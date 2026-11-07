@@ -13,6 +13,12 @@
 //! playback opt-in) — so the config schema does not have to change when the
 //! feature that consumes them arrives. `replay_gain` arrived the other way
 //! round (T11, S15): its [`ReplayGainMode`] is what the audio path reads.
+//!
+//! Since S1 of the config-and-settings feature this one file also carries what
+//! the interface needs: the `[state]` table (what the next launch comes back
+//! to), the `[theme]` table (every colour, as `"#rrggbb"`) and the `[ui]`
+//! table (which parts of the screen are drawn). Nothing else is stored
+//! anywhere: no state file, no settings table in the library index.
 
 use std::ffi::OsStr;
 use std::fmt;
@@ -20,7 +26,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use clap::Parser;
+use serde::Deserialize as _;
 use serde::de::{self, Deserializer, Visitor};
+
+use crate::audio::output::Repeat;
+use crate::ui::{BrowseBy, View};
 
 /// The volume the player has always started at (T3 kept it at full).
 pub const DEFAULT_VOLUME: u8 = 100;
@@ -76,9 +86,11 @@ Audio must share one channel layout: sample rates are converted to the
     output device, channel layouts are not.
 
 Configuration: $XDG_CONFIG_HOME/velo/config.toml, or
-    ~/.config/velo/config.toml — keys: library, volume, bit_perfect, replay_gain.
-    When the file is missing, velo writes it with every key at its default and
-    a comment per key; an unknown key is an error. library (and --library)
+    ~/.config/velo/config.toml — keys: library, bit_perfect, replay_gain, and
+    the tables [state] (volume, shuffle, repeat, the tab and the open node),
+    [theme] (every colour, as \"#rrggbb\") and [ui] (cover_art, spectrum, hints,
+    top_bar). When the file is missing, velo writes it with every key at its
+    default and a comment per key; an unknown key is an error. library (and --library)
     takes an absolute path, ~/... or a path relative to the current directory.
     With no library set, the interface asks for it in a floating prompt that
     starts at ~/ (tab completes folders) and saves the answer to the file; velo --index needs one and exits 2 without."
@@ -107,18 +119,35 @@ pub struct Cli {
 }
 
 /// The config file as the user wrote it: every key optional, nothing filled in.
-#[derive(Debug, Clone, Default)]
+///
+/// The three tables below are read as written — [`StateKeys`], [`ThemeKeys`],
+/// [`UiKeys`] — and [`Config::merged`] resolves each of them with its defaults.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     /// `library` — the library root to index and browse.
     pub library: Option<PathBuf>,
-    /// `volume` — an integer between 0 and 100, inclusive.
+    /// `volume` at the top level: where the key lived before `[state]`
+    /// existed. Still read, so an older file keeps working; `[state] volume`
+    /// wins over it, and every write goes to `[state]` from then on (S2).
+    #[serde(default, deserialize_with = "deserialize_volume")]
     pub volume: Option<u8>,
     /// `bit_perfect` — stored and passed through for T17; nothing reads it
     /// yet, and saying so here is the point.
     pub bit_perfect: Option<bool>,
     /// `replay_gain` — which `ReplayGain` tags the audio path applies (T11,
     /// S15); the audio path reads it through [`ReplayGainMode`].
+    #[serde(default)]
     pub replay_gain: Option<ReplayGainMode>,
+    /// `[state]` — what the next launch comes back to (S2, S3).
+    #[serde(default)]
+    pub state: StateKeys,
+    /// `[theme]` — every colour the interface draws with (S4).
+    #[serde(default)]
+    pub theme: ThemeKeys,
+    /// `[ui]` — which parts of the screen are drawn (S5).
+    #[serde(default)]
+    pub ui: UiKeys,
 }
 
 impl Config {
@@ -145,15 +174,8 @@ impl Config {
             }
         };
 
-        let file: FileConfig = toml::from_str(&text).map_err(|error| ConfigError {
+        toml::from_str(&text).map_err(|error| ConfigError {
             message: parse_error_message(path, &error, &text),
-        })?;
-
-        Ok(Self {
-            library: file.library,
-            volume: file.volume,
-            bit_perfect: file.bit_perfect,
-            replay_gain: file.replay_gain,
         })
     }
 
@@ -161,14 +183,24 @@ impl Config {
     /// over the config file, the config file wins over the built-in default.
     #[must_use]
     pub fn merged(self, cli: &Cli) -> Settings {
+        let node = self.state.open_node();
         Settings {
             // An empty `library` in the file is no library: the prompt asks.
             library: cli.library.clone().or(self
                 .library
                 .filter(|library| !library.as_os_str().is_empty())),
-            volume: self.volume.unwrap_or(DEFAULT_VOLUME),
+            volume: self.state.volume.or(self.volume).unwrap_or(DEFAULT_VOLUME),
             bit_perfect: self.bit_perfect.unwrap_or(false),
             replay_gain: self.replay_gain.unwrap_or(ReplayGainMode::Track),
+            session: Session {
+                shuffle: self.state.shuffle.unwrap_or(false),
+                repeat: self.state.repeat.unwrap_or_default(),
+                view: self.state.view.unwrap_or_default(),
+                browse_by: self.state.browse_by.unwrap_or_default(),
+                node,
+            },
+            theme: self.theme.resolved(),
+            ui: self.ui.resolved(),
         }
     }
 }
@@ -178,7 +210,8 @@ impl Config {
 ///
 /// `bit_perfect` is set here and read nowhere; T17 will read it.
 /// `replay_gain` is consumed by the audio path (T11): the gain is applied in
-/// the producer, once per track, before the ring.
+/// the producer, once per track, before the ring. `session`, `theme` and `ui`
+/// are what the interface needs on its very first frame (S2–S5).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
     /// The library root as written (`--library`, else the file), unexpanded;
@@ -187,6 +220,255 @@ pub struct Settings {
     pub volume: u8,
     pub bit_perfect: bool,
     pub replay_gain: ReplayGainMode,
+    /// What the next launch comes back to (S2, S3).
+    pub session: Session,
+    /// The colours the interface draws with (S4).
+    pub theme: ThemeColors,
+    /// Which parts of the interface are drawn (S5).
+    pub ui: UiParts,
+}
+
+/// Where the next launch picks up (S3): the tab, the library view and the
+/// node that was open when velo last ran.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Session {
+    /// Whether the queue is shuffled (S2).
+    pub shuffle: bool,
+    /// What follows the end of a track (S2).
+    pub repeat: Repeat,
+    /// The tab the interface was on (S3).
+    pub view: View,
+    /// The library view it was showing (S3).
+    pub browse_by: BrowseBy,
+    /// The node that was open inside that view (S3).
+    pub node: Option<OpenNode>,
+}
+
+/// The library node that was open (S3): an artist, one of that artist's
+/// albums, or a genre. Which names matter is decided by the view: `albums`
+/// with an artist and an album is that album's tracks, `albums` with neither
+/// is every album, `genres` with a genre is that genre's tracks.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OpenNode {
+    /// The open artist, when the view is inside one.
+    pub artist: Option<String>,
+    /// The open album, which always belongs to [`OpenNode::artist`].
+    pub album: Option<String>,
+    /// The open genre, in the `genres` view.
+    pub genre: Option<String>,
+}
+
+/// The `[state]` table as the file writes it (S2, S3): every key optional.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StateKeys {
+    /// `volume` — an integer between 0 and 100, inclusive.
+    #[serde(default, deserialize_with = "deserialize_volume")]
+    pub volume: Option<u8>,
+    /// `shuffle` — whether the queue is shuffled.
+    pub shuffle: Option<bool>,
+    /// `repeat` — `off`, `all` or `one`.
+    #[serde(default)]
+    pub repeat: Option<Repeat>,
+    /// `view` — `library` or `queue`.
+    #[serde(default)]
+    pub view: Option<View>,
+    /// `browse_by` — `artists`, `albums`, `tracks` or `genres`.
+    #[serde(default)]
+    pub browse_by: Option<BrowseBy>,
+    /// `artist` — the open artist, when the view is inside one.
+    pub artist: Option<String>,
+    /// `album` — the open album, when the view is inside one.
+    pub album: Option<String>,
+    /// `genre` — the open genre, in the genres view.
+    pub genre: Option<String>,
+}
+
+impl StateKeys {
+    /// The open node the three names describe: a name that is missing or
+    /// blank is no node, so a table without names is no node either.
+    fn open_node(&self) -> Option<OpenNode> {
+        fn name(value: Option<&str>) -> Option<String> {
+            value
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+        }
+
+        let node = OpenNode {
+            artist: name(self.artist.as_deref()),
+            album: name(self.album.as_deref()),
+            genre: name(self.genre.as_deref()),
+        };
+        if node.artist.is_none() && node.album.is_none() && node.genre.is_none() {
+            None
+        } else {
+            Some(node)
+        }
+    }
+}
+
+/// A colour as the `[theme]` table writes it (S4): `"#rrggbb"`, or `"reset"`
+/// for whatever the terminal draws with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThemeColor {
+    /// The terminal's own colour: the user's palette, not velo's.
+    Terminal,
+    /// A 24-bit colour.
+    Rgb { red: u8, green: u8, blue: u8 },
+}
+
+impl ThemeColor {
+    /// The colour as the file writes it: `"reset"` or `"#rrggbb"`.
+    #[must_use]
+    pub fn to_key(self) -> String {
+        match self {
+            Self::Terminal => "reset".to_owned(),
+            Self::Rgb { red, green, blue } => format!("#{red:02x}{green:02x}{blue:02x}"),
+        }
+    }
+}
+
+/// One colour of the default palette.
+const fn rgb(red: u8, green: u8, blue: u8) -> ThemeColor {
+    ThemeColor::Rgb { red, green, blue }
+}
+
+/// The `[theme]` table resolved with its defaults (S4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThemeColors {
+    /// The screen behind everything.
+    pub background: ThemeColor,
+    /// The body text and the values in a list.
+    pub text: ThemeColor,
+    /// Hints, section headers and everything that should recede.
+    pub dim: ThemeColor,
+    /// Card borders, titles, the focused row and the selection.
+    pub accent: ThemeColor,
+    /// The keys and labels next to the values.
+    pub secondary: ThemeColor,
+    /// The panes that are not the one in focus.
+    pub border: ThemeColor,
+    /// The text drawn on top of `accent`.
+    pub ink: ThemeColor,
+}
+
+impl Default for ThemeColors {
+    /// The palette velo drew with before colours were configurable: the
+    /// terminal's own background and text, the ANSI magenta accent and the
+    /// ANSI blue secondary.
+    fn default() -> Self {
+        Self {
+            background: ThemeColor::Terminal,
+            text: ThemeColor::Terminal,
+            dim: rgb(0x76, 0x76, 0x76),
+            accent: rgb(0xaf, 0x00, 0xaf),
+            secondary: rgb(0x5f, 0x87, 0xd7),
+            border: rgb(0x76, 0x76, 0x76),
+            ink: rgb(0x00, 0x00, 0x00),
+        }
+    }
+}
+
+/// The `[theme]` table as the file writes it (S4): every colour optional.
+#[derive(Debug, Clone, Copy, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThemeKeys {
+    /// `background` — `"#rrggbb"`, or `"reset"` for the terminal's own.
+    #[serde(default, deserialize_with = "deserialize_terminal_colour")]
+    pub background: Option<ThemeColor>,
+    /// `text` — `"#rrggbb"`, or `"reset"` for the terminal's own.
+    #[serde(default, deserialize_with = "deserialize_terminal_colour")]
+    pub text: Option<ThemeColor>,
+    /// `dim` — hints and everything that recedes.
+    #[serde(default, deserialize_with = "deserialize_hex_colour")]
+    pub dim: Option<ThemeColor>,
+    /// `accent` — borders, titles and the selection.
+    #[serde(default, deserialize_with = "deserialize_hex_colour")]
+    pub accent: Option<ThemeColor>,
+    /// `secondary` — keys and labels.
+    #[serde(default, deserialize_with = "deserialize_hex_colour")]
+    pub secondary: Option<ThemeColor>,
+    /// `border` — the panes that are not in focus.
+    #[serde(default, deserialize_with = "deserialize_hex_colour")]
+    pub border: Option<ThemeColor>,
+    /// `ink` — the text drawn on top of `accent`.
+    #[serde(default, deserialize_with = "deserialize_hex_colour")]
+    pub ink: Option<ThemeColor>,
+}
+
+impl ThemeKeys {
+    /// The table with its defaults filled in.
+    #[must_use]
+    pub fn resolved(self) -> ThemeColors {
+        let default = ThemeColors::default();
+        ThemeColors {
+            background: self.background.unwrap_or(default.background),
+            text: self.text.unwrap_or(default.text),
+            dim: self.dim.unwrap_or(default.dim),
+            accent: self.accent.unwrap_or(default.accent),
+            secondary: self.secondary.unwrap_or(default.secondary),
+            border: self.border.unwrap_or(default.border),
+            ink: self.ink.unwrap_or(default.ink),
+        }
+    }
+}
+
+/// Which parts of the interface are drawn (S5).
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "four independent switches, one per key the file writes"
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UiParts {
+    /// The cover art pane, when the terminal can show one.
+    pub cover_art: bool,
+    /// The spectrum bars in the now-playing block.
+    pub spectrum: bool,
+    /// The key hints on the last row.
+    pub hints: bool,
+    /// The tabs and the `V E L O` name on the first row.
+    pub top_bar: bool,
+}
+
+impl Default for UiParts {
+    /// Everything is drawn until the user says otherwise.
+    fn default() -> Self {
+        Self {
+            cover_art: true,
+            spectrum: true,
+            hints: true,
+            top_bar: true,
+        }
+    }
+}
+
+/// The `[ui]` table as the file writes it (S5): every key optional.
+#[derive(Debug, Clone, Copy, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UiKeys {
+    /// `cover_art` — whether the cover art pane is drawn at all.
+    pub cover_art: Option<bool>,
+    /// `spectrum` — whether the spectrum bars are drawn.
+    pub spectrum: Option<bool>,
+    /// `hints` — whether the key hints are drawn.
+    pub hints: Option<bool>,
+    /// `top_bar` — whether the tabs and the player name are drawn.
+    pub top_bar: Option<bool>,
+}
+
+impl UiKeys {
+    /// The table with its defaults filled in.
+    #[must_use]
+    pub fn resolved(self) -> UiParts {
+        let default = UiParts::default();
+        UiParts {
+            cover_art: self.cover_art.unwrap_or(default.cover_art),
+            spectrum: self.spectrum.unwrap_or(default.spectrum),
+            hints: self.hints.unwrap_or(default.hints),
+            top_bar: self.top_bar.unwrap_or(default.top_bar),
+        }
+    }
 }
 
 /// Resolves the default config file location from the two environment values
@@ -213,6 +495,7 @@ pub fn config_path(xdg_config_home: Option<&OsStr>, home: Option<&OsStr>) -> Opt
 /// asks for it.
 #[must_use]
 pub fn default_config_text() -> String {
+    let theme = ThemeColors::default();
     format!(
         "# velo configuration. velo wrote this file with every key at its default;
 # change any value to customize velo, or delete a line to restore its default.
@@ -222,16 +505,49 @@ pub fn default_config_text() -> String {
 # Unset, the interface asks for it the first time and saves the answer here.
 # library = \"~/Music\"
 
-# The volume velo starts at, an integer from 0 to 100.
-volume = {DEFAULT_VOLUME}
-
 # Bit-perfect playback opt-in. Accepted and stored; nothing reads it yet.
 bit_perfect = false
 
 # ReplayGain: \"track\" (the track's gain), \"album\" (the album's, else the
 # track's) or \"off\".
 replay_gain = \"track\"
-"
+
+# What comes back the next time velo starts. velo keeps this table up to date
+# as you listen; edit it to choose where the next launch begins. `artist`,
+# `album` and `genre` name the node that was open — `album` always belongs to
+# `artist` — and a line velo leaves out is a level velo does not restore.
+[state]
+volume = {DEFAULT_VOLUME}
+shuffle = false
+repeat = \"off\"
+view = \"library\"
+browse_by = \"artists\"
+
+# Every colour, as \"#rrggbb\". \"reset\" is the terminal's own colour and is
+# the default for background and text only.
+[theme]
+background = \"{}\"
+text = \"{}\"
+dim = \"{}\"
+accent = \"{}\"
+secondary = \"{}\"
+border = \"{}\"
+ink = \"{}\"
+
+# The parts of the interface to draw.
+[ui]
+cover_art = true
+spectrum = true
+hints = true
+top_bar = true
+",
+        theme.background.to_key(),
+        theme.text.to_key(),
+        theme.dim.to_key(),
+        theme.accent.to_key(),
+        theme.secondary.to_key(),
+        theme.border.to_key(),
+        theme.ink.to_key(),
     )
 }
 
@@ -378,16 +694,73 @@ fn parse_error_message(path: &Path, error: &toml::de::Error, text: &str) -> Stri
     }
 }
 
-/// The serde shape of the file: the same keys and nothing else.
-#[derive(Debug, Default, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct FileConfig {
-    #[serde(default, deserialize_with = "deserialize_volume")]
-    volume: Option<u8>,
-    library: Option<PathBuf>,
-    bit_perfect: Option<bool>,
-    #[serde(default)]
-    replay_gain: Option<ReplayGainMode>,
+/// Reads a `[theme]` colour that may be `"reset"`, for `background` and
+/// `text`: there it means the terminal's own colour, which is what velo has
+/// always drawn with.
+fn deserialize_terminal_colour<'de, D>(deserializer: D) -> Result<Option<ThemeColor>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    ThemeColor::deserialize(deserializer).map(Some)
+}
+
+/// Reads a `[theme]` colour that has to be `"#rrggbb"`: `"reset"` there would
+/// erase an accent, a border or the dim text instead of colouring it.
+fn deserialize_hex_colour<'de, D>(deserializer: D) -> Result<Option<ThemeColor>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let colour = ThemeColor::deserialize(deserializer)?;
+    if matches!(colour, ThemeColor::Terminal) {
+        return Err(de::Error::custom(
+            "\"reset\" is a colour for background and text only: write \"#rrggbb\"",
+        ));
+    }
+    Ok(Some(colour))
+}
+
+impl<'de> serde::Deserialize<'de> for ThemeColor {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct ColourVisitor;
+
+        impl Visitor<'_> for ColourVisitor {
+            type Value = ThemeColor;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("\"#rrggbb\" or \"reset\"")
+            }
+
+            fn visit_str<E: de::Error>(self, value: &str) -> Result<ThemeColor, E> {
+                if value == "reset" {
+                    return Ok(ThemeColor::Terminal);
+                }
+                parse_colour(value).ok_or_else(|| {
+                    E::custom(format!(
+                        "{value} is not a colour: write \"#rrggbb\" or \"reset\""
+                    ))
+                })
+            }
+        }
+
+        deserializer.deserialize_str(ColourVisitor)
+    }
+}
+
+/// Parses `"#rrggbb"`: a hash and exactly six hexadecimal digits.
+fn parse_colour(text: &str) -> Option<ThemeColor> {
+    let digits = text.strip_prefix('#')?;
+    if digits.len() != 6 || !digits.is_ascii() {
+        return None;
+    }
+    let byte = |at: usize| u8::from_str_radix(digits.get(at..at + 2)?, 16).ok();
+    Some(ThemeColor::Rgb {
+        red: byte(0)?,
+        green: byte(2)?,
+        blue: byte(4)?,
+    })
 }
 
 fn deserialize_volume<'de, D>(deserializer: D) -> Result<Option<u8>, D::Error>

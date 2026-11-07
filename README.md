@@ -122,7 +122,7 @@ velo --play song.flac song.mp3 # play and exit when finished
 
 ## Configuration
 
-One TOML file, read once at startup:
+One TOML file, read once at startup, and the only place velo keeps anything:
 
 ```
 $XDG_CONFIG_HOME/velo/config.toml      # else ~/.config/velo/config.toml
@@ -130,14 +130,58 @@ $XDG_CONFIG_HOME/velo/config.toml      # else ~/.config/velo/config.toml
 
 When the file does not exist, velo writes it with every key at its default
 value and a short comment per key, so everything below can be changed from
-it. An existing file is never overwritten or reformatted.
+it. An existing file is never overwritten or reformatted: every value velo
+saves itself is written key by key, leaving your comments and your ordering
+alone.
 
 | Key | Meaning | Default |
 |:--|:--|:--|
 | `library` | The root folder to index and browse: an absolute path, `~/...` (your home) or a path relative to the directory velo starts in | none — written commented out (`# library = "~/Music"`) |
-| `volume` | Start level, `0..=100` | `100` |
 | `bit_perfect` | Accepted and stored; nothing reads it yet | `false` |
 | `replay_gain` | ReplayGain mode: `track` (use the track's own gain), `album` (album gain, falling back to the track's), or `off` | `track` |
+
+### `[state]` — where the next launch begins
+
+| Key | Meaning | Default |
+|:--|:--|:--|
+| `volume` | Start level, `0..=100` | `100` |
+| `shuffle` | Whether the queue is shuffled | `false` |
+| `repeat` | What follows the end of a track: `off`, `all` or `one` | `off` |
+| `view` | The tab that was open: `library` or `queue` | `library` |
+| `browse_by` | The library view: `artists`, `albums`, `tracks` or `genres` | `artists` |
+| `artist`, `album`, `genre` | The node that was open inside that view — `album` always belongs to `artist` | absent |
+
+velo keeps this table up to date as you listen: the volume when it changes,
+the tab and the node when you move, the shuffle and the repeat when you toggle
+them. The next launch comes back to it. The queue and the track that was
+playing are not kept. `volume` used to live at the top level of the file; it
+is still read there and moves under `[state]` the first time velo saves one.
+
+### `[theme]` — the colours
+
+Every value is `"#rrggbb"`. `"reset"` means the terminal's own colour and is
+allowed for `background` and `text` only.
+
+| Key | Meaning | Default |
+|:--|:--|:--|
+| `background` | The screen behind everything | `reset` |
+| `text` | Body text and the values in a list | `reset` |
+| `dim` | Hints and everything that should recede | `#767676` |
+| `accent` | Borders, titles, the focused row and the selection | `#af00af` |
+| `secondary` | The keys and labels next to the values | `#5f87d7` |
+| `border` | The panes that are not in focus | `#767676` |
+| `ink` | The text drawn on top of `accent` | `#000000` |
+
+The brighter shade behind the accent is derived from `accent`, not written.
+
+### `[ui]` — what is drawn
+
+| Key | Meaning | Default |
+|:--|:--|:--|
+| `cover_art` | Draw the cover art pane at all | `true` |
+| `spectrum` | Draw the spectrum under the now-playing block | `true` |
+| `hints` | Draw the key hints on the last row | `true` |
+| `top_bar` | Draw the tabs and the `V E L O` name | `true` |
 
 Precedence: `--library` (expanded the same way) beats the config file. With no
 library set, `velo` opens the interface with a floating prompt asking for the

@@ -88,9 +88,11 @@ pub enum Action {
 }
 
 /// The four ways to look at the library, on the keys `1` to `4`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum BrowseBy {
     /// Artists, then their albums, then an album's tracks.
+    #[default]
     Artists,
     /// Every album, then its tracks.
     Albums,
@@ -229,9 +231,11 @@ enum Playback {
 }
 
 /// Which list the arrow keys and the editing commands act on.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum View {
     /// The library browser, or the flat command-line list.
+    #[default]
     Library,
     /// The queue, in play order.
     Queue,

@@ -12,10 +12,13 @@ use std::path::{Path, PathBuf};
 use std::ffi::OsStr;
 
 use clap::Parser as _;
+use velo::audio::output::Repeat;
 use velo::config::{
-    Cli, Config, DEFAULT_VOLUME, ReplayGainMode, config_path, default_config_text, expand_path,
-    library_to_save, set_library, write_default_config,
+    Cli, Config, DEFAULT_VOLUME, OpenNode, ReplayGainMode, ThemeColor, ThemeColors, UiParts,
+    config_path, default_config_text, expand_path, library_to_save, set_library,
+    write_default_config,
 };
+use velo::ui::{BrowseBy, View};
 
 /// Makes `<temp>/<name>`, verifies the directory can be removed, and returns
 /// the path. Each test gets its own directory, so tests cannot see each other.
@@ -108,6 +111,248 @@ fn an_empty_config_file_is_all_defaults() {
     let settings = config.merged(&cli_with_no_flags());
     assert_eq!(settings.library, None);
     assert!(!settings.bit_perfect);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// ------------------------------------------------ state, theme and ui tables
+
+#[test]
+fn a_full_file_carries_the_state_the_theme_and_the_ui() {
+    let dir = temp_dir("every-table");
+    let path = write_config(
+        &dir,
+        r##"library = "/music/root"
+
+[state]
+volume = 72
+shuffle = true
+repeat = "all"
+view = "queue"
+browse_by = "albums"
+artist = "Lo-Fi Scientists"
+album = "Drift"
+
+[theme]
+background = "reset"
+text = "#e0e0e0"
+dim = "#767676"
+accent = "#FF00AA"
+secondary = "#5f87d7"
+border = "#303030"
+ink = "#101010"
+
+[ui]
+cover_art = false
+spectrum = false
+hints = false
+top_bar = false
+"##,
+    );
+
+    let config = Config::load_from(&path).unwrap_or_else(|error| panic!("load failed: {error}"));
+    let settings = config.merged(&cli_with_no_flags());
+
+    assert_eq!(settings.volume, 72);
+    assert!(settings.session.shuffle);
+    assert_eq!(settings.session.repeat, Repeat::All);
+    assert_eq!(settings.session.view, View::Queue);
+    assert_eq!(settings.session.browse_by, BrowseBy::Albums);
+    assert_eq!(
+        settings.session.node,
+        Some(OpenNode {
+            artist: Some("Lo-Fi Scientists".to_owned()),
+            album: Some("Drift".to_owned()),
+            genre: None,
+        })
+    );
+    assert_eq!(
+        settings.theme.accent,
+        ThemeColor::Rgb {
+            red: 0xff,
+            green: 0x00,
+            blue: 0xaa,
+        },
+        "hex is read case-insensitively"
+    );
+    assert_eq!(settings.theme.background, ThemeColor::Terminal);
+    assert_eq!(
+        settings.theme.text,
+        ThemeColor::Rgb {
+            red: 0xe0,
+            green: 0xe0,
+            blue: 0xe0
+        }
+    );
+    assert_eq!(
+        settings.theme.border,
+        ThemeColor::Rgb {
+            red: 0x30,
+            green: 0x30,
+            blue: 0x30,
+        }
+    );
+    assert_eq!(
+        settings.ui,
+        UiParts {
+            cover_art: false,
+            spectrum: false,
+            hints: false,
+            top_bar: false,
+        }
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn every_new_table_is_optional_and_defaults_to_what_velo_did_before() {
+    let settings = Config::default().merged(&cli_with_no_flags());
+
+    assert!(!settings.session.shuffle);
+    assert_eq!(settings.session.repeat, Repeat::Off);
+    assert_eq!(settings.session.view, View::Library);
+    assert_eq!(settings.session.browse_by, BrowseBy::Artists);
+    assert_eq!(settings.session.node, None);
+    assert_eq!(settings.theme, ThemeColors::default());
+    assert_eq!(settings.ui, UiParts::default());
+    assert!(
+        settings.ui.cover_art,
+        "the cover is drawn unless told not to"
+    );
+    assert!(settings.ui.spectrum);
+    assert!(settings.ui.hints);
+    assert!(settings.ui.top_bar);
+}
+
+#[test]
+fn the_state_volume_is_the_one_that_counts_and_the_old_flat_key_still_reads() {
+    let dir = temp_dir("state-volume-wins");
+    let path = write_config(&dir, "volume = 40\n\n[state]\nvolume = 72\n");
+    let settings = Config::load_from(&path)
+        .unwrap_or_else(|error| panic!("load failed: {error}"))
+        .merged(&cli_with_no_flags());
+    assert_eq!(settings.volume, 72, "[state] is where volume lives now");
+    let _ = fs::remove_dir_all(&dir);
+
+    let dir = temp_dir("state-volume-legacy");
+    let path = write_config(&dir, "volume = 40\n");
+    let settings = Config::load_from(&path)
+        .unwrap_or_else(|error| panic!("load failed: {error}"))
+        .merged(&cli_with_no_flags());
+    assert_eq!(
+        settings.volume, 40,
+        "a file written before [state] still reads"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_state_volume_out_of_range_names_the_file_and_the_line() {
+    let dir = temp_dir("state-volume-bounds");
+    let path = write_config(&dir, "[state]\nvolume = 101\n");
+    let error = Config::load_from(&path).expect_err("101 is not a volume");
+    let message = error.to_string();
+    assert!(message.contains("config.toml"), "{message}");
+    assert!(message.contains("line 2"), "{message}");
+    assert!(message.contains("between 0 and 100"), "{message}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_theme_colour_is_hex_or_reset_in_the_two_places_reset_makes_sense() {
+    for (name, body, line, expected) in [
+        (
+            "theme-reset-accent",
+            "[theme]\naccent = \"reset\"\n",
+            2,
+            "background and text only",
+        ),
+        (
+            "theme-no-hash",
+            "[theme]\naccent = \"ff00aa\"\n",
+            2,
+            "is not a colour",
+        ),
+        (
+            "theme-short",
+            "[theme]\naccent = \"#f0a\"\n",
+            2,
+            "is not a colour",
+        ),
+        (
+            "theme-not-hex",
+            "[theme]\naccent = \"#gg00aa\"\n",
+            2,
+            "is not a colour",
+        ),
+        (
+            "theme-unknown-key",
+            "[theme]\naccent = \"#ff00aa\"\naccent_bright = \"#ff00aa\"\n",
+            3,
+            "unknown field",
+        ),
+    ] {
+        let dir = temp_dir(name);
+        let path = write_config(&dir, body);
+        let error = Config::load_from(&path).expect_err(name);
+        let message = error.to_string();
+        assert!(message.contains(expected), "{name}: {message}");
+        assert!(
+            message.contains(&format!("line {line}")),
+            "{name}: {message}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[test]
+fn the_state_names_are_checked_by_name_and_an_empty_node_is_no_node() {
+    for (name, body) in [
+        ("state-repeat", "[state]\nrepeat = \"sometimes\"\n"),
+        ("state-view", "[state]\nview = \"mixer\"\n"),
+        ("state-browse-by", "[state]\nbrowse_by = \"playlists\"\n"),
+    ] {
+        let dir = temp_dir(name);
+        let path = write_config(&dir, body);
+        let error = Config::load_from(&path).expect_err(name);
+        let message = error.to_string();
+        assert!(message.contains("unknown variant"), "{name}: {message}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    let dir = temp_dir("state-empty-node");
+    let path = write_config(
+        &dir,
+        "[state]\nbrowse_by = \"albums\"\nartist = \"\"\nalbum = \"   \"\ngenre = \"\"\n",
+    );
+    let settings = Config::load_from(&path)
+        .unwrap_or_else(|error| panic!("load failed: {error}"))
+        .merged(&cli_with_no_flags());
+    assert_eq!(settings.session.node, None, "a blank name is no node");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_default_file_names_every_table_and_reads_back_as_the_defaults() {
+    let text = default_config_text();
+    for table in ["[state]", "[theme]", "[ui]"] {
+        assert!(text.contains(table), "{table} is missing from:\n{text}");
+    }
+    assert!(
+        text.contains("[state]\nvolume = "),
+        "volume lives under [state] now:\n{text}"
+    );
+
+    let dir = temp_dir("default-round-trip");
+    let path = write_config(&dir, &text);
+    let settings = Config::load_from(&path)
+        .unwrap_or_else(|error| panic!("the default file must load: {error}"))
+        .merged(&cli_with_no_flags());
+    assert_eq!(settings.volume, DEFAULT_VOLUME);
+    assert_eq!(settings.theme, ThemeColors::default());
+    assert_eq!(settings.ui, UiParts::default());
+    assert_eq!(settings.session.repeat, Repeat::Off);
+    assert_eq!(settings.session.view, View::Library);
+    assert_eq!(settings.session.browse_by, BrowseBy::Artists);
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -356,9 +601,31 @@ fn a_missing_config_file_is_written_with_every_key_and_its_default() {
     let text = fs::read_to_string(&path).unwrap();
     assert_eq!(text, default_config_text());
 
-    // Every key is there, each with a comment right above it.
+    // Every key is there, each with a comment right above it — or right above
+    // the table it opens, which is where the first key of a table sits.
     let lines: Vec<&str> = text.lines().collect();
-    for key in ["library", "volume", "bit_perfect", "replay_gain"] {
+    let keys = [
+        "library",
+        "bit_perfect",
+        "replay_gain",
+        "volume",
+        "shuffle",
+        "repeat",
+        "view",
+        "browse_by",
+        "background",
+        "text",
+        "dim",
+        "accent",
+        "secondary",
+        "border",
+        "ink",
+        "cover_art",
+        "spectrum",
+        "hints",
+        "top_bar",
+    ];
+    for key in keys {
         let at = lines
             .iter()
             .position(|line| {
@@ -366,9 +633,14 @@ fn a_missing_config_file_is_written_with_every_key_and_its_default() {
                 line.starts_with(&format!("{key} ="))
             })
             .unwrap_or_else(|| panic!("{key} missing from\n{text}"));
+        let commented = at > 0 && lines[at - 1].starts_with('#');
+        let under_its_table = lines[..at]
+            .iter()
+            .rposition(|line| line.starts_with('['))
+            .is_some_and(|header| header > 0 && lines[header - 1].starts_with('#'));
         assert!(
-            at > 0 && lines[at - 1].starts_with('#'),
-            "{key} needs a comment above it\n{text}"
+            commented || under_its_table,
+            "{key} needs a comment above it or above its table\n{text}"
         );
     }
     // `library` has no universal default, so it is written commented out.

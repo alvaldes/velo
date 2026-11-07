@@ -116,7 +116,8 @@ pub fn seek_target(position: Duration, delta_secs: i64, duration: Option<Duratio
 }
 
 /// What follows the end of a track.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Repeat {
     /// The next track, and silence after the last.
     #[default]
