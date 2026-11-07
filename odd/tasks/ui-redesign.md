@@ -26,7 +26,7 @@ Stage 1 changes `src/ui/` (and its tests) only. Stage 2 (the spectrum) taps the 
 | T1 | Theme tokens (surface, border), the window frame and title bar with the letter-spaced wordmark | S1, S3, S4 | inline | `68f790e` |
 | T2 | Now-playing block: title and subtitle of the playing track, clock and state pill, progress bar, volume slider, transport buttons | S1, S3, S4 | inline | `6b5fdd6` |
 | T3 | Lists restyled (browse, queue, search): header line, numbered rows, right-aligned facts, subtle selection, `▸` on the playing row | S1, S3 | inline | `4b236ff` |
-| T4 | Footer key hints and help overlay restyled; golden screen re-recorded | S1, S3, S4 | inline | — |
+| T4 | Footer key hints and help overlay restyled; golden screen re-recorded | S1, S3, S4 | inline | `ad0e3ee` (hints landed in T1) |
 | T5 | Stage 2: spectrum analyzer from an audio tap (FFT), replacing the progress band's spare room | S2 | — (deferred) | — |
 
 ## Log
@@ -44,3 +44,5 @@ Stage 1 changes `src/ui/` (and its tests) only. Stage 2 (the spectrum) taps the 
 **L6** T3: RED observed (3 tests). One `list_row` lays out every list (library levels, files, queue, search): `▸ n. name  note …… fact`, `▶` and accent on the row that plays, selection changes only the background (SURFACE). The list header names the level and count (`▸─ Tide › Harbor  [1 track]`, `▸─ Search /d  [1 match]`). The shell test now looks for the wordmark `V E L O` instead of `velo`.
 
 **L7** (2026-11-07, user, asked how to split the branch into pull requests): "nada de pr tu sigue sumando commit en este worktree, y cuando termines con estas tareas que te faltan traete los cambios que esten en main y acutualiza la UI"
+
+**L8** T4 (`ad0e3ee`): RED observed (1 test). The help is a rounded card titled `keys` on SURFACE, keys in SECONDARY in their own column; every row's text is unchanged, so the existing help tests still pass. The footer hints were already restyled in T1. Stage 1 tasks T1–T4 done; next per L7: bring `main` in and update the UI over it.
