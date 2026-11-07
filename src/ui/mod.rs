@@ -4,6 +4,13 @@
 //! Every state change answers through an [`Action`], so the key rules are
 //! tested in `tests/ui_state.rs` without a terminal. Wiring the [`Player`] to
 //! those actions happens in [`App::apply`], which is never exercised by tests.
+//!
+//! `App` knows two ways to stand over a list of rows. `App::new` keeps the
+//! flat list of files given on the command line. `App::browse` stands over the
+//! library index instead: artists, then the albums of the selected artist,
+//! then the tracks of the selected album. In browse mode the rows on screen
+//! come from an in-memory snapshot that is refreshed when the position
+//! changes, never once per frame.
 
 pub mod theme;
 
@@ -19,6 +26,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph};
 
 use crate::audio::Player;
+use crate::library::{AlbumEntry, ArtistEntry, Library, TrackEntry};
 
 use self::theme::{ACCENT, BACKGROUND, DIM, SECONDARY, TEXT};
 
@@ -31,10 +39,53 @@ pub enum Action {
     Quit,
     /// Start playing the track at this index.
     Play { from: usize },
+    /// Go one level deeper into the current selection.
+    Descend,
+    /// Go one level up; at the top level this does nothing.
+    Ascend,
     /// Pause or resume.
     TogglePause,
     /// The new volume, in percent.
     SetVolume(u8),
+}
+
+/// Where in the library the interface stands while browsing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Level {
+    /// Every artist in the index.
+    Artists,
+    /// The albums of one artist.
+    Albums { artist: String },
+    /// The tracks of one album of one artist.
+    Tracks { artist: String, album: String },
+}
+
+/// Where the interface stands, including the flat command-line list.
+#[derive(Debug)]
+enum Position {
+    /// One flat level over the files given on the command line.
+    Files,
+    Artists,
+    Albums {
+        artist: String,
+    },
+    Tracks {
+        artist: String,
+        album: String,
+    },
+}
+
+/// The stream that is playing, so rows can be marked with `▸`.
+#[derive(Debug)]
+enum Playback {
+    /// A flat command-line stream started at this index.
+    Files { from: usize },
+    /// An album stream started at this index of that album's track list.
+    Album {
+        artist: String,
+        album: String,
+        from: usize,
+    },
 }
 
 /// Where playback stands, for the header and the footer.
@@ -55,12 +106,28 @@ impl PlayState {
     }
 }
 
+/// `1 track`, `2 tracks`: a count reads as English, not as a log line.
+#[must_use]
+pub fn plural(count: usize, one: &str, many: &str) -> String {
+    if count == 1 {
+        format!("1 {one}")
+    } else {
+        format!("{count} {many}")
+    }
+}
+
 /// The whole interface state, minus the terminal.
-pub struct App {
-    tracks: Vec<PathBuf>,
+pub struct App<'lib> {
+    position: Position,
+    /// The files given on the command line, in [`Position::Files`].
+    argv: Vec<PathBuf>,
+    library: Option<&'lib Library>,
+    artists: Vec<ArtistEntry>,
+    albums: Vec<AlbumEntry>,
+    tracks: Vec<TrackEntry>,
     selected: usize,
-    /// The track the running stream was started from, if any.
-    playing_from: Option<usize>,
+    /// The stream that is playing, if any.
+    playing: Option<Playback>,
     help: bool,
     volume: u8,
     state: PlayState,
@@ -68,14 +135,19 @@ pub struct App {
     status: String,
 }
 
-impl App {
-    /// An interface over the given tracks, selection at the top.
+impl<'lib> App<'lib> {
+    /// An interface over the given files, selection at the top.
     #[must_use]
-    pub fn new(tracks: Vec<PathBuf>) -> Self {
-        Self {
-            tracks,
+    pub fn new(tracks: Vec<PathBuf>) -> App<'static> {
+        App {
+            position: Position::Files,
+            argv: tracks,
+            library: None,
+            artists: Vec::new(),
+            albums: Vec::new(),
+            tracks: Vec::new(),
             selected: 0,
-            playing_from: None,
+            playing: None,
             help: false,
             volume: 100,
             state: PlayState::Stopped,
@@ -84,10 +156,68 @@ impl App {
         }
     }
 
+    /// An interface browsing the library index. The artists snapshot is read
+    /// here, once; deeper levels are read when the position changes.
+    #[must_use]
+    pub fn browse(library: Option<&'lib Library>) -> Self {
+        let mut app = Self {
+            position: Position::Artists,
+            argv: Vec::new(),
+            library,
+            artists: Vec::new(),
+            albums: Vec::new(),
+            tracks: Vec::new(),
+            selected: 0,
+            playing: None,
+            help: false,
+            volume: 100,
+            state: PlayState::Stopped,
+            player: None,
+            status: String::new(),
+        };
+        app.reload();
+        app
+    }
+
     /// The index of the selected row.
     #[must_use]
     pub const fn selected(&self) -> usize {
         self.selected
+    }
+
+    /// Where in the library the interface stands, or `None` over a flat
+    /// command-line list.
+    #[must_use]
+    pub fn level(&self) -> Option<Level> {
+        match &self.position {
+            Position::Files => None,
+            Position::Artists => Some(Level::Artists),
+            Position::Albums { artist } => Some(Level::Albums {
+                artist: artist.clone(),
+            }),
+            Position::Tracks { artist, album } => Some(Level::Tracks {
+                artist: artist.clone(),
+                album: album.clone(),
+            }),
+        }
+    }
+
+    /// The artists snapshot, empty when not browsing.
+    #[must_use]
+    pub fn artists(&self) -> &[ArtistEntry] {
+        &self.artists
+    }
+
+    /// The albums of the artist being browsed, empty when not inside one.
+    #[must_use]
+    pub fn albums(&self) -> &[AlbumEntry] {
+        &self.albums
+    }
+
+    /// The tracks of the album being browsed, empty when not inside one.
+    #[must_use]
+    pub fn tracks(&self) -> &[TrackEntry] {
+        &self.tracks
     }
 
     /// Whether the help overlay is open.
@@ -102,8 +232,26 @@ impl App {
         self.volume
     }
 
-    /// Applies one key press. Pure with respect to the terminal: it only
-    /// moves state and answers with an [`Action`].
+    /// Writes the status line, e.g. indexing progress.
+    pub fn note(&mut self, message: impl Into<String>) {
+        self.status = message.into();
+    }
+
+    /// Re-reads the artists snapshot from the index, e.g. right after
+    /// indexing. Keeps the selection inside the (possibly shorter) list.
+    pub fn reload(&mut self) {
+        let Some(library) = self.library else {
+            return;
+        };
+        match library.artists() {
+            Ok(artists) => self.artists = artists,
+            Err(error) => self.status = format!("velo: {error}"),
+        }
+        self.selected = self.selected.min(self.row_count().saturating_sub(1));
+    }
+
+    /// Applies one key press. Pure with respect to the terminal and the
+    /// library: it only moves state and answers with an [`Action`].
     pub fn on_key(&mut self, event: ratatui::crossterm::event::KeyEvent) -> Action {
         use ratatui::crossterm::event::KeyCode;
 
@@ -121,11 +269,19 @@ impl App {
                 Action::None
             }
             KeyCode::Char('G') => {
-                self.selected = self.tracks.len().saturating_sub(1);
+                self.selected = self.row_count().saturating_sub(1);
                 Action::None
             }
-            KeyCode::Enter if !self.tracks.is_empty() => Action::Play {
-                from: self.selected,
+            KeyCode::Enter => match &self.position {
+                Position::Files if !self.argv.is_empty() => Action::Play {
+                    from: self.selected,
+                },
+                Position::Tracks { .. } if !self.tracks.is_empty() => Action::Play {
+                    from: self.selected,
+                },
+                Position::Artists if !self.artists.is_empty() => Action::Descend,
+                Position::Albums { .. } if !self.albums.is_empty() => Action::Descend,
+                _ => Action::None,
             },
             KeyCode::Char(' ') => Action::TogglePause,
             KeyCode::Char('+' | '=') => Action::SetVolume(self.change_volume(5)),
@@ -134,17 +290,23 @@ impl App {
                 self.help = !self.help;
                 Action::None
             }
-            KeyCode::Esc => {
+            KeyCode::Esc | KeyCode::Backspace => {
+                // `Esc` closes the help overlay when it is open, before it
+                // would ascend; ascending is browse-only.
                 self.help = false;
-                Action::None
+                if matches!(self.position, Position::Files) {
+                    Action::None
+                } else {
+                    Action::Ascend
+                }
             }
             KeyCode::Char('q') => Action::Quit,
             _ => Action::None,
         }
     }
 
-    /// Carries an [`Action`] into the audio half. Errors land in the status
-    /// message instead of leaving the interface.
+    /// Carries an [`Action`] into the audio or library half. Errors land in
+    /// the status message instead of leaving the interface.
     pub fn apply(&mut self, action: Action) {
         match action {
             Action::None | Action::SetVolume(_) => {
@@ -153,6 +315,8 @@ impl App {
             }
             Action::Quit => self.shutdown(),
             Action::Play { from } => self.play_from(from),
+            Action::Descend => self.descend(),
+            Action::Ascend => self.ascend(),
             Action::TogglePause => self.toggle_pause(),
         }
     }
@@ -180,16 +344,43 @@ impl App {
         let state = self.state.label();
         let [left, right] =
             Layout::horizontal([Constraint::Min(0), Constraint::Length(10)]).areas(area);
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled("velo", Style::new().fg(ACCENT).bold()),
-                Span::styled(
-                    format!("  {} tracks", self.tracks.len()),
+        let mut spans = vec![Span::styled("velo", Style::new().fg(ACCENT).bold())];
+        match &self.position {
+            Position::Files => {
+                spans.push(Span::styled(
+                    format!("  {}", plural(self.argv.len(), "track", "tracks")),
                     Style::new().fg(SECONDARY),
-                ),
-            ])),
-            left,
-        );
+                ));
+            }
+            Position::Artists => {
+                spans.push(Span::styled("  artists", Style::new().fg(SECONDARY)));
+                spans.push(Span::styled(
+                    format!("  {}", self.artists.len()),
+                    Style::new().fg(SECONDARY),
+                ));
+            }
+            Position::Albums { artist } => {
+                spans.push(Span::styled(
+                    format!("  {artist}"),
+                    Style::new().fg(SECONDARY),
+                ));
+                spans.push(Span::styled(
+                    format!("  {}", plural(self.albums.len(), "album", "albums")),
+                    Style::new().fg(SECONDARY),
+                ));
+            }
+            Position::Tracks { artist, album } => {
+                spans.push(Span::styled(
+                    format!("  {artist} · {album}"),
+                    Style::new().fg(SECONDARY),
+                ));
+                spans.push(Span::styled(
+                    format!("  {}", plural(self.tracks.len(), "track", "tracks")),
+                    Style::new().fg(SECONDARY),
+                ));
+            }
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)), left);
         frame.render_widget(
             Paragraph::new(Span::styled(state, Style::new().fg(DIM))).alignment(Alignment::Right),
             right,
@@ -197,43 +388,97 @@ impl App {
     }
 
     fn draw_body(&self, frame: &mut Frame, area: Rect) {
-        if self.tracks.is_empty() {
+        if let Some(message) = self.empty_message() {
             frame.render_widget(
-                Paragraph::new(Line::styled(
-                    "no tracks — pass files on the command line",
-                    Style::new().fg(DIM),
-                )),
+                Paragraph::new(Line::styled(message, Style::new().fg(DIM))),
                 area,
             );
             return;
         }
 
-        let items: Vec<ListItem> = self
-            .tracks
-            .iter()
-            .enumerate()
-            .map(|(index, path)| ListItem::new(self.track_row(index, path)))
-            .collect();
-        let list = List::new(items)
+        let list = List::new(self.rows())
             .style(Style::new().bg(BACKGROUND))
             .highlight_style(Style::new().bg(ACCENT).fg(BACKGROUND));
         let mut state = ListState::default().with_selected(Some(self.selected));
         frame.render_stateful_widget(list, area, &mut state);
     }
 
-    /// One row: the play marker, the file name, the parent directory dimmed.
-    fn track_row(&self, index: usize, path: &std::path::Path) -> Line<'_> {
-        let marker = if self.playing_from == Some(index) {
-            Span::styled("▸ ", Style::new().fg(ACCENT))
-        } else {
-            Span::raw("  ")
-        };
+    /// The rows of the current level, as they are on screen.
+    fn rows(&self) -> Vec<ListItem<'_>> {
+        match &self.position {
+            Position::Files => self
+                .argv
+                .iter()
+                .enumerate()
+                .map(|(index, path)| ListItem::new(self.file_row(index, path)))
+                .collect(),
+            Position::Artists => self
+                .artists
+                .iter()
+                .enumerate()
+                .map(|(index, entry)| {
+                    ListItem::new(Line::from(vec![
+                        self.marker(index),
+                        Span::styled(entry.name.clone(), Style::new().fg(TEXT)),
+                        Span::styled(
+                            format!(
+                                "  {} · {}",
+                                plural(
+                                    usize::try_from(entry.albums).unwrap_or(usize::MAX),
+                                    "album",
+                                    "albums"
+                                ),
+                                plural(
+                                    usize::try_from(entry.tracks).unwrap_or(usize::MAX),
+                                    "track",
+                                    "tracks"
+                                )
+                            ),
+                            Style::new().fg(DIM),
+                        ),
+                    ]))
+                })
+                .collect(),
+            Position::Albums { .. } => self
+                .albums
+                .iter()
+                .enumerate()
+                .map(|(index, entry)| {
+                    let year = entry
+                        .year
+                        .map_or_else(String::new, |year| format!("  {year}"));
+                    ListItem::new(Line::from(vec![
+                        self.marker(index),
+                        Span::styled(entry.title.clone(), Style::new().fg(TEXT)),
+                        Span::styled(year, Style::new().fg(DIM)),
+                    ]))
+                })
+                .collect(),
+            Position::Tracks { .. } => self
+                .tracks
+                .iter()
+                .enumerate()
+                .map(|(index, entry)| {
+                    ListItem::new(Line::from(vec![
+                        self.marker(index),
+                        Span::styled(entry.title.clone(), Style::new().fg(TEXT)),
+                        Span::styled(Self::duration(entry.duration_ms), Style::new().fg(DIM)),
+                    ]))
+                })
+                .collect(),
+        }
+    }
 
+    /// One flat row: the play marker, the file name, the parent directory dimmed.
+    fn file_row(&self, index: usize, path: &std::path::Path) -> Line<'_> {
         let name = path.file_name().map_or_else(
             || path.display().to_string(),
             |name| name.to_string_lossy().to_string(),
         );
-        let mut spans = vec![marker, Span::styled(name, Style::new().fg(TEXT))];
+        let mut spans = vec![
+            self.marker(index),
+            Span::styled(name, Style::new().fg(TEXT)),
+        ];
 
         if let Some(parent) = path.parent() {
             let parent = parent.display().to_string();
@@ -242,6 +487,24 @@ impl App {
             }
         }
         Line::from(spans)
+    }
+
+    /// The play marker: `▸` on the row whose samples are being produced.
+    fn marker(&self, index: usize) -> Span<'static> {
+        if self.playing_row() == Some(index) {
+            Span::styled("▸ ", Style::new().fg(ACCENT))
+        } else {
+            Span::raw("  ")
+        }
+    }
+
+    /// A duration in `m:ss`, empty for tracks with no known length.
+    fn duration(duration_ms: i64) -> String {
+        if duration_ms <= 0 {
+            return String::new();
+        }
+        let seconds = u64::try_from(duration_ms / 1000).unwrap_or(0);
+        format!("  {}:{:02}", seconds / 60, seconds % 60)
     }
 
     fn draw_footer(&self, frame: &mut Frame, area: Rect) {
@@ -257,7 +520,7 @@ impl App {
 
         frame.render_widget(
             Paragraph::new(Line::styled(
-                "j/k move  enter play  space pause  +/- volume  ? help  q quit",
+                "j/k move  enter open/play  esc back  space pause  +/- volume  ? help  q quit",
                 Style::new().fg(DIM),
             )),
             hints_row,
@@ -270,11 +533,11 @@ impl App {
             "k / Up     move up",
             "g          first track",
             "G          last track",
-            "enter      play from the selection",
+            "enter      open, or play from the selection",
+            "esc        back one level / close help",
             "space      pause / resume",
             "+ / -      volume up / down",
             "?          toggle this help",
-            "esc        close help",
             "q          quit",
         ];
         let widest = rows.iter().map(|row| row.len()).max().unwrap_or(0);
@@ -299,8 +562,52 @@ impl App {
         );
     }
 
+    /// How many rows the current level has.
+    fn row_count(&self) -> usize {
+        match &self.position {
+            Position::Files => self.argv.len(),
+            Position::Artists => self.artists.len(),
+            Position::Albums { .. } => self.albums.len(),
+            Position::Tracks { .. } => self.tracks.len(),
+        }
+    }
+
+    /// What an empty level says about itself, if it is empty.
+    fn empty_message(&self) -> Option<&'static str> {
+        match &self.position {
+            Position::Files if self.argv.is_empty() => {
+                Some("no tracks — pass files on the command line")
+            }
+            Position::Artists if self.artists.is_empty() => Some("no artists in the index yet"),
+            Position::Albums { .. } if self.albums.is_empty() => Some("no albums for this artist"),
+            Position::Tracks { .. } if self.tracks.is_empty() => Some("no tracks in this album"),
+            _ => None,
+        }
+    }
+
+    /// The list position of the row whose samples are being produced: where
+    /// the stream was started plus the producer's track index.
+    fn playing_row(&self) -> Option<usize> {
+        let produced = self.player.as_ref().map_or(0, Player::current_index);
+        match (&self.playing, &self.position) {
+            (Some(Playback::Files { from }), Position::Files) => Some(from + produced),
+            (
+                Some(Playback::Album {
+                    artist,
+                    album,
+                    from,
+                }),
+                Position::Tracks {
+                    artist: level_artist,
+                    album: level_album,
+                },
+            ) if artist == level_artist && album == level_album => Some(from + produced),
+            _ => None,
+        }
+    }
+
     fn select_next(&mut self) {
-        if self.selected + 1 < self.tracks.len() {
+        if self.selected + 1 < self.row_count() {
             self.selected += 1;
         }
     }
@@ -316,24 +623,109 @@ impl App {
         self.volume
     }
 
-    fn play_from(&mut self, from: usize) {
-        if from >= self.tracks.len() {
+    /// Goes one level deeper, re-reading the child snapshot from the index.
+    /// Query errors are reported instead of leaving the level unchanged.
+    fn descend(&mut self) {
+        let Some(library) = self.library else {
             return;
+        };
+        match &self.position {
+            Position::Artists => {
+                let Some(entry) = self.artists.get(self.selected) else {
+                    return;
+                };
+                let artist = entry.name.clone();
+                match library.albums_of(&artist) {
+                    Ok(albums) => {
+                        self.position = Position::Albums { artist };
+                        self.albums = albums;
+                        self.selected = 0;
+                    }
+                    Err(error) => self.status = format!("velo: {error}"),
+                }
+            }
+            Position::Albums { artist } => {
+                let Some(entry) = self.albums.get(self.selected) else {
+                    return;
+                };
+                let album = entry.title.clone();
+                match library.tracks_of(artist, &album) {
+                    Ok(tracks) => {
+                        self.position = Position::Tracks {
+                            artist: artist.clone(),
+                            album,
+                        };
+                        self.tracks = tracks;
+                        self.selected = 0;
+                    }
+                    Err(error) => self.status = format!("velo: {error}"),
+                }
+            }
+            // `Files` does not descend; `Tracks` is the deepest level and
+            // answers with `Action::Play` instead.
+            Position::Files | Position::Tracks { .. } => {}
         }
+    }
+
+    /// Goes one level up. The parent's row snapshot is kept as it was when
+    /// the level was entered — no query runs on ascent.
+    fn ascend(&mut self) {
+        match &self.position {
+            Position::Files | Position::Artists => {
+                // Already at the top: ascending stays at the artists.
+            }
+            Position::Albums { .. } => {
+                self.position = Position::Artists;
+                self.selected = 0;
+            }
+            Position::Tracks { artist, .. } => {
+                self.position = Position::Albums {
+                    artist: artist.clone(),
+                };
+                self.selected = 0;
+            }
+        }
+    }
+
+    /// Starts a gapless stream. On the tracks level this queues the whole
+    /// album from the selection onwards; a track that cannot play is reported
+    /// in the status line instead of exiting.
+    fn play_from(&mut self, from: usize) {
+        let started = match &self.position {
+            Position::Files if from < self.argv.len() => {
+                Some((self.argv[from..].to_vec(), Playback::Files { from }))
+            }
+            Position::Tracks { artist, album } if from < self.tracks.len() => Some((
+                self.tracks[from..]
+                    .iter()
+                    .map(|entry| entry.path.clone())
+                    .collect(),
+                Playback::Album {
+                    artist: artist.clone(),
+                    album: album.clone(),
+                    from,
+                },
+            )),
+            _ => None,
+        };
+        let Some((paths, playback)) = started else {
+            return;
+        };
+
         // Dropping through `stop` also releases the producer thread.
         if let Some(old) = self.player.take() {
             old.stop();
         }
-        match Player::play_gapless(self.tracks[from..].to_vec()) {
+        match Player::play_gapless(paths) {
             Ok(player) => {
                 self.player = Some(player);
-                self.playing_from = Some(from);
+                self.playing = Some(playback);
                 self.state = PlayState::Playing;
                 self.status.clear();
             }
             Err(error) => {
                 self.player = None;
-                self.playing_from = None;
+                self.playing = None;
                 self.state = PlayState::Stopped;
                 self.status = format!("velo: {error}");
             }
@@ -362,7 +754,7 @@ impl App {
     }
 }
 
-impl Default for App {
+impl Default for App<'_> {
     fn default() -> Self {
         Self::new(Vec::new())
     }

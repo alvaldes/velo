@@ -1,9 +1,10 @@
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Stdout};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
 use velo::audio::{Player, TrackSource};
+use velo::library::Library;
 use velo::ui::{Action, App, crossterm};
 
 use crossterm::event::{Event, KeyEventKind};
@@ -56,8 +57,16 @@ fn main() -> ExitCode {
     }
 
     if paths.is_empty() {
-        print_help();
-        return ExitCode::from(2);
+        if info_only || play_and_exit {
+            print_help();
+            return ExitCode::from(2);
+        }
+        // No files: the interface browses the library index.
+        return browse_interface(
+            library_root
+                .as_deref()
+                .unwrap_or(Path::new(DEFAULT_LIBRARY_ROOT)),
+        );
     }
 
     if info_only {
@@ -155,13 +164,72 @@ fn run_interface(paths: Vec<PathBuf>) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let mut app = App::new(paths);
-    let outcome = interface_loop(&mut app);
+    let outcome = with_terminal(|terminal| {
+        let mut app = App::new(paths);
+        event_loop(&mut app, terminal)
+    });
+    report_outcome(outcome)
+}
 
-    // Whatever happened above, the user's terminal comes back whole.
+/// The library interface: indexes the library root (incrementally, so a
+/// second launch is fast) with progress in the status line, then browses the
+/// index. A missing root or an empty index still opens the interface and says
+/// so instead of exiting.
+fn browse_interface(root: &Path) -> ExitCode {
+    if !std::io::stdout().is_terminal() {
+        eprintln!("velo: the interface needs an interactive terminal");
+        return ExitCode::FAILURE;
+    }
+
+    let outcome = with_terminal(|terminal| {
+        let opened = Library::open();
+        let mut app = match &opened {
+            Ok(library) => App::browse(Some(library)),
+            Err(_) => App::browse(None),
+        };
+        match &opened {
+            Ok(library) => {
+                if root.is_dir() {
+                    app.note(format!("indexing {} …", root.display()));
+                    terminal.draw(|frame| app.draw(frame))?;
+                    match library.index(root) {
+                        Ok(report) => app.note(format!(
+                            "indexed: {} added, {} updated, {} unchanged, {} removed",
+                            report.added, report.updated, report.unchanged, report.removed
+                        )),
+                        Err(error) => app.note(format!("velo: indexing failed: {error}")),
+                    }
+                } else {
+                    app.note(format!(
+                        "velo: library root {} does not exist — no indexing",
+                        root.display()
+                    ));
+                }
+            }
+            Err(error) => app.note(format!("velo: cannot open the library index: {error}")),
+        }
+        app.reload();
+        event_loop(&mut app, terminal)
+    });
+    report_outcome(outcome)
+}
+
+/// Runs `work` inside the alternate screen with raw mode on, and restores the
+/// user's terminal whatever happens.
+fn with_terminal(
+    work: impl FnOnce(&mut Terminal<CrosstermBackend<Stdout>>) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    terminal::enable_raw_mode()?;
+    let outcome = execute!(std::io::stdout(), terminal::EnterAlternateScreen).and_then(|()| {
+        let mut terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
+        work(&mut terminal)
+    });
     let _ = terminal::disable_raw_mode();
     let _ = execute!(std::io::stdout(), terminal::LeaveAlternateScreen);
+    outcome
+}
 
+fn report_outcome(outcome: std::io::Result<()>) -> ExitCode {
     match outcome {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -171,11 +239,10 @@ fn run_interface(paths: Vec<PathBuf>) -> ExitCode {
     }
 }
 
-fn interface_loop(app: &mut App) -> std::io::Result<()> {
-    terminal::enable_raw_mode()?;
-    execute!(std::io::stdout(), terminal::EnterAlternateScreen)?;
-    let mut terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
-
+fn event_loop(
+    app: &mut App<'_>,
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+) -> std::io::Result<()> {
     loop {
         terminal.draw(|frame| app.draw(frame))?;
 
@@ -221,6 +288,7 @@ fn print_help() {
         "velo — a fast, single-binary music player for your terminal
 
 USAGE:
+    velo [--library <PATH>]    Browse and play the library index
     velo [--info | --play] <file>...
     velo [--library <PATH>] --index
 
@@ -235,7 +303,8 @@ OPTIONS:
     --library <PATH>  Library root to index (default /Users/alvaldes/Music/Library)
     -h, --help      Show this help
 
-Interface keys: j/k move, enter play, space pause, +/- volume, ? help, q quit.
+Interface keys: j/k move, enter open/play, esc back, space pause, +/- volume,
+    ? help, q quit. Without files, the interface browses the library.
 
 Audio must share one channel layout: sample rates are converted to the
     output device, channel layouts are not."

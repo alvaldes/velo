@@ -37,6 +37,9 @@ pub struct Player {
     delivered: Arc<AtomicUsize>,
     played: Arc<AtomicUsize>,
     underruns: Arc<AtomicUsize>,
+    /// The queue index the producer is currently decoding; the UI reads it to
+    /// mark the playing row.
+    current: Arc<AtomicUsize>,
     producer: Option<JoinHandle<Result<(), AudioError>>>,
 }
 
@@ -82,15 +85,19 @@ impl Player {
         let delivered = Arc::new(AtomicUsize::new(0));
         let played = Arc::new(AtomicUsize::new(0));
         let underruns = Arc::new(AtomicUsize::new(0));
+        // The first track is the one being produced until the producer says
+        // otherwise; it sets the index before it opens each track.
+        let current = Arc::new(AtomicUsize::new(0));
 
         let producer = {
             let delivered = Arc::clone(&delivered);
             let stop = Arc::clone(&stop);
             let producing = Arc::clone(&producing);
+            let current = Arc::clone(&current);
             thread::Builder::new()
                 .name("velo-producer".to_owned())
                 .spawn(move || {
-                    let result = produce(paths, spec, ring, &delivered, &stop);
+                    let result = produce(paths, spec, ring, &delivered, &stop, &current);
                     producing.store(false, Ordering::Release);
                     result
                 })
@@ -160,6 +167,7 @@ impl Player {
             delivered,
             played,
             underruns,
+            current,
             producer: Some(producer),
         })
     }
@@ -200,6 +208,14 @@ impl Player {
         self.underruns.load(Ordering::Relaxed)
     }
 
+    /// The index, within the list passed to [`Player::play_gapless`], of the
+    /// track whose samples are currently being produced. The producer sets it
+    /// before it opens each track; readers only load it.
+    #[must_use]
+    pub fn current_index(&self) -> usize {
+        self.current.load(Ordering::Acquire)
+    }
+
     /// Silences the device without stopping the stream.
     pub fn set_playing(&self, playing: bool) {
         self.playing.store(playing, Ordering::Relaxed);
@@ -219,11 +235,16 @@ fn produce(
     mut ring: Producer<f32>,
     delivered: &AtomicUsize,
     stop: &AtomicBool,
+    current: &AtomicUsize,
 ) -> Result<(), AudioError> {
-    for path in paths {
+    for (index, path) in paths.into_iter().enumerate() {
         if stop.load(Ordering::Relaxed) {
             return Ok(());
         }
+
+        // Announce which track is being produced before touching the file, so
+        // a reader always sees a track that is either playing or about to.
+        current.store(index, Ordering::Release);
 
         let mut source = TrackSource::open(&path)?;
         let spec = source.spec();

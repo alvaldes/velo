@@ -6,9 +6,12 @@
 //! interface was first verified by construction, and construction never noticed
 //! a separator dangling in the footer.
 
+use std::fs;
 use std::path::PathBuf;
 
+use velo::library::Library;
 use velo::ui::App;
+use velo::ui::crossterm::event::{KeyCode, KeyEvent};
 use velo::ui::ratatui::Terminal;
 use velo::ui::ratatui::backend::TestBackend;
 use velo::ui::ratatui::buffer::{Buffer, Cell};
@@ -91,4 +94,124 @@ fn the_help_overlay_lists_the_keys_and_covers_the_list() {
         helped.contains("first track"),
         "the overlay documents the keys it claims to"
     );
+}
+
+// ---- browsing the library (T5) ------------------------------------------
+
+/// A temp library with its own index, self-removing on drop. The index is
+/// opened at an explicit path inside it, never through `VELO_DB`.
+struct TempLibrary {
+    root: PathBuf,
+    library: Library,
+}
+
+impl TempLibrary {
+    fn new(name: &str) -> Self {
+        let root =
+            std::env::temp_dir().join(format!("velo-ui-render-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let library = Library::open_at(&root.join("index.db")).unwrap();
+        Self { root, library }
+    }
+
+    /// Writes a small valid PCM WAV file (0.1 s, 44.1 kHz, stereo).
+    fn write_wav(&self, relative: &str) -> PathBuf {
+        let path = self.root.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        let sample_rate: u32 = 44_100;
+        let channels: u16 = 2;
+        let frames: usize = 4_410;
+        let data_len: u32 = u32::try_from(frames * usize::from(channels) * 2).unwrap();
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data_len).to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16_u32.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes()); // PCM
+        bytes.extend_from_slice(&channels.to_le_bytes());
+        bytes.extend_from_slice(&sample_rate.to_le_bytes());
+        bytes.extend_from_slice(&(sample_rate * u32::from(channels) * 2).to_le_bytes());
+        bytes.extend_from_slice(&(channels * 2).to_le_bytes()); // block align
+        bytes.extend_from_slice(&16_u16.to_le_bytes()); // bits per sample
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data_len.to_le_bytes());
+        bytes.extend(
+            std::iter::repeat_n(0_i16, frames * usize::from(channels)).flat_map(i16::to_le_bytes),
+        );
+
+        fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    fn index(&self) {
+        self.library.index(&self.root).unwrap();
+    }
+}
+
+impl Drop for TempLibrary {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+fn press(app: &mut App<'_>, code: KeyCode) {
+    let action = app.on_key(KeyEvent::from(code));
+    app.apply(action);
+}
+
+/// An empty level must explain itself, in the spirit of the flat "no tracks"
+/// empty state, instead of panicking. Both empty levels are reached with real
+/// index states: an artist whose rows vanished between the snapshot and the
+/// descent, and an album whose tracks did the same (a stale snapshot plus a
+/// re-index is exactly how this happens to a real user).
+#[test]
+fn an_artist_without_albums_and_an_album_without_tracks_draw_an_empty_state() {
+    let temp = TempLibrary::new("empty-levels");
+    temp.write_wav("Solo/2019 - Single/01 - One.wav");
+    temp.write_wav("Tide/2019 - Harbor/01 - Dawn.wav");
+    temp.write_wav("Tide/2019 - Lantern/01 - Far.wav");
+    temp.index();
+
+    let mut app = App::browse(Some(&temp.library));
+
+    // Solo's only file disappears after the interface took its snapshot.
+    fs::remove_file(temp.root.join("Solo/2019 - Single/01 - One.wav")).unwrap();
+    temp.index();
+    press(&mut app, KeyCode::Enter); // into Solo: zero albums
+    let screen = render(&app);
+    assert!(
+        screen.contains("no albums"),
+        "an artist without albums must explain itself, got: {screen}"
+    );
+
+    press(&mut app, KeyCode::Esc); // back to the artists
+    press(&mut app, KeyCode::Char('j')); // onto Tide
+    press(&mut app, KeyCode::Enter); // into Tide: Lantern is second
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Enter); // into Lantern
+
+    // Lantern's only track disappears too.
+    fs::remove_file(temp.root.join("Tide/2019 - Lantern/01 - Far.wav")).unwrap();
+    temp.index();
+    press(&mut app, KeyCode::Esc); // back onto the cached album list
+    press(&mut app, KeyCode::Char('j')); // onto Lantern again
+    press(&mut app, KeyCode::Enter); // into Lantern: zero tracks
+
+    let screen = render(&app);
+    assert!(
+        screen.contains("no tracks"),
+        "an album without tracks must explain itself, got: {screen}"
+    );
+}
+
+#[test]
+fn a_count_of_one_is_not_pluralised() {
+    assert_eq!(velo::ui::plural(1, "album", "albums"), "1 album");
+    assert_eq!(velo::ui::plural(1, "track", "tracks"), "1 track");
+    assert_eq!(velo::ui::plural(0, "track", "tracks"), "0 tracks");
+    assert_eq!(velo::ui::plural(20, "artist", "artists"), "20 artists");
 }
