@@ -39,12 +39,12 @@ use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, ListState, Para
 use crate::audio::output::{Repeat, SharedQueue, TrackFailure};
 use crate::audio::spectrum::Spectrum;
 use crate::audio::{Player, seek_target, skip_target};
-use crate::config::ReplayGainMode;
+use crate::config::{ReplayGainMode, ThemeColors};
 use crate::library::{AlbumEntry, ArtistEntry, GenreEntry, IndexReport, Library, TrackEntry};
 
 use self::artwork::{Artwork, Picker, StatefulImage, StatefulProtocol};
 use self::search::Search;
-use self::theme::{ACCENT, BACKGROUND, BORDER, DIM, INK, SECONDARY, TEXT};
+use self::theme::Theme;
 
 /// What one key press asks the runtime to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -306,6 +306,8 @@ pub struct App<'lib> {
     /// How `ReplayGain` is applied, from the config; the player reads it when a
     /// stream is built, so a seek keeps honouring it (T11).
     replay_gain: ReplayGainMode,
+    /// The palette the interface draws with, from the config's `[theme]` (S4).
+    theme: Theme,
     /// Whether what is left of the queue plays in a mixed order.
     shuffle: bool,
     /// The queue as it was before it was shuffled, to put it back.
@@ -385,6 +387,7 @@ impl<'lib> App<'lib> {
             seen_area: std::cell::Cell::new(Rect::new(0, 0, 0, 0)),
             art_explained: false,
             replay_gain: ReplayGainMode::default(),
+            theme: Theme::default(),
             shuffle: false,
             unshuffled: Vec::new(),
             repeat: Repeat::Off,
@@ -435,6 +438,7 @@ impl<'lib> App<'lib> {
             seen_area: std::cell::Cell::new(Rect::new(0, 0, 0, 0)),
             art_explained: false,
             replay_gain: ReplayGainMode::default(),
+            theme: Theme::default(),
             shuffle: false,
             unshuffled: Vec::new(),
             repeat: Repeat::Off,
@@ -485,6 +489,12 @@ impl<'lib> App<'lib> {
     /// How `ReplayGain` is applied, as the config resolved it.
     pub const fn set_replay_gain(&mut self, mode: ReplayGainMode) {
         self.replay_gain = mode;
+    }
+
+    /// The palette the interface draws with, from the config's `[theme]` (S4):
+    /// `accent_bright` stays derived from the accent.
+    pub fn set_theme(&mut self, colors: ThemeColors) {
+        self.theme = colors.into();
     }
 
     /// The level the config asks for. Applied to a running player and kept for
@@ -1279,15 +1289,18 @@ impl<'lib> App<'lib> {
         self.seen_area.set(area);
         // Set again by `draw_spectrum` only when this frame has room for it.
         self.spectrum_bands.set(0);
-        frame.render_widget(Block::new().style(Style::new().bg(BACKGROUND)), area);
+        frame.render_widget(
+            Block::new().style(Style::new().bg(self.theme.background)),
+            area,
+        );
 
         // The window: a rounded frame around a title bar, the content and
         // the footer. The art threshold below is still measured on the whole
         // terminal, so `artwork::hidden_reason` keeps telling the truth.
         let window = Block::bordered()
             .border_type(BorderType::Rounded)
-            .border_style(Style::new().fg(BORDER))
-            .style(Style::new().bg(BACKGROUND));
+            .border_style(Style::new().fg(self.theme.border))
+            .style(Style::new().bg(self.theme.background));
         let inner = window.inner(area);
         frame.render_widget(window, area);
 
@@ -1325,10 +1338,10 @@ impl<'lib> App<'lib> {
         self.draw_footer(frame, footer);
         self.draw_artwork(frame, pane);
         if let Some(help) = &self.help {
-            Self::draw_help(frame, area, help);
+            Self::draw_help(frame, area, help, &self.theme);
         }
         if let Some(prompt) = self.library_prompt() {
-            Self::draw_library_prompt(frame, area, prompt);
+            Self::draw_library_prompt(frame, area, prompt, &self.theme);
         }
     }
 
@@ -1354,12 +1367,15 @@ impl<'lib> App<'lib> {
     /// The title bar: the two views as tabs on the left, the one `tab`
     /// switches between, and the letter-spaced wordmark on the right.
     fn draw_title_bar(&self, frame: &mut Frame, area: Rect) {
-        frame.render_widget(Block::new().style(Style::new().bg(BACKGROUND)), area);
+        frame.render_widget(
+            Block::new().style(Style::new().bg(self.theme.background)),
+            area,
+        );
         let tab = |label: &'static str, view: View| {
             if self.view == view {
-                Span::styled(label, Style::new().fg(ACCENT).bold())
+                Span::styled(label, Style::new().fg(self.theme.accent).bold())
             } else {
-                Span::styled(label, Style::new().fg(DIM))
+                Span::styled(label, Style::new().fg(self.theme.dim))
             }
         };
         let mut tabs = Line::from(vec![
@@ -1372,13 +1388,18 @@ impl<'lib> App<'lib> {
         // goes away when it ends (library-refresh T3).
         if self.refresh.running.is_some() {
             tabs.spans.push(Span::raw("   "));
-            tabs.spans
-                .push(Span::styled("⟳ indexing…", Style::new().fg(ACCENT)));
+            tabs.spans.push(Span::styled(
+                "⟳ indexing…",
+                Style::new().fg(self.theme.accent),
+            ));
         }
         frame.render_widget(Paragraph::new(tabs), area);
         frame.render_widget(
-            Paragraph::new(Span::styled(WORDMARK, Style::new().fg(ACCENT).bold()))
-                .alignment(Alignment::Right),
+            Paragraph::new(Span::styled(
+                WORDMARK,
+                Style::new().fg(self.theme.accent).bold(),
+            ))
+            .alignment(Alignment::Right),
             area,
         );
     }
@@ -1397,8 +1418,8 @@ impl<'lib> App<'lib> {
             |path| describe(path, self.known_tracks()),
         );
         let title = Line::from(vec![
-            Span::styled("♫ ", Style::new().fg(ACCENT)),
-            Span::styled(title, Style::new().fg(TEXT).bold()),
+            Span::styled("♫ ", Style::new().fg(self.theme.accent)),
+            Span::styled(title, Style::new().fg(self.theme.text).bold()),
         ]);
         let volume = self.player.as_ref().map_or(self.volume, Player::volume);
 
@@ -1408,16 +1429,17 @@ impl<'lib> App<'lib> {
                 let pill = self.state_pill();
                 let right = vec![pill, Span::raw("  ")]
                     .into_iter()
-                    .chain(volume_slider(volume, 0))
+                    .chain(volume_slider(volume, 0, &self.theme))
                     .collect::<Vec<_>>();
                 split_row(frame, area, title, Line::from(right));
             }
             2..=6 => {
                 let [top, middle, bottom] = rows3(area);
                 let mut title = title;
-                title
-                    .spans
-                    .push(Span::styled(format!("  {subtitle}"), Style::new().fg(DIM)));
+                title.spans.push(Span::styled(
+                    format!("  {subtitle}"),
+                    Style::new().fg(self.theme.dim),
+                ));
                 split_row(frame, top, title, Line::from(self.state_pill()));
                 self.draw_clock_and_progress(frame, middle);
                 self.draw_transport(frame, bottom, volume);
@@ -1449,7 +1471,7 @@ impl<'lib> App<'lib> {
                 self.draw_spectrum(frame, spectrum_area);
                 frame.render_widget(Paragraph::new(title), title_row);
                 frame.render_widget(
-                    Paragraph::new(Line::styled(subtitle, Style::new().fg(DIM))),
+                    Paragraph::new(Line::styled(subtitle, Style::new().fg(self.theme.dim))),
                     subtitle_row,
                 );
                 let mut clock = self.clock_spans();
@@ -1466,12 +1488,16 @@ impl<'lib> App<'lib> {
                     frame,
                     clock_row,
                     Line::from(clock),
-                    Line::styled(position.unwrap_or_default(), Style::new().fg(DIM)),
+                    Line::styled(
+                        position.unwrap_or_default(),
+                        Style::new().fg(self.theme.dim),
+                    ),
                 );
                 frame.render_widget(
                     Paragraph::new(Line::from(progress_bar(
                         self.progress(),
                         progress_row.width,
+                        &self.theme,
                     ))),
                     progress_row,
                 );
@@ -1489,13 +1515,21 @@ impl<'lib> App<'lib> {
         spans.extend(progress_bar(
             self.progress(),
             u16::try_from(room).unwrap_or(0),
+            &self.theme,
         ));
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 
     /// The buttons on the left, the volume slider on the right.
     fn draw_transport(&self, frame: &mut Frame, area: Rect, volume: u8) {
-        let button = Style::new().fg(SECONDARY);
+        let button = Style::new().fg(self.theme.secondary);
+        let lit = |on: bool| {
+            if on {
+                self.theme.accent
+            } else {
+                self.theme.dim
+            }
+        };
         let primary = if self.state == PlayState::Playing {
             " ❚❚ pause "
         } else {
@@ -1504,13 +1538,16 @@ impl<'lib> App<'lib> {
         let buttons = Line::from(vec![
             Span::styled(" ◂◂ ", button),
             Span::raw(" "),
-            Span::styled(primary, Style::new().bg(ACCENT).fg(INK).bold()),
+            Span::styled(
+                primary,
+                Style::new().bg(self.theme.accent).fg(self.theme.ink).bold(),
+            ),
             Span::raw(" "),
             Span::styled(" ▸▸ ", button),
             // Shuffle and repeat: dim while off, the accent while on.
             Span::raw("   "),
             Span::styled("shuffle", Style::new().fg(lit(self.shuffle))),
-            Span::styled("  repeat ", Style::new().fg(DIM)),
+            Span::styled("  repeat ", Style::new().fg(self.theme.dim)),
             Span::styled(
                 self.repeat.label(),
                 Style::new().fg(lit(self.repeat != Repeat::Off)),
@@ -1524,11 +1561,11 @@ impl<'lib> App<'lib> {
             ReplayGainMode::Off => "off",
         };
         let mut right = vec![
-            Span::styled("RG ", Style::new().fg(DIM)),
-            Span::styled(format!("{mode:<5}"), Style::new().fg(SECONDARY)),
+            Span::styled("RG ", Style::new().fg(self.theme.dim)),
+            Span::styled(format!("{mode:<5}"), Style::new().fg(self.theme.secondary)),
             Span::raw("   "),
         ];
-        right.extend(volume_slider(volume, VOLUME_CELLS));
+        right.extend(volume_slider(volume, VOLUME_CELLS, &self.theme));
         split_row(frame, area, buttons, Line::from(right));
     }
 
@@ -1536,14 +1573,14 @@ impl<'lib> App<'lib> {
     /// when nothing plays.
     fn clock_spans(&self) -> Vec<Span<'static>> {
         let Some(player) = &self.player else {
-            return vec![Span::styled("--:--", Style::new().fg(DIM))];
+            return vec![Span::styled("--:--", Style::new().fg(self.theme.dim))];
         };
         let mut clock = mmss(player.position());
         if let Some(total) = self.current_track_duration() {
             clock.push_str(" / ");
             clock.push_str(&mmss(total));
         }
-        vec![Span::styled(clock, Style::new().fg(ACCENT))]
+        vec![Span::styled(clock, Style::new().fg(self.theme.accent))]
     }
 
     /// How far into the track playback is, `0.0..=1.0`; `None` when nothing
@@ -1567,15 +1604,18 @@ impl<'lib> App<'lib> {
         self.spectrum_bands.set(bands);
         let mut levels = self.spectrum.levels().to_vec();
         levels.resize(bands, 0.0);
-        frame.render_widget(Paragraph::new(spectrum_lines(&levels, area.height)), area);
+        frame.render_widget(
+            Paragraph::new(spectrum_lines(&levels, area.height, &self.theme)),
+            area,
+        );
     }
 
     /// The play state as a pill: `▶ playing` in the accent, the others dim.
     fn state_pill(&self) -> Span<'static> {
         let (glyph, color) = match self.state {
-            PlayState::Playing => ("▶", ACCENT),
-            PlayState::Paused => ("❚❚", SECONDARY),
-            PlayState::Stopped => ("■", DIM),
+            PlayState::Playing => ("▶", self.theme.accent),
+            PlayState::Paused => ("❚❚", self.theme.secondary),
+            PlayState::Stopped => ("■", self.theme.dim),
         };
         Span::styled(
             format!(" {glyph} {} ", self.state.label()),
@@ -1612,9 +1652,9 @@ impl<'lib> App<'lib> {
             )
         };
         let line = Line::from(vec![
-            Span::styled("▸─ ", Style::new().fg(BORDER)),
-            Span::styled(label, Style::new().fg(TEXT).bold()),
-            Span::styled(format!("  [{count}]"), Style::new().fg(DIM)),
+            Span::styled("▸─ ", Style::new().fg(self.theme.border)),
+            Span::styled(label, Style::new().fg(self.theme.text).bold()),
+            Span::styled(format!("  [{count}]"), Style::new().fg(self.theme.dim)),
         ]);
         frame.render_widget(Paragraph::new(line), area);
     }
@@ -1625,15 +1665,15 @@ impl<'lib> App<'lib> {
     /// it the count goes first, then the place is cut at the edge; the views
     /// stay.
     fn views_header(&self, width: u16) -> Line<'static> {
-        let mut spans = vec![Span::styled("▸─ ", Style::new().fg(BORDER))];
+        let mut spans = vec![Span::styled("▸─ ", Style::new().fg(self.theme.border))];
         for (index, by) in BrowseBy::ALL.into_iter().enumerate() {
             if index > 0 {
                 spans.push(Span::raw("  "));
             }
             let style = if by == self.browse_by {
-                Style::new().fg(ACCENT).bold()
+                Style::new().fg(self.theme.accent).bold()
             } else {
-                Style::new().fg(DIM)
+                Style::new().fg(self.theme.dim)
             };
             spans.push(Span::styled(by.label(), style));
         }
@@ -1646,7 +1686,7 @@ impl<'lib> App<'lib> {
         if !place.is_empty() {
             spans.push(Span::styled(
                 format!("   {place}"),
-                Style::new().fg(TEXT).bold(),
+                Style::new().fg(self.theme.text).bold(),
             ));
         }
         let count = Span::styled(
@@ -1655,7 +1695,7 @@ impl<'lib> App<'lib> {
                 if place.is_empty() { "   " } else { "  " },
                 self.level_count()
             ),
-            Style::new().fg(DIM),
+            Style::new().fg(self.theme.dim),
         );
         if Line::from(spans.clone()).width() + count.width() <= usize::from(width) {
             spans.push(count);
@@ -1683,19 +1723,24 @@ impl<'lib> App<'lib> {
         let width = area.width;
         let (rows, selected) = if self.search.is_some() {
             if self.search_results.is_empty() {
-                draw_empty(frame, area, "no tracks match");
+                draw_empty(frame, area, "no tracks match", self.theme.dim);
                 return;
             }
             (self.search_rows(width), self.search_selected)
         } else if self.view == View::Queue {
             if self.queue.is_empty() {
-                draw_empty(frame, area, "nothing queued — press a on a track to add it");
+                draw_empty(
+                    frame,
+                    area,
+                    "nothing queued — press a on a track to add it",
+                    self.theme.dim,
+                );
                 return;
             }
             (self.queue_rows(width), self.queue_selected)
         } else {
             if let Some(message) = self.empty_message() {
-                draw_empty(frame, area, message);
+                draw_empty(frame, area, message, self.theme.dim);
                 return;
             }
             (self.rows(width), self.selected)
@@ -1703,8 +1748,8 @@ impl<'lib> App<'lib> {
         // Only the background changes on the selected row, so its dim notes
         // stay dim and the playing row keeps its accent.
         let list = List::new(rows)
-            .style(Style::new().bg(BACKGROUND))
-            .highlight_style(Style::new().bg(ACCENT).fg(INK));
+            .style(Style::new().bg(self.theme.background))
+            .highlight_style(Style::new().bg(self.theme.accent).fg(self.theme.ink));
         let mut state = ListState::default().with_selected(Some(selected));
         frame.render_stateful_widget(list, area, &mut state);
     }
@@ -1726,6 +1771,7 @@ impl<'lib> App<'lib> {
                         fact,
                     },
                     width,
+                    &self.theme,
                 ))
             })
             .collect()
@@ -1806,6 +1852,7 @@ impl<'lib> App<'lib> {
                         fact: String::new(),
                     },
                     width,
+                    &self.theme,
                 ))
             })
             .collect()
@@ -1831,6 +1878,7 @@ impl<'lib> App<'lib> {
                         fact: Self::duration(entry.duration_ms),
                     },
                     width,
+                    &self.theme,
                 ))
             })
             .collect()
@@ -1852,12 +1900,15 @@ impl<'lib> App<'lib> {
         let status = if self.search.is_some() {
             // The query itself, over the transport line, so the user sees what
             // they are typing while the body lists the results.
-            Line::styled(format!("/{}", self.search_query()), Style::new().fg(ACCENT))
+            Line::styled(
+                format!("/{}", self.search_query()),
+                Style::new().fg(self.theme.accent),
+            )
         } else if self.status.is_empty() {
             // The clock and the volume live in the now-playing block.
             Line::default()
         } else {
-            Line::styled(self.status.clone(), Style::new().fg(ACCENT))
+            Line::styled(self.status.clone(), Style::new().fg(self.theme.accent))
         };
         if !status.spans.is_empty() {
             frame.render_widget(Paragraph::new(status), status_row);
@@ -1902,7 +1953,10 @@ impl<'lib> App<'lib> {
                 ("q", "quit"),
             ]
         };
-        frame.render_widget(Paragraph::new(hint_line(hints, hints_row.width)), hints_row);
+        frame.render_widget(
+            Paragraph::new(hint_line(hints, hints_row.width, &self.theme)),
+            hints_row,
+        );
     }
 
     /// Every library row the interface holds that may name a playing file:
@@ -1944,7 +1998,7 @@ impl<'lib> App<'lib> {
     /// shorter, scrolled to `help.top`, with the filter under the title while
     /// there is one and where it is (`12–20 of 26`) on its bottom edge when it
     /// does not fit.
-    fn draw_help(frame: &mut Frame, area: Rect, help: &Help) {
+    fn draw_help(frame: &mut Frame, area: Rect, help: &Help, theme: &Theme) {
         let key_width = HELP_ROWS
             .iter()
             .map(|(key, _)| key.chars().count())
@@ -1969,39 +2023,43 @@ impl<'lib> App<'lib> {
         let mut text: Vec<Line> = Vec::new();
         if help.filtering() {
             let mut filter = vec![
-                Span::styled("/ ", Style::new().fg(SECONDARY)),
-                Span::styled(help.filter.clone(), Style::new().fg(ACCENT)),
+                Span::styled("/ ", Style::new().fg(theme.secondary)),
+                Span::styled(help.filter.clone(), Style::new().fg(theme.accent)),
             ];
             if help.typing {
-                filter.push(Span::styled("▏", Style::new().fg(SECONDARY)));
+                filter.push(Span::styled("▏", Style::new().fg(theme.secondary)));
             }
             text.push(Line::from(filter));
         }
         if rows.is_empty() {
             text.push(Line::styled(
                 format!("no key matches “{}”", help.filter),
-                Style::new().fg(DIM),
+                Style::new().fg(theme.dim),
             ));
         }
         text.extend(rows.iter().skip(top).take(shown).map(|(key, label)| {
             Line::from(vec![
-                Span::styled(format!("{key:<key_width$}   "), Style::new().fg(SECONDARY)),
-                Span::styled((*label).to_owned(), Style::new().fg(TEXT)),
+                Span::styled(
+                    format!("{key:<key_width$}   "),
+                    Style::new().fg(theme.secondary),
+                ),
+                Span::styled((*label).to_owned(), Style::new().fg(theme.text)),
             ])
         }));
 
         let mut card = Block::bordered()
             .border_type(BorderType::Rounded)
-            .border_style(Style::new().fg(ACCENT))
-            .title(Span::styled(" keys ", Style::new().fg(ACCENT).bold()))
+            .border_style(Style::new().fg(theme.accent))
+            .title(Span::styled(" keys ", Style::new().fg(theme.accent).bold()))
             .padding(ratatui::widgets::Padding::horizontal(1))
-            .style(Style::new().bg(BACKGROUND));
+            .style(Style::new().bg(theme.background));
         if !help.filtering() {
-            card = card.title_bottom(Line::styled(" / filter ", Style::new().fg(DIM)));
+            card = card.title_bottom(Line::styled(" / filter ", Style::new().fg(theme.dim)));
         }
         if shown < rows.len() {
             let position = format!(" {}–{} of {} ", top + 1, top + shown, rows.len());
-            card = card.title_bottom(Line::styled(position, Style::new().fg(DIM)).right_aligned());
+            card = card
+                .title_bottom(Line::styled(position, Style::new().fg(theme.dim)).right_aligned());
         }
         frame.render_widget(Clear, box_area);
         frame.render_widget(Paragraph::new(text).block(card), box_area);
@@ -2009,7 +2067,7 @@ impl<'lib> App<'lib> {
 
     /// The library prompt: a rounded card, centred like the help, with the
     /// path being typed and, under it, why the last one was refused.
-    fn draw_library_prompt(frame: &mut Frame, area: Rect, prompt: &LibraryPrompt) {
+    fn draw_library_prompt(frame: &mut Frame, area: Rect, prompt: &LibraryPrompt, theme: &Theme) {
         let width = area.width.saturating_sub(8).clamp(20, 72);
         let box_area = centered(area, width, 9);
         let field_width = usize::from(width.saturating_sub(6));
@@ -2020,20 +2078,23 @@ impl<'lib> App<'lib> {
             chars[skip..].iter().collect()
         };
         let text = vec![
-            Line::styled("Where is your music?", Style::new().fg(TEXT)),
+            Line::styled("Where is your music?", Style::new().fg(theme.text)),
             Line::styled(
                 "a folder in your home — tab completes it",
-                Style::new().fg(DIM),
+                Style::new().fg(theme.dim),
             ),
             Line::from(vec![
-                Span::styled(shown, Style::new().fg(ACCENT)),
-                Span::styled("▏", Style::new().fg(SECONDARY)),
+                Span::styled(shown, Style::new().fg(theme.accent)),
+                Span::styled("▏", Style::new().fg(theme.secondary)),
             ]),
             // The folders the last tab could not choose between.
-            Line::styled(prompt.candidates.join("  "), Style::new().fg(SECONDARY)),
+            Line::styled(
+                prompt.candidates.join("  "),
+                Style::new().fg(theme.secondary),
+            ),
             prompt.error.as_ref().map_or_else(
-                || Line::styled("enter save · esc skip", Style::new().fg(DIM)),
-                |error| Line::styled(error.clone(), Style::new().fg(SECONDARY)),
+                || Line::styled("enter save · esc skip", Style::new().fg(theme.dim)),
+                |error| Line::styled(error.clone(), Style::new().fg(theme.secondary)),
             ),
         ];
         frame.render_widget(Clear, box_area);
@@ -2041,10 +2102,13 @@ impl<'lib> App<'lib> {
             Paragraph::new(text).block(
                 Block::bordered()
                     .border_type(BorderType::Rounded)
-                    .border_style(Style::new().fg(ACCENT))
-                    .title(Span::styled(" library ", Style::new().fg(ACCENT).bold()))
+                    .border_style(Style::new().fg(theme.accent))
+                    .title(Span::styled(
+                        " library ",
+                        Style::new().fg(theme.accent).bold(),
+                    ))
                     .padding(ratatui::widgets::Padding::new(1, 1, 1, 0))
-                    .style(Style::new().bg(BACKGROUND)),
+                    .style(Style::new().bg(theme.background)),
             ),
             box_area,
         );
@@ -2792,7 +2856,7 @@ impl Default for App<'_> {
 /// row is too narrow, pairs are dropped from the middle: the first ones say
 /// how to move and the last two how to get help and leave, and those last
 /// two are never the ones that go.
-fn hint_line(hints: &[(&str, &str)], width: u16) -> Line<'static> {
+fn hint_line(hints: &[(&str, &str)], width: u16, theme: &Theme) -> Line<'static> {
     let fits = |pairs: &[&(&str, &str)]| {
         let used: usize = pairs
             .iter()
@@ -2810,8 +2874,14 @@ fn hint_line(hints: &[(&str, &str)], width: u16) -> Line<'static> {
         if index > 0 {
             spans.push(Span::raw("  "));
         }
-        spans.push(Span::styled((*key).to_owned(), Style::new().fg(SECONDARY)));
-        spans.push(Span::styled(format!(" {label}"), Style::new().fg(DIM)));
+        spans.push(Span::styled(
+            (*key).to_owned(),
+            Style::new().fg(theme.secondary),
+        ));
+        spans.push(Span::styled(
+            format!(" {label}"),
+            Style::new().fg(theme.dim),
+        ));
     }
     Line::from(spans)
 }
@@ -2832,18 +2902,18 @@ struct ListRow {
 /// the row that plays), the number, the name, the note, and the fact against
 /// the right edge when it fits beside the rest; a fact that does not fit is
 /// the part left out, never the name.
-fn list_row(row: ListRow, width: u16) -> Line<'static> {
+fn list_row(row: ListRow, width: u16, theme: &Theme) -> Line<'static> {
     let (marker, number, name) = if row.playing {
         (
-            Style::new().fg(ACCENT),
-            Style::new().fg(ACCENT),
-            Style::new().fg(ACCENT).bold(),
+            Style::new().fg(theme.accent),
+            Style::new().fg(theme.accent),
+            Style::new().fg(theme.accent).bold(),
         )
     } else {
         (
-            Style::new().fg(BORDER),
-            Style::new().fg(DIM),
-            Style::new().fg(TEXT),
+            Style::new().fg(theme.border),
+            Style::new().fg(theme.dim),
+            Style::new().fg(theme.text),
         )
     };
     let digits = row.digits;
@@ -2855,7 +2925,7 @@ fn list_row(row: ListRow, width: u16) -> Line<'static> {
     if !row.note.is_empty() {
         spans.push(Span::styled(
             format!("  {}", row.note),
-            Style::new().fg(DIM),
+            Style::new().fg(theme.dim),
         ));
     }
     let used = Line::from(spans.clone()).width();
@@ -2863,7 +2933,7 @@ fn list_row(row: ListRow, width: u16) -> Line<'static> {
     let width = usize::from(width);
     if fact > 0 && used + 2 + fact <= width {
         spans.push(Span::raw(" ".repeat(width - used - fact)));
-        spans.push(Span::styled(row.fact, Style::new().fg(DIM)));
+        spans.push(Span::styled(row.fact, Style::new().fg(theme.dim)));
     }
     Line::from(spans)
 }
@@ -2874,9 +2944,9 @@ fn digits(count: usize) -> usize {
 }
 
 /// The sentence an empty list says about itself, dimmed.
-fn draw_empty(frame: &mut Frame, area: Rect, message: &str) {
+fn draw_empty(frame: &mut Frame, area: Rect, message: &str, dim: ratatui::style::Color) {
     frame.render_widget(
-        Paragraph::new(Line::styled(message.to_owned(), Style::new().fg(DIM))),
+        Paragraph::new(Line::styled(message.to_owned(), Style::new().fg(dim))),
         area,
     );
 }
@@ -2947,13 +3017,13 @@ const EIGHTHS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇'
 /// air after it, each bar filling from the bottom in eighths of a row and
 /// colored by height. A silent band keeps a baseline in the frame's color,
 /// so the analyzer reads as there and quiet rather than missing.
-fn spectrum_lines(levels: &[f32], rows: u16) -> Vec<Line<'static>> {
+fn spectrum_lines(levels: &[f32], rows: u16, theme: &Theme) -> Vec<Line<'static>> {
     let rows = usize::from(rows);
     let steps = rows * 8;
     (0..rows)
         .map(|row| {
             let from_bottom = rows - 1 - row;
-            let color = bar_color(from_bottom, rows);
+            let color = bar_color(from_bottom, rows, theme);
             let spans: Vec<Span<'static>> = levels
                 .iter()
                 .flat_map(|&level| {
@@ -2966,7 +3036,7 @@ fn spectrum_lines(levels: &[f32], rows: u16) -> Vec<Line<'static>> {
                     let filled = (level.clamp(0.0, 1.0) * steps as f32).round() as usize;
                     let here = filled.saturating_sub(from_bottom * 8).min(8);
                     let cell = if here == 0 && from_bottom == 0 {
-                        Span::styled("▁", Style::new().fg(BORDER))
+                        Span::styled("▁", Style::new().fg(theme.border))
                     } else {
                         Span::styled(EIGHTHS[here].to_string(), Style::new().fg(color))
                     };
@@ -2981,11 +3051,11 @@ fn spectrum_lines(levels: &[f32], rows: u16) -> Vec<Line<'static>> {
 /// The bar color `from_bottom` rows up out of `rows`: the accent in the
 /// lower half, its bright twin above — the two-step gradient the terminal's
 /// own palette can give.
-const fn bar_color(from_bottom: usize, rows: usize) -> ratatui::style::Color {
+fn bar_color(from_bottom: usize, rows: usize, theme: &Theme) -> ratatui::style::Color {
     if from_bottom * 2 >= rows {
-        theme::ACCENT_BRIGHT
+        theme.accent_bright
     } else {
-        ACCENT
+        theme.accent
     }
 }
 
@@ -3015,28 +3085,34 @@ const VOLUME_CELLS: u16 = 12;
 
 /// `VOL ━━━━━━●───── 90`: the filled part in the accent, the knob, the rest
 /// in the border color, then the number. With no cells it is `VOL 90`.
-fn volume_slider(volume: u8, cells: u16) -> Vec<Span<'static>> {
-    let mut spans = vec![Span::styled("VOL ", Style::new().fg(DIM))];
+fn volume_slider(volume: u8, cells: u16, theme: &Theme) -> Vec<Span<'static>> {
+    let mut spans = vec![Span::styled("VOL ", Style::new().fg(theme.dim))];
     if cells > 0 {
         let cells = usize::from(cells);
         let knob = usize::from(volume.min(100)) * (cells - 1) / 100;
-        spans.push(Span::styled("━".repeat(knob), Style::new().fg(ACCENT)));
-        spans.push(Span::styled("●", Style::new().fg(TEXT)));
+        spans.push(Span::styled(
+            "━".repeat(knob),
+            Style::new().fg(theme.accent),
+        ));
+        spans.push(Span::styled("●", Style::new().fg(theme.text)));
         spans.push(Span::styled(
             "─".repeat(cells - 1 - knob),
-            Style::new().fg(BORDER),
+            Style::new().fg(theme.border),
         ));
         spans.push(Span::raw(" "));
     }
     // Three columns whatever the number, so a slider set against the right
     // edge does not jump when 100 becomes 95 (T7).
-    spans.push(Span::styled(format!("{volume:>3}"), Style::new().fg(TEXT)));
+    spans.push(Span::styled(
+        format!("{volume:>3}"),
+        Style::new().fg(theme.text),
+    ));
     spans
 }
 
 /// A bar `width` cells wide, filled to `ratio` in the accent; with no ratio
 /// (nothing plays, or the length is unknown) the whole bar is unfilled.
-fn progress_bar(ratio: Option<f64>, width: u16) -> Vec<Span<'static>> {
+fn progress_bar(ratio: Option<f64>, width: u16, theme: &Theme) -> Vec<Span<'static>> {
     let width = usize::from(width);
     // Rounded down, so a bar is never shown full before the track ends.
     #[allow(
@@ -3048,8 +3124,8 @@ fn progress_bar(ratio: Option<f64>, width: u16) -> Vec<Span<'static>> {
         .map_or(0, |ratio| (ratio * width as f64) as usize)
         .min(width);
     vec![
-        Span::styled("━".repeat(filled), Style::new().fg(ACCENT)),
-        Span::styled("─".repeat(width - filled), Style::new().fg(BORDER)),
+        Span::styled("━".repeat(filled), Style::new().fg(theme.accent)),
+        Span::styled("─".repeat(width - filled), Style::new().fg(theme.border)),
     ]
 }
 
@@ -3066,11 +3142,6 @@ fn split_row(frame: &mut Frame, area: Rect, left: Line<'static>, right: Line<'st
 /// Three one-row areas from the top of `area`.
 fn rows3(area: Rect) -> [Rect; 3] {
     Layout::vertical([Constraint::Length(1); 3]).areas(area)
-}
-
-/// The color of a mode's word: the accent while it is on, dim while off.
-const fn lit(on: bool) -> ratatui::style::Color {
-    if on { ACCENT } else { DIM }
 }
 
 /// The name in the title bar, spaced out the way a wordmark is set.
@@ -3230,7 +3301,12 @@ mod tests {
 
     #[test]
     fn the_progress_bar_is_never_full_before_the_end_and_empty_without_a_length() {
-        let filled = |ratio, width| super::progress_bar(ratio, width)[0].content.chars().count();
+        let filled = |ratio, width| {
+            super::progress_bar(ratio, width, &super::Theme::default())[0]
+                .content
+                .chars()
+                .count()
+        };
         assert_eq!(filled(Some(0.999), 10), 9);
         assert_eq!(filled(Some(1.0), 10), 10);
         assert_eq!(filled(Some(0.5), 10), 5);
@@ -3290,7 +3366,7 @@ mod tests {
     #[test]
     fn spectrum_bars_fill_from_the_bottom_in_eighths_with_a_gap_between() {
         let rows = |levels: &[f32]| -> Vec<String> {
-            super::spectrum_lines(levels, 4)
+            super::spectrum_lines(levels, 4, &super::Theme::default())
                 .iter()
                 .map(ToString::to_string)
                 .collect()
@@ -3312,7 +3388,7 @@ mod tests {
             ("?", "help"),
             ("q", "quit"),
         ];
-        let text = |width| super::hint_line(&hints, width).to_string();
+        let text = |width| super::hint_line(&hints, width, &super::Theme::default()).to_string();
 
         assert_eq!(text(80), "j/k move  enter play  ? help  q quit");
         assert_eq!(text(28), "j/k move  ? help  q quit");
