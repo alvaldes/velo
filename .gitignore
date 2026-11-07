@@ -4,3 +4,4 @@
 !tests/fixtures/*.wav
 .DS_Store
 .atl/
+.worktrees/
