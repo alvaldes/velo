@@ -226,6 +226,54 @@ fn a_short_terminal_shrinks_the_block_before_the_list_disappears() {
     }
 }
 
+// ---- the help overlay (ui-redesign T4, S1, S3) -----------------------------
+
+#[test]
+fn the_help_is_a_rounded_card_titled_keys_with_the_keys_in_their_own_color() {
+    use velo::ui::theme::SECONDARY;
+
+    let mut app = App::new(tracks(&["one.flac"]));
+    press(&mut app, KeyCode::Char('?'));
+    let screen = screen_at(&app, 80, 24);
+    let lines: Vec<&str> = screen.lines().collect();
+
+    let top = lines
+        .iter()
+        .position(|line| line.contains("╭ keys "))
+        .unwrap_or_else(|| panic!("a rounded card titled keys, got:\n{screen}"));
+    let row = lines
+        .iter()
+        .position(|line| line.contains("first track"))
+        .expect("the g row");
+    assert!(row > top);
+
+    // The key is the first thing after the card's left edge, the second `│`.
+    let key_x = lines[row]
+        .chars()
+        .enumerate()
+        .filter(|&(_, c)| c == '│')
+        .nth(1)
+        .map(|(x, _)| x)
+        .and_then(|edge| {
+            lines[row]
+                .chars()
+                .enumerate()
+                .skip(edge + 1)
+                .find(|&(_, c)| c != ' ')
+        })
+        .map(|(x, c)| {
+            assert_eq!(c, 'g', "got: {}", lines[row]);
+            x
+        })
+        .expect("a key on the row");
+    let cell = cell_at(
+        &app,
+        u16::try_from(key_x).unwrap(),
+        u16::try_from(row).unwrap(),
+    );
+    assert_eq!(cell.fg, SECONDARY, "keys stand apart from what they do");
+}
+
 // ---- browsing the library (T5) ------------------------------------------
 
 /// A temp library with its own index, self-removing on drop. The index is

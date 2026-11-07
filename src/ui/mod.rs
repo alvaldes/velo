@@ -1114,42 +1114,58 @@ impl<'lib> App<'lib> {
 
     fn draw_help(frame: &mut Frame, area: Rect) {
         let rows = [
-            "j / Down   move down",
-            "k / Up     move up",
-            "g          first track",
-            "G          last track",
-            "enter      open, or play from the selection",
-            "esc        back one level / close help",
-            "/          search the whole library",
-            "space      pause / resume",
-            "← / →      seek 5 s back / forward",
-            ", / .      seek 5 s back / forward",
-            "+ / -      volume up / down",
-            "?          toggle this help",
-            "tab        library / queue",
-            "a          add the selection to the queue",
-            "d          remove from the queue",
-            "J / K      move it down / up",
-            "q          quit",
+            ("j / Down", "move down"),
+            ("k / Up", "move up"),
+            ("g", "first track"),
+            ("G", "last track"),
+            ("enter", "open, or play from the selection"),
+            ("esc", "back one level / close help"),
+            ("/", "search the whole library"),
+            ("space", "pause / resume"),
+            ("← / →", "seek 5 s back / forward"),
+            (", / .", "seek 5 s back / forward"),
+            ("+ / -", "volume up / down"),
+            ("?", "toggle this help"),
+            ("tab", "library / queue"),
+            ("a", "add the selection to the queue"),
+            ("d", "remove from the queue"),
+            ("J / K", "move it down / up"),
+            ("q", "quit"),
         ];
-        let widest = rows.iter().map(|row| row.len()).max().unwrap_or(0);
-        let width = u16::try_from(widest + 4).unwrap_or(area.width);
+        let key_width = rows
+            .iter()
+            .map(|(key, _)| key.chars().count())
+            .max()
+            .unwrap_or(0);
+        let label_width = rows
+            .iter()
+            .map(|(_, label)| label.chars().count())
+            .max()
+            .unwrap_or(0);
+        // Two border columns, one of air per side, three between the columns.
+        let width = u16::try_from(key_width + 3 + label_width + 4).unwrap_or(area.width);
         let height = u16::try_from(rows.len() + 2).unwrap_or(area.height);
         let box_area = centered(area, width, height);
 
         frame.render_widget(Clear, box_area);
         let text: Vec<Line> = rows
             .iter()
-            .map(|row| Line::styled((*row).to_string(), Style::new().fg(TEXT)))
+            .map(|(key, label)| {
+                Line::from(vec![
+                    Span::styled(format!("{key:<key_width$}   "), Style::new().fg(SECONDARY)),
+                    Span::styled((*label).to_owned(), Style::new().fg(TEXT)),
+                ])
+            })
             .collect();
         frame.render_widget(
-            Paragraph::new(text)
-                .style(Style::new().bg(BACKGROUND))
-                .block(
-                    Block::bordered()
-                        .border_style(Style::new().fg(ACCENT))
-                        .style(Style::new().bg(BACKGROUND)),
-                ),
+            Paragraph::new(text).block(
+                Block::bordered()
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::new().fg(ACCENT))
+                    .title(Span::styled(" keys ", Style::new().fg(ACCENT).bold()))
+                    .padding(ratatui::widgets::Padding::horizontal(1))
+                    .style(Style::new().bg(SURFACE)),
+            ),
             box_area,
         );
     }
