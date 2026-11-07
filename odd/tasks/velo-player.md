@@ -73,7 +73,7 @@ Root folder: `/Users/alvaldes/Music/Library` (L15). Metadata comes from tags fir
 | T18 | Edit the queue: add, remove, reorder | S11 | inline | — |
 | T19 | Report a track that fails mid-queue instead of playing silence to the end | S7, S8 | worker `gentle-ai-worker` | `207dc0f` |
 | T20 | Remap the channel layout instead of refusing it: a mono track could not be played at all, and in a queue it took the album down with it (found while verifying T19) | S5, S7 | inline | `0bd1e9d` |
-| T21 | Expose the current track's duration so the clock clamps and the footer shows `/ total` when the queue came from the command line (found while proving T20) | S8 | inline | — |
+| T21 | Expose the current track's duration so the clock clamps and the footer shows `/ total` when the queue came from the command line (found while proving T20) | S8 | inline | `de97f97` |
 | T17 | Bit-perfect mode: opt in to reopening the device per track when the rate changes instead of resampling (waits for the config system in T9) | S7, S12 | inline | — |
 
 ### Slice boundaries
@@ -192,4 +192,4 @@ T19's own acceptance, measured not assumed: a queue of `[good, broken, good]` in
 
 The proof that matters is a fixture, not an opinion: a mono WAV drained into a stereo expected spec yields **twice the samples with both channels identical**, and a six-channel WAV is announced once and skipped. The same mono file that printed `sample format mismatch` now plays and reaches `00:03` in the interface, which is where the whole detour started.
 
-**T21**, found while proving it: when the queue comes from the command line, `current_track_duration()` returns nothing, so the footer shows a bare `mm:ss` and `seek_target` has no duration to clamp against — a seek past the end of a 3 s file leaves the clock frozen at `00:08`. The decoder knows the duration; the interface just never asks it. Small, real, and it belongs with the CLI work rather than here.
+**T21**, found while proving it and closed in `de97f97`: when the queue came from the command line, `current_track_duration()` returned nothing, so the footer showed a bare `mm:ss` and `seek_target` had no duration to clamp against — a seek past the end of a 3 s file left the clock frozen at `00:08`. The decoder had always known the length and nothing exposed it: `TrackSource::duration` reports it, the producer publishes it in the same record the clock reads so the two flip together, and the footer falls back to it. Verified both ways: a 0.25 s fixture reports exactly 250 ms, and the interface now reads `00:03 / 00:03` after a seek past the end.
