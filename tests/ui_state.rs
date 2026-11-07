@@ -10,6 +10,7 @@ use lofty::tag::{Tag, TagType};
 use velo::audio::output::TrackFailure;
 use velo::library::Library;
 use velo::ui::crossterm::event::{KeyCode, KeyEvent};
+use velo::ui::indexing::Indexer;
 use velo::ui::{Action, App, BrowseBy, Level, View};
 
 fn app_with_three_tracks() -> App<'static> {
@@ -1332,4 +1333,178 @@ fn enter_on_a_command_line_file_plays_from_that_file_onwards() {
             PathBuf::from("/library/artist/three.flac"),
         ]
     );
+}
+
+// ---- refreshing the index (library-refresh T3, S3) --------------------------
+
+/// Runs one background index of `temp` the way the shell does: on its own
+/// connection to the same index file, while `App` keeps the UI connection.
+fn index_in_background(temp: &TempLibrary) -> Result<velo::library::IndexReport, String> {
+    let database = temp.root.join("index.db");
+    Indexer::spawn(temp.root.clone(), move || Library::open_at(&database)).wait()
+}
+
+#[test]
+fn u_asks_the_shell_to_refresh_the_configured_library() {
+    let temp = TempLibrary::new("u-refresh");
+    let mut app = App::browse(Some(&temp.library));
+    app.set_library_root(Some(temp.root.clone()));
+
+    assert_eq!(app.on_key(key(KeyCode::Char('u'))), Action::Reindex);
+    app.apply(Action::Reindex);
+    assert_eq!(app.take_library_root(), Some(temp.root.clone()));
+}
+
+#[test]
+fn u_while_an_index_runs_starts_no_second_one_and_says_so() {
+    let temp = TempLibrary::new("u-busy");
+    let mut app = App::browse(Some(&temp.library));
+    app.set_library_root(Some(temp.root.clone()));
+    app.index_started(&temp.root);
+    assert_eq!(app.indexing(), Some(temp.root.as_path()));
+
+    assert_eq!(app.on_key(key(KeyCode::Char('u'))), Action::None);
+    assert!(
+        app.status().contains("already indexing"),
+        "{}",
+        app.status()
+    );
+    assert_eq!(app.take_library_root(), None);
+}
+
+#[test]
+fn u_without_a_library_says_how_to_set_one() {
+    let mut app = App::browse(None);
+    assert_eq!(app.on_key(key(KeyCode::Char('u'))), Action::None);
+    assert!(app.status().contains("no library set"), "{}", app.status());
+    assert!(app.status().contains('L'), "{}", app.status());
+    assert_eq!(app.take_library_root(), None);
+}
+
+#[test]
+fn a_library_chosen_in_the_prompt_is_the_one_u_refreshes() {
+    let temp = TempLibrary::new("u-after-prompt");
+    let home = temp.root.clone();
+    fs::create_dir_all(home.join("Music")).unwrap();
+    let mut app = App::browse(Some(&temp.library));
+    app.ask_for_library_under(None, Some(home.clone()));
+    for character in "Music".chars() {
+        press(&mut app, KeyCode::Char(character));
+    }
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.take_library_root(), Some(home.join("Music")));
+
+    assert_eq!(app.on_key(key(KeyCode::Char('u'))), Action::Reindex);
+    app.apply(Action::Reindex);
+    assert_eq!(app.take_library_root(), Some(home.join("Music")));
+}
+
+#[test]
+fn the_launch_index_builds_a_configured_library_on_its_own_connection() {
+    let temp = TempLibrary::new("launch-index");
+    temp.write_wav("Tide/2019 - Harbor/01 - Dawn.wav");
+    temp.write_wav("Tide/2019 - Harbor/02 - Noon.wav");
+    let mut app = App::browse(Some(&temp.library));
+    app.set_library_root(Some(temp.root.clone()));
+    assert!(app.artists().is_empty(), "nothing indexed yet");
+
+    app.index_started(&temp.root);
+    app.index_finished(index_in_background(&temp));
+
+    assert_eq!(app.indexing(), None);
+    assert_eq!(
+        app.status(),
+        "indexed: 2 added, 0 updated, 0 unchanged, 0 removed"
+    );
+    assert_eq!(app.artists().len(), 1, "the lists reload when it ends");
+}
+
+#[test]
+fn finishing_an_index_reloads_the_lists_and_keeps_the_view_level_and_selection() {
+    let temp = TempLibrary::new("finish-reload");
+    temp.write_wav("Tide/2019 - Harbor/01 - Dawn.wav");
+    temp.write_wav("Tide/2019 - Harbor/02 - Noon.wav");
+    temp.index();
+    let mut app = App::browse(Some(&temp.library));
+    press(&mut app, KeyCode::Char('3'));
+    press(&mut app, KeyCode::Char('j'));
+    let selected = app.tracks()[app.selected()].path.clone();
+
+    temp.write_wav("Tide/2019 - Harbor/00 - Before.wav");
+    app.index_started(&temp.root);
+    app.index_finished(index_in_background(&temp));
+
+    assert_eq!(app.level(), Some(Level::AllTracks));
+    assert_eq!(app.browse_by(), BrowseBy::Tracks);
+    assert_eq!(app.tracks().len(), 3, "the new file is listed");
+    assert_eq!(
+        app.tracks()[app.selected()].path,
+        selected,
+        "the same track stays selected"
+    );
+    assert!(app.status().contains("1 added"), "{}", app.status());
+}
+
+#[test]
+fn finishing_an_index_reloads_an_open_album_and_the_albums_above_it() {
+    let temp = TempLibrary::new("finish-album");
+    temp.write_wav("Tide/2019 - Harbor/01 - Dawn.wav");
+    temp.index();
+    let mut app = App::browse(Some(&temp.library));
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Enter);
+    let album = Level::Tracks {
+        artist: "Tide".to_owned(),
+        album: "Harbor".to_owned(),
+    };
+    assert_eq!(app.level(), Some(album.clone()));
+
+    temp.write_wav("Tide/2019 - Harbor/02 - Noon.wav");
+    temp.write_wav("Tide/2021 - Lantern/01 - Far.wav");
+    app.index_started(&temp.root);
+    app.index_finished(index_in_background(&temp));
+
+    assert_eq!(app.level(), Some(album));
+    assert_eq!(app.tracks().len(), 2);
+    press(&mut app, KeyCode::Esc);
+    assert_eq!(app.albums().len(), 2, "the parent list is fresh too");
+}
+
+#[test]
+fn an_album_that_disappeared_returns_to_the_top_of_its_view() {
+    let temp = TempLibrary::new("finish-gone");
+    let dawn = temp.write_wav("Tide/2019 - Harbor/01 - Dawn.wav");
+    temp.write_wav("Sea/2020 - Shore/01 - Low.wav");
+    temp.index();
+    let mut app = App::browse(Some(&temp.library));
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Enter);
+    assert!(matches!(app.level(), Some(Level::Tracks { .. })));
+
+    fs::remove_file(dawn).unwrap();
+    app.index_started(&temp.root);
+    app.index_finished(index_in_background(&temp));
+
+    assert_eq!(app.level(), Some(Level::Artists));
+    assert_eq!(app.artists().len(), 1);
+}
+
+#[test]
+fn a_failed_index_reports_its_error_and_ends() {
+    let temp = TempLibrary::new("finish-error");
+    let mut app = App::browse(Some(&temp.library));
+    app.index_started(&temp.root);
+    app.index_finished(Err("disk on fire".to_owned()));
+
+    assert_eq!(app.indexing(), None);
+    assert_eq!(app.status(), "velo: indexing failed: disk on fire");
+
+    // An index that cannot even be opened reaches the same line.
+    let outcome = Indexer::spawn(temp.root.clone(), || {
+        Library::open_at(Path::new("/dev/null/velo/index.db"))
+    })
+    .wait();
+    let error = outcome.expect_err("/dev/null holds no directory");
+    assert!(error.contains("cannot open the index"), "{error}");
 }

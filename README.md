@@ -54,6 +54,7 @@ Every key below is what the code does today.
 | `s` | Shuffle what is left of the queue; again to put it back in order |
 | `r` | Repeat: off → all (the queue again) → one (the track again) |
 | `L` | Set the library folder: the same prompt as the first run, at any time |
+| `u` | Refresh the library index in the background; the title bar shows `⟳ indexing…` until it ends and the lists reload |
 | `+` / `-` | Volume up / down, 5% at a time |
 | `tab` | Switch between the library browser and the queue |
 | `a` | Append the selection to the queue — a track, or every track of an album or genre |
@@ -100,6 +101,11 @@ by CI for `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`,
 velo --library /path/to/your/music --index   # point velo at your music, index it
 velo --library /path/to/your/music           # open the browser
 ```
+
+Every launch refreshes the index in the background: the interface is usable
+at once, the title bar shows `⟳ indexing…` while the scan runs, and the lists
+reload with the counts in the status line when it ends. `u` runs the same
+refresh at any time.
 
 Then, inside the interface: `enter` into an artist, into an album, `enter`
 again to play — or `2` for every album, `3` for every track, `4` for genres

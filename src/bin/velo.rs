@@ -7,6 +7,7 @@ use clap::{CommandFactory as _, Parser};
 use velo::audio::{Player, TrackSource};
 use velo::config::{self, Cli, Config, ReplayGainMode, Settings};
 use velo::library::Library;
+use velo::ui::indexing::Indexer;
 use velo::ui::{Action, App, artwork, crossterm};
 
 use crossterm::event::{Event, KeyEventKind};
@@ -190,11 +191,12 @@ fn run_interface(paths: Vec<PathBuf>, replay_gain: ReplayGainMode, volume: u8) -
     report_outcome(outcome)
 }
 
-/// The library interface: indexes the library root (incrementally, so a
-/// second launch is fast) with progress in the status line, then browses the
-/// index. A missing root or an empty index still opens the interface and says
-/// so instead of exiting. With no root configured, a floating prompt asks for
-/// one and the answer is saved to the config file, then indexed the same way.
+/// The library interface: browses the index at once while the library root
+/// is re-indexed in the background (incrementally, so it is fast when little
+/// changed); the lists reload when it ends. A missing root or an empty index
+/// still opens the interface and says so instead of exiting. With no root
+/// configured, a floating prompt asks for one and the answer is saved to the
+/// config file, then indexed the same way.
 fn browse_interface(
     root: Option<&Path>,
     config_file: Option<PathBuf>,
@@ -216,40 +218,30 @@ fn browse_interface(
         app.set_config_file(config_file.clone());
         match (&opened, root) {
             (Err(error), _) => app.note(format!("velo: cannot open the library index: {error}")),
-            (Ok(library), Some(root)) => index_root(&mut app, library, root, terminal)?,
+            (Ok(_), Some(root)) => {
+                // Every launch refreshes the index; the event loop starts it.
+                app.set_library_root(Some(root.to_path_buf()));
+                app.apply(Action::Reindex);
+            }
             (Ok(_), None) => app.ask_for_library(config_file),
         }
-        app.reload();
         event_loop(&mut app, opened.as_ref().ok(), terminal)
     });
     report_outcome(outcome)
 }
 
-/// Indexes `root` into `library` with progress in the status line, or says
-/// why it did not.
-fn index_root(
-    app: &mut App<'_>,
-    library: &Library,
-    root: &Path,
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-) -> std::io::Result<()> {
+/// Starts indexing `root` on a background thread with its own connection to
+/// the index, or says why it did not.
+fn start_index(app: &mut App<'_>, root: PathBuf) -> Option<Indexer> {
     if !root.is_dir() {
         app.note(format!(
             "velo: library root {} does not exist — no indexing",
             root.display()
         ));
-        return Ok(());
+        return None;
     }
-    app.note(format!("indexing {} …", root.display()));
-    terminal.draw(|frame| app.draw(frame))?;
-    match library.index(root) {
-        Ok(report) => app.note(format!(
-            "indexed: {} added, {} updated, {} unchanged, {} removed",
-            report.added, report.updated, report.unchanged, report.removed
-        )),
-        Err(error) => app.note(format!("velo: indexing failed: {error}")),
-    }
-    Ok(())
+    app.index_started(&root);
+    Some(Indexer::spawn(root, Library::open))
 }
 
 /// Runs `work` inside the alternate screen with raw mode on, and restores the
@@ -282,7 +274,23 @@ fn event_loop(
     library: Option<&Library>,
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
 ) -> std::io::Result<()> {
+    // At most one background index at a time. Quitting drops it: the thread
+    // is detached and its uncommitted transaction never reaches the index.
+    let mut indexer: Option<Indexer> = None;
     loop {
+        if let Some(outcome) = indexer.as_ref().and_then(Indexer::poll) {
+            indexer = None;
+            app.index_finished(outcome);
+        }
+        // A root accepted in the prompt, `u`, or the launch: indexed and
+        // browsed the same way. One chosen while an index runs waits for it.
+        if indexer.is_none()
+            && library.is_some()
+            && let Some(root) = app.take_library_root()
+        {
+            indexer = start_index(app, root);
+        }
+
         // The producer announces skipped tracks asynchronously; every turn
         // of the loop — every ~33 ms while the spectrum moves, ~100 ms otherwise —
         // collects what it published and feeds the spectrum.
@@ -297,12 +305,6 @@ fn event_loop(
             app.apply(action);
             if action == Action::Quit {
                 break;
-            }
-            // A library path accepted in the prompt is indexed and browsed
-            // the way a configured one is at startup.
-            if let (Some(root), Some(library)) = (app.take_library_root(), library) {
-                index_root(app, library, &root, terminal)?;
-                app.reload();
             }
         }
     }

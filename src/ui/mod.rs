@@ -16,6 +16,7 @@
 
 pub mod artwork;
 pub mod complete;
+pub mod indexing;
 pub mod search;
 pub mod shuffle;
 pub mod theme;
@@ -39,7 +40,7 @@ use crate::audio::output::{Repeat, SharedQueue, TrackFailure};
 use crate::audio::spectrum::Spectrum;
 use crate::audio::{Player, seek_target, skip_target};
 use crate::config::ReplayGainMode;
-use crate::library::{AlbumEntry, ArtistEntry, GenreEntry, Library, TrackEntry};
+use crate::library::{AlbumEntry, ArtistEntry, GenreEntry, IndexReport, Library, TrackEntry};
 
 use self::artwork::{Artwork, Picker, StatefulImage, StatefulProtocol};
 use self::search::Search;
@@ -81,6 +82,9 @@ pub enum Action {
     CompleteLibraryPath,
     /// Show the library in this view, from its top level.
     Browse(BrowseBy),
+    /// Refresh the index of the configured library in the background; the
+    /// shell runs it and reports back with [`App::index_finished`].
+    Reindex,
 }
 
 /// The four ways to look at the library, on the keys `1` to `4`.
@@ -154,6 +158,16 @@ struct LibrarySetup {
     home: Option<PathBuf>,
     /// The open prompt; `None` once it was skipped with `Esc`.
     prompt: Option<LibraryPrompt>,
+}
+
+/// Refreshing the index (library-refresh T3): which folder `u` re-indexes
+/// and which one is being indexed right now.
+#[derive(Debug, Default)]
+struct Refresh {
+    /// The configured library root, or the one chosen in the prompt.
+    root: Option<PathBuf>,
+    /// The folder a background index is scanning, while it runs.
+    running: Option<PathBuf>,
 }
 
 /// Where in the library the interface stands while browsing.
@@ -324,8 +338,10 @@ pub struct App<'lib> {
     library_setup: Option<LibrarySetup>,
     /// The config file a library chosen with `L` is saved to.
     config_file: Option<PathBuf>,
-    /// An accepted library root, waiting for the shell to index it.
+    /// An accepted library root, or the one `u` refreshes, waiting for the
+    /// shell to index it.
     library_root: Option<PathBuf>,
+    refresh: Refresh,
     volume: u8,
     state: PlayState,
     player: Option<Player>,
@@ -378,6 +394,7 @@ impl<'lib> App<'lib> {
             library_setup: None,
             config_file: None,
             library_root: None,
+            refresh: Refresh::default(),
             volume: 100,
             state: PlayState::Stopped,
             player: None,
@@ -427,6 +444,7 @@ impl<'lib> App<'lib> {
             library_setup: None,
             config_file: None,
             library_root: None,
+            refresh: Refresh::default(),
             volume: 100,
             state: PlayState::Stopped,
             player: None,
@@ -631,6 +649,57 @@ impl<'lib> App<'lib> {
         self.library_root.take()
     }
 
+    /// The library root `u` refreshes: the configured one, or `None` when no
+    /// library is set. A root accepted in the prompt replaces it.
+    pub fn set_library_root(&mut self, root: Option<PathBuf>) {
+        self.refresh.root = root;
+    }
+
+    /// The folder a background index is scanning, while one runs.
+    #[must_use]
+    pub fn indexing(&self) -> Option<&Path> {
+        self.refresh.running.as_deref()
+    }
+
+    /// The shell started indexing `root` in the background: the title bar
+    /// shows it until [`App::index_finished`].
+    pub fn index_started(&mut self, root: &Path) {
+        self.refresh.running = Some(root.to_path_buf());
+        self.status = format!("indexing {} …", root.display());
+    }
+
+    /// The background index ended: its counts, or why it failed, go to the
+    /// status line, and after a success every list on screen is read again.
+    pub fn index_finished(&mut self, outcome: Result<IndexReport, String>) {
+        self.refresh.running = None;
+        match outcome {
+            Ok(report) => {
+                self.status = format!(
+                    "indexed: {} added, {} updated, {} unchanged, {} removed",
+                    report.added, report.updated, report.unchanged, report.removed
+                );
+                // A read error replaces the counts: it matters more.
+                self.reload();
+            }
+            // The index is written in one transaction, so a failure left it
+            // as it was and the lists on screen are still true.
+            Err(error) => self.status = format!("velo: indexing failed: {error}"),
+        }
+    }
+
+    /// What `u` answers: the refresh to run, or why there is none.
+    fn ask_to_reindex(&mut self) -> Action {
+        if let Some(running) = &self.refresh.running {
+            self.status = format!("already indexing {}", running.display());
+            return Action::None;
+        }
+        if self.refresh.root.is_none() {
+            self.note("no library set — press L to choose one");
+            return Action::None;
+        }
+        Action::Reindex
+    }
+
     /// Whether the help overlay is open.
     #[must_use]
     pub const fn help_open(&self) -> bool {
@@ -780,24 +849,76 @@ impl<'lib> App<'lib> {
         self.art_explained = false;
     }
 
-    /// Re-reads the artists snapshot from the index, e.g. right after
-    /// indexing, and the list of the view's top level when it stands there.
-    /// Keeps the selection inside the (possibly shorter) list.
+    /// Re-reads from the index, e.g. right after indexing, the artists, the
+    /// list the interface stands on and the one above it, keeping the view
+    /// and the level. The selected row stays selected when it still exists;
+    /// otherwise the selection stays inside the (possibly shorter) list. A
+    /// level whose artist, album or genre is gone returns to the top of its
+    /// view. A list that cannot be read keeps its last snapshot.
     pub fn reload(&mut self) {
         let Some(library) = self.library else {
             return;
         };
-        match library.artists() {
-            Ok(artists) => self.artists = artists,
-            Err(error) => self.status = format!("velo: {error}"),
+        let kept = self.row_key(self.selected);
+        if let Err(error) = self.read_level(library) {
+            self.status = format!("velo: {error}");
         }
-        if matches!(
+        let deep = matches!(
             self.position,
-            Position::AllAlbums | Position::AllTracks | Position::Genres
-        ) {
-            self.load_top();
+            Position::Albums { .. } | Position::Tracks { .. } | Position::Genre { .. }
+        );
+        if deep && self.row_count() == 0 {
+            self.browse_view(self.browse_by);
+            return;
         }
-        self.selected = self.selected.min(self.row_count().saturating_sub(1));
+        let found = kept.and_then(|key| {
+            (0..self.row_count()).find(|&index| self.row_key(index).as_deref() == Some(&key))
+        });
+        self.selected =
+            found.unwrap_or_else(|| self.selected.min(self.row_count().saturating_sub(1)));
+    }
+
+    /// Reads the artists, the current level's list and its parent's.
+    fn read_level(&mut self, library: &Library) -> Result<(), crate::library::LibraryError> {
+        self.artists = library.artists()?;
+        match &self.position {
+            Position::Files | Position::Artists => {}
+            Position::Albums { artist } => self.albums = library.albums_of(artist)?,
+            Position::Tracks { artist, album } => {
+                self.tracks = library.tracks_of(artist, album)?;
+                // The list `esc` returns to, which ascending does not re-read.
+                self.albums = if self.browse_by == BrowseBy::Albums {
+                    library.all_albums()?
+                } else {
+                    library.albums_of(artist)?
+                };
+            }
+            Position::AllAlbums => self.albums = library.all_albums()?,
+            Position::AllTracks => self.tracks = library.all_tracks()?,
+            Position::Genres => self.genres = library.genres()?,
+            Position::Genre { genre } => {
+                self.tracks = library.tracks_of_genre(genre)?;
+                self.genres = library.genres()?;
+            }
+        }
+        Ok(())
+    }
+
+    /// What identifies row `index` of the current level across a reload.
+    fn row_key(&self, index: usize) -> Option<String> {
+        match &self.position {
+            Position::Files => self.argv.get(index).map(|path| path.display().to_string()),
+            Position::Artists => self.artists.get(index).map(|entry| entry.name.clone()),
+            Position::Albums { .. } | Position::AllAlbums => self
+                .albums
+                .get(index)
+                .map(|entry| format!("{}\u{0}{}", entry.artist, entry.title)),
+            Position::Tracks { .. } | Position::AllTracks | Position::Genre { .. } => self
+                .tracks
+                .get(index)
+                .map(|entry| entry.path.display().to_string()),
+            Position::Genres => self.genres.get(index).map(|entry| entry.name.clone()),
+        }
     }
 
     /// Stands at the top of `by` and reads its list; the library tab comes
@@ -911,6 +1032,9 @@ impl<'lib> App<'lib> {
                 self.ask_for_library(self.config_file.clone());
                 Action::None
             }
+            KeyCode::Char('u') if !matches!(self.position, Position::Files) => {
+                self.ask_to_reindex()
+            }
             KeyCode::Char('r') => {
                 self.repeat = self.repeat.next();
                 Action::SetRepeat(self.repeat)
@@ -968,6 +1092,8 @@ impl<'lib> App<'lib> {
             Action::SetLibrary => self.accept_library(),
             Action::CompleteLibraryPath => self.complete_library_path(),
             Action::Browse(by) => self.browse_view(by),
+            // Handed to the shell, which owns the thread.
+            Action::Reindex => self.library_root.clone_from(&self.refresh.root),
         }
     }
 
@@ -1066,6 +1192,7 @@ impl<'lib> App<'lib> {
                 }
             }
         }
+        self.refresh.root = Some(root.clone());
         self.library_root = Some(root);
     }
 
@@ -1158,12 +1285,19 @@ impl<'lib> App<'lib> {
                 Span::styled(label, Style::new().fg(DIM))
             }
         };
-        let tabs = Line::from(vec![
+        let mut tabs = Line::from(vec![
             Span::raw(" "),
             tab("library", View::Library),
             Span::raw("  "),
             tab("queue", View::Queue),
         ]);
+        // A background index is announced where it is always in view, and
+        // goes away when it ends (library-refresh T3).
+        if self.refresh.running.is_some() {
+            tabs.spans.push(Span::raw("   "));
+            tabs.spans
+                .push(Span::styled("⟳ indexing…", Style::new().fg(ACCENT)));
+        }
         frame.render_widget(Paragraph::new(tabs), area);
         frame.render_widget(
             Paragraph::new(Span::styled(WORDMARK, Style::new().fg(ACCENT).bold()))
@@ -1737,7 +1871,7 @@ impl<'lib> App<'lib> {
             ("G", "last track"),
             ("enter", "open, or play from the selection"),
             ("esc", "back one level / close help"),
-            ("L", "set the library folder (tab completes)"),
+            ("L / u", "set the library / refresh the index"),
             ("/", "search the whole library"),
             ("space", "pause / resume"),
             ("← / →", "seek 5 s back / forward"),

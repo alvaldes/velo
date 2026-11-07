@@ -878,3 +878,39 @@ fn a_narrow_header_drops_the_count_before_the_view_names() {
     );
     assert!(header.contains("A Rather Long Artist Name ›"), "{header}");
 }
+
+// ---- refreshing the index (library-refresh T3, S3) --------------------------
+
+#[test]
+fn the_title_bar_says_indexing_while_an_index_runs_and_not_after() {
+    use velo::ui::ratatui::style::Color;
+
+    let temp = TempLibrary::new("indexing-title");
+    let mut app = App::browse(Some(&temp.library));
+    app.index_started(&temp.root);
+    let lines = lines_at(&app, 80, 24);
+    assert!(lines[1].contains("⟳ indexing…"), "{}", lines[1]);
+    let column = lines[1]
+        .chars()
+        .position(|character| character == '⟳')
+        .unwrap();
+    let cell = cell_at_size(&app, 80, 24, column, 1);
+    assert_eq!(cell.fg, Color::Magenta, "the indicator is the accent");
+    assert!(
+        lines[1].contains("V E L O"),
+        "the wordmark stays: {}",
+        lines[1]
+    );
+
+    app.index_finished(Err("stopped".to_owned()));
+    let lines = lines_at(&app, 80, 24);
+    assert!(!lines[1].contains("indexing"), "{}", lines[1]);
+}
+
+#[test]
+fn the_help_names_the_key_that_refreshes_the_index() {
+    let mut app = App::browse(None);
+    press(&mut app, KeyCode::Char('?'));
+    let screen = screen_at(&app, 80, 24);
+    assert!(screen.contains("refresh the index"), "{screen}");
+}
