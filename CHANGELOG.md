@@ -1,6 +1,16 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.9.0] - 2026-11-07
+
+### Features
+- **config:** The file carries the state, the theme and the ui
+- **ui:** The palette comes from the theme table
+- **ui:** Cover, spectrum, hints and the top bar can be switched off
+- **config:** Velo can write any key of its own file
+- **ui:** The session comes back, and every change is written down
+- **ui:** O opens the settings card
+- **ui:** The card drops the volume and gains two switches
 ## [0.8.1] - 2026-11-07
 
 ### Fixes
