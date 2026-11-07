@@ -754,3 +754,39 @@ fn no_protocol_and_an_80x24_terminal_draw_exactly_the_screen_without_cover_art()
         "cover art must leave the 80×24 interface unchanged"
     );
 }
+
+// ---- the library prompt (T5, S4) ----------------------------------------
+
+#[test]
+fn the_library_prompt_is_a_floating_card_with_the_typed_path_and_its_error() {
+    let mut app = App::browse(None);
+    app.ask_for_library(None);
+    for character in "/no/such/velo-dir".chars() {
+        let action = app.on_key(KeyEvent::from(KeyCode::Char(character)));
+        app.apply(action);
+    }
+    let screen = screen_at(&app, 90, 24);
+    assert!(screen.contains("library"), "{screen}");
+    assert!(screen.contains("/no/such/velo-dir"), "{screen}");
+    assert!(
+        screen.contains("~/Music"),
+        "the card shows an example\n{screen}"
+    );
+
+    let action = app.on_key(KeyEvent::from(KeyCode::Enter));
+    app.apply(action);
+    let screen = screen_at(&app, 90, 24);
+    assert!(screen.contains("not a directory"), "{screen}");
+}
+
+#[test]
+fn after_esc_the_empty_browser_says_how_to_set_the_library() {
+    let mut app = App::browse(None);
+    app.ask_for_library(None);
+    let action = app.on_key(KeyEvent::from(KeyCode::Esc));
+    app.apply(action);
+    let screen = screen_at(&app, 100, 24);
+    assert!(screen.contains("no library set"), "{screen}");
+    assert!(screen.contains("--library"), "{screen}");
+    assert!(screen.contains("config.toml"), "{screen}");
+}

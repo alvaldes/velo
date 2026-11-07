@@ -71,6 +71,28 @@ pub enum Action {
     ToggleShuffle,
     /// What follows the end of a track from now on.
     SetRepeat(Repeat),
+    /// Check the path typed into the library prompt; save and index it when
+    /// it is a directory, otherwise say why in the prompt.
+    SetLibrary,
+}
+
+/// The floating prompt that asks for the library root when none is set.
+#[derive(Debug, Default)]
+struct LibraryPrompt {
+    /// The path as typed.
+    input: String,
+    /// Why the last answer was refused, shown in the card.
+    error: Option<String>,
+}
+
+/// Setting the library up because none is configured (S4): where an answer
+/// is saved and the prompt, while it is open.
+#[derive(Debug, Default)]
+struct LibrarySetup {
+    /// The config file an accepted library path is saved to.
+    config_file: Option<PathBuf>,
+    /// The open prompt; `None` once it was skipped with `Esc`.
+    prompt: Option<LibraryPrompt>,
 }
 
 /// Where in the library the interface stands while browsing.
@@ -211,6 +233,11 @@ pub struct App<'lib> {
     /// only when its area changes, so redrawing stays cheap.
     protocol: RefCell<Option<Box<dyn StatefulProtocol>>>,
     help: bool,
+    /// Present while no library root is set (S4): the empty browser then
+    /// says how to set one, and while its prompt is open every key edits it.
+    library_setup: Option<LibrarySetup>,
+    /// An accepted library root, waiting for the shell to index it.
+    library_root: Option<PathBuf>,
     volume: u8,
     state: PlayState,
     player: Option<Player>,
@@ -257,6 +284,8 @@ impl<'lib> App<'lib> {
             artwork_path: None,
             protocol: RefCell::new(None),
             help: false,
+            library_setup: None,
+            library_root: None,
             volume: 100,
             state: PlayState::Stopped,
             player: None,
@@ -300,6 +329,8 @@ impl<'lib> App<'lib> {
             artwork_path: None,
             protocol: RefCell::new(None),
             help: false,
+            library_setup: None,
+            library_root: None,
             volume: 100,
             state: PlayState::Stopped,
             player: None,
@@ -383,6 +414,46 @@ impl<'lib> App<'lib> {
     #[must_use]
     pub fn tracks(&self) -> &[TrackEntry] {
         &self.tracks
+    }
+
+    /// Opens the floating prompt asking for the library root, because none
+    /// is configured. An accepted path is saved to `config_file` (when there
+    /// is one) as the `library` key.
+    pub fn ask_for_library(&mut self, config_file: Option<PathBuf>) {
+        self.library_setup = Some(LibrarySetup {
+            config_file,
+            prompt: Some(LibraryPrompt::default()),
+        });
+    }
+
+    /// Whether the library prompt is open.
+    #[must_use]
+    pub fn library_prompt_open(&self) -> bool {
+        self.library_prompt().is_some()
+    }
+
+    fn library_prompt(&self) -> Option<&LibraryPrompt> {
+        self.library_setup.as_ref()?.prompt.as_ref()
+    }
+
+    /// The path typed into the library prompt, empty when it is closed.
+    #[must_use]
+    pub fn library_prompt_input(&self) -> &str {
+        self.library_prompt()
+            .map_or("", |prompt| prompt.input.as_str())
+    }
+
+    /// Why the prompt refused the last path, if it did.
+    #[must_use]
+    pub fn library_prompt_error(&self) -> Option<&str> {
+        self.library_prompt()
+            .and_then(|prompt| prompt.error.as_deref())
+    }
+
+    /// The library root accepted in the prompt, handed over once, for the
+    /// shell to index and browse.
+    pub const fn take_library_root(&mut self) -> Option<PathBuf> {
+        self.library_root.take()
     }
 
     /// Whether the help overlay is open.
@@ -558,6 +629,9 @@ impl<'lib> App<'lib> {
         if self.search.is_some() {
             return self.on_search_key(event.code);
         }
+        if self.library_prompt_open() {
+            return self.on_prompt_key(event.code);
+        }
 
         match event.code {
             KeyCode::Char('j') | KeyCode::Down => {
@@ -678,7 +752,78 @@ impl<'lib> App<'lib> {
                     player.set_repeat(mode);
                 }
             }
+            Action::SetLibrary => self.accept_library(),
         }
+    }
+
+    /// The keys while the library prompt is open: they edit the path, `Enter`
+    /// asks to accept it, `Esc` closes the prompt.
+    fn on_prompt_key(&mut self, code: ratatui::crossterm::event::KeyCode) -> Action {
+        use ratatui::crossterm::event::KeyCode;
+
+        let Some(setup) = &mut self.library_setup else {
+            return Action::None;
+        };
+        let Some(prompt) = &mut setup.prompt else {
+            return Action::None;
+        };
+        match code {
+            KeyCode::Esc => {
+                setup.prompt = None;
+                Action::None
+            }
+            KeyCode::Enter => Action::SetLibrary,
+            KeyCode::Backspace => {
+                prompt.input.pop();
+                prompt.error = None;
+                Action::None
+            }
+            KeyCode::Char(character) => {
+                prompt.input.push(character);
+                prompt.error = None;
+                Action::None
+            }
+            _ => Action::None,
+        }
+    }
+
+    /// Accepts the typed library path when it names a directory: saves it to
+    /// the config file as typed, closes the prompt and hands the expanded
+    /// root to the shell. Otherwise the prompt stays open and says why.
+    fn accept_library(&mut self) {
+        let Some(prompt) = self
+            .library_setup
+            .as_mut()
+            .and_then(|setup| setup.prompt.as_mut())
+        else {
+            return;
+        };
+        let typed = prompt.input.trim().to_owned();
+        if typed.is_empty() {
+            prompt.error = Some("type the folder that holds your music".to_owned());
+            return;
+        }
+        let home = std::env::var_os("HOME").filter(|value| !value.is_empty());
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let root =
+            crate::config::expand_path(Path::new(&typed), home.as_deref().map(Path::new), &cwd);
+        if !root.is_dir() {
+            prompt.error = Some(format!("{} is not a directory", root.display()));
+            return;
+        }
+        let config_file = self
+            .library_setup
+            .take()
+            .and_then(|setup| setup.config_file);
+        if let Some(path) = &config_file {
+            match crate::config::set_library(path, &typed) {
+                Ok(()) => self.status = format!("library saved to {}", path.display()),
+                Err(error) => {
+                    self.status = format!("velo: cannot save {}: {error}", path.display());
+                }
+            }
+        }
+        self.library_root = Some(root);
     }
 
     /// Renders the interface. Reads state, changes nothing.
@@ -734,6 +879,9 @@ impl<'lib> App<'lib> {
         self.draw_artwork(frame, pane);
         if self.help {
             Self::draw_help(frame, area);
+        }
+        if let Some(prompt) = self.library_prompt() {
+            Self::draw_library_prompt(frame, area, prompt);
         }
     }
 
@@ -1266,6 +1414,7 @@ impl<'lib> App<'lib> {
             ("G", "last track"),
             ("enter", "open, or play from the selection"),
             ("esc", "back one level / close help"),
+            ("", "no library set: a prompt asks for its path"),
             ("/", "search the whole library"),
             ("space", "pause / resume"),
             ("← / →", "seek 5 s back / forward"),
@@ -1319,6 +1468,47 @@ impl<'lib> App<'lib> {
         );
     }
 
+    /// The library prompt: a rounded card, centred like the help, with the
+    /// path being typed and, under it, why the last one was refused.
+    fn draw_library_prompt(frame: &mut Frame, area: Rect, prompt: &LibraryPrompt) {
+        let width = area.width.saturating_sub(8).clamp(20, 72);
+        let box_area = centered(area, width, 8);
+        let field_width = usize::from(width.saturating_sub(6));
+        // Keep the end of a long path, where the cursor is, in view.
+        let shown: String = {
+            let chars: Vec<char> = prompt.input.chars().collect();
+            let skip = chars.len().saturating_sub(field_width);
+            chars[skip..].iter().collect()
+        };
+        let text = vec![
+            Line::styled("Where is your music?", Style::new().fg(TEXT)),
+            Line::styled(
+                "an absolute path, ~/Music, or relative to here",
+                Style::new().fg(DIM),
+            ),
+            Line::from(vec![
+                Span::styled(shown, Style::new().fg(ACCENT)),
+                Span::styled("▏", Style::new().fg(SECONDARY)),
+            ]),
+            prompt.error.as_ref().map_or_else(
+                || Line::styled("enter save · esc skip", Style::new().fg(DIM)),
+                |error| Line::styled(error.clone(), Style::new().fg(SECONDARY)),
+            ),
+        ];
+        frame.render_widget(Clear, box_area);
+        frame.render_widget(
+            Paragraph::new(text).block(
+                Block::bordered()
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::new().fg(ACCENT))
+                    .title(Span::styled(" library ", Style::new().fg(ACCENT).bold()))
+                    .padding(ratatui::widgets::Padding::new(1, 1, 1, 0))
+                    .style(Style::new().bg(BACKGROUND)),
+            ),
+            box_area,
+        );
+    }
+
     /// How many rows the current level has.
     fn row_count(&self) -> usize {
         match &self.position {
@@ -1335,6 +1525,9 @@ impl<'lib> App<'lib> {
             Position::Files if self.argv.is_empty() => {
                 Some("no tracks — pass files on the command line")
             }
+            Position::Artists if self.artists.is_empty() && self.library_setup.is_some() => Some(
+                "no library set — add library = \"~/Music\" to ~/.config/velo/config.toml, or run velo --library <PATH>",
+            ),
             Position::Artists if self.artists.is_empty() => Some("no artists in the index yet"),
             Position::Albums { .. } if self.albums.is_empty() => Some("no albums for this artist"),
             Position::Tracks { .. } if self.tracks.is_empty() => Some("no tracks in this album"),

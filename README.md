@@ -112,22 +112,31 @@ velo --play song.flac song.mp3 # play and exit when finished
 
 ## Configuration
 
-An optional TOML file, read once at startup:
+One TOML file, read once at startup:
 
 ```
 $XDG_CONFIG_HOME/velo/config.toml      # else ~/.config/velo/config.toml
 ```
 
+When the file does not exist, velo writes it with every key at its default
+value and a short comment per key, so everything below can be changed from
+it. An existing file is never overwritten or reformatted.
+
 | Key | Meaning | Default |
 |:--|:--|:--|
-| `library` | The root folder to index and browse | `--library` flag, else the config file, else the built-in default — which is the author's own `~/Music/Library`, so set your own |
+| `library` | The root folder to index and browse: an absolute path, `~/...` (your home) or a path relative to the directory velo starts in | none — written commented out (`# library = "~/Music"`) |
 | `volume` | Start level, `0..=100` | `100` |
 | `bit_perfect` | Accepted and stored; nothing reads it yet | `false` |
 | `replay_gain` | ReplayGain mode: `track` (use the track's own gain), `album` (album gain, falling back to the track's), or `off` | `track` |
 
-Precedence: `--library` beats the config file, the config file beats the
-default. A missing file is normal and silent. An unknown key is an error
-naming the key; a bad value names the file and the line.
+Precedence: `--library` (expanded the same way) beats the config file. With no
+library set, `velo` opens the interface with a floating prompt asking for the
+folder: a path that is not a directory is refused in the prompt, an accepted
+one is saved to the file as `library = "<what you typed>"` (every other line
+is kept) and indexed right away; `esc` skips it and the empty browser says how
+to set it. `velo --index` without a library exits 2 and names the key and the
+flag. An unknown key is an error naming the key; a bad value names the file
+and the line.
 
 ## Requirements
 

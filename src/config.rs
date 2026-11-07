@@ -22,10 +22,6 @@ use std::path::{Path, PathBuf};
 use clap::Parser;
 use serde::de::{self, Deserializer, Visitor};
 
-/// The library root indexed and browsed until the config file or `--library`
-/// says otherwise.
-pub const DEFAULT_LIBRARY_ROOT: &str = "/Users/alvaldes/Music/Library";
-
 /// The volume the player has always started at (T3 kept it at full).
 pub const DEFAULT_VOLUME: u8 = 100;
 
@@ -80,8 +76,12 @@ Audio must share one channel layout: sample rates are converted to the
     output device, channel layouts are not.
 
 Configuration: $XDG_CONFIG_HOME/velo/config.toml, or
-    ~/.config/velo/config.toml — keys: library, volume, bit_perfect, replay_gain. A
-    missing file is normal and silent; an unknown key is an error."
+    ~/.config/velo/config.toml — keys: library, volume, bit_perfect, replay_gain.
+    When the file is missing, velo writes it with every key at its default and
+    a comment per key; an unknown key is an error. library (and --library)
+    takes an absolute path, ~/... or a path relative to the current directory.
+    With no library set, the interface asks for it in a floating prompt and
+    saves the answer to the file; velo --index needs one and exits 2 without."
 )]
 pub struct Cli {
     /// Tracks to play as one continuous, gapless stream. Without files, the
@@ -162,11 +162,7 @@ impl Config {
     #[must_use]
     pub fn merged(self, cli: &Cli) -> Settings {
         Settings {
-            library: cli
-                .library
-                .clone()
-                .or(self.library)
-                .unwrap_or_else(|| PathBuf::from(DEFAULT_LIBRARY_ROOT)),
+            library: cli.library.clone().or(self.library),
             volume: self.volume.unwrap_or(DEFAULT_VOLUME),
             bit_perfect: self.bit_perfect.unwrap_or(false),
             replay_gain: self.replay_gain.unwrap_or(ReplayGainMode::Track),
@@ -182,7 +178,9 @@ impl Config {
 /// the producer, once per track, before the ring.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
-    pub library: PathBuf,
+    /// The library root as written (`--library`, else the file), unexpanded;
+    /// `None` when neither names one. [`expand_path`] resolves it.
+    pub library: Option<PathBuf>,
     pub volume: u8,
     pub bit_perfect: bool,
     pub replay_gain: ReplayGainMode,
@@ -204,6 +202,131 @@ pub fn config_path(xdg_config_home: Option<&OsStr>, home: Option<&OsStr>) -> Opt
                 .join("config.toml")
         })
     })
+}
+
+/// The config file velo writes when there is none: every key at its default,
+/// each under a short comment. `library` has no default that suits everyone,
+/// so it is written commented out — "not in the file" — and the interface
+/// asks for it.
+#[must_use]
+pub fn default_config_text() -> String {
+    format!(
+        "# velo configuration. velo wrote this file with every key at its default;
+# change any value to customize velo, or delete a line to restore its default.
+
+# The folder velo indexes and browses: an absolute path, ~/... (your home) or
+# a path relative to the directory velo starts in. --library overrides it.
+# Unset, the interface asks for it the first time and saves the answer here.
+# library = \"~/Music\"
+
+# The volume velo starts at, an integer from 0 to 100.
+volume = {DEFAULT_VOLUME}
+
+# Bit-perfect playback opt-in. Accepted and stored; nothing reads it yet.
+bit_perfect = false
+
+# ReplayGain: \"track\" (the track's gain), \"album\" (the album's, else the
+# track's) or \"off\".
+replay_gain = \"track\"
+"
+    )
+}
+
+/// Writes [`default_config_text`] to `path`, creating its directory, unless a
+/// file is already there: an existing file is never overwritten or
+/// reformatted. Answers whether it wrote one.
+///
+/// # Errors
+///
+/// Fails when the directory or the file cannot be created.
+pub fn write_default_config(path: &Path) -> std::io::Result<bool> {
+    if path.exists() {
+        return Ok(false);
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path);
+    match file {
+        Ok(mut file) => {
+            std::io::Write::write_all(&mut file, default_config_text().as_bytes())?;
+            Ok(true)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// Writes `library = "<value>"` into the config file at `path`, keeping every
+/// other line and comment as it is: an active `library` line is replaced,
+/// else a commented-out one is uncommented, else the key is added on top
+/// (the file has no tables, so the top is still the root table). A missing
+/// file starts from [`default_config_text`].
+///
+/// # Errors
+///
+/// Fails when the file cannot be read or written.
+pub fn set_library(path: &Path, value: &str) -> std::io::Result<()> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => default_config_text(),
+        Err(error) => return Err(error),
+    };
+    let entry = format!("library = {}", toml::Value::String(value.to_owned()));
+    let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
+    let target = lines
+        .iter()
+        .position(|line| is_library_line(line, false))
+        .or_else(|| lines.iter().position(|line| is_library_line(line, true)));
+    match target {
+        Some(index) => lines[index] = entry,
+        None => lines.insert(0, entry),
+    }
+    let mut out = lines.join("\n");
+    if text.ends_with('\n') || text.is_empty() {
+        out.push('\n');
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, out)
+}
+
+/// Whether `line` assigns `library`, active or (with `commented`) behind `#`.
+fn is_library_line(line: &str, commented: bool) -> bool {
+    let line = line.trim_start();
+    let line = if commented {
+        match line.strip_prefix('#') {
+            Some(rest) => rest.trim_start(),
+            None => return false,
+        }
+    } else {
+        line
+    };
+    line.strip_prefix("library")
+        .is_some_and(|rest| rest.trim_start().starts_with('='))
+}
+
+/// Resolves a library path as the user wrote it: `~` and `~/...` against
+/// `home`, a relative path against `cwd`, an absolute path as it is. `~user`
+/// is not special. Without a home, `~` stays literal (and is then relative).
+#[must_use]
+pub fn expand_path(raw: &Path, home: Option<&Path>, cwd: &Path) -> PathBuf {
+    if let (Ok(rest), Some(home)) = (raw.strip_prefix("~"), home) {
+        return if rest.as_os_str().is_empty() {
+            home.to_path_buf()
+        } else {
+            home.join(rest)
+        };
+    }
+    if raw.is_absolute() {
+        raw.to_path_buf()
+    } else {
+        cwd.join(raw)
+    }
 }
 
 /// Everything the config file can fail with, already phrased for the user.

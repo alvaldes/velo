@@ -885,3 +885,98 @@ fn a_search_opened_from_the_queue_view_returns_to_the_queue_on_esc() {
     );
     assert_eq!(app.queue().len(), 2, "the queue is untouched");
 }
+
+// ---- the library prompt (T5, S4) ----------------------------------------
+
+/// A throwaway directory outside the worktree for the prompt tests.
+fn prompt_dir(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("velo-prompt-{name}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn type_text(app: &mut App<'_>, text: &str) {
+    for character in text.chars() {
+        press(app, KeyCode::Char(character));
+    }
+}
+
+#[test]
+fn the_prompt_opens_when_no_library_is_configured_and_typing_edits_it() {
+    let mut app = App::browse(None);
+    assert!(!app.library_prompt_open());
+    app.ask_for_library(None);
+    assert!(app.library_prompt_open());
+    assert_eq!(app.library_prompt_input(), "");
+
+    // Every printable key types, `q` included: it does not quit.
+    assert_eq!(app.on_key(key(KeyCode::Char('q'))), Action::None);
+    type_text(&mut app, "/mus");
+    press(&mut app, KeyCode::Backspace);
+    assert_eq!(app.library_prompt_input(), "q/mu");
+    assert!(app.library_prompt_open());
+}
+
+#[test]
+fn a_path_that_is_not_a_directory_keeps_the_prompt_open_and_says_why() {
+    let dir = prompt_dir("invalid");
+    let config = dir.join("velo").join("config.toml");
+    let mut app = App::browse(None);
+    app.ask_for_library(Some(config.clone()));
+    let missing = dir.join("no-such-folder");
+    type_text(&mut app, &missing.display().to_string());
+
+    assert_eq!(app.on_key(key(KeyCode::Enter)), Action::SetLibrary);
+    app.apply(Action::SetLibrary);
+
+    assert!(app.library_prompt_open());
+    let reason = app.library_prompt_error().unwrap_or_default().to_owned();
+    assert!(reason.contains("no-such-folder"), "reason: {reason}");
+    assert!(reason.contains("not a directory"), "reason: {reason}");
+    assert!(app.take_library_root().is_none());
+    assert!(!config.exists(), "nothing is saved for a refused path");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_directory_is_accepted_saved_to_the_config_and_handed_to_indexing() {
+    let dir = prompt_dir("valid");
+    let music = dir.join("Music");
+    fs::create_dir_all(&music).unwrap();
+    let config = dir.join("velo").join("config.toml");
+    velo::config::write_default_config(&config).unwrap();
+
+    let mut app = App::browse(None);
+    app.ask_for_library(Some(config.clone()));
+    type_text(&mut app, &music.display().to_string());
+    press(&mut app, KeyCode::Enter);
+
+    assert!(!app.library_prompt_open());
+    assert_eq!(app.take_library_root(), Some(music.clone()));
+    assert_eq!(app.take_library_root(), None, "handed over once");
+    let text = fs::read_to_string(&config).unwrap();
+    let expected = velo::config::default_config_text().replace(
+        "# library = \"~/Music\"",
+        &format!("library = \"{}\"", music.display()),
+    );
+    assert_eq!(text, expected);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn esc_closes_the_prompt_without_saving_anything() {
+    let dir = prompt_dir("esc");
+    let config = dir.join("velo").join("config.toml");
+    let mut app = App::browse(None);
+    app.ask_for_library(Some(config.clone()));
+    type_text(&mut app, "/tmp");
+
+    assert_eq!(app.on_key(key(KeyCode::Esc)), Action::None);
+    assert!(!app.library_prompt_open());
+    assert!(app.take_library_root().is_none());
+    assert!(!config.exists());
+    // Back in the browser, `q` quits again.
+    assert_eq!(app.on_key(key(KeyCode::Char('q'))), Action::Quit);
+    let _ = fs::remove_dir_all(&dir);
+}

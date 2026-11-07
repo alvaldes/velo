@@ -92,12 +92,27 @@ fn binary() -> &'static str {
     env!("CARGO_BIN_EXE_velo")
 }
 
-/// Runs the binary in a headless (not a terminal) environment and reports its
-/// exit status and stderr. Everything is stdin-closed and piped so the test
-/// cannot hang waiting for a terminal.
-fn run(arguments: &[&str]) -> (i32, String) {
+/// A throwaway home outside the worktree, so the binary — which writes its
+/// default config file on first run — never touches the user's own.
+fn temp_home(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("velo-cli-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// Runs the binary in a headless (not a terminal) environment with `home` as
+/// its HOME (and no `XDG_CONFIG_HOME`), the index at `home/index.db` and
+/// `home` as its current directory, and reports its exit status and stderr.
+/// Everything is stdin-closed and piped so the test cannot hang waiting for a
+/// terminal.
+fn run_in(home: &std::path::Path, arguments: &[&str]) -> (i32, String) {
     let output = Command::new(binary())
         .args(arguments)
+        .env("HOME", home)
+        .env_remove("XDG_CONFIG_HOME")
+        .env("VELO_DB", home.join("index.db"))
+        .current_dir(home)
         .stdin(std::process::Stdio::null())
         .output()
         .unwrap_or_else(|error| panic!("cannot run {}: {error}", binary()));
@@ -107,10 +122,19 @@ fn run(arguments: &[&str]) -> (i32, String) {
     )
 }
 
+/// [`run_in`] with a fresh home per call site.
+fn run(arguments: &[&str]) -> (i32, String) {
+    let name = arguments.join("_").replace(['/', '-', '.'], "");
+    run_in(&temp_home(&format!("run{name}")), arguments)
+}
+
 #[test]
 fn the_help_screen_exits_zero_and_names_the_new_features() {
+    let home = temp_home("help");
     let output = Command::new(binary())
         .arg("--help")
+        .env("HOME", &home)
+        .env_remove("XDG_CONFIG_HOME")
         .stdin(std::process::Stdio::null())
         .output()
         .unwrap_or_else(|error| panic!("cannot run {}: {error}", binary()));
@@ -159,4 +183,57 @@ fn a_missing_library_root_exits_one() {
     let (code, stderr) = run(&["--library", "/no/such/velo-root", "--index"]);
     assert_eq!(code, 1);
     assert!(stderr.contains("/no/such/velo-root"), "stderr: {stderr}");
+}
+
+// ------------------------------------------------ the config file (T5, S4)
+
+#[test]
+fn the_first_run_writes_the_default_config_file() {
+    let home = temp_home("first-run");
+    let (code, _) = run_in(&home, &["--info"]);
+    assert_eq!(code, 2);
+    let path = home.join(".config").join("velo").join("config.toml");
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("{} not written: {error}", path.display()));
+    assert_eq!(text, velo::config::default_config_text());
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn index_without_a_library_is_a_usage_error_naming_the_key_and_the_flag() {
+    let home = temp_home("index-no-library");
+    let (code, stderr) = run_in(&home, &["--index"]);
+    assert_eq!(code, 2, "stderr: {stderr}");
+    assert!(stderr.contains("`library`"), "stderr: {stderr}");
+    assert!(stderr.contains("config.toml"), "stderr: {stderr}");
+    assert!(stderr.contains("--library"), "stderr: {stderr}");
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn the_library_flag_expands_a_tilde_and_a_relative_path() {
+    let home = temp_home("expand-flag");
+    std::fs::create_dir_all(home.join("Music")).unwrap();
+    let (code, stderr) = run_in(&home, &["--library", "~/Music", "--index"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let (code, stderr) = run_in(&home, &["--library", "Music", "--index"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn a_library_in_the_config_file_is_expanded_and_indexed() {
+    let home = temp_home("expand-config");
+    std::fs::create_dir_all(home.join("Music")).unwrap();
+    let config = home.join(".config").join("velo");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(config.join("config.toml"), "library = \"~/Music\"\n").unwrap();
+    let (code, stderr) = run_in(&home, &["--index"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    // The user's file was not rewritten.
+    assert_eq!(
+        std::fs::read_to_string(config.join("config.toml")).unwrap(),
+        "library = \"~/Music\"\n"
+    );
+    let _ = std::fs::remove_dir_all(&home);
 }

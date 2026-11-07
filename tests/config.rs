@@ -13,7 +13,8 @@ use std::ffi::OsStr;
 
 use clap::Parser as _;
 use velo::config::{
-    Cli, Config, DEFAULT_LIBRARY_ROOT, DEFAULT_VOLUME, ReplayGainMode, config_path,
+    Cli, Config, DEFAULT_VOLUME, ReplayGainMode, config_path, default_config_text, expand_path,
+    set_library, write_default_config,
 };
 
 /// Makes `<temp>/<name>`, verifies the directory can be removed, and returns
@@ -53,7 +54,7 @@ fn a_missing_config_file_is_normal_and_silent() {
     // report an error.
     let config = Config::load_from(&dir.join("velo").join("config.toml"));
     let settings = config.unwrap().merged(&cli_with_no_flags());
-    assert_eq!(settings.library.as_path(), Path::new(DEFAULT_LIBRARY_ROOT));
+    assert_eq!(settings.library, None);
     assert_eq!(settings.volume, DEFAULT_VOLUME);
     assert!(!settings.bit_perfect);
     let _ = fs::remove_dir_all(&dir);
@@ -75,7 +76,7 @@ bit_perfect = true
     let config = Config::load_from(&path).unwrap_or_else(|error| panic!("load failed: {error}"));
     let settings = config.merged(&cli_with_no_flags());
 
-    assert_eq!(settings.library, PathBuf::from("/music/root"));
+    assert_eq!(settings.library, Some(PathBuf::from("/music/root")));
     assert_eq!(settings.volume, 85);
     assert!(settings.bit_perfect);
     let _ = fs::remove_dir_all(&dir);
@@ -105,7 +106,7 @@ fn an_empty_config_file_is_all_defaults() {
     let path = write_config(&dir, "");
     let config = Config::load_from(&path).unwrap_or_else(|error| panic!("load failed: {error}"));
     let settings = config.merged(&cli_with_no_flags());
-    assert_eq!(settings.library.as_path(), Path::new(DEFAULT_LIBRARY_ROOT));
+    assert_eq!(settings.library, None);
     assert!(!settings.bit_perfect);
     let _ = fs::remove_dir_all(&dir);
 }
@@ -265,7 +266,7 @@ fn the_config_file_beats_the_built_in_defaults() {
         .unwrap_or_else(|error| panic!("load failed: {error}"))
         .merged(&cli_with_no_flags());
 
-    assert_eq!(settings.library, PathBuf::from("/music/from/config"));
+    assert_eq!(settings.library, Some(PathBuf::from("/music/from/config")));
     assert_eq!(settings.volume, 42);
     let _ = fs::remove_dir_all(&dir);
 }
@@ -279,14 +280,17 @@ fn the_command_line_beats_the_config_file() {
         .unwrap_or_else(|error| panic!("load failed: {error}"))
         .merged(&cli_with_library("/music/from/command-line"));
 
-    assert_eq!(settings.library, PathBuf::from("/music/from/command-line"));
+    assert_eq!(
+        settings.library,
+        Some(PathBuf::from("/music/from/command-line"))
+    );
     let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn a_cli_value_alone_beats_the_default() {
     let settings = Config::default().merged(&cli_with_library("/music/cli-only"));
-    assert_eq!(settings.library, PathBuf::from("/music/cli-only"));
+    assert_eq!(settings.library, Some(PathBuf::from("/music/cli-only")));
 }
 
 #[test]
@@ -298,7 +302,7 @@ fn keys_absent_from_the_config_keep_their_defaults() {
         .unwrap_or_else(|error| panic!("load failed: {error}"))
         .merged(&cli_with_no_flags());
 
-    assert_eq!(settings.library.as_path(), Path::new(DEFAULT_LIBRARY_ROOT));
+    assert_eq!(settings.library, None);
     assert_eq!(settings.volume, 10);
     assert!(!settings.bit_perfect);
     let _ = fs::remove_dir_all(&dir);
@@ -337,5 +341,166 @@ fn the_default_path_honours_an_end_to_end_xdg_load() {
         .unwrap_or_else(|error| panic!("load failed: {error}"))
         .merged(&cli_with_no_flags());
     assert_eq!(settings.volume, 7);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// ------------------------------------------------- the default file (T5, S4)
+
+#[test]
+fn a_missing_config_file_is_written_with_every_key_and_its_default() {
+    let dir = temp_dir("default-written");
+    let path = dir.join("velo").join("config.toml");
+
+    let written = write_default_config(&path).unwrap_or_else(|error| panic!("write: {error}"));
+    assert!(written, "a missing file is written");
+    let text = fs::read_to_string(&path).unwrap();
+    assert_eq!(text, default_config_text());
+
+    // Every key is there, each with a comment right above it.
+    let lines: Vec<&str> = text.lines().collect();
+    for key in ["library", "volume", "bit_perfect", "replay_gain"] {
+        let at = lines
+            .iter()
+            .position(|line| {
+                let line = line.trim_start_matches('#').trim_start();
+                line.starts_with(&format!("{key} ="))
+            })
+            .unwrap_or_else(|| panic!("{key} missing from\n{text}"));
+        assert!(
+            at > 0 && lines[at - 1].starts_with('#'),
+            "{key} needs a comment above it\n{text}"
+        );
+    }
+    // `library` has no universal default, so it is written commented out.
+    assert!(text.contains("\n# library = \"~/Music\"\n"), "{text}");
+
+    // And the file says exactly the defaults.
+    let settings = Config::load_from(&path)
+        .unwrap_or_else(|error| panic!("load failed: {error}"))
+        .merged(&cli_with_no_flags());
+    assert_eq!(settings.library, None);
+    assert_eq!(settings.volume, DEFAULT_VOLUME);
+    assert!(!settings.bit_perfect);
+    assert_eq!(settings.replay_gain, ReplayGainMode::Track);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_existing_config_file_is_never_overwritten() {
+    let dir = temp_dir("default-kept");
+    let path = write_config(&dir, "volume   = 7 # mine\n");
+
+    let written = write_default_config(&path).unwrap_or_else(|error| panic!("write: {error}"));
+    assert!(!written);
+    assert_eq!(fs::read_to_string(&path).unwrap(), "volume   = 7 # mine\n");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_configured_library_still_loads_exactly_as_before() {
+    let dir = temp_dir("configured-library");
+    let path = write_config(&dir, "library = \"/music/root\"\n");
+    let settings = Config::load_from(&path)
+        .unwrap_or_else(|error| panic!("load failed: {error}"))
+        .merged(&cli_with_no_flags());
+    let raw = settings.library.unwrap_or_else(|| panic!("library lost"));
+    assert_eq!(raw, PathBuf::from("/music/root"));
+    assert_eq!(
+        expand_path(&raw, Some(Path::new("/home/me")), Path::new("/cwd")),
+        PathBuf::from("/music/root")
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn no_personal_path_is_hard_coded() {
+    for source in [
+        include_str!("../src/config.rs"),
+        include_str!("../src/bin/velo.rs"),
+        include_str!("../src/ui/mod.rs"),
+    ] {
+        assert!(!source.contains("/Users/"), "a personal path is hard-coded");
+    }
+}
+
+// ---------------------------------------------------------- path expansion
+
+#[test]
+fn a_tilde_expands_against_home() {
+    let home = Some(Path::new("/home/me"));
+    let cwd = Path::new("/somewhere");
+    assert_eq!(
+        expand_path(Path::new("~"), home, cwd),
+        PathBuf::from("/home/me")
+    );
+    assert_eq!(
+        expand_path(Path::new("~/Music/Library"), home, cwd),
+        PathBuf::from("/home/me/Music/Library")
+    );
+    // `~user` is not expanded: it is an ordinary relative name.
+    assert_eq!(
+        expand_path(Path::new("~other"), home, cwd),
+        PathBuf::from("/somewhere/~other")
+    );
+}
+
+#[test]
+fn a_relative_path_resolves_against_the_current_directory() {
+    let home = Some(Path::new("/home/me"));
+    assert_eq!(
+        expand_path(Path::new("Music"), home, Path::new("/work")),
+        PathBuf::from("/work/Music")
+    );
+    assert_eq!(
+        expand_path(Path::new("/abs/Music"), home, Path::new("/work")),
+        PathBuf::from("/abs/Music")
+    );
+}
+
+// -------------------------------------------------- writing the library key
+
+#[test]
+fn setting_the_library_uncomments_its_line_and_keeps_every_other_line() {
+    let dir = temp_dir("set-library-default");
+    let path = dir.join("velo").join("config.toml");
+    write_default_config(&path).unwrap();
+
+    set_library(&path, "~/Music").unwrap_or_else(|error| panic!("set: {error}"));
+
+    let text = fs::read_to_string(&path).unwrap();
+    let expected =
+        default_config_text().replace("# library = \"~/Music\"", "library = \"~/Music\"");
+    assert_eq!(text, expected);
+    let config = Config::load_from(&path).unwrap_or_else(|error| panic!("load: {error}"));
+    assert_eq!(config.library, Some(PathBuf::from("~/Music")));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn setting_the_library_replaces_an_active_line_and_quotes_the_value() {
+    let dir = temp_dir("set-library-active");
+    let path = write_config(&dir, "# mine\nvolume = 3\nlibrary = \"/old\"\n");
+
+    set_library(&path, "/new \"quoted\" dir").unwrap();
+
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(text.starts_with("# mine\nvolume = 3\nlibrary = "), "{text}");
+    let config = Config::load_from(&path).unwrap_or_else(|error| panic!("load: {error}"));
+    assert_eq!(config.library, Some(PathBuf::from("/new \"quoted\" dir")));
+    assert_eq!(config.volume, Some(3));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn setting_the_library_adds_the_key_when_the_file_has_none() {
+    let dir = temp_dir("set-library-absent");
+    let path = write_config(&dir, "volume = 3\n");
+
+    set_library(&path, "/music").unwrap();
+
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        "library = \"/music\"\nvolume = 3\n"
+    );
     let _ = fs::remove_dir_all(&dir);
 }

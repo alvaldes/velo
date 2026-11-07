@@ -16,7 +16,21 @@ use ratatui::backend::CrosstermBackend;
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    let settings = match user_settings(&cli) {
+    // The two environment values are read here, at the edge, so the config
+    // layer itself stays testable without touching the user's environment.
+    let home = std::env::var_os("HOME").filter(|value| !value.is_empty());
+    let config_file = config::config_path(
+        std::env::var_os("XDG_CONFIG_HOME").as_deref(),
+        home.as_deref(),
+    );
+    if let Some(path) = &config_file
+        && let Err(error) = config::write_default_config(path)
+    {
+        // Not fatal: velo runs on its defaults; the user learns why there is
+        // no file to edit.
+        eprintln!("velo: cannot write {}: {error}", path.display());
+    }
+    let settings = match user_settings(&cli, config_file.as_deref()) {
         Ok(settings) => settings,
         Err(error) => {
             // A config the user wrote and that does not parse is a usage
@@ -25,10 +39,25 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let library = settings
+        .library
+        .as_deref()
+        .map(|raw| config::expand_path(raw, home.as_deref().map(Path::new), &cwd));
 
     // `bit_perfect` is resolved and carried in `settings`; T17 reads it.
     if cli.index {
-        return index_library(&settings.library);
+        let Some(root) = library else {
+            let file = config_file.as_deref().map_or_else(
+                || "the config file".to_owned(),
+                |path| path.display().to_string(),
+            );
+            eprintln!(
+                "velo: no library to index — set `library` in {file} or pass --library <PATH>"
+            );
+            return ExitCode::from(2);
+        };
+        return index_library(&root);
     }
 
     if cli.files.is_empty() {
@@ -38,7 +67,7 @@ fn main() -> ExitCode {
             return usage_help();
         }
         // No files: the interface browses the library index.
-        return browse_interface(&settings.library, settings.replay_gain, settings.volume);
+        return browse_interface(library.as_deref(), config_file, &settings);
     }
 
     if cli.info {
@@ -50,18 +79,11 @@ fn main() -> ExitCode {
     run_interface(cli.files, settings.replay_gain, settings.volume)
 }
 
-/// Resolves the user's settings: the config file (a missing file is normal
-/// and silent) merged under the command line.
-///
-/// The two environment values are read here, at the edge, so the config
-/// layer itself stays testable without touching the user's environment.
-fn user_settings(cli: &Cli) -> Result<Settings, config::ConfigError> {
-    let path = config::config_path(
-        std::env::var_os("XDG_CONFIG_HOME").as_deref(),
-        std::env::var_os("HOME").as_deref(),
-    );
+/// Resolves the user's settings: the config file at `path` (a missing file is
+/// normal and silent) merged under the command line.
+fn user_settings(cli: &Cli, path: Option<&Path>) -> Result<Settings, config::ConfigError> {
     match path {
-        Some(path) => Config::load_from(&path).map(|file| file.merged(cli)),
+        Some(path) => Config::load_from(path).map(|file| file.merged(cli)),
         None => Ok(Config::default().merged(cli)),
     }
 }
@@ -163,7 +185,7 @@ fn run_interface(paths: Vec<PathBuf>, replay_gain: ReplayGainMode, volume: u8) -
         app.set_replay_gain(replay_gain);
         app.set_volume(volume);
         app.show_artwork(picker);
-        event_loop(&mut app, terminal)
+        event_loop(&mut app, None, terminal)
     });
     report_outcome(outcome)
 }
@@ -171,8 +193,13 @@ fn run_interface(paths: Vec<PathBuf>, replay_gain: ReplayGainMode, volume: u8) -
 /// The library interface: indexes the library root (incrementally, so a
 /// second launch is fast) with progress in the status line, then browses the
 /// index. A missing root or an empty index still opens the interface and says
-/// so instead of exiting.
-fn browse_interface(root: &Path, replay_gain: ReplayGainMode, volume: u8) -> ExitCode {
+/// so instead of exiting. With no root configured, a floating prompt asks for
+/// one and the answer is saved to the config file, then indexed the same way.
+fn browse_interface(
+    root: Option<&Path>,
+    config_file: Option<PathBuf>,
+    settings: &Settings,
+) -> ExitCode {
     if !std::io::stdout().is_terminal() {
         eprintln!("velo: the interface needs an interactive terminal");
         return ExitCode::FAILURE;
@@ -182,38 +209,46 @@ fn browse_interface(root: &Path, replay_gain: ReplayGainMode, volume: u8) -> Exi
     let picker = artwork::detect();
     let outcome = with_terminal(|terminal| {
         let opened = Library::open();
-        let mut app = match &opened {
-            Ok(library) => App::browse(Some(library)),
-            Err(_) => App::browse(None),
-        };
-        app.set_replay_gain(replay_gain);
-        app.set_volume(volume);
+        let mut app = App::browse(opened.as_ref().ok());
+        app.set_replay_gain(settings.replay_gain);
+        app.set_volume(settings.volume);
         app.show_artwork(picker);
-        match &opened {
-            Ok(library) => {
-                if root.is_dir() {
-                    app.note(format!("indexing {} …", root.display()));
-                    terminal.draw(|frame| app.draw(frame))?;
-                    match library.index(root) {
-                        Ok(report) => app.note(format!(
-                            "indexed: {} added, {} updated, {} unchanged, {} removed",
-                            report.added, report.updated, report.unchanged, report.removed
-                        )),
-                        Err(error) => app.note(format!("velo: indexing failed: {error}")),
-                    }
-                } else {
-                    app.note(format!(
-                        "velo: library root {} does not exist — no indexing",
-                        root.display()
-                    ));
-                }
-            }
-            Err(error) => app.note(format!("velo: cannot open the library index: {error}")),
+        match (&opened, root) {
+            (Err(error), _) => app.note(format!("velo: cannot open the library index: {error}")),
+            (Ok(library), Some(root)) => index_root(&mut app, library, root, terminal)?,
+            (Ok(_), None) => app.ask_for_library(config_file),
         }
         app.reload();
-        event_loop(&mut app, terminal)
+        event_loop(&mut app, opened.as_ref().ok(), terminal)
     });
     report_outcome(outcome)
+}
+
+/// Indexes `root` into `library` with progress in the status line, or says
+/// why it did not.
+fn index_root(
+    app: &mut App<'_>,
+    library: &Library,
+    root: &Path,
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+) -> std::io::Result<()> {
+    if !root.is_dir() {
+        app.note(format!(
+            "velo: library root {} does not exist — no indexing",
+            root.display()
+        ));
+        return Ok(());
+    }
+    app.note(format!("indexing {} …", root.display()));
+    terminal.draw(|frame| app.draw(frame))?;
+    match library.index(root) {
+        Ok(report) => app.note(format!(
+            "indexed: {} added, {} updated, {} unchanged, {} removed",
+            report.added, report.updated, report.unchanged, report.removed
+        )),
+        Err(error) => app.note(format!("velo: indexing failed: {error}")),
+    }
+    Ok(())
 }
 
 /// Runs `work` inside the alternate screen with raw mode on, and restores the
@@ -243,6 +278,7 @@ fn report_outcome(outcome: std::io::Result<()>) -> ExitCode {
 
 fn event_loop(
     app: &mut App<'_>,
+    library: Option<&Library>,
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
 ) -> std::io::Result<()> {
     loop {
@@ -260,6 +296,12 @@ fn event_loop(
             app.apply(action);
             if action == Action::Quit {
                 break;
+            }
+            // A library path accepted in the prompt is indexed and browsed
+            // the way a configured one is at startup.
+            if let (Some(root), Some(library)) = (app.take_library_root(), library) {
+                index_root(app, library, &root, terminal)?;
+                app.reload();
             }
         }
     }
