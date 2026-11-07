@@ -841,118 +841,124 @@ impl<'lib> App<'lib> {
         )
     }
 
+    /// The line over the list: what it lists and how many of them, as in
+    /// `▸─ Tide › Harbor  [12 tracks]`.
     fn draw_header(&self, frame: &mut Frame, area: Rect) {
-        let mut spans = vec![Span::styled("velo", Style::new().fg(ACCENT).bold())];
-        match &self.position {
-            Position::Files => {
-                spans.push(Span::styled(
-                    format!("  {}", plural(self.argv.len(), "track", "tracks")),
-                    Style::new().fg(SECONDARY),
-                ));
+        let (label, count) = if let Some(search) = &self.search {
+            (
+                format!("Search /{}", search.query()),
+                plural(self.search_results.len(), "match", "matches"),
+            )
+        } else if self.view == View::Queue {
+            (
+                "Queue".to_owned(),
+                plural(self.queue.len(), "track", "tracks"),
+            )
+        } else {
+            match &self.position {
+                Position::Files => (
+                    "Files".to_owned(),
+                    plural(self.argv.len(), "track", "tracks"),
+                ),
+                Position::Artists => (
+                    "Artists".to_owned(),
+                    plural(self.artists.len(), "artist", "artists"),
+                ),
+                Position::Albums { artist } => {
+                    (artist.clone(), plural(self.albums.len(), "album", "albums"))
+                }
+                Position::Tracks { artist, album } => (
+                    format!("{artist} › {album}"),
+                    plural(self.tracks.len(), "track", "tracks"),
+                ),
             }
-            Position::Artists => {
-                spans.push(Span::styled("  artists", Style::new().fg(SECONDARY)));
-                spans.push(Span::styled(
-                    format!("  {}", self.artists.len()),
-                    Style::new().fg(SECONDARY),
-                ));
-            }
-            Position::Albums { artist } => {
-                spans.push(Span::styled(
-                    format!("  {artist}"),
-                    Style::new().fg(SECONDARY),
-                ));
-                spans.push(Span::styled(
-                    format!("  {}", plural(self.albums.len(), "album", "albums")),
-                    Style::new().fg(SECONDARY),
-                ));
-            }
-            Position::Tracks { artist, album } => {
-                spans.push(Span::styled(
-                    format!("  {artist} · {album}"),
-                    Style::new().fg(SECONDARY),
-                ));
-                spans.push(Span::styled(
-                    format!("  {}", plural(self.tracks.len(), "track", "tracks")),
-                    Style::new().fg(SECONDARY),
-                ));
-            }
-        }
-        frame.render_widget(Paragraph::new(Line::from(spans)), area);
+        };
+        let line = Line::from(vec![
+            Span::styled("▸─ ", Style::new().fg(BORDER)),
+            Span::styled(label, Style::new().fg(TEXT).bold()),
+            Span::styled(format!("  [{count}]"), Style::new().fg(DIM)),
+        ]);
+        frame.render_widget(Paragraph::new(line), area);
     }
 
+    /// The list the keys act on — the search results, the queue or the
+    /// library level — or the sentence an empty one says about itself.
     fn draw_body(&self, frame: &mut Frame, area: Rect) {
-        if self.search.is_some() {
-            self.draw_search(frame, area);
-            return;
-        }
-        if self.view == View::Queue {
-            if self.queue.is_empty() {
-                frame.render_widget(
-                    Paragraph::new(Line::styled(
-                        "nothing queued — press a on a track to add it",
-                        Style::new().fg(DIM),
-                    )),
-                    area,
-                );
+        let width = area.width;
+        let (rows, selected) = if self.search.is_some() {
+            if self.search_results.is_empty() {
+                draw_empty(frame, area, "no tracks match");
                 return;
             }
-            let list = List::new(self.queue_rows())
-                .style(Style::new().bg(BACKGROUND))
-                .highlight_style(Style::new().bg(ACCENT).fg(BACKGROUND));
-            let mut state = ListState::default().with_selected(Some(self.queue_selected));
-            frame.render_stateful_widget(list, area, &mut state);
-            return;
-        }
-        if let Some(message) = self.empty_message() {
-            frame.render_widget(
-                Paragraph::new(Line::styled(message, Style::new().fg(DIM))),
-                area,
-            );
-            return;
-        }
-
-        let list = List::new(self.rows())
+            (self.search_rows(width), self.search_selected)
+        } else if self.view == View::Queue {
+            if self.queue.is_empty() {
+                draw_empty(frame, area, "nothing queued — press a on a track to add it");
+                return;
+            }
+            (self.queue_rows(width), self.queue_selected)
+        } else {
+            if let Some(message) = self.empty_message() {
+                draw_empty(frame, area, message);
+                return;
+            }
+            (self.rows(width), self.selected)
+        };
+        // Only the background changes on the selected row, so its dim notes
+        // stay dim and the playing row keeps its accent.
+        let list = List::new(rows)
             .style(Style::new().bg(BACKGROUND))
-            .highlight_style(Style::new().bg(ACCENT).fg(BACKGROUND));
-        let mut state = ListState::default().with_selected(Some(self.selected));
+            .highlight_style(Style::new().bg(SURFACE));
+        let mut state = ListState::default().with_selected(Some(selected));
         frame.render_stateful_widget(list, area, &mut state);
     }
 
     /// The rows of the current level, as they are on screen.
-    fn rows(&self) -> Vec<ListItem<'_>> {
+    fn rows(&self, width: u16) -> Vec<ListItem<'static>> {
+        let digits = digits(self.row_count());
+        let playing = self.playing_row();
+        let row = |index: usize, name: &str, note: String, fact: String| {
+            ListItem::new(list_row(
+                ListRow {
+                    playing: playing == Some(index),
+                    number: index + 1,
+                    digits,
+                    name: name.to_owned(),
+                    note,
+                    fact,
+                },
+                width,
+            ))
+        };
         match &self.position {
             Position::Files => self
                 .argv
                 .iter()
                 .enumerate()
-                .map(|(index, path)| ListItem::new(self.file_row(index, path)))
+                .map(|(index, path)| {
+                    let (name, folder) = describe(path, []);
+                    row(index, &name, folder, String::new())
+                })
                 .collect(),
             Position::Artists => self
                 .artists
                 .iter()
                 .enumerate()
                 .map(|(index, entry)| {
-                    ListItem::new(Line::from(vec![
-                        self.marker(index),
-                        Span::styled(entry.name.clone(), Style::new().fg(TEXT)),
-                        Span::styled(
-                            format!(
-                                "  {} · {}",
-                                plural(
-                                    usize::try_from(entry.albums).unwrap_or(usize::MAX),
-                                    "album",
-                                    "albums"
-                                ),
-                                plural(
-                                    usize::try_from(entry.tracks).unwrap_or(usize::MAX),
-                                    "track",
-                                    "tracks"
-                                )
-                            ),
-                            Style::new().fg(DIM),
+                    let counts = format!(
+                        "{} · {}",
+                        plural(
+                            usize::try_from(entry.albums).unwrap_or(usize::MAX),
+                            "album",
+                            "albums"
                         ),
-                    ]))
+                        plural(
+                            usize::try_from(entry.tracks).unwrap_or(usize::MAX),
+                            "track",
+                            "tracks"
+                        )
+                    );
+                    row(index, &entry.name, String::new(), counts)
                 })
                 .collect(),
             Position::Albums { .. } => self
@@ -960,14 +966,8 @@ impl<'lib> App<'lib> {
                 .iter()
                 .enumerate()
                 .map(|(index, entry)| {
-                    let year = entry
-                        .year
-                        .map_or_else(String::new, |year| format!("  {year}"));
-                    ListItem::new(Line::from(vec![
-                        self.marker(index),
-                        Span::styled(entry.title.clone(), Style::new().fg(TEXT)),
-                        Span::styled(year, Style::new().fg(DIM)),
-                    ]))
+                    let year = entry.year.map_or_else(String::new, |year| year.to_string());
+                    row(index, &entry.title, String::new(), year)
                 })
                 .collect(),
             Position::Tracks { .. } => self
@@ -975,71 +975,65 @@ impl<'lib> App<'lib> {
                 .iter()
                 .enumerate()
                 .map(|(index, entry)| {
-                    ListItem::new(Line::from(vec![
-                        self.marker(index),
-                        Span::styled(entry.title.clone(), Style::new().fg(TEXT)),
-                        Span::styled(Self::duration(entry.duration_ms), Style::new().fg(DIM)),
-                    ]))
+                    row(
+                        index,
+                        &entry.title,
+                        String::new(),
+                        Self::duration(entry.duration_ms),
+                    )
                 })
                 .collect(),
         }
     }
 
-    /// The queue, in play order, marked the way every other list marks the row
-    /// that is playing.
-    fn queue_rows(&self) -> Vec<ListItem<'static>> {
+    /// The queue, in play order, named the way the now-playing block names
+    /// a file and marked the way every other list marks the row that plays.
+    fn queue_rows(&self, width: u16) -> Vec<ListItem<'static>> {
+        let digits = digits(self.queue.len());
         let playing = self.playing_queue_index();
         self.queue
             .iter()
             .enumerate()
             .map(|(index, path)| {
-                let marker = if playing == Some(index) {
-                    Span::styled("▸ ", Style::new().fg(ACCENT))
-                } else {
-                    Span::raw("  ")
-                };
-                let mut spans = vec![
-                    marker,
-                    Span::styled(Self::file_name(path), Style::new().fg(TEXT)),
-                ];
-                if let Some(parent) = path.parent() {
-                    spans.push(Span::styled(
-                        format!("  {}", parent.display()),
-                        Style::new().fg(DIM),
-                    ));
-                }
-                ListItem::new(Line::from(spans))
+                let (name, note) = describe(path, self.tracks.iter().chain(&self.search_pool));
+                ListItem::new(list_row(
+                    ListRow {
+                        playing: playing == Some(index),
+                        number: index + 1,
+                        digits,
+                        name,
+                        note,
+                        fact: String::new(),
+                    },
+                    width,
+                ))
             })
             .collect()
     }
 
-    /// One flat row: the play marker, the file name, the parent directory dimmed.
-    fn file_row(&self, index: usize, path: &std::path::Path) -> Line<'_> {
-        let name = path.file_name().map_or_else(
-            || path.display().to_string(),
-            |name| name.to_string_lossy().to_string(),
-        );
-        let mut spans = vec![
-            self.marker(index),
-            Span::styled(name, Style::new().fg(TEXT)),
-        ];
-
-        if let Some(parent) = path.parent() {
-            let parent = parent.display().to_string();
-            if !parent.is_empty() {
-                spans.push(Span::styled(format!("  {parent}"), Style::new().fg(DIM)));
-            }
-        }
-        Line::from(spans)
-    }
-
-    /// The play marker: `▸` on the row whose samples are being produced.
-    fn marker(&self, index: usize) -> Span<'static> {
-        if self.playing_row() == Some(index) {
-            Span::styled("▸ ", Style::new().fg(ACCENT))
-        } else {
-            Span::raw("  ")
-        }
+    /// The search results: a title with its artist and album dimmed after
+    /// it and its length at the right edge.
+    fn search_rows(&self, width: u16) -> Vec<ListItem<'static>> {
+        let digits = digits(self.search_results.len());
+        let playing = self.playing_path();
+        self.search_results
+            .iter()
+            .filter_map(|&index| self.search_pool.get(index))
+            .enumerate()
+            .map(|(row, entry)| {
+                ListItem::new(list_row(
+                    ListRow {
+                        playing: playing == Some(entry.path.as_path()),
+                        number: row + 1,
+                        digits,
+                        name: entry.title.clone(),
+                        note: format!("{} · {}", entry.artist, entry.album),
+                        fact: Self::duration(entry.duration_ms),
+                    },
+                    width,
+                ))
+            })
+            .collect()
     }
 
     /// A duration in `m:ss`, empty for tracks with no known length.
@@ -1048,7 +1042,7 @@ impl<'lib> App<'lib> {
             return String::new();
         }
         let seconds = u64::try_from(duration_ms / 1000).unwrap_or(0);
-        format!("  {}:{:02}", seconds / 60, seconds % 60)
+        format!("{}:{:02}", seconds / 60, seconds % 60)
     }
 
     fn draw_footer(&self, frame: &mut Frame, area: Rect) {
@@ -1090,44 +1084,6 @@ impl<'lib> App<'lib> {
             ]
         };
         frame.render_widget(Paragraph::new(hint_line(hints, hints_row.width)), hints_row);
-    }
-
-    /// The search results: a track title with its artist and album dimmed,
-    /// and the playing marker drawn the way every other list draws it.
-    fn draw_search(&self, frame: &mut Frame, area: Rect) {
-        if self.search_results.is_empty() {
-            frame.render_widget(
-                Paragraph::new(Line::styled("no tracks match", Style::new().fg(DIM))),
-                area,
-            );
-            return;
-        }
-        let playing = self.playing_path();
-        let items: Vec<ListItem<'_>> = self
-            .search_results
-            .iter()
-            .filter_map(|&index| self.search_pool.get(index))
-            .map(|entry| {
-                let marker = if playing == Some(entry.path.as_path()) {
-                    Span::styled("▸ ", Style::new().fg(ACCENT))
-                } else {
-                    Span::raw("  ")
-                };
-                ListItem::new(Line::from(vec![
-                    marker,
-                    Span::styled(entry.title.clone(), Style::new().fg(TEXT)),
-                    Span::styled(
-                        format!("  {} · {}", entry.artist, entry.album),
-                        Style::new().fg(DIM),
-                    ),
-                ]))
-            })
-            .collect();
-        let list = List::new(items)
-            .style(Style::new().bg(BACKGROUND))
-            .highlight_style(Style::new().bg(ACCENT).fg(BACKGROUND));
-        let mut state = ListState::default().with_selected(Some(self.search_selected));
-        frame.render_stateful_widget(list, area, &mut state);
     }
 
     /// The path of the file whose samples are being produced, if any: the
@@ -1803,6 +1759,71 @@ fn hint_line(hints: &[(&str, &str)], width: u16) -> Line<'static> {
         spans.push(Span::styled(format!(" {label}"), Style::new().fg(DIM)));
     }
     Line::from(spans)
+}
+
+/// What one list row says, before it is laid out.
+struct ListRow {
+    playing: bool,
+    number: usize,
+    digits: usize,
+    name: String,
+    /// Dimmed after the name: a folder, or an artist and album.
+    note: String,
+    /// Dimmed against the right edge: a length, a year, counts.
+    fact: String,
+}
+
+/// `▸ 3. Dawn  Tide · Harbor ……… 4:12`: the marker (`▶` in the accent on
+/// the row that plays), the number, the name, the note, and the fact against
+/// the right edge when it fits beside the rest; a fact that does not fit is
+/// the part left out, never the name.
+fn list_row(row: ListRow, width: u16) -> Line<'static> {
+    let (marker, number, name) = if row.playing {
+        (
+            Style::new().fg(ACCENT),
+            Style::new().fg(ACCENT),
+            Style::new().fg(ACCENT).bold(),
+        )
+    } else {
+        (
+            Style::new().fg(BORDER),
+            Style::new().fg(DIM),
+            Style::new().fg(TEXT),
+        )
+    };
+    let digits = row.digits;
+    let mut spans = vec![
+        Span::styled(if row.playing { "▶ " } else { "▸ " }, marker),
+        Span::styled(format!("{:>digits$}. ", row.number), number),
+        Span::styled(row.name, name),
+    ];
+    if !row.note.is_empty() {
+        spans.push(Span::styled(
+            format!("  {}", row.note),
+            Style::new().fg(DIM),
+        ));
+    }
+    let used = Line::from(spans.clone()).width();
+    let fact = row.fact.chars().count();
+    let width = usize::from(width);
+    if fact > 0 && used + 2 + fact <= width {
+        spans.push(Span::raw(" ".repeat(width - used - fact)));
+        spans.push(Span::styled(row.fact, Style::new().fg(DIM)));
+    }
+    Line::from(spans)
+}
+
+/// How many digits the largest row number of a list this long takes.
+fn digits(count: usize) -> usize {
+    count.max(1).to_string().len()
+}
+
+/// The sentence an empty list says about itself, dimmed.
+fn draw_empty(frame: &mut Frame, area: Rect, message: &str) {
+    frame.render_widget(
+        Paragraph::new(Line::styled(message.to_owned(), Style::new().fg(DIM))),
+        area,
+    );
 }
 
 /// How many rows the now-playing block takes out of a content area this tall.

@@ -42,7 +42,7 @@ fn the_shell_shows_its_name_the_tracks_the_state_and_the_keys() {
     let screen = render(&app);
 
     for expected in [
-        "velo", "2 tracks", "one.flac", "two.flac", "stopped", "j/k move", "q quit",
+        "V E L O", "2 tracks", "one.flac", "two.flac", "stopped", "j/k move", "q quit",
     ] {
         assert!(
             screen.contains(expected),
@@ -293,6 +293,85 @@ fn press(app: &mut App<'_>, code: KeyCode) {
     app.apply(action);
 }
 
+// ---- the lists (ui-redesign T3, S1, S3) ------------------------------------
+
+#[test]
+fn a_list_has_a_header_line_and_numbered_rows_on_a_quiet_selection() {
+    use velo::ui::theme::{ACCENT, SURFACE};
+
+    let app = App::new(tracks(&["one.flac", "two.flac", "three.flac"]));
+    let screen = screen_at(&app, 80, 24);
+
+    for expected in ["▸─ Files  [3 tracks]", "1. one.flac", "3. three.flac"] {
+        assert!(
+            screen.contains(expected),
+            "the list shows {expected:?}, got:\n{screen}"
+        );
+    }
+    let row = screen
+        .lines()
+        .position(|line| line.contains("1. one.flac"))
+        .expect("the first row");
+    let selected = cell_at(&app, 10, u16::try_from(row).unwrap());
+    assert_eq!(selected.bg, SURFACE, "the selection is a raised row");
+    assert_ne!(selected.bg, ACCENT, "not a solid accent bar");
+}
+
+#[test]
+fn library_rows_put_their_facts_against_the_right_edge() {
+    let temp = TempLibrary::new("right-facts");
+    temp.write_wav("Tide/2019 - Harbor/01 - Dawn.wav");
+    temp.index();
+    let mut app = App::browse(Some(&temp.library));
+
+    let artists = screen_at(&app, 80, 24);
+    assert!(
+        artists.contains("▸─ Artists  [1 artist]"),
+        "got:\n{artists}"
+    );
+    assert!(
+        artists
+            .lines()
+            .any(|line| line.contains("1. Tide") && line.ends_with("1 album · 1 track │")),
+        "the artist's counts sit at the right edge, got:\n{artists}"
+    );
+
+    press(&mut app, KeyCode::Enter); // Tide
+    press(&mut app, KeyCode::Enter); // Harbor
+    let tracks = screen_at(&app, 80, 24);
+    assert!(
+        tracks.contains("▸─ Tide › Harbor  [1 track]"),
+        "got:\n{tracks}"
+    );
+    assert!(
+        tracks
+            .lines()
+            .any(|line| line.contains("1. Dawn") && line.ends_with("0:00 │")),
+        "the track's length sits at the right edge, got:\n{tracks}"
+    );
+
+    press(&mut app, KeyCode::Char('/'));
+    press(&mut app, KeyCode::Char('d'));
+    let search = screen_at(&app, 80, 24);
+    assert!(
+        search.contains("▸─ Search /d  [1 match]"),
+        "the search names its query and its count, got:\n{search}"
+    );
+}
+
+#[test]
+fn the_queue_has_its_own_header() {
+    let mut app = App::new(tracks(&["one.flac", "two.flac"]));
+    press(&mut app, KeyCode::Char('a'));
+    press(&mut app, KeyCode::Tab);
+    let screen = screen_at(&app, 80, 24);
+
+    assert!(
+        screen.contains("▸─ Queue  [1 track]") && screen.contains("1. one.flac"),
+        "got:\n{screen}"
+    );
+}
+
 /// An empty level must explain itself, in the spirit of the flat "no tracks"
 /// empty state, instead of panicking. Both empty levels are reached with real
 /// index states: an artist whose rows vanished between the snapshot and the
@@ -386,7 +465,7 @@ fn the_queue_view_draws_the_queued_file_names_and_empty_state() {
 /// not move a single cell of it: no protocol is ever attached to a
 /// [`TestBackend`]-backed app. Re-recorded on purpose whenever the design
 /// changes (ui-redesign T1: the window frame, the title bar, the key hints;
-/// T2: the now-playing block).
+/// T2: the now-playing block; T3: the list header and numbered rows).
 const SCREEN_WITHOUT_COVER_ART: &str = concat!(
     "╭──────────────────────────────────────────────────────────────────────────────╮\n",
     "│ library  queue                                                       V E L O │\n",
@@ -397,10 +476,10 @@ const SCREEN_WITHOUT_COVER_ART: &str = concat!(
     "│ ──────────────────────────────────────────────────────────────────────────── │\n",
     "│  ◂◂   ▶ play   ▸▸                                       VOL ━━━━━━━━━━━● 100 │\n",
     "│                                                                              │\n",
-    "│ velo  3 tracks                                                               │\n",
-    "│   one.flac  /music                                                           │\n",
-    "│   two.flac  /music                                                           │\n",
-    "│   three.flac  /music                                                         │\n",
+    "│ ▸─ Files  [3 tracks]                                                         │\n",
+    "│ ▸ 1. one.flac  /music                                                        │\n",
+    "│ ▸ 2. two.flac  /music                                                        │\n",
+    "│ ▸ 3. three.flac  /music                                                      │\n",
     "│                                                                              │\n",
     "│                                                                              │\n",
     "│                                                                              │\n",

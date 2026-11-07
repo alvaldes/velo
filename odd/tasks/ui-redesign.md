@@ -1,7 +1,7 @@
 # UI redesign — a modern terminal interface in the style of cliamp
 
 Objective: restyle velo's interface after the reference video (cliamp.stream), visual first, spectrum later.
-Branch: `feat/ui-redesign` (worktree `../velo-worktrees/ui-redesign`, from `main` `ed92ea4`). Delivery: `ask-on-risk`. Runner: `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`.
+Branch: `feat/ui-redesign` (worktree `../velo-worktrees/ui-redesign`, from `main` `ed92ea4`). Delivery: no pull requests — commits accumulate on this worktree, then `main` is brought in and the UI updated over it (L7). Runner: `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`.
 
 ## Specs
 
@@ -23,9 +23,9 @@ Stage 1 changes `src/ui/` (and its tests) only. Stage 2 (the spectrum) taps the 
 
 | ID | Task | Specs | Route | Commit |
 |----|------|-------|-------|--------|
-| T1 | Theme tokens (surface, border), the window frame and title bar with the letter-spaced wordmark | S1, S3, S4 | inline | — |
-| T2 | Now-playing block: title and subtitle of the playing track, clock and state pill, progress bar, volume slider, transport buttons | S1, S3, S4 | inline | — |
-| T3 | Lists restyled (browse, queue, search): header line, numbered rows, right-aligned facts, subtle selection, `▸` on the playing row | S1, S3 | inline | — |
+| T1 | Theme tokens (surface, border), the window frame and title bar with the letter-spaced wordmark | S1, S3, S4 | inline | `68f790e` |
+| T2 | Now-playing block: title and subtitle of the playing track, clock and state pill, progress bar, volume slider, transport buttons | S1, S3, S4 | inline | `6b5fdd6` |
+| T3 | Lists restyled (browse, queue, search): header line, numbered rows, right-aligned facts, subtle selection, `▸` on the playing row | S1, S3 | inline | T3_COMMIT |
 | T4 | Footer key hints and help overlay restyled; golden screen re-recorded | S1, S3, S4 | inline | — |
 | T5 | Stage 2: spectrum analyzer from an audio tap (FFT), replacing the progress band's spare room | S2 | — (deferred) | — |
 
@@ -36,3 +36,11 @@ Stage 1 changes `src/ui/` (and its tests) only. Stage 2 (the spectrum) taps the 
 **L2** (2026-11-07, user, on whether the spectrum is in scope): "primero lo visual, el espectro en una segunda etapa"
 
 **L3** Analysis: the spectrum needs a lock-free sample tap in the real-time output callback (`src/audio/output.rs`) plus an FFT; that is concurrency (high risk) and the same file T11 (ReplayGain, other agent) will edit. Stage 1 stays in `src/ui/`. The playing track's title comes from the library row whose path is playing, falling back to the file name, so no new state mirrors the queue.
+
+**L4** T1 (`68f790e`): RED observed (2 render tests failed on `main`'s code). The frame cost the footer 4 columns and cut `q quit` at 80×24, so the key hints became `key label` pairs that drop from the middle and never lose `? help` / `q quit` (unit-tested). Golden 80×24 screen re-recorded on purpose. Assess: medium, `under_budget`.
+
+**L5** T2 (`6b5fdd6`): RED observed (4 tests). The block is 7 rows at ≥18 content rows, 3 at ≥7, 1 below; volume moved from the footer into the slider (`the_footer_shows_the_volume…` renamed and re-asserted on the slider). The playing title comes from the library row with the playing path, else the file name (unit-tested). Not covered headlessly: the playing/paused look, which needs a sound device. Assess: medium, `under_budget`; branch at ~690 changed lines, over the 400 budget — the chain strategy is asked before the next commit.
+
+**L6** T3: RED observed (3 tests). One `list_row` lays out every list (library levels, files, queue, search): `▸ n. name  note …… fact`, `▶` and accent on the row that plays, selection changes only the background (SURFACE). The list header names the level and count (`▸─ Tide › Harbor  [1 track]`, `▸─ Search /d  [1 match]`). The shell test now looks for the wordmark `V E L O` instead of `velo`.
+
+**L7** (2026-11-07, user, asked how to split the branch into pull requests): "nada de pr tu sigue sumando commit en este worktree, y cuando termines con estas tareas que te faltan traete los cambios que esten en main y acutualiza la UI"
