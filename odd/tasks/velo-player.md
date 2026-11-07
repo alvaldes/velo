@@ -60,7 +60,7 @@ Root folder: `/Users/alvaldes/Music/Library` (L15). Metadata comes from tags fir
 | T4 | Library scan: jwalk + lofty + rusqlite schema, artist/album/track browser | S6 | inline (worker) | `8b42092` |
 | T5 | Play from the library and manage the queue | S11 | inline (worker) | `b931250` |
 | T6 | Pause, seek, volume with fades | S8 | inline (worker) + fixes `9a8dff1`, `8139a22` | `8e2c4bc` |
-| T7 | Fuzzy search with nucleo | S9 | inline | — |
+| T7 | Fuzzy search with nucleo | S9 | inline | `2282892` |
 | T8 | Cover art with ratatui-image | S10 | inline | — |
 | T9 | clap CLI, config TOML, `--help` | S12, S13 | inline | — |
 | T10 | README, install path (brew / cargo-binstall), release workflow | S3 | inline | — |
@@ -210,3 +210,11 @@ The rule that makes editing safe without renumerating the producer's index: **on
 One design decision worth keeping: `App::edit_queue` applies a mutation to the drawing mirror **and** to the `SharedQueue` the player reads, in one place. The alternative — two call sites that must remember to agree — is the kind of thing that works until the day someone adds a third.
 
 `queue_move_target` and `editable_queue_index_among` are pure, so the six refusal cases are pinned as rules rather than through a live player; the `on_key` wiring is pinned separately on the empty-queue path. The joint path (a refusal with a real device) is what the terminal run above confirms, because no test here can hold a sound card.
+
+**L28** (T7 closed in `2282892`): search is in, over the whole library, on `/`. Matching is case-insensitive, tolerates a subsequence (`mnlgt` finds `Moonlight`), and ranks a prefix above a scattered match. `Esc` restores the view and selection you left — including from the queue view — because the browse state is never written while a search is open.
+
+Two things worth keeping from how it was built. First, **the matcher is a pure struct**: query text plus a function from candidate strings to ranked indices, in its own module with no terminal, no library and no audio. That is the difference between seven tests that run in milliseconds and a feature nobody can pin. Second, a wrong test that nearly became a wrong implementation: the expectation was that `NIGHT` ranks `Night Drive` above `Moonlight Sonata`, and it does — but `Moonlight` also *contains* `night` as a subsequence, so the honest answer was `[1, 0]`, prefix first, and the test was fixed rather than the matcher. Fuzzy matchers are right far more often than the intuition that writes their assertions.
+
+Verified on the real library, not on fixtures: typing `lofi` lists `Lo-Fi Scientists` — a query with no hyphen matching a title that has one, which is the whole point.
+
+The docs had drifted while the code moved: the README still called the library database and search "not yet", and `--help` still carried the pre-T7 key line without `tab`, `a`, `d`, `J`/`K` or `/`. Both now describe what the binary actually does. A help screen that lies about the keymap is worse than no help screen.
