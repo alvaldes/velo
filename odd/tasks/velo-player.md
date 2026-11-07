@@ -64,7 +64,7 @@ Root folder: `/Users/alvaldes/Music/Library` (L15). Metadata comes from tags fir
 | T8 | Cover art with ratatui-image | S10 | inline | `feb8a43` |
 | T9 | clap CLI, config TOML, `--help` | S12, S13 | inline | `6b7f180` |
 | T10 | README, install path (brew / cargo-binstall), release workflow | S3 | inline | `5c28143` |
-| T11 | ReplayGain read + apply in the audio path | S15 | inline | — |
+| T11 | ReplayGain read + apply in the audio path | S15 | inline | `c8a418c` |
 | T12 | Subsonic/Navidrome backend | S14 | inline | — |
 | T13 | ReplayGain tag writer | S15 | inline | — |
 | T14 | Opus decode via a bundled `libopus` (`audiopus_sys`), keeping the single-binary promise | S5 | inline | — |
@@ -246,3 +246,11 @@ Three things worth keeping from this one:
 Scratch left outside the worktree by the delegation: `/tmp/velo-install` and `/tmp/velo-install-2` (install roots, disposable) plus a handful of `mktemp` directories; nothing in the repository.
 
 **L32** (what T10 did *not* do, so the row does not overclaim): the task line says "install path (brew / cargo-binstall)" and only half of that exists. `cargo install --path .`, `cargo install velo` after publishing, and the four prebuilt tarballs are real and verified. Homebrew needs a tap repository and `cargo-binstall` needs release assets named `velo-<target>.tar.gz` with the binary at a known depth — ours carry the tag in the name, which `cargo-binstall` will not find. Both are follow-ups, not promises.
+
+**L33** (T11 closed in `c8a418c`): `ReplayGain` is read from the file's tags with `lofty`, chosen per track (`track`, `album` with a track fallback, or `off`), converted from dB and multiplied into each block **on its way into the ring** — so the callback keeps its single job (copy, ramp, count) and the user's volume ramp behaves exactly as before. Clipping is prevented rather than hoped against: with a peak in the file, the applied gain is capped so `peak × gain ≤ 1.0`, and a value landing exactly on 1.0 is left alone. Without a peak the gain is applied as read, and the module says so.
+
+The proof is a fixture, not arithmetic: a constant-amplitude WAV tagged `-6.02 dB` drains at **half** its amplitude, and the same file with `replay_gain = "off"` drains unchanged, sample for sample.
+
+**The classification worth keeping**: the delegated half arrived as *partial*, honestly, because two call sites that build a player sat outside its edit surfaces. Wiring them exposed the same defect twice — `replay_gain` **and** the config's `volume` were both parsed, validated, stored, and then ignored, because the entry points those two call sites used predated them. The terminal said `vol 100%` with `volume = 70` written in the config file, which is how it was caught. A setting that parses and never arrives is worse than a setting that does not exist: the file claims otherwise, and the user has no way to tell the difference between "velo ignored me" and "velo is broken".
+
+So the check that closes a feature is not "does it parse" but **"does the value reach the code that acts on it"**, and the way to answer that is to look at the artifact: the volume readout after a seek (`vol 70%`, twice — before and after the player is rebuilt), not the test that proves `Settings` holds a 70.
