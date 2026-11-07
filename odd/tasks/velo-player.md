@@ -254,3 +254,18 @@ The proof is a fixture, not arithmetic: a constant-amplitude WAV tagged `-6.02 d
 **The classification worth keeping**: the delegated half arrived as *partial*, honestly, because two call sites that build a player sat outside its edit surfaces. Wiring them exposed the same defect twice — `replay_gain` **and** the config's `volume` were both parsed, validated, stored, and then ignored, because the entry points those two call sites used predated them. The terminal said `vol 100%` with `volume = 70` written in the config file, which is how it was caught. A setting that parses and never arrives is worse than a setting that does not exist: the file claims otherwise, and the user has no way to tell the difference between "velo ignored me" and "velo is broken".
 
 So the check that closes a feature is not "does it parse" but **"does the value reach the code that acts on it"**, and the way to answer that is to look at the artifact: the volume readout after a seek (`vol 70%`, twice — before and after the player is rebuilt), not the test that proves `Settings` holds a 70.
+
+---
+
+**L34 — handoff (session pause, not a closure).** Everything is committed: 42 commits on `main`, working tree clean except `.mise.toml`, which is the human's own and must stay unstaged. 16 suites green, clippy 0, `fmt` clean, `cargo install --path .` measured working.
+
+**Where the project stands.** Formats and gapless playback (T1, T2); a terminal interface (T3) browsing an index built from tags (T4, T5); transport with fade, seek and a clock (T6, fixed twice — the offset counted interleaved samples while the clock counted frames, L23); a library that survives broken files (T19) and mono tracks (T20); a command-line queue that knows its lengths (T21); search over everything (T7); cover art that never fakes itself and now explains when it hides (T8, T8b); a queue you can edit (T18a, T18b); `clap` with a strict config (T9); and ReplayGain applied before the ring (T11). It installs (T10).
+
+**Two things owed to a human, in this order:**
+1. **Cover art in a real terminal.** The drawing path is only verified up to "a protocol was detected and the size allows a pane"; no Kitty/Sixel/iTerm2 terminal was ever available here. Step 3 of L33's T8b entry prints the reason in the status line — `no image protocol` or `the window is NxM and cover art needs 100x28` — and that sentence is the whole diagnosis. Report which one appears.
+2. **A design review of the interface**, which the human has asked for and postponed until after the functional work. Cover art's placement depends on that conversation, so do not tune the art panel before it.
+
+**Next task, decided by the human's own ordering question.** T17 (bit-perfect: reopen the device per track) is unblocked — `bit_perfect` already exists in the config, resolved and passed through, with nothing reading it yet — and is the smaller of the two remaining substantial tasks. T12 (Subsonic/Navidrome) is the ambitious one and deserves a fresh context and its own design conversation: streaming versus caching, auth, XML versus JSON, and how a remote source coexists with the SQLite index. Do not start T12 by guessing those four answers.
+
+**Environment facts a fresh session must not rediscover:** Rust only through `mise exec -- cargo` (1.99.1 pinned); no remote is configured, so nothing is pushed and CI has never run; `.mise.toml` is the human's uncommitted work; commit style is the repo's Conventional Commits, one work unit each, docs entries recorded per task in this file.
+
