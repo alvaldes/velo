@@ -53,7 +53,7 @@ Status: MP3, FLAC, M4A/AAC, OGG Vorbis and WAV are decodable with symphonia 0.5.
 | ID | Task | Specs | Route | Commit |
 |:--|:--|:--|:--|:--|
 | T1 | Audio spike: decode with symphonia, output through cpal, lock-free ring buffer, gapless join between two tracks | S5, S7, S16 | inline | `cc2d967` |
-| T2 | Replace the spike's resampling with rubato; audible verification of the join | S7 | inline | — |
+| T2 | Replace the spike's resampling with rubato; audible verification of the join | S7 | inline (worker) | `a6adebc` |
 | T3 | ratatui skeleton: layout, keybindings, themes | S1 | inline | — |
 | T4 | Library scan: jwalk + lofty + rusqlite schema, artist/album/track browser | S6 | inline | — |
 | T5 | Play from the library and manage the queue | S11 | inline | — |
@@ -73,6 +73,8 @@ Status: MP3, FLAC, M4A/AAC, OGG Vorbis and WAV are decodable with symphonia 0.5.
 ### Slice boundaries
 
 - T1 (`cc2d967`, branch `feat/audio-engine`): **926 authored lines in one commit**, over the ~400-line work-unit budget. Splitting it after the fact was measured and rejected: the decode half alone is ~540 lines, so the split buys the reviewer nothing while breaking a compile-consistent commit. Recorded as a known deviation. From T2 on, each unit stays at or under ~400 authored lines, and a unit whose Risk line names a high-risk item gets its own commit.
+- T2 (`a6adebc`): **~700 authored lines** (`resample.rs` 290, `tests/resample.rs` 200, `output.rs` 62, docs), again over budget. The cause was bundling three things in one unit: the converter, the device-format selection, and the wiring. Accepted as recorded; T3 splits its own work into the shell and the keybinding layer so each commit stays reviewable.
+- **Delivery strategy for this branch:** no PR is open and none will be until the human decides. When it happens, `feat/audio-engine` splits into two PRs — `cc2d967` (decode + gapless) and `a6adebc` (rate conversion) — which is why they are separate commits with separate tests.
 
 ## Log
 
@@ -94,7 +96,9 @@ Interpretation: S1–S13 and S16–S17 are v1; S14 and S15 are required by the p
 
 **L7** (functional verification, T1): decoding works for FLAC, MP3, OGG Vorbis and WAV. Two real bugs surfaced and were fixed or tracked: (a) **M4A/AAC failed at open** because the container declares no channel layout until the decoder parses the first packet — `TrackSource::open` now decodes the first block and uses it as `pending`, with the spec taken from the decoder instead of the container (`tests/formats.rs`); (b) **AAC priming is not trimmed** by symphonia 0.5 for isomp4 (an MP3 of the same 2.00s trims to exactly 88 200 frames; the M4A decodes ~1 024 frames long), so AAC joins are not yet gapless — tracked as T16. Opus is rejected at probe time, as expected until T14.
 
-**L9** (product decision, verbatim):
+**L10** (T2 acceptance evidence): `cargo test` 10/10 (5 resample rules: exact passthrough, length within 1%, pitch within 20 Hz, level within 0.02, layout rejected), `cargo clippy --all-targets` 0 warnings, `cargo fmt --check` clean. A mixed-rate queue — 96 kHz FLAC, 44.1 kHz FLAC, 44.1 kHz MP3 — plays as one stream: exit 0, **zero underruns**. A mono track is still rejected with the same `SpecMismatch` message. The delegated writer found a genuine behavioural RED on its own: its first converter measured a 1 kHz tone at 1052.2 Hz because the resampler's startup ramp had not been dropped — a 5% pitch error that no length assertion would ever catch. Parent review then caught a defect no test covered: `flush()` computed `out_frames - target` without saturating, so a stalled resampler would panic in debug and discard the whole tail in release; fixed, and pinned with a test for the branch where the tail arrives only through `flush`.
+
+**L11** (T2 performance, resolved): on a debug build the 96 kHz sinc path spent ~2.9 s of CPU per 3 s of audio, which looked like a real-time risk. On a **release** build the same queue (3 × 1 s of 96 kHz FLAC through the sinc resampler) plays in 3.31 s wall time using **0.04 s of user CPU** — about 1.3% of one core — with zero underruns. No real-time risk to carry into the interface work; only note that a debug build is not representative of playback cost.
 > voy con tu recomendacion
 
 Interpretation: resample every track to the output format by default (T2), so a queue never stops; bit-perfect playback becomes an opt-in setting (T17) once the config system exists (T9), because an option nobody can configure is not an option. Channel-layout differences keep being rejected: converting a rate preserves pitch and level, remixing a layout does not preserve anything.: `cargo test` 5/5 green (3 gapless rules, 2 format rules); `cargo clippy --all-targets` 0 warnings; `cargo fmt --check` clean. Playing a quiet 440 Hz FLAC followed by a 660 Hz FLAC exits 0 with **zero underruns** — the first attempt reported 1 underrun, fixed by pre-filling the ring before the device starts and by counting an underrun only while the producer still has work. `velo /a.flac /mono.wav` rejects the join with `sample format mismatch: sequence is 44100 Hz/2 ch, track is 44100 Hz/1 ch` and exit code 1; a missing file exits 1; no arguments exits 2. MP3 of 2.00s reports exactly 88 200 frames, proving LAME's priming is trimmed.
