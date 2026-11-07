@@ -868,7 +868,11 @@ impl<'lib> App<'lib> {
             Position::Albums { .. } | Position::Tracks { .. } | Position::Genre { .. }
         );
         if deep && self.row_count() == 0 {
+            // Back to the top of the view, on whichever tab the user is: an
+            // index they did not start must not move them off the queue.
+            let view = self.view;
             self.browse_view(self.browse_by);
+            self.view = view;
             return;
         }
         let found = kept.and_then(|key| {

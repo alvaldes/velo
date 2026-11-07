@@ -152,7 +152,7 @@ impl Library {
         }
         let conn = Connection::open(path)?;
         if conn.is_readonly(rusqlite::MAIN_DB)?
-            && let Some(uri) = immutable_uri(path)
+            && let Some(uri) = read_only_uri(path, !has_wal_rows(path))
         {
             drop(conn);
             return Self::open_read_only(&uri);
@@ -167,10 +167,11 @@ impl Library {
         })
     }
 
-    /// Opens a file that cannot be written as `immutable`, so reading it
-    /// leaves no `-wal`/`-shm` files behind. Such files would keep the
-    /// file's read-only mode and block every write after it becomes
-    /// writable again.
+    /// Opens a file that cannot be written read-only. With no rows left in
+    /// its WAL it is opened `immutable`, so reading it leaves no `-wal`/`-shm`
+    /// files behind — such files would keep the file's read-only mode and
+    /// block every write after it becomes writable again. With rows still in
+    /// the WAL it is opened plainly read-only, so those rows are read.
     fn open_read_only(uri: &str) -> Result<Self, LibraryError> {
         let conn = Connection::open_with_flags(
             uri,
@@ -528,7 +529,7 @@ fn migrate(conn: &Connection) -> Result<(), LibraryError> {
 /// The `file:` URI that opens `path` read-only and `immutable`, or `None`
 /// when the path is not UTF-8. Bytes outside the unreserved set and `/` are
 /// percent-encoded, so `?`, `#` and `%` in a folder name stay part of it.
-fn immutable_uri(path: &Path) -> Option<String> {
+fn read_only_uri(path: &Path, immutable: bool) -> Option<String> {
     use std::fmt::Write as _;
     let mut uri = String::from("file:");
     for byte in path.to_str()?.bytes() {
@@ -538,8 +539,22 @@ fn immutable_uri(path: &Path) -> Option<String> {
             let _ = write!(uri, "%{byte:02X}");
         }
     }
-    uri.push_str("?mode=ro&immutable=1");
+    uri.push_str(if immutable {
+        "?mode=ro&immutable=1"
+    } else {
+        "?mode=ro"
+    });
     Some(uri)
+}
+
+/// Whether committed rows may still sit in the index's `-wal` file — a velo
+/// killed before it closed leaves them there. `immutable` would ignore them
+/// (fewer tracks, or no tables at all), so such an index is opened plainly
+/// read-only instead, at the cost of the `-shm` file SQLite then needs.
+fn has_wal_rows(path: &Path) -> bool {
+    let mut wal = path.as_os_str().to_owned();
+    wal.push("-wal");
+    std::fs::metadata(wal).is_ok_and(|metadata| metadata.len() > 0)
 }
 
 /// `artist`/`album`/`title` are declared `COLLATE NOCASE`, so grouping and

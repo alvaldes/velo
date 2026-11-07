@@ -1490,6 +1490,30 @@ fn an_album_that_disappeared_returns_to_the_top_of_its_view() {
     assert_eq!(app.artists().len(), 1);
 }
 
+/// Found by the T3 verifier: falling back to the top of the view also
+/// switched the tab, so a user on the queue was moved off it by an index
+/// they did not touch.
+#[test]
+fn an_index_that_empties_the_open_album_leaves_the_queue_tab_where_it_was() {
+    let temp = TempLibrary::new("finish-queue-tab");
+    let dawn = temp.write_wav("Tide/2019 - Harbor/01 - Dawn.wav");
+    temp.write_wav("Sea/2020 - Shore/01 - Low.wav");
+    temp.index();
+    let mut app = App::browse(Some(&temp.library));
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Tab);
+    assert_eq!(app.view(), View::Queue);
+
+    fs::remove_file(dawn).unwrap();
+    app.index_started(&temp.root);
+    app.index_finished(index_in_background(&temp));
+
+    assert_eq!(app.view(), View::Queue, "the tab stays");
+    assert_eq!(app.level(), Some(Level::Artists), "the library moved up");
+}
+
 #[test]
 fn a_failed_index_reports_its_error_and_ends() {
     let temp = TempLibrary::new("finish-error");

@@ -740,3 +740,44 @@ fn a_file_that_is_not_a_database_still_fails_to_open() {
     assert!(Library::open_at(&database).is_err());
     let _ = fs::remove_dir_all(&root);
 }
+
+/// A velo killed mid-session (a closed terminal, a crash) leaves committed
+/// rows in `index.db-wal`. Opening that index read-only must read them: the
+/// `immutable` open ignores the WAL and showed fewer tracks, or failed when
+/// every row was still there (found by the T2/T3 verifier).
+#[cfg(unix)]
+#[test]
+fn a_read_only_index_with_rows_still_in_its_wal_shows_every_row() {
+    let root = temp_root("readonly-wal");
+    let live = root.join("live").join("index.db");
+    let scratch = TempLibrary {
+        root: root.join("music"),
+        library: Library::open_at(&live).unwrap(),
+    };
+    tagged_wav(&scratch, "Tide", "Harbor", "Dawn", None);
+    tagged_wav(&scratch, "Tide", "Harbor", "Dusk", None);
+    tagged_wav(&scratch, "Solo", "Single", "One", None);
+    scratch.library.index(&scratch.root).unwrap();
+
+    // Copied while the writer still holds it open: the rows live in the WAL.
+    let copy = root.join("copy");
+    fs::create_dir_all(&copy).unwrap();
+    for name in ["index.db", "index.db-wal"] {
+        fs::copy(live.with_file_name(name), copy.join(name)).unwrap();
+    }
+    assert!(fs::metadata(copy.join("index.db-wal")).unwrap().len() > 0);
+    set_mode(&copy.join("index.db"), 0o444);
+
+    let opened = Library::open_at(&copy.join("index.db"));
+    set_mode(&copy.join("index.db"), 0o644);
+    let library = opened.expect("a read-only index with a WAL must open");
+    assert_eq!(
+        library.all_tracks().unwrap().len(),
+        3,
+        "every committed row"
+    );
+    assert_eq!(library.artists().unwrap().len(), 2);
+    drop(library);
+    drop(scratch);
+    let _ = fs::remove_dir_all(&root);
+}
