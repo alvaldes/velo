@@ -62,6 +62,9 @@ playable is an error naming the file, not `unsupported format`.
 **S8 — Undecodable stations are filtered before they reach the queue.**
 `codec` from the directory decides. The accepted set comes from the features
 compiled into symphonia, never a hardcoded list, because T14 may enable `opus`.
+A spelling the table does not recognise (blank, `unknown`) is **allowed**: the
+directory omits or fudges it often enough that hiding those stations would throw
+away playable ones, and a failure that names the codec is the better outcome.
 
 **S9 — The radio view follows the sketched layout.**
 `R` opens/closes it, `/` filters the focused list, `enter` enters a country or
@@ -76,7 +79,7 @@ is English. Footer shows `● live` instead of a position and total.
 |:--|:--|:--|:--|:--|
 | T1 | S4 | worker | `src/radio/icy.rs`: ICY length-prefixed demux over a `Read`, `StreamTitle` extraction, passthrough when no metaint | `b9bb2c2` |
 | T2 | S7 | worker | `src/radio/lists.rs`: PLS and M3U parse to the first playable entry | `f804a64` |
-| T3 | S1, S8 | worker | `src/radio/{client,directory}.rs`: Radio Browser client, indexes, station search, codec filter from symphonia features | |
+| T3 | S1, S8 | worker | `src/radio/{client,directory}.rs`: Radio Browser client, indexes, station search, codec filter from symphonia features | `a0f946a` |
 | T4 | S5 | worker | `src/radio/store.rs`: atomic `radio.toml` for favourites, pins and hand-added stations | |
 | T5 | S2, S3 | parent | stream engine: `MediaSource` over the HTTP body, queue entry `File \| Station`, live semantics; **blocked on the other session's T15 (symphonia 0.6)** | |
 | T6 | S9 | parent | radio view in `src/ui/mod.rs`; **serialised with the other session's artwork work** | |
@@ -146,3 +149,32 @@ forward:
   in the wild and leniency there was not worth untested code.
 
 **Slice 2** closes with T2 (`f804a64`, 282 lines). **T3 opens slice 3.**
+
+**L8** — T3 closed (`a0f946a`, 853 lines in four files: 19 tests green, clippy
+`-D warnings` clean, whole suite untouched). Parent review changed two things and
+added one obligation:
+
+- **S8 rewritten**: an unrecognised `codec` (blank or `unknown`) is now allowed,
+  not filtered. The worker had it rejecting them; the directory omits or fudges
+  that field often enough that a whitelist would hide playable stations, and the
+  cost of being wrong is one decode error that names the codec. Known codecs
+  still answer from the registry.
+- **`opus` became a table row** (`CODEC_TYPE_OPUS` exists in symphonia-core
+  0.5.5 even though no opus decoder is compiled in), so the filter answers false
+  for it today and flips by itself the day T14 enables the feature — which is what
+  "never a hardcoded list" was supposed to mean. Pinned by a test.
+- **The transport is deliberately duplicated.** `subsonic::client::HttpTransport`
+  is reachable, but it returns Subsonic's error type and sends no `User-Agent`, so
+  meeting the radio contract through it would mean editing a file another session
+  owns. `src/radio/client.rs` carries its own same-shape `Transport` trait.
+  Follow-up: unify the two once `src/subsonic/**` is free again.
+- **Obligation for T5**: the JSON client's agent uses `timeout_global(10 s)`, which
+  is right for one-shot GETs and fatal for an endless body. T5 must not reuse this
+  agent for audio; S2 already requires per-operation timeouts there.
+
+**Slice 3** is T3 alone (`a0f946a`): 853 authored lines, over the ~400-line
+review slice. It is offered as one review on purpose — the client contract and the
+codec seam are one behaviour pinned by one test file, and splitting the file would
+have cost more than it bought — but it is recorded here so the reviewer knows the
+size before opening it. **T4 and T7 stay small; the next task over ~400 lines gets
+split at delegation time, not after.**
