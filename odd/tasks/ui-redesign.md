@@ -38,6 +38,7 @@ Chosen: the terminal (see L17).
 | T6 | Cover art from the folder (`cover`/`folder`/`front` `.jpg`/`.png`) when the file embeds none | S1, S3 | inline | `2053d98` |
 | T7 | The volume number takes three columns so the right-aligned slider stops jumping | S1 | inline | `d47ce9a` |
 | T9 | Redraw at ~30 fps only while the spectrum is on screen and moving (review advisory R4) | S2, S4 | inline | `496bdbf` |
+| T10 | Show the `ReplayGain` mode (from `main`'s T11) beside the volume | S1, S3 | inline | `4037539` |
 | T8 | Theme from the terminal: its own background and text, roles mapped to the ANSI palette | S5 | inline | `cefaa2a` |
 
 ## Log
@@ -79,3 +80,5 @@ Chosen: the terminal (see L17).
 **L18** T8 (`cefaa2a`): RED observed (2 tests: the selection test re-asserted for the new design, and a new palette test — no fixed RGB role, the terminal's own background). All suites, clippy and fmt green; the 80×24 golden text is unchanged. README says velo wears the terminal's colors and mentions the spectrum.
 
 **L19** (2026-11-07, user): "arregla lo de los 30 fps cuando no se ve el espectro". T9 (`496bdbf`): RED observed (compile: `cadence` missing). `draw` zeroes the band count each frame and `draw_spectrum` sets it only when the block has room, so `frame_interval` knows whether bars are on screen; the rule is the pure `cadence(visible, playing, falling)`, tested over its five cases. The tap is still drained every tick (L13). All suites, clippy and fmt green.
+
+**L20** (2026-11-07, user): "trae los cambios de main y actualiza la UI". Merged `main` (T11 ReplayGain, `2a0efbb`) with no textual conflicts although both sides touched `src/audio/output.rs`, `src/ui/mod.rs` and `src/bin/velo.rs`. Checked the seam: ReplayGain is applied on the producer thread before the ring, so the spectrum tap sees the normalized music before the volume — the bars do not jump with mastering. `set_volume` from the config feeds the slider before a player exists. T10 (`4037539`): RED observed (1 test); the transport row shows `RG track|album|off` in the config's words, padded so the slider never moves; golden and README row re-recorded. fmt, clippy, all 17 suites green.
