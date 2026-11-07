@@ -74,7 +74,7 @@ is English. Footer shows `● live` instead of a position and total.
 
 | ID | Spec | Route | Task | Commit |
 |:--|:--|:--|:--|:--|
-| T1 | S4 | worker | `src/radio/icy.rs`: ICY length-prefixed demux over a `Read`, `StreamTitle` extraction, passthrough when no metaint | |
+| T1 | S4 | worker | `src/radio/icy.rs`: ICY length-prefixed demux over a `Read`, `StreamTitle` extraction, passthrough when no metaint | `b9bb2c2` |
 | T2 | S7 | worker | `src/radio/lists.rs`: PLS and M3U parse to the first playable entry | |
 | T3 | S1, S8 | worker | `src/radio/{client,directory}.rs`: Radio Browser client, indexes, station search, codec filter from symphonia features | |
 | T4 | S5 | worker | `src/radio/store.rs`: atomic `radio.toml` for favourites, pins and hand-added stations | |
@@ -110,3 +110,20 @@ not written against symphonia 0.5; `src/ui/mod.rs` writes are serialised.
 **L5** — user: "Cuando puedas y estes listo ya puedes crear el worktree y comenzar
 a trabajar" — worktree `.worktrees/radio` on branch `feat/radio`, started from
 `46ca28a`.
+
+**L6** — T1 closed (`b9bb2c2`, 363 lines in four files: 13 tests green, clippy
+`-D warnings` clean, full suite unchanged). Two corrections came out of it:
+
+- The delegation asked for an `InvalidData` error on a metadata block larger than
+  4080 bytes. That cannot happen: `L` is one wire byte, so `L × 16 ≤ 4080` by
+  construction. The worker refused to fake a RED test for it and pinned the
+  reachable boundary (`L = 255`, 4080 bytes) instead; the parent then removed the
+  unreachable guard rather than ship a branch no test can enter. **The bound to
+  validate is a corrupt `Icy-Metaint` header, and that belongs to T5.**
+- `metaint = 0` is treated as passthrough: a zero interval would never advance.
+  Documented in the code, not requested.
+
+**Slice boundary** — slice 1 is this logbook plus T1 (`444db77`, `b9bb2c2`), 475
+authored lines: past the ~400-line review slice, so slice 2 starts at T2 and the
+two are offered as separate reviews. Each task keeps its own commit, tests and
+docs in that commit, and no task is split across slices.
