@@ -80,6 +80,30 @@ pub fn pane(area: Rect) -> Option<Rect> {
     })
 }
 
+/// Why a cover that exists is not on screen, in one sentence.
+///
+/// Art that is silently absent is indistinguishable from art that is broken.
+/// This is the difference: no picture, no protocol and too small a window all
+/// end with nothing drawn, and only the last two are worth telling the user.
+#[must_use]
+pub fn hidden_reason(has_protocol: bool, has_art: bool, area: Rect) -> Option<String> {
+    if !has_art {
+        return None;
+    }
+    if !has_protocol {
+        return Some(
+            "this terminal reported no image protocol (kitty, sixel or iterm2)".to_owned(),
+        );
+    }
+    if pane(area).is_some() {
+        return None;
+    }
+    Some(format!(
+        "the window is {}x{} and cover art needs {ART_MIN_COLUMNS}x{ART_MIN_ROWS}",
+        area.width, area.height
+    ))
+}
+
 /// One-time detection at startup: asks the terminal which graphics protocol
 /// it speaks. `None` means draw no art — not a terminal, or a terminal that
 /// supports none of the protocols; the half-block fallback of `ratatui-image`

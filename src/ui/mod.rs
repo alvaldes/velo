@@ -162,6 +162,10 @@ pub struct App<'lib> {
     /// The handle the running player reads its queue from, so an edit reaches
     /// the audio instead of only the screen (T18).
     shared: Option<SharedQueue>,
+    /// The area the last frame was drawn into, so a hidden cover can say why.
+    seen_area: std::cell::Cell<Rect>,
+    /// Whether the reason a cover is missing has already been said.
+    art_explained: bool,
     /// The open search, if any (T7). While it is open the body lists its
     /// results and nearly every key types into it; the browse state below this
     /// field is never touched, which is how `Esc` restores it exactly.
@@ -212,6 +216,8 @@ impl<'lib> App<'lib> {
             view: View::Library,
             queue_selected: 0,
             shared: None,
+            seen_area: std::cell::Cell::new(Rect::new(0, 0, 0, 0)),
+            art_explained: false,
             search: None,
             search_pool: Vec::new(),
             search_haystacks: Vec::new(),
@@ -246,6 +252,8 @@ impl<'lib> App<'lib> {
             view: View::Library,
             queue_selected: 0,
             shared: None,
+            seen_area: std::cell::Cell::new(Rect::new(0, 0, 0, 0)),
+            art_explained: false,
             search: None,
             search_pool: Vec::new(),
             search_haystacks: Vec::new(),
@@ -389,6 +397,7 @@ impl<'lib> App<'lib> {
     /// player there is nothing to collect.
     pub fn tick(&mut self) {
         self.refresh_artwork();
+        self.explain_hidden_art();
         let Some(player) = &self.player else {
             return;
         };
@@ -414,6 +423,22 @@ impl<'lib> App<'lib> {
     /// only then: the file is read once per track, never per frame, and never
     /// from the audio callback (T8). A track whose file carries no picture
     /// draws no art until a different track plays.
+    /// Tells the user once why a cover they own is not on screen, instead of
+    /// leaving them staring at a panel that never appears (T8).
+    fn explain_hidden_art(&mut self) {
+        if self.art_explained || !self.status.is_empty() {
+            return;
+        }
+        let area = self.seen_area.get();
+        let Some(reason) =
+            artwork::hidden_reason(self.picker.is_some(), self.artwork.is_some(), area)
+        else {
+            return;
+        };
+        self.status = format!("velo: cover art hidden — {reason}");
+        self.art_explained = true;
+    }
+
     fn refresh_artwork(&mut self) {
         let path = self.playing_path().map(Path::to_path_buf);
         if path == self.artwork_path {
@@ -422,6 +447,8 @@ impl<'lib> App<'lib> {
         self.protocol.borrow_mut().take();
         self.artwork = path.as_deref().and_then(Artwork::from_path);
         self.artwork_path = path;
+        // A new track deserves its own explanation.
+        self.art_explained = false;
     }
 
     /// Re-reads the artists snapshot from the index, e.g. right after
@@ -559,6 +586,7 @@ impl<'lib> App<'lib> {
     /// Renders the interface. Reads state, changes nothing.
     pub fn draw(&self, frame: &mut Frame) {
         let area = frame.area();
+        self.seen_area.set(area);
         frame.render_widget(Block::new().style(Style::new().bg(BACKGROUND)), area);
 
         let [header, body, footer] = Layout::vertical([

@@ -177,3 +177,21 @@ fn art_never_takes_more_than_a_quarter_of_the_width() {
         }
     }
 }
+
+#[test]
+fn a_hidden_cover_says_why_instead_of_vanishing() {
+    use ratatui::layout::Rect;
+    use velo::ui::artwork::hidden_reason;
+
+    // No picture at all: nothing to explain, and nothing to apologise for.
+    assert!(hidden_reason(true, false, Rect::new(0, 0, 120, 40)).is_none());
+    // A picture, a protocol, room for it: it is on screen, nothing to say.
+    assert!(hidden_reason(true, true, Rect::new(0, 0, 120, 40)).is_none());
+    // A picture and nowhere to draw it: the window is the reason.
+    let too_small = hidden_reason(true, true, Rect::new(0, 0, 96, 24)).expect("a reason");
+    assert!(too_small.contains("96x24"), "{too_small}");
+    assert!(too_small.contains("100x28"), "{too_small}");
+    // A picture and a terminal that speaks no graphics protocol.
+    let no_protocol = hidden_reason(false, true, Rect::new(0, 0, 120, 40)).expect("a reason");
+    assert!(no_protocol.contains("no image protocol"), "{no_protocol}");
+}
