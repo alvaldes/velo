@@ -912,5 +912,149 @@ fn the_help_names_the_key_that_refreshes_the_index() {
     let mut app = App::browse(None);
     press(&mut app, KeyCode::Char('?'));
     let screen = screen_at(&app, 80, 24);
-    assert!(screen.contains("refresh the index"), "{screen}");
+    assert!(screen.contains("refresh the library index"), "{screen}");
+}
+
+// ---- the help scrolls and filters (help-and-advisories T1, S1) -------------
+
+/// The help card open on `app`, drawn at 80×14: too short for every row.
+fn help_at_80x14(app: &App) -> String {
+    screen_at(app, 80, 14)
+}
+
+#[test]
+fn the_help_scrolls_with_j_k_and_jumps_with_g_and_shift_g() {
+    let mut app = App::new(tracks(&["one.flac"]));
+    press(&mut app, KeyCode::Char('?'));
+    let screen = help_at_80x14(&app);
+    assert!(
+        screen.contains("1–12 of 24"),
+        "where the card is:\n{screen}"
+    );
+    assert!(screen.contains("j / Down"), "{screen}");
+    assert!(!screen.contains("quit"), "the last row is below:\n{screen}");
+
+    press(&mut app, KeyCode::Char('j'));
+    let screen = help_at_80x14(&app);
+    assert!(screen.contains("2–13 of 24"), "{screen}");
+    assert!(
+        !screen.contains("j / Down"),
+        "the first row scrolled off:\n{screen}"
+    );
+
+    press(&mut app, KeyCode::Down);
+    assert!(help_at_80x14(&app).contains("3–14 of 24"));
+    press(&mut app, KeyCode::Char('k'));
+    press(&mut app, KeyCode::Up);
+    press(&mut app, KeyCode::Up);
+    assert!(
+        help_at_80x14(&app).contains("1–12 of 24"),
+        "k stops at the top"
+    );
+
+    press(&mut app, KeyCode::Char('G'));
+    let screen = help_at_80x14(&app);
+    assert!(screen.contains("13–24 of 24"), "{screen}");
+    assert!(screen.contains("quit"), "{screen}");
+    press(&mut app, KeyCode::Char('j'));
+    assert!(
+        help_at_80x14(&app).contains("13–24 of 24"),
+        "j stops at the end"
+    );
+
+    press(&mut app, KeyCode::Char('g'));
+    assert!(help_at_80x14(&app).contains("1–12 of 24"));
+}
+
+#[test]
+fn a_help_that_fits_shows_no_position() {
+    let mut app = App::new(tracks(&["one.flac"]));
+    press(&mut app, KeyCode::Char('?'));
+    let screen = screen_at(&app, 80, 30);
+    assert!(
+        screen.contains("quit") && screen.contains("j / Down"),
+        "{screen}"
+    );
+    assert!(!screen.contains(" of 24"), "{screen}");
+}
+
+#[test]
+fn slash_filters_the_help_and_says_when_nothing_matches() {
+    let mut app = App::new(tracks(&["one.flac"]));
+    press(&mut app, KeyCode::Char('?'));
+    press(&mut app, KeyCode::Char('/'));
+    for character in "SEEK".chars() {
+        press(&mut app, KeyCode::Char(character));
+    }
+    let screen = help_at_80x14(&app);
+    assert!(screen.contains("/ SEEK"), "the filter shows:\n{screen}");
+    assert!(
+        screen.contains("← / →") && screen.contains(", / ."),
+        "{screen}"
+    );
+    assert_eq!(screen.matches("seek 5 s").count(), 2, "{screen}");
+    assert!(!screen.contains("first track"), "{screen}");
+    assert!(!screen.contains(" of "), "two rows fit:\n{screen}");
+
+    for _ in 0..4 {
+        press(&mut app, KeyCode::Backspace);
+    }
+    for character in "zzz".chars() {
+        press(&mut app, KeyCode::Char(character));
+    }
+    let screen = help_at_80x14(&app);
+    assert!(screen.contains("/ zzz"), "{screen}");
+    assert!(screen.contains("no key matches"), "{screen}");
+    assert!(!screen.contains("seek 5 s"), "{screen}");
+}
+
+#[test]
+fn enter_keeps_the_filter_and_j_k_scroll_again() {
+    let mut app = App::new(tracks(&["one.flac"]));
+    press(&mut app, KeyCode::Char('?'));
+    press(&mut app, KeyCode::Char('/'));
+    press(&mut app, KeyCode::Char('e'));
+    let typing = help_at_80x14(&app);
+    let total = typing
+        .split(" of ")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .unwrap_or_else(|| panic!("many rows match e:\n{typing}"))
+        .to_owned();
+    press(&mut app, KeyCode::Char('j'));
+    assert!(help_at_80x14(&app).contains("/ ej"), "j types while typing");
+    press(&mut app, KeyCode::Backspace);
+
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Char('j'));
+    let screen = help_at_80x14(&app);
+    assert!(screen.contains("/ e"), "the filter stays:\n{screen}");
+    assert!(!screen.contains("/ ej"), "{screen}");
+    assert!(
+        screen.contains(&format!("2–12 of {total}")) || screen.contains("2–"),
+        "{screen}"
+    );
+    assert!(screen.contains(&format!(" of {total}")), "{screen}");
+}
+
+#[test]
+fn the_help_brings_back_the_library_rows() {
+    let mut app = App::new(tracks(&["one.flac"]));
+    press(&mut app, KeyCode::Char('?'));
+    press(&mut app, KeyCode::Char('/'));
+    for character in "library".chars() {
+        press(&mut app, KeyCode::Char(character));
+    }
+    let screen = screen_at(&app, 80, 24);
+    for row in [
+        "set the library folder",
+        "refresh the library index",
+        "no library set: a prompt asks for its path, tab completes",
+    ] {
+        assert!(screen.contains(row), "{row:?} in:\n{screen}");
+    }
+    assert!(
+        !screen.contains("L / u"),
+        "the merged row is gone:\n{screen}"
+    );
 }

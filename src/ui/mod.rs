@@ -332,7 +332,8 @@ pub struct App<'lib> {
     /// mutability because `draw` takes `&self`: the stateful protocol re-encodes
     /// only when its area changes, so redrawing stays cheap.
     protocol: RefCell<Option<Box<dyn StatefulProtocol>>>,
-    help: bool,
+    /// The help card while it is open: its scroll and its filter (S1).
+    help: Option<Help>,
     /// Present while no library root is set (S4): the empty browser then
     /// says how to set one, and while its prompt is open every key edits it.
     library_setup: Option<LibrarySetup>,
@@ -390,7 +391,7 @@ impl<'lib> App<'lib> {
             artwork: None,
             artwork_path: None,
             protocol: RefCell::new(None),
-            help: false,
+            help: None,
             library_setup: None,
             config_file: None,
             library_root: None,
@@ -440,7 +441,7 @@ impl<'lib> App<'lib> {
             artwork: None,
             artwork_path: None,
             protocol: RefCell::new(None),
-            help: false,
+            help: None,
             library_setup: None,
             config_file: None,
             library_root: None,
@@ -703,7 +704,7 @@ impl<'lib> App<'lib> {
     /// Whether the help overlay is open.
     #[must_use]
     pub const fn help_open(&self) -> bool {
-        self.help
+        self.help.is_some()
     }
 
     /// The volume, in percent.
@@ -971,6 +972,11 @@ impl<'lib> App<'lib> {
         if self.library_prompt_open() {
             return self.on_prompt_key(event.code);
         }
+        // An open help owns every key too, so `j`/`k` scroll it and never
+        // the list underneath.
+        if self.help.is_some() {
+            return self.on_help_key(event.code);
+        }
 
         match event.code {
             KeyCode::Char('j') | KeyCode::Down => {
@@ -1044,7 +1050,7 @@ impl<'lib> App<'lib> {
                 Action::SetRepeat(self.repeat)
             }
             KeyCode::Char('?') => {
-                self.help = !self.help;
+                self.help = Some(Help::default());
                 Action::None
             }
             KeyCode::Char('/') if self.library.is_some() => {
@@ -1052,9 +1058,7 @@ impl<'lib> App<'lib> {
                 Action::None
             }
             KeyCode::Esc | KeyCode::Backspace => {
-                // `Esc` closes the help overlay when it is open, before it
-                // would ascend; ascending is browse-only.
-                self.help = false;
+                // Ascending is browse-only; an open help took `Esc` above.
                 if matches!(self.position, Position::Files) {
                     Action::None
                 } else {
@@ -1160,6 +1164,45 @@ impl<'lib> App<'lib> {
         }
     }
 
+    /// The keys while the help is open (S1): `j`/`k`/`↓`/`↑` scroll it,
+    /// `g`/`G` jump to its ends, `/` starts a filter that printable keys type
+    /// into until `Enter`; `Esc` clears a filter before it closes the help,
+    /// `?` closes it at once. Nothing reaches the list underneath.
+    fn on_help_key(&mut self, code: ratatui::crossterm::event::KeyCode) -> Action {
+        use ratatui::crossterm::event::KeyCode;
+
+        let area = self.seen_area.get();
+        let Some(help) = &mut self.help else {
+            return Action::None;
+        };
+        let last_top = help.last_top(area);
+        match code {
+            KeyCode::Esc if help.filtering() => {
+                help.filter.clear();
+                help.typing = false;
+                help.top = 0;
+            }
+            KeyCode::Enter if help.typing => help.typing = false,
+            KeyCode::Backspace if help.typing => {
+                help.filter.pop();
+                help.top = 0;
+            }
+            KeyCode::Char(character) if help.typing => {
+                help.filter.push(character);
+                help.top = 0;
+            }
+            // While typing, `j`, `k` and `?` were typed above.
+            KeyCode::Char('j') | KeyCode::Down => help.top = (help.top + 1).min(last_top),
+            KeyCode::Char('k') | KeyCode::Up => help.top = help.top.saturating_sub(1),
+            KeyCode::Char('g') => help.top = 0,
+            KeyCode::Char('G') => help.top = last_top,
+            KeyCode::Char('/') => help.typing = true,
+            KeyCode::Char('?') | KeyCode::Esc => self.help = None,
+            _ => {}
+        }
+        Action::None
+    }
+
     /// Accepts the typed library path when it names a directory: saves it to
     /// the config file as typed, closes the prompt and hands the expanded
     /// root to the shell. Otherwise the prompt stays open and says why.
@@ -1251,8 +1294,8 @@ impl<'lib> App<'lib> {
         self.draw_body(frame, body);
         self.draw_footer(frame, footer);
         self.draw_artwork(frame, pane);
-        if self.help {
-            Self::draw_help(frame, area);
+        if let Some(help) = &self.help {
+            Self::draw_help(frame, area, help);
         }
         if let Some(prompt) = self.library_prompt() {
             Self::draw_library_prompt(frame, area, prompt);
@@ -1867,67 +1910,70 @@ impl<'lib> App<'lib> {
         from_row.or_else(|| player.current_duration())
     }
 
-    fn draw_help(frame: &mut Frame, area: Rect) {
-        let rows = [
-            ("j / Down", "move down"),
-            ("k / Up", "move up"),
-            ("g", "first track"),
-            ("G", "last track"),
-            ("enter", "open, or play from the selection"),
-            ("esc", "back one level / close help"),
-            ("L / u", "set the library / refresh the index"),
-            ("/", "search the whole library"),
-            ("space", "pause / resume"),
-            ("← / →", "seek 5 s back / forward"),
-            (", / .", "seek 5 s back / forward"),
-            ("n / p", "next / previous track"),
-            ("s", "shuffle what is left of the queue"),
-            ("r", "repeat: off, all, one"),
-            ("+ / -", "volume up / down"),
-            ("?", "toggle this help"),
-            ("tab", "library / queue"),
-            ("1 2 3 4", "artists, albums, tracks, genres"),
-            ("a", "add the selection to the queue"),
-            ("d", "remove from the queue"),
-            ("J / K", "move it down / up"),
-            ("q", "quit"),
-        ];
-        let key_width = rows
+    /// The help card (S1): every key, as tall as the window allows, scrolled
+    /// to `help.top`, with the filter under the title while there is one and
+    /// where it is (`12–20 of 26`) on its bottom edge when it does not fit.
+    fn draw_help(frame: &mut Frame, area: Rect, help: &Help) {
+        let key_width = HELP_ROWS
             .iter()
             .map(|(key, _)| key.chars().count())
             .max()
             .unwrap_or(0);
-        let label_width = rows
+        let label_width = HELP_ROWS
             .iter()
             .map(|(_, label)| label.chars().count())
             .max()
             .unwrap_or(0);
+        // Measured on every row, so filtering never makes the card jump.
         // Two border columns, one of air per side, three between the columns.
         let width = u16::try_from(key_width + 3 + label_width + 4).unwrap_or(area.width);
-        let height = u16::try_from(rows.len() + 2).unwrap_or(area.height);
+        let rows = help.rows();
+        let shown = help.shown_rows(area);
+        let top = help.top.min(help.last_top(area));
+        // The line that says nothing matches stands in for the rows.
+        let body = shown.max(usize::from(rows.is_empty()));
+        let height = u16::try_from(body + help.header_lines() + 2).unwrap_or(area.height);
         let box_area = centered(area, width, height);
 
+        let mut text: Vec<Line> = Vec::new();
+        if help.filtering() {
+            let mut filter = vec![
+                Span::styled("/ ", Style::new().fg(SECONDARY)),
+                Span::styled(help.filter.clone(), Style::new().fg(ACCENT)),
+            ];
+            if help.typing {
+                filter.push(Span::styled("▏", Style::new().fg(SECONDARY)));
+            }
+            text.push(Line::from(filter));
+        }
+        if rows.is_empty() {
+            text.push(Line::styled(
+                format!("no key matches “{}”", help.filter),
+                Style::new().fg(DIM),
+            ));
+        }
+        text.extend(rows.iter().skip(top).take(shown).map(|(key, label)| {
+            Line::from(vec![
+                Span::styled(format!("{key:<key_width$}   "), Style::new().fg(SECONDARY)),
+                Span::styled((*label).to_owned(), Style::new().fg(TEXT)),
+            ])
+        }));
+
+        let mut card = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(Style::new().fg(ACCENT))
+            .title(Span::styled(" keys ", Style::new().fg(ACCENT).bold()))
+            .padding(ratatui::widgets::Padding::horizontal(1))
+            .style(Style::new().bg(BACKGROUND));
+        if !help.filtering() {
+            card = card.title_bottom(Line::styled(" / filter ", Style::new().fg(DIM)));
+        }
+        if shown < rows.len() {
+            let position = format!(" {}–{} of {} ", top + 1, top + shown, rows.len());
+            card = card.title_bottom(Line::styled(position, Style::new().fg(DIM)).right_aligned());
+        }
         frame.render_widget(Clear, box_area);
-        let text: Vec<Line> = rows
-            .iter()
-            .map(|(key, label)| {
-                Line::from(vec![
-                    Span::styled(format!("{key:<key_width$}   "), Style::new().fg(SECONDARY)),
-                    Span::styled((*label).to_owned(), Style::new().fg(TEXT)),
-                ])
-            })
-            .collect();
-        frame.render_widget(
-            Paragraph::new(text).block(
-                Block::bordered()
-                    .border_type(BorderType::Rounded)
-                    .border_style(Style::new().fg(ACCENT))
-                    .title(Span::styled(" keys ", Style::new().fg(ACCENT).bold()))
-                    .padding(ratatui::widgets::Padding::horizontal(1))
-                    .style(Style::new().bg(BACKGROUND)),
-            ),
-            box_area,
-        );
+        frame.render_widget(Paragraph::new(text).block(card), box_area);
     }
 
     /// The library prompt: a rounded card, centred like the help, with the
@@ -2977,6 +3023,89 @@ fn pad(area: Rect) -> Rect {
 fn mmss(duration: Duration) -> String {
     let seconds = duration.as_secs();
     format!("{:02}:{:02}", seconds / 60, seconds % 60)
+}
+
+/// Every row of the help card: the key, then what it does.
+const HELP_ROWS: [(&str, &str); 24] = [
+    ("j / Down", "move down"),
+    ("k / Up", "move up"),
+    ("g", "first track"),
+    ("G", "last track"),
+    ("enter", "open, or play from the selection"),
+    ("esc", "back one level / close help"),
+    ("/", "search the whole library"),
+    ("space", "pause / resume"),
+    ("← / →", "seek 5 s back / forward"),
+    (", / .", "seek 5 s back / forward"),
+    ("n / p", "next / previous track"),
+    ("s", "shuffle what is left of the queue"),
+    ("r", "repeat: off, all, one"),
+    ("+ / -", "volume up / down"),
+    ("?", "toggle this help"),
+    ("tab", "library / queue"),
+    ("1 2 3 4", "artists, albums, tracks, genres"),
+    ("L", "set the library folder"),
+    ("u", "refresh the library index"),
+    (
+        "",
+        "no library set: a prompt asks for its path, tab completes",
+    ),
+    ("a", "add the selection to the queue"),
+    ("d", "remove from the queue"),
+    ("J / K", "move it down / up"),
+    ("q", "quit"),
+];
+
+/// The open help card (S1): which row is at its top and what it is
+/// filtered by. Nothing here touches the filesystem.
+#[derive(Debug, Default)]
+struct Help {
+    /// The first row in view.
+    top: usize,
+    /// The text typed after `/`; a row stays when its key or what it does
+    /// contains it, ignoring case.
+    filter: String,
+    /// Whether printable keys type into the filter (between `/` and `Enter`).
+    typing: bool,
+}
+
+impl Help {
+    /// The rows the filter keeps, in their order.
+    fn rows(&self) -> Vec<(&'static str, &'static str)> {
+        let needle = self.filter.to_lowercase();
+        HELP_ROWS
+            .iter()
+            .filter(|(key, label)| {
+                key.to_lowercase().contains(&needle) || label.to_lowercase().contains(&needle)
+            })
+            .copied()
+            .collect()
+    }
+
+    /// Whether a filter is being typed or kept; `Esc` clears it first.
+    fn filtering(&self) -> bool {
+        self.typing || !self.filter.is_empty()
+    }
+
+    /// The lines above the rows: the filter's, while there is one.
+    fn header_lines(&self) -> usize {
+        usize::from(self.filtering())
+    }
+
+    /// How many rows fit in `area`: all of them before the first draw.
+    fn shown_rows(&self, area: Rect) -> usize {
+        let rows = self.rows().len();
+        if area.height == 0 {
+            return rows;
+        }
+        let room = usize::from(area.height).saturating_sub(2 + self.header_lines());
+        rows.min(room)
+    }
+
+    /// The row at the top when the last row is at the bottom.
+    fn last_top(&self, area: Rect) -> usize {
+        self.rows().len() - self.shown_rows(area)
+    }
 }
 
 /// A `width` × `height` rectangle centred in `area`, clamped to fit.

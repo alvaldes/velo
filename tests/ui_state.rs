@@ -1532,3 +1532,45 @@ fn a_failed_index_reports_its_error_and_ends() {
     let error = outcome.expect_err("/dev/null holds no directory");
     assert!(error.contains("cannot open the index"), "{error}");
 }
+
+#[test]
+fn an_open_help_owns_the_keys_and_esc_clears_its_filter_before_closing() {
+    let mut app = app_with_three_tracks();
+    press(&mut app, KeyCode::Char('?'));
+
+    // j/k/G scroll the help, never the list underneath.
+    for code in [
+        KeyCode::Char('j'),
+        KeyCode::Down,
+        KeyCode::Char('G'),
+        KeyCode::Char('k'),
+    ] {
+        assert_eq!(app.on_key(key(code)), Action::None);
+    }
+    assert_eq!(app.selected(), 0, "the library selection never moved");
+
+    // A filter: printable keys type into it, `q` included.
+    press(&mut app, KeyCode::Char('/'));
+    assert_eq!(app.on_key(key(KeyCode::Char('q'))), Action::None);
+    assert!(app.help_open());
+    press(&mut app, KeyCode::Enter);
+
+    // The first `Esc` clears the filter, the second closes the help.
+    press(&mut app, KeyCode::Esc);
+    assert!(app.help_open(), "esc cleared the filter first");
+    press(&mut app, KeyCode::Esc);
+    assert!(!app.help_open(), "esc with no filter closes the help");
+    assert_eq!(app.selected(), 0);
+
+    // `?` closes it too, filter or not.
+    press(&mut app, KeyCode::Char('?'));
+    press(&mut app, KeyCode::Char('/'));
+    press(&mut app, KeyCode::Char('x'));
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Char('?'));
+    assert!(!app.help_open());
+
+    // Closed again, j moves the list as before.
+    press(&mut app, KeyCode::Char('j'));
+    assert_eq!(app.selected(), 1);
+}
