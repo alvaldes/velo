@@ -62,7 +62,7 @@ Root folder: `/Users/alvaldes/Music/Library` (L15). Metadata comes from tags fir
 | T6 | Pause, seek, volume with fades | S8 | inline (worker) + fixes `9a8dff1`, `8139a22` | `8e2c4bc` |
 | T7 | Fuzzy search with nucleo | S9 | inline | `2282892` |
 | T8 | Cover art with ratatui-image | S10 | inline | `feb8a43` |
-| T9 | clap CLI, config TOML, `--help` | S12, S13 | inline | — |
+| T9 | clap CLI, config TOML, `--help` | S12, S13 | inline | `6b7f180` |
 | T10 | README, install path (brew / cargo-binstall), release workflow | S3 | inline | — |
 | T11 | ReplayGain read + apply in the audio path | S15 | inline | — |
 | T12 | Subsonic/Navidrome backend | S14 | inline | — |
@@ -226,3 +226,11 @@ The art is honest or absent. Half-blocks are rejected rather than used to paint 
 **A false alarm worth recording**, because it cost time and taught something: the terminal harness reported the app dying mid-playback with cover art in place. It was the harness — it sent `q` as a test key and then sent `q` again as its own way out, so the second write hit a closed pty. The app survived every resize I threw at it afterwards, including 20x60. The lesson is the same one this project keeps relearning from the other side: **when a test harness reports a crash, suspect the harness first, and prove the binary is alive with the smallest scenario that could be guilty** `(enter, wait, resize, read)` rather than the largest one.
 
 **Not verified, and it must be said plainly**: the art as rendered pixels in a real terminal. No Kitty, Sixel or iTerm2 terminal was available here, so the drawing path is covered only up to "a protocol was detected and the size rule allows a pane". That needs a human eye on a real terminal — the one kind of check this project cannot automate.
+
+**L30** (T9 closed in `6b7f180`): `clap`, a config file, and help that stops lying. The exit-code contract was measured on the binary before and after rather than argued about — help 0, usage error 2, missing file 1, missing library root 1 — because that is the one part of a CLI that scripts depend on.
+
+The config is deliberately small and strict: `library`, `volume`, `bit_perfect`; a missing file is silent, an unknown key is an error that **names the key and lists the ones that exist**, and a bad value quotes the file and the line. A config file is the user's own input, and an error that does not quote it back is a riddle. `bit_perfect` is stored now and read by nobody, with a doc comment saying so: T17 needs a place to put it, and adding the setting later would mean migrating a config format that people have already written.
+
+One defect the red-first tests earned, worth keeping: the first version reported **line 3 for an error on line 2**, because it counted lines in the byte prefix of the span rather than counting newlines. A message that points at the wrong line is worse than no line at all — it teaches the user to distrust the error.
+
+The default config path is resolved by a function that **takes the two environment values as arguments**, so the resolution is testable without setting a variable. Edition 2024 made `set_var` unsafe and this repo forbids it in tests; the design that falls out of that constraint is simply better, because the test names the case it exercises instead of mutating global state and hoping.
