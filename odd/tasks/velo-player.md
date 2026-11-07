@@ -58,7 +58,7 @@ Root folder: `/Users/alvaldes/Music/Library` (L15). Metadata comes from tags fir
 | T2 | Replace the spike's resampling with rubato; audible verification of the join | S7 | inline (worker) | `a6adebc` |
 | T3 | ratatui skeleton: layout, keybindings, themes | S1, S13 | inline (worker) | `f8aee9f` |
 | T4 | Library scan: jwalk + lofty + rusqlite schema, artist/album/track browser | S6 | inline (worker) | `8b42092` |
-| T5 | Play from the library and manage the queue | S11 | inline | — |
+| T5 | Play from the library and manage the queue | S11 | inline (worker) | `b931250` |
 | T6 | Pause, seek, volume with fades | S8 | inline | — |
 | T7 | Fuzzy search with nucleo | S9 | inline | — |
 | T8 | Cover art with ratatui-image | S10 | inline | — |
@@ -126,3 +126,13 @@ Verified after the confirmation: `/Users/alvaldes/Music/Library` exists, laid ou
 Two corrections worth recording. First, an earlier count of "32 MP3 across 3 artists" was stale within the same session because the human is actively adding music; counts in this document are snapshots, never invariants. Second, a `--library /no/such/dir` run first appeared to exit 0 — that was a pipe swallowing the status code in the verification command, not a defect; measured without the pipe it exits 1.
 
 **Known limit (T4):** the path fallback understands exactly `Artist/Album/file`. An untagged file in a flatter or deeper tree would get an empty title. It does not occur in the current library (0 empty titles across 104 tracks), so it is recorded as a limit rather than guessed at. The worker also found and fixed a real case from live data: an album folder with no `YYYY - ` prefix was falling through to "Unknown album" and now keeps its full folder name with no year.
+
+**L17** (T5 acceptance evidence): `cargo test` 33/33 across nine suites, `cargo clippy --all-targets` 0 warnings, `cargo fmt --check` clean. The audio callback was verified unchanged: only the producer gained a counter and the player a read-only accessor.
+
+The browse flow was driven in a real pty, which is the only reason two defects were caught: the artist list rendered `1 albums · 4 tracks` for almost every artist (counts of one were not pluralised), and while the app was indexing, the body said *"no artists in the index — run velo --index to scan the library"* directly under a status line that said *"indexing …"*. Both are fixed here and the count rule is pinned by `a_count_of_one_is_not_pluralised`. Nobody would report either as a bug; everybody would notice them.
+
+Counts are again a snapshot: the tree reached 140 tracks / 27 albums / 20 artists while this ran, and the incremental re-index over the grown tree stayed at 27 ms.
+
+Known limits recorded, not fixed: the queue-editing half of S11 is not implemented (S11 says the user can edit the queue; today an album plays from the selected track to its end); and a track that fails *mid*-queue still plays silence to the end, because the interface never polls `wait_until_finished`, so producer errors surface only when the first file fails at selection time.
+
+**L18 — UNATTRIBUTED, NOT A DECISION.** An uncommitted `[tasks.dev]` block appeared in `.mise.toml`: it builds velo in release and opens one album from `~/Music/Library`, defaulting to `Poldoore/2012 - Lush Life`, using `fd`. Neither this session nor the delegated writer wrote it. It is useful and was left untouched and uncommitted rather than adopted or deleted; the human should say whether it is theirs. This is the second unexplained edit to appear in this repository, after the L13 entry.
