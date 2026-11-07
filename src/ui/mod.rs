@@ -27,6 +27,7 @@ pub use ratatui::crossterm;
 use std::cell::RefCell;
 
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::TryRecvError;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -41,6 +42,8 @@ use crate::audio::spectrum::Spectrum;
 use crate::audio::{Player, seek_target, skip_target};
 use crate::config::{OpenNode, ReplayGainMode, Session, ThemeColor, ThemeColors, UiParts};
 use crate::library::{AlbumEntry, ArtistEntry, GenreEntry, IndexReport, Library, TrackEntry};
+use crate::subsonic::cache::CoverArt;
+use crate::subsonic::scrobble::{ScrobbleTracker, Scrobbles};
 
 use self::artwork::{Artwork, Picker, StatefulImage, StatefulProtocol};
 use self::search::Search;
@@ -372,6 +375,17 @@ pub struct App<'lib> {
     /// subsonic cache. `None` (a local-only launch) means every entry already
     /// is a file.
     resolver: Option<Arc<dyn PathResolver>>,
+    /// Fetches a remote row's cover into the covers cache (T12d), off the
+    /// drawing path. `None` when no server is configured: remote covers then
+    /// simply never arrive, like any other missing cover.
+    covers: Option<Arc<dyn CoverArt>>,
+    /// The remote cover still being fetched for `artwork_path`, with the
+    /// channel its background thread answers on. A fetch never blocks a
+    /// tick: the cover arrives whenever it arrives, or never.
+    pending_cover: Option<(PathBuf, std::sync::mpsc::Receiver<Option<PathBuf>>)>,
+    /// The scrobble tracker (T12d), fed once per tick; `None` when no
+    /// scrobble sink was installed — a local-only or unconfigured launch.
+    scrobbles: Option<ScrobbleTracker>,
     /// What the file already says (S2): the session it launched from and the
     /// volume it launched at. Every persisted write compares against this,
     /// so a value the file holds is never written back.
@@ -443,6 +457,9 @@ impl<'lib> App<'lib> {
             library_setup: None,
             config_file: None,
             resolver: None,
+            covers: None,
+            pending_cover: None,
+            scrobbles: None,
             saved: Session::default(),
             saved_volume: crate::config::DEFAULT_VOLUME,
             library_root: None,
@@ -502,6 +519,9 @@ impl<'lib> App<'lib> {
             library_setup: None,
             config_file: None,
             resolver: None,
+            covers: None,
+            pending_cover: None,
+            scrobbles: None,
             saved: Session::default(),
             saved_volume: crate::config::DEFAULT_VOLUME,
             library_root: None,
@@ -948,6 +968,20 @@ impl<'lib> App<'lib> {
         self.resolver = resolver;
     }
 
+    /// Installs the remote cover-art source (T12d): the same resolver the
+    /// queue resolves through, seen as the covers cache it also serves.
+    /// `None` leaves remote rows with no cover, exactly as a local file with
+    /// no picture draws none.
+    pub fn set_covers(&mut self, covers: Option<Arc<dyn CoverArt>>) {
+        self.covers = covers;
+    }
+
+    /// Installs the scrobble sink (T12d). `None` scrobbles nothing: a
+    /// local-only launch, or a server whose credentials never resolved.
+    pub fn set_scrobbler(&mut self, scrobbler: Option<Arc<dyn Scrobbles>>) {
+        self.scrobbles = scrobbler.map(ScrobbleTracker::new);
+    }
+
     /// The launch with no `library` configured (T12c): with a Subsonic server
     /// configured, the synced index is the library — nothing is asked, and
     /// `/` reaches its search; with neither, one sentence says what to
@@ -1171,12 +1205,20 @@ impl<'lib> App<'lib> {
 
     /// Runs once per turn of the event loop — the same cadence as key
     /// polling — so the producer's announcements surface without a key
-    /// press, and the cover art follows the track it plays (T8). Without a
-    /// player there is nothing to collect.
+    /// press, the cover art follows the track it plays (T8), and the server
+    /// learns what is playing (T12d). Without a player there is nothing to
+    /// collect.
     pub fn tick(&mut self) {
+        self.poll_cover();
         self.refresh_artwork();
         self.explain_hidden_art();
         self.listen();
+        let path = self.playing_path().map(Path::to_path_buf);
+        let (position, duration) = match &self.player {
+            Some(player) => (player.position(), self.current_track_duration()),
+            None => (Duration::ZERO, None),
+        };
+        self.scrobble_tick(path, position, duration);
         let Some(player) = &self.player else {
             return;
         };
@@ -1187,6 +1229,51 @@ impl<'lib> App<'lib> {
         // A bit-perfect fallback and its kin: one line, said once (T17).
         if let Some(notice) = player.take_notice() {
             self.status = format!("velo: {notice}");
+        }
+    }
+
+    /// The scrobble decision, fed once per tick with what is playing (T12d).
+    /// Production calls this from [`App::tick`] with the player's own
+    /// values; the tests drive it headlessly. A local track sends nothing,
+    /// and nothing here ever changes what the user sees. The path is taken
+    /// by value because the tick must end the borrow of the queue before
+    /// the tracker inside `self` can be fed.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "the owned path ends the tick's immutable borrow of self before the mutable one"
+    )]
+    #[doc(hidden)]
+    pub fn scrobble_tick(
+        &mut self,
+        path: Option<PathBuf>,
+        position: Duration,
+        duration: Option<Duration>,
+    ) {
+        if let Some(tracker) = self.scrobbles.as_mut() {
+            tracker.on_tick(path.as_deref(), position, duration);
+        }
+    }
+
+    /// Collects a remote cover that finished arriving (T12d): the fetch ran
+    /// on a background thread, so a tick never waited on the network. A
+    /// result for a track that has since moved on is dropped — its
+    /// replacement fetch is already running.
+    fn poll_cover(&mut self) {
+        let delivered: Option<PathBuf> = match self
+            .pending_cover
+            .as_ref()
+            .map(|(_, receiver)| receiver.try_recv())
+        {
+            Some(Ok(file)) => file,
+            Some(Err(TryRecvError::Disconnected)) => None,
+            Some(Err(TryRecvError::Empty)) | None => return,
+        };
+        let Some((path, _)) = self.pending_cover.take() else {
+            return;
+        };
+        let playing = self.playing_path().map(Path::to_path_buf);
+        if playing.as_deref() == Some(path.as_path()) {
+            self.artwork = delivered.as_deref().and_then(Artwork::from_image_file);
         }
     }
 
@@ -1265,10 +1352,35 @@ impl<'lib> App<'lib> {
             return;
         }
         self.protocol.borrow_mut().take();
-        self.artwork = path.as_deref().and_then(Artwork::from_path);
-        self.artwork_path = path;
-        // A new track deserves its own explanation.
+        self.artwork_path.clone_from(&path);
+        self.artwork = None;
         self.art_explained = false;
+        let Some(path) = path else {
+            return;
+        };
+        // A remote row's cover is not in any file's tags: it is fetched once
+        // from the server into the covers cache (T12d) and decoded from
+        // there — off this path, on a background thread, so a slow server
+        // never stalls a tick or a frame.
+        if !crate::subsonic::cache::is_pseudo_path(&path) {
+            self.artwork = Artwork::from_path(&path);
+            return;
+        }
+        let Some(cover_id) = self
+            .known_tracks()
+            .find(|entry| entry.path == path)
+            .and_then(|entry| entry.cover_id.clone())
+        else {
+            return;
+        };
+        let Some(covers) = self.covers.clone() else {
+            return;
+        };
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(covers.cover_file(&cover_id));
+        });
+        self.pending_cover = Some((path, receiver));
     }
 
     /// Re-reads from the index, e.g. right after indexing, the artists, the
@@ -4309,6 +4421,7 @@ mod tests {
             path: PathBuf::from("/music/Tide/01.flac"),
             source: crate::library::LOCAL_SOURCE.to_owned(),
             remote_id: None,
+            cover_id: None,
         }];
 
         assert_eq!(

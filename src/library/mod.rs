@@ -25,6 +25,11 @@ pub struct Library {
     /// genres are unknown and every track reads as [`NO_GENRE`].
     has_genre: bool,
     has_source: bool,
+    /// Whether `tracks` has the `cover_id` column (T12d). Only a
+    /// version-2-or-older index in a file that cannot be written lacks it:
+    /// it is never migrated, and every track reads with no cover id until
+    /// the first open that can migrate the file.
+    has_cover_id: bool,
 }
 
 /// Everything `--index` needs to report after a scan.
@@ -77,8 +82,10 @@ pub const LOCAL_SOURCE: &str = "local";
 
 /// The schema this build writes: 1 added the `genre` column, 2 added the
 /// `source`/`remote_id` pair that lets a Subsonic server's library live in
-/// the same table as the local files (T12b).
-const SCHEMA_VERSION: i64 = 2;
+/// the same table as the local files (T12b), and 3 added the `cover_id`
+/// column that carries the server's `coverArt` id a remote cover is fetched
+/// with (T12d).
+const SCHEMA_VERSION: i64 = 3;
 
 /// One track of one album, for the track browser. A row synced from a
 /// Subsonic server carries the `source` it came from and the server's own
@@ -96,6 +103,10 @@ pub struct TrackEntry {
     pub source: String,
     /// The server's own song id, when the row is remote.
     pub remote_id: Option<String>,
+    /// The server's `coverArt` id the row's cover is fetched with (T12d):
+    /// the song's own when it says one, else its album's. A remote cover is
+    /// fetched with `getCoverArt?id=<cover_id>` into the covers cache.
+    pub cover_id: Option<String>,
 }
 
 impl TrackEntry {
@@ -193,6 +204,7 @@ impl Library {
             conn,
             has_genre: true,
             has_source: true,
+            has_cover_id: true,
         })
     }
 
@@ -218,10 +230,14 @@ impl Library {
         let has_source = conn
             .prepare("SELECT 1 FROM pragma_table_info('tracks') WHERE name = 'source'")?
             .exists([])?;
+        let has_cover_id = conn
+            .prepare("SELECT 1 FROM pragma_table_info('tracks') WHERE name = 'cover_id'")?
+            .exists([])?;
         Ok(Self {
             conn,
             has_genre,
             has_source,
+            has_cover_id,
         })
     }
 
@@ -433,10 +449,10 @@ impl Library {
     ///
     /// Fails when the query cannot run.
     pub fn tracks_of(&self, artist: &str, album: &str) -> Result<Vec<TrackEntry>, LibraryError> {
-        let source = if self.has_source {
-            "source, remote_id"
-        } else {
-            "'local', NULL"
+        let source = match (self.has_source, self.has_cover_id) {
+            (true, true) => "source, remote_id, cover_id",
+            (true, false) => "source, remote_id, NULL",
+            (false, _) => "'local', NULL, NULL",
         };
         let mut statement = self.conn.prepare(&format!(
             "SELECT title, track_no, disc_no, duration_ms, path, {source}
@@ -454,6 +470,7 @@ impl Library {
                 path: PathBuf::from(row.get::<_, String>(4)?),
                 source: row.get(5)?,
                 remote_id: row.get(6)?,
+                cover_id: row.get(7)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -561,10 +578,10 @@ impl Library {
     /// Every track with its raw genre tag, in [`Library::all_tracks`] order.
     fn tracks_with_genre(&self) -> Result<Vec<(TrackEntry, Option<String>)>, LibraryError> {
         let genre = if self.has_genre { "genre" } else { "NULL" };
-        let source = if self.has_source {
-            "source, remote_id"
-        } else {
-            "'local', NULL"
+        let source = match (self.has_source, self.has_cover_id) {
+            (true, true) => "source, remote_id, cover_id",
+            (true, false) => "source, remote_id, NULL",
+            (false, _) => "'local', NULL, NULL",
         };
         let mut statement = self.conn.prepare(&format!(
             "SELECT title, track_no, disc_no, duration_ms, path, artist, album, {genre}, {source}
@@ -583,6 +600,7 @@ impl Library {
                     album: row.get(6)?,
                     source: row.get(8)?,
                     remote_id: row.get(9)?,
+                    cover_id: row.get(10)?,
                 },
                 row.get(7)?,
             ))
@@ -615,9 +633,12 @@ fn split_genres(tag: &str) -> Vec<(String, String)> {
 /// file's tags — the rows themselves stay until that scan replaces them.
 /// Version 1 had no `source`/`remote_id` pair: the columns are added with
 /// every existing row labelled `local`, and the `(source, remote_id)`
-/// uniqueness that remote rows live under comes with them (T12b). The whole
-/// migration is one transaction on columns that `ALTER TABLE` already
-/// refuses to add twice, so running it twice is harmless.
+/// uniqueness that remote rows live under comes with them (T12b). Version 2
+/// had no `cover_id` column: it is added empty — a row's cover id is filled
+/// by the next `--sync`, so an existing index loses nothing and changes
+/// nothing else (T12d). The whole migration is one transaction on columns
+/// that `ALTER TABLE` already refuses to add twice, so running it twice is
+/// harmless.
 fn migrate(conn: &Connection) -> Result<(), LibraryError> {
     let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
     if version >= SCHEMA_VERSION {
@@ -642,6 +663,14 @@ fn migrate(conn: &Connection) -> Result<(), LibraryError> {
         transaction
             .execute_batch("ALTER TABLE tracks ADD COLUMN source TEXT NOT NULL DEFAULT 'local'")?;
         transaction.execute_batch("ALTER TABLE tracks ADD COLUMN remote_id TEXT")?;
+    }
+    // T12d: the `coverArt` id a remote cover is fetched with. Existing rows
+    // read `NULL` until the next sync upserts them with the id.
+    let has_cover_id = transaction
+        .prepare("SELECT 1 FROM pragma_table_info('tracks') WHERE name = 'cover_id'")?
+        .exists([])?;
+    if !has_cover_id {
+        transaction.execute_batch("ALTER TABLE tracks ADD COLUMN cover_id TEXT")?;
     }
     // One server may not hold two rows with the same song id. A partial
     // unique index: local rows have no remote id and are unconstrained here.
@@ -708,7 +737,8 @@ CREATE TABLE IF NOT EXISTS tracks (
     size         INTEGER NOT NULL,
     genre        TEXT,
     source       TEXT NOT NULL DEFAULT 'local',
-    remote_id    TEXT
+    remote_id    TEXT,
+    cover_id     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tracks_artist_album ON tracks(artist, album);
 CREATE INDEX IF NOT EXISTS idx_tracks_album ON tracks(album);
@@ -741,12 +771,15 @@ ON CONFLICT(path) DO UPDATE SET
 /// path is built from its source and remote id, so the same song re-synced
 /// updates its row and never duplicates it. `album_artist`, `sample_rate`,
 /// `channels` and `has_cover` have nothing to say about a remote song;
-/// `mtime`/`size` are meaningless off the file system and stay 0.
+/// `mtime`/`size` are meaningless off the file system and stay 0. The
+/// `cover_id` column (T12d) carries the server's `coverArt` id, the song's
+/// own or its album's (T12d); a local upsert never names it, so a local row
+/// keeps `NULL` whatever it was.
 const UPSERT_REMOTE: &str = "
 INSERT INTO tracks (path, title, artist, album, album_artist, track_no, disc_no,
                     year, duration_ms, sample_rate, channels, format, has_cover,
-                    mtime, size, genre, source, remote_id)
-VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7, ?8, NULL, NULL, 'subsonic', 0, 0, 0, NULL, ?9, ?10)
+                    mtime, size, genre, source, remote_id, cover_id)
+VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7, ?8, NULL, NULL, 'subsonic', 0, 0, 0, NULL, ?9, ?10, ?11)
 ON CONFLICT(path) DO UPDATE SET
     title = excluded.title,
     artist = excluded.artist,
@@ -756,7 +789,8 @@ ON CONFLICT(path) DO UPDATE SET
     year = excluded.year,
     duration_ms = excluded.duration_ms,
     source = excluded.source,
-    remote_id = excluded.remote_id
+    remote_id = excluded.remote_id,
+    cover_id = excluded.cover_id
 ";
 
 #[expect(

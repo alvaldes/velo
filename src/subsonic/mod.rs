@@ -1,12 +1,15 @@
 //! The Subsonic/Navidrome client and its authentication (T12a, S14), plus
-//! the two read endpoints the sync needs (T12b).
+//! the two read endpoints the sync needs (T12b) and the two play-history
+//! pieces: `getCoverArt` into the covers cache and `scrobble` on a track
+//! change (T12d).
 //!
 //! Scope of this module today: speak the protocol over a [`Transport`]
 //! seam, resolve the server's secret, answer "can I use this server?"
-//! through `velo --subsonic-test`, and serve `getAlbumList2`/`getAlbum` to
-//! the sync in `crate::library::sync`. No playback yet: playing a remote
-//! row is cache-on-play (T12c): `src/subsonic/cache.rs` owns the fetch and
-//! the on-disk cache the producer opens.
+//! through `velo --subsonic-test`, serve `getAlbumList2`/`getAlbum` to
+//! the sync in `crate::library::sync`, and — from T12c and T12d — own the
+//! on-disk caches the interface plays and draws from: the track cache and
+//! resolver in [`cache`], the cover-art cache behind the [`cache::CoverArt`]
+//! seam, and the scrobble decision behind the [`scrobble::Scrobbles`] seam.
 //!
 //! The four decisions this shape rests on:
 //!
@@ -25,5 +28,6 @@ pub mod cache;
 pub mod client;
 pub mod credentials;
 pub mod error;
+pub mod scrobble;
 
 pub use error::Error;

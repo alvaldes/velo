@@ -17,6 +17,11 @@
 //! - the fetch: [`Cache::ensure`] returns a hit without calling the
 //!   transport and downloads a miss into place atomically.
 //!
+//! The same rule serves the covers cache (T12d): [`Cache::covers_cache`]
+//! derives the sibling `…/velo/covers` directory, and [`CoverArt`] (on
+//! [`SubsonicResolver`]) fetches `getCoverArt` into it — one image file per
+//! cover id, a hit never calling the transport.
+//!
 //! [`SubsonicResolver`] ties the three together behind the player's
 //! [`PathResolver`] seam: it parses a queue entry `subsonic://<host>/<id>`,
 //! passes every other path through untouched (a queue can mix sources,
@@ -61,8 +66,11 @@ pub fn cache_dir(xdg_cache_home: Option<&OsStr>, home: Option<&OsStr>) -> Option
 }
 
 /// Whether `path` is a queue entry from a synced remote row
-/// (`subsonic://<host>/<id>`, T12b) rather than a file.
-fn is_pseudo_path(path: &Path) -> bool {
+/// (`subsonic://<host>/<id>`, T12b) rather than a file. Shared with the
+/// interface, whose art and scrobble paths must tell a remote row from a
+/// file for exactly the same reason this module does.
+#[must_use]
+pub fn is_pseudo_path(path: &Path) -> bool {
     path.to_str()
         .is_some_and(|text| text.starts_with("subsonic://"))
 }
@@ -162,7 +170,7 @@ impl Cache {
     fn store(&self, path: &Path, bytes: &[u8]) -> Result<(), Error> {
         fs::create_dir_all(&self.dir).map_err(|error| {
             Error::Config(format!(
-                "cannot create the subsonic cache directory {}: {error}",
+                "cannot create the cache directory {}: {error}",
                 self.dir.display()
             ))
         })?;
@@ -175,10 +183,21 @@ impl Cache {
         }
         written.map_err(|error| {
             Error::Config(format!(
-                "cannot write the cached track {}: {error}",
+                "cannot write the cached file {}: {error}",
                 path.display()
             ))
         })
+    }
+
+    /// The cache of cover art that sits beside this one: `$XDG_CACHE_HOME/
+    /// velo/covers` (else `~/.cache/velo/covers`) when this is the track
+    /// cache under `…/velo/subsonic`. Same rule, same stable-hash names, its
+    /// own directory — a cover never lands among the track bytes (T12d).
+    #[must_use]
+    pub fn covers_cache(&self) -> Self {
+        Self {
+            dir: self.dir.with_file_name("covers"),
+        }
     }
 }
 
@@ -201,6 +220,9 @@ pub struct SubsonicResolver<T> {
     /// exactly the row-to-server match.
     source: String,
     cache: Cache,
+    /// The cover-art cache beside `cache` (T12d): one image file per cover
+    /// id, fetched once.
+    covers: Cache,
 }
 
 impl<T: Transport> SubsonicResolver<T> {
@@ -212,6 +234,7 @@ impl<T: Transport> SubsonicResolver<T> {
         Self {
             client,
             source,
+            covers: cache.covers_cache(),
             cache,
         }
     }
@@ -234,6 +257,25 @@ impl<T: Transport + Send + Sync> PathResolver for SubsonicResolver<T> {
         self.cache
             .ensure(&url, || self.client.stream_bytes(&id))
             .map_err(|error| as_audio_error(&error))
+    }
+}
+
+/// The cover-art seam the interface draws through (T12d): one `cover_id` in,
+/// the cached image file out. `None` on any failure — a cover is decoration,
+/// and a missing or slow one means no cover, never an error the user sees.
+/// The interface calls this off its drawing path, on a background thread.
+pub trait CoverArt: Send + Sync {
+    /// The cached file of one cover id, fetched once from the server.
+    fn cover_file(&self, cover_id: &str) -> Option<PathBuf>;
+}
+
+impl<T: Transport + Send + Sync> CoverArt for SubsonicResolver<T> {
+    fn cover_file(&self, cover_id: &str) -> Option<PathBuf> {
+        // The covers cache keys on the cover id itself, so the same id is
+        // always the same file and a hit never calls the transport.
+        self.covers
+            .ensure(cover_id, || self.client.cover_art_bytes(cover_id))
+            .ok()
     }
 }
 

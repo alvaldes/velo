@@ -164,6 +164,10 @@ impl<T: Transport + ?Sized> Transport for &T {
 
 /// The production [`Transport`]: one blocking GET at a time over `ureq`
 /// with rustls — no async stack, which fits the player's synchronous shape.
+/// `Clone` is cheap (the agent shares one connection pool) and is what lets
+/// the resolver and the scrobbler each own a client over one transport
+/// (T12d).
+#[derive(Clone)]
 pub struct HttpTransport {
     agent: ureq::Agent,
 }
@@ -412,6 +416,42 @@ impl<T: Transport> Client<T> {
             .collect())
     }
 
+    /// `getCoverArt?id=<cover_id>&size=600`: the image behind a synced
+    /// row's `cover_id` (T12d), fetched into the covers cache. Like a
+    /// stream, a failed fetch answers with the JSON error envelope, not an
+    /// image; any other body is the image itself.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::bytes`], plus [`Error::Server`] when the server answers
+    /// the cover request with its error envelope.
+    pub fn cover_art_bytes(&self, id: &str) -> Result<Vec<u8>, Error> {
+        let body = self.bytes("getCoverArt", &[("id", id), ("size", "600")])?;
+        match parse_response(&body) {
+            Err(error @ Error::Server { .. }) => Err(error),
+            _ => Ok(body),
+        }
+    }
+
+    /// `scrobble?id=<id>&submission=<flag>`: what the server's play history
+    /// is built from (T12d). `submission=false` marks a track as now
+    /// playing; `submission=true` registers it as played. Every call is
+    /// fire-and-forget at the caller's end — the failures are swallowed
+    /// there, never shown.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::request`].
+    pub fn scrobble(&self, id: &str, submission: bool) -> Result<Response, Error> {
+        self.request(
+            "scrobble",
+            &[
+                ("id", id),
+                ("submission", if submission { "true" } else { "false" }),
+            ],
+        )
+    }
+
     /// `getAlbum`: one album with its songs — what the sync (T12b) maps one
     /// request per album, not one per track.
     ///
@@ -432,6 +472,7 @@ impl<T: Transport> Client<T> {
             name: raw.name.unwrap_or_default(),
             artist: raw.artist,
             year: raw.year,
+            cover_art: raw.cover_art,
             songs: raw
                 .songs
                 .unwrap_or_default()
@@ -444,6 +485,7 @@ impl<T: Transport> Client<T> {
                     track: song.track,
                     disc_number: song.disc_number,
                     year: song.year,
+                    cover_art: song.cover_art,
                 })
                 .collect(),
         })
@@ -557,6 +599,9 @@ pub struct RemoteAlbumDetail {
     pub artist: Option<String>,
     /// The album year, when the server says one.
     pub year: Option<i64>,
+    /// The album's `coverArt` id, the cover its songs inherit when they
+    /// name none of their own (T12d).
+    pub cover_art: Option<String>,
     /// The album's songs, in the server's order.
     pub songs: Vec<RemoteSong>,
 }
@@ -578,6 +623,8 @@ pub struct RemoteSong {
     pub disc_number: Option<i64>,
     /// The song year.
     pub year: Option<i64>,
+    /// The song's `coverArt` id, when the server says one (T12d).
+    pub cover_art: Option<String>,
 }
 
 /// The serde shape of the JSON envelope.
@@ -635,6 +682,8 @@ struct RawAlbumDetail {
     name: Option<String>,
     artist: Option<String>,
     year: Option<i64>,
+    #[serde(rename = "coverArt")]
+    cover_art: Option<String>,
     #[serde(rename = "song")]
     songs: Option<Vec<RawSong>>,
 }
@@ -649,6 +698,8 @@ struct RawSong {
     #[serde(rename = "discNumber")]
     disc_number: Option<i64>,
     year: Option<i64>,
+    #[serde(rename = "coverArt")]
+    cover_art: Option<String>,
 }
 
 #[derive(Deserialize)]

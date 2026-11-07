@@ -257,6 +257,25 @@ The cache lives at `$XDG_CACHE_HOME/velo/subsonic`, else
 stream URL. Nothing prunes it yet: every track you have played stays until
 you delete the directory yourself.
 
+### Remote covers and scrobbling
+
+A remote track's cover comes from the server too. The sync stores each
+song's `coverArt` id (the song's own, else its album's) in the index; when a
+remote track plays, the interface fetches it once with
+`getCoverArt?id=<cover_id>&size=600` into the covers cache —
+`$XDG_CACHE_HOME/velo/covers`, else `~/.cache/velo/covers`, one image file
+per cover id — and draws it exactly like a local track's cover. The fetch
+runs off the drawing path, so a slow or missing cover means no cover, never
+a stall or an error. A local track's cover keeps coming from its tags or
+folder.
+
+While a remote track plays, velo tells the server: `scrobble` with
+`submission=false` when the track starts (now playing), and one
+`submission=true` once it has played long enough to count — half its
+duration or four minutes, whichever comes first, the same rule the servers
+themselves apply. Scrobbles are sent from a background thread and a failing
+one is never shown; local tracks are never scrobbled.
+
 Add the table to the same `config.toml` (it must come after the other keys;
 `url` and `user` are required when the table exists):
 
@@ -317,9 +336,10 @@ Honest list; none of these exist behind a flag:
 - ReplayGain tag writing (reading and applying them is in: the `replay_gain`
   setting).
 - Subsonic/Navidrome, still early access: the connection, authentication,
-  `velo --subsonic-test`, `velo --sync` and cache-on-play playback all exist
-  (see above). Nothing evicts the cache yet, and streaming over HTTP ranges
-  (playing before the whole track is on disk) is a later optimisation.
+  `velo --subsonic-test`, `velo --sync`, cache-on-play playback, remote
+  covers and scrobbling all exist (see above). Nothing evicts either cache
+  yet, and streaming over HTTP ranges (playing before the whole track is on
+  disk) is a later optimisation.
 - Opus — symphonia has no Opus decoder yet, so `.opus` files are rejected at
   probe time.
 - Playlists.

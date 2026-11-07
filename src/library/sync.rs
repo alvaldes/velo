@@ -74,6 +74,9 @@ struct RemoteRow {
     year: Option<i64>,
     duration_ms: i64,
     remote_id: String,
+    /// The `coverArt` id the song's cover is fetched with (T12d): the
+    /// song's own when the server says one, else its album's.
+    cover_id: Option<String>,
 }
 
 /// Maps one `getAlbum` answer into index rows for `source`.
@@ -104,6 +107,9 @@ fn rows_from_album(detail: &RemoteAlbumDetail, source: &str) -> Vec<RemoteRow> {
             year: song.year.or(detail.year),
             duration_ms: song.duration.map_or(0, duration_ms),
             remote_id: song.id.clone(),
+            // A song whose album carries the id inherits it; Navidrome names
+            // the album id for every song that has no own art.
+            cover_id: song.cover_art.clone().or_else(|| detail.cover_art.clone()),
         })
         .collect()
 }
@@ -177,6 +183,7 @@ impl Library {
                     row.duration_ms,
                     source,
                     row.remote_id,
+                    row.cover_id,
                 ])?;
             }
         }

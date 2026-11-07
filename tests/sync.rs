@@ -364,6 +364,7 @@ fn a_canned_server_produces_rows_with_every_field_filled() {
             path: PathBuf::from(format!("subsonic://music.example.com/{remote_id}")),
             source: source.to_owned(),
             remote_id: Some(remote_id.to_owned()),
+            cover_id: None,
         }
     };
     assert_eq!(
@@ -503,6 +504,62 @@ fn a_failed_sync_removes_nothing() {
         .filter_map(|track| track.remote_id)
         .collect();
     assert_eq!(ids.len(), 3, "{ids:?}");
+}
+
+// ----------------------------------------------------------------- cover id
+
+#[test]
+fn a_cover_art_id_from_the_song_or_its_album_fills_the_row() {
+    let dir = TempIndex::new("cover-id");
+    // `al-1`'s first song carries its own `coverArt`; the second carries none
+    // and falls back to the album's. `al-2` says nothing per song, so the
+    // album's id is all the rows get.
+    let transport = Canned::new(vec![
+        (
+            "id=al-1",
+            Ok(ok_envelope(
+                r#","album":{"id":"al-1","name":"Harbor","artist":"Tide","coverArt":"al-1","song":[{"id":"s-1","title":"Dawn","coverArt":"al-1"},{"id":"s-2","title":"Tide"}]}"#,
+            )),
+        ),
+        (
+            "id=al-2",
+            Ok(ok_envelope(
+                r#","album":{"id":"al-2","name":"Views","artist":"Baltazar","coverArt":"cov-views","song":[{"id":"s-3","title":"Rising"}]}"#,
+            )),
+        ),
+        (
+            "getAlbumList2",
+            Ok(album_list_body(&[
+                ("al-1", "Harbor", "Tide"),
+                ("al-2", "Views", "Baltazar"),
+            ])),
+        ),
+    ]);
+    sync(&dir.library, transport);
+
+    let rows = dir.library.all_tracks().unwrap();
+    let cover_id = |remote_id: &str| {
+        rows.iter()
+            .find(|row| row.remote_id.as_deref() == Some(remote_id))
+            .unwrap()
+            .cover_id
+            .clone()
+    };
+    assert_eq!(
+        cover_id("s-1").as_deref(),
+        Some("al-1"),
+        "the song's own id"
+    );
+    assert_eq!(
+        cover_id("s-2").as_deref(),
+        Some("al-1"),
+        "the album's id when the song names none"
+    );
+    assert_eq!(
+        cover_id("s-3").as_deref(),
+        Some("cov-views"),
+        "the album-level id reaches every song"
+    );
 }
 
 // ------------------------------------------------- one index, both sources

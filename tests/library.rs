@@ -561,6 +561,72 @@ fn an_index_built_without_genres_keeps_its_rows_and_the_next_scan_fills_them_in(
     let _ = fs::remove_dir_all(&root);
 }
 
+/// The `tracks` table as velo 0.7.0 (T12c and before) wrote it: the
+/// `source`/`remote_id` pair, but no `cover_id` and `user_version` 2.
+const VERSION_2_SCHEMA: &str = "
+CREATE TABLE tracks (
+    id           INTEGER PRIMARY KEY,
+    path         TEXT NOT NULL UNIQUE,
+    title        TEXT NOT NULL COLLATE NOCASE,
+    artist       TEXT NOT NULL COLLATE NOCASE,
+    album        TEXT NOT NULL COLLATE NOCASE,
+    album_artist TEXT COLLATE NOCASE,
+    track_no     INTEGER,
+    disc_no      INTEGER,
+    year         INTEGER,
+    duration_ms  INTEGER NOT NULL DEFAULT 0,
+    sample_rate  INTEGER,
+    channels     INTEGER,
+    format       TEXT NOT NULL,
+    has_cover    INTEGER NOT NULL DEFAULT 0,
+    mtime        INTEGER NOT NULL,
+    size         INTEGER NOT NULL,
+    genre        TEXT,
+    source       TEXT NOT NULL DEFAULT 'local',
+    remote_id    TEXT
+);
+CREATE INDEX idx_tracks_artist_album ON tracks(artist, album);
+CREATE INDEX idx_tracks_album ON tracks(album);
+";
+
+#[test]
+fn a_version_2_index_migrates_to_3_with_cover_id_and_every_row_intact() {
+    let root = temp_root("migrate-v2");
+    let database = root.join("index.db");
+    {
+        let old = rusqlite::Connection::open(&database).unwrap();
+        old.execute_batch(VERSION_2_SCHEMA).unwrap();
+        old.pragma_update(None, "user_version", 2).unwrap();
+        old.execute(
+            "INSERT INTO tracks (path, title, artist, album, format, mtime, size)
+             VALUES ('/music/Tide/01 - Dawn.wav', 'Dawn', 'Tide', 'Harbor', 'wav', 1, 1)",
+            [],
+        )
+        .unwrap();
+        old.execute(
+            "INSERT INTO tracks (path, title, artist, album, format, mtime, size, source, remote_id)
+             VALUES ('subsonic:demo.navidrome.org/s-1', 'Rising', 'Baltazar', 'Views', 'subsonic', 0, 0, 'subsonic:demo.navidrome.org', 's-1')",
+            [],
+        )
+        .unwrap();
+    }
+
+    // Opening a version-2 file with this velo migrates it, keeps every row
+    // (local and remote alike) and adds the `cover_id` column, empty until
+    // the next sync fills it.
+    let library = Library::open_at(&database).unwrap();
+    assert_eq!(library.counts().unwrap().tracks, 2, "every row survives");
+    let tracks = library.all_tracks().unwrap();
+    assert_eq!(tracks.len(), 2);
+    assert!(
+        tracks.iter().all(|track| track.cover_id.is_none()),
+        "no cover id until the next sync fills it: {tracks:?}"
+    );
+    drop(library);
+    assert_eq!(schema_state(&database), (3, true, true, true));
+    let _ = fs::remove_dir_all(&root);
+}
+
 // read-only indexes (S2) ---------------------------------------------------
 
 /// Builds a velo 0.5.0 index (no `genre` column, schema version 0, WAL
@@ -585,13 +651,14 @@ fn set_mode(path: &Path, mode: u32) {
     fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
 }
 
-/// The `user_version` and whether `tracks` has the `genre` and `source`
-/// columns, read directly from the file.
+/// The `user_version` and whether `tracks` has the `genre`, `source` and
+/// `cover_id` columns, read directly from the file.
 ///
-/// Two migrations are now in the sequence: genres took the schema to 1 and the
-/// `source`/`remote_id` pair (T12b) took it to 2, so a fully migrated index
-/// reports both columns and version 2.
-fn schema_state(database: &Path) -> (i64, bool, bool) {
+/// Three migrations are now in the sequence: genres took the schema to 1, the
+/// `source`/`remote_id` pair (T12b) took it to 2, and the `cover_id` column
+/// (T12d) took it to 3, so a fully migrated index reports all three columns
+/// and version 3.
+fn schema_state(database: &Path) -> (i64, bool, bool, bool) {
     let conn = rusqlite::Connection::open(database).unwrap();
     let version = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
@@ -602,7 +669,12 @@ fn schema_state(database: &Path) -> (i64, bool, bool) {
             .exists([name])
             .unwrap()
     };
-    (version, has_column("genre"), has_column("source"))
+    (
+        version,
+        has_column("genre"),
+        has_column("source"),
+        has_column("cover_id"),
+    )
 }
 
 fn temp_root(name: &str) -> PathBuf {
@@ -675,7 +747,7 @@ fn a_read_only_index_built_without_genres_opens_and_browses_with_genres_unknown(
     set_mode(&root, 0o755);
     set_mode(&database, 0o644);
     // The read-only open wrote nothing.
-    assert_eq!(schema_state(&database), (0, false, false));
+    assert_eq!(schema_state(&database), (0, false, false, false));
     let _ = fs::remove_dir_all(&root);
 }
 
@@ -696,12 +768,12 @@ fn a_read_only_old_index_migrates_on_the_first_open_after_it_becomes_writable() 
         .map(|entry| entry.unwrap().file_name())
         .collect();
     assert_eq!(left, ["index.db"]);
-    assert_eq!(schema_state(&database), (0, false, false));
+    assert_eq!(schema_state(&database), (0, false, false, false));
 
     let library = Library::open_at(&database).unwrap();
     assert_eq!(library.counts().unwrap().tracks, 2, "the old rows survive");
     drop(library);
-    assert_eq!(schema_state(&database), (2, true, true));
+    assert_eq!(schema_state(&database), (3, true, true, true));
     let _ = fs::remove_dir_all(&root);
 }
 

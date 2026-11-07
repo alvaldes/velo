@@ -11,8 +11,9 @@ use velo::audio::{Player, TrackSource};
 use velo::config::{self, Cli, Config, Settings};
 use velo::library::Library;
 use velo::subsonic;
-use velo::subsonic::cache::{Cache, SubsonicResolver, Unconfigured, cache_dir};
+use velo::subsonic::cache::{Cache, CoverArt, SubsonicResolver, Unconfigured, cache_dir};
 use velo::subsonic::client::{Auth, Client, HttpTransport};
+use velo::subsonic::scrobble::{Scrobbler, Scrobbles};
 use velo::ui::indexing::Indexer;
 use velo::ui::{Action, App, artwork, crossterm};
 
@@ -84,48 +85,74 @@ fn main() -> ExitCode {
             return usage_help();
         }
         // No files: the interface browses the library index.
-        let resolver = track_resolver(
+        let seams = subsonic_seams(
             &settings,
             std::env::var_os("VELO_SUBSONIC_SECRET").as_deref(),
             std::env::var_os("XDG_CONFIG_HOME").as_deref(),
             std::env::var_os("XDG_CACHE_HOME").as_deref(),
             home.as_deref(),
         );
-        return browse_interface(library.as_deref(), config_file, &settings, resolver);
+        return browse_interface(
+            library.as_deref(),
+            config_file,
+            &settings,
+            seams.resolver,
+            seams.covers,
+            seams.scrobbler,
+        );
     }
 
     if cli.info {
         return print_info(&cli.files);
     }
     if cli.play {
-        let resolver = track_resolver(
+        let seams = subsonic_seams(
             &settings,
             std::env::var_os("VELO_SUBSONIC_SECRET").as_deref(),
             std::env::var_os("XDG_CONFIG_HOME").as_deref(),
             std::env::var_os("XDG_CACHE_HOME").as_deref(),
             home.as_deref(),
         );
-        return play(&cli.files, &settings, resolver);
+        return play(&cli.files, &settings, seams.resolver);
     }
     run_interface(cli.files, &settings, config_file)
 }
 
-/// Builds the resolver that turns queue entries into files (T12c): with a
-/// `[subsonic]` table, remote rows resolve through the on-disk cache. The
-/// environment values are arguments, read here at the edge, so the wiring
-/// stays out of the library and the tests. A server whose credentials cannot
-/// be resolved still gets a resolver — one that skips its remote tracks with
-/// the credential sentence — because the interface must start, and the queue
-/// must survive a half-configured server.
-fn track_resolver(
+/// The three seams one configured Subsonic server provides: turning queue
+/// entries into files (T12c), fetching cover art (T12d) and scrobbling
+/// (T12d). All three come from one credential resolution and one transport —
+/// the resolver, the covers source and the scrobbler each hold their own
+/// client over a clone of it, and clones of the same connection pool.
+struct SubsonicSeams {
+    resolver: Option<Arc<dyn PathResolver>>,
+    covers: Option<Arc<dyn CoverArt>>,
+    scrobbler: Option<Arc<dyn Scrobbles>>,
+}
+
+/// Builds the seams above from the user's settings. The environment values
+/// are arguments, read here at the edge, so the wiring stays out of the
+/// library and the tests. A server whose credentials cannot be resolved
+/// still gets a resolver — one that skips its remote tracks with the
+/// credential sentence — because the interface must start, and the queue
+/// must survive a half-configured server; covers and scrobbles then simply
+/// never arrive, which is exactly what a missing cover and a missing play
+/// history should look like.
+fn subsonic_seams(
     settings: &Settings,
     env_secret: Option<&OsStr>,
     xdg_config_home: Option<&OsStr>,
     xdg_cache_home: Option<&OsStr>,
     home: Option<&OsStr>,
-) -> Option<Arc<dyn PathResolver>> {
-    let server = settings.subsonic.as_ref()?;
-    match subsonic::credentials::resolve(
+) -> SubsonicSeams {
+    let without = |resolver: Option<Arc<dyn PathResolver>>| SubsonicSeams {
+        resolver,
+        covers: None,
+        scrobbler: None,
+    };
+    let Some(server) = &settings.subsonic else {
+        return without(None);
+    };
+    let credentials = match subsonic::credentials::resolve(
         &server.url,
         &server.user,
         server.api_key.as_deref(),
@@ -133,30 +160,52 @@ fn track_resolver(
         xdg_config_home,
         home,
     ) {
-        Ok(credentials) => {
-            let transport = match HttpTransport::new(server.insecure) {
-                Ok(transport) => transport,
-                Err(error) => {
-                    // HttpTransport::new never fails today; if it ever does,
-                    // the sentence still reaches the skip path.
-                    return Some(Arc::new(Unconfigured::new(error.to_string())));
-                }
-            };
-            let client = Client::new(
-                transport,
-                &credentials.url,
-                &credentials.user,
-                // Token authentication: every Subsonic-compatible server
-                // accepts it, which is why the probe tries it first (T12a).
-                Auth::Token {
-                    password: credentials.secret,
-                },
-            );
-            let source = velo::library::source_for(&credentials.url);
-            let cache = cache_dir(xdg_cache_home, home).map(Cache::new)?;
-            Some(Arc::new(SubsonicResolver::new(client, source, cache)))
+        Ok(credentials) => credentials,
+        Err(error) => return without(Some(Arc::new(Unconfigured::new(error.to_string())))),
+    };
+    let transport = match HttpTransport::new(server.insecure) {
+        Ok(transport) => transport,
+        Err(error) => {
+            // HttpTransport::new never fails today; if it ever does,
+            // the sentence still reaches the skip path.
+            return without(Some(Arc::new(Unconfigured::new(error.to_string()))));
         }
-        Err(error) => Some(Arc::new(Unconfigured::new(error.to_string()))),
+    };
+    let Some(cache) = cache_dir(xdg_cache_home, home).map(Cache::new) else {
+        // With no place for the caches there is nothing a remote track can
+        // resolve to; the same sentence path as unconfigured credentials.
+        return without(Some(Arc::new(Unconfigured::new(
+            "no cache directory — neither XDG_CACHE_HOME nor HOME is usable".to_owned(),
+        ))));
+    };
+    let client = Client::new(
+        transport.clone(),
+        &credentials.url,
+        &credentials.user,
+        // Token authentication: every Subsonic-compatible server
+        // accepts it, which is why the probe tries it first (T12a).
+        Auth::Token {
+            password: credentials.secret.clone(),
+        },
+    );
+    let source = velo::library::source_for(&credentials.url);
+    let resolver = Arc::new(SubsonicResolver::new(client, source, cache));
+    let covers: Arc<dyn CoverArt> = Arc::clone(&resolver) as Arc<dyn CoverArt>;
+    // The scrobbler speaks to the same server over the same pool, from its
+    // own client: it fires from background threads, never from a tick's path
+    // back into the player (T12d).
+    let scrobbler = Scrobbler::new(Client::new(
+        transport,
+        &credentials.url,
+        &credentials.user,
+        Auth::Token {
+            password: credentials.secret,
+        },
+    ));
+    SubsonicSeams {
+        resolver: Some(resolver),
+        covers: Some(covers),
+        scrobbler: Some(Arc::new(scrobbler)),
     }
 }
 
@@ -501,6 +550,8 @@ fn browse_interface(
     config_file: Option<PathBuf>,
     settings: &Settings,
     resolver: Option<Arc<dyn PathResolver>>,
+    covers: Option<Arc<dyn CoverArt>>,
+    scrobbler: Option<Arc<dyn Scrobbles>>,
 ) -> ExitCode {
     if !std::io::stdout().is_terminal() {
         eprintln!("velo: the interface needs an interactive terminal");
@@ -526,6 +577,10 @@ fn browse_interface(
         // Remote rows play through the cache (T12c); without a server this
         // stays `None` and every entry already is a file.
         app.set_resolver(resolver);
+        // Remote covers and scrobbles ride the same server (T12d); without
+        // one, covers simply never arrive and nothing is ever sent.
+        app.set_covers(covers);
+        app.set_scrobbler(scrobbler);
         match (&opened, root) {
             (Err(error), _) => app.index_unavailable(error.to_string()),
             (Ok(_), Some(root)) => {

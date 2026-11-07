@@ -140,6 +140,44 @@ fn picture_bytes_that_are_not_an_image_yield_nothing_rather_than_panicking() {
     clean("bogus-picture");
 }
 
+// ---- a remote cover from an image file (T12d) -----------------------------
+
+/// A directory for the image-file fixtures, removed before the test ends.
+fn image_dir(name: &str) -> PathBuf {
+    let dir =
+        std::env::temp_dir().join(format!("velo-artwork-image-{name}-{}", std::process::id()));
+    let _ = fs::create_dir_all(&dir);
+    dir
+}
+
+#[test]
+fn a_cover_image_file_decodes_the_way_an_embedded_picture_does() {
+    let dir = image_dir("decodes");
+    // A remote cover is a JPEG/PNG on disk with no audio around it; the name
+    // says nothing the bytes do not (a PNG named .jpg still decodes).
+    let file = dir.join("anything.jpg");
+    fs::write(&file, square_png(6)).unwrap();
+
+    let art = Artwork::from_image_file(&file).expect("an image file is a cover");
+
+    assert_eq!(art.image().dimensions(), (6, 6));
+    assert_eq!(art.image().get_pixel(0, 0).0, [200, 100, 50, 255]);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_file_that_is_not_an_image_yields_nothing_rather_than_an_error() {
+    let dir = image_dir("not-image");
+    let file = dir.join("cover.jpg");
+    fs::write(&file, b"this is not an image, it is a sentence").unwrap();
+
+    assert!(
+        Artwork::from_image_file(&file).is_none(),
+        "bytes that are not an image are no cover, never an error"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
 // ---- the layout rule ------------------------------------------------------
 
 #[test]

@@ -17,6 +17,7 @@ use std::process::Command;
 use clap::Parser as _;
 use velo::config::Cli;
 use velo::subsonic::Error;
+use velo::subsonic::cache::{Cache, CoverArt as _, SubsonicResolver};
 use velo::subsonic::client::{Auth, AuthKind, Client, Transport, build_request_url, token};
 use velo::subsonic::credentials::resolve;
 
@@ -793,6 +794,212 @@ fn a_failed_album_answer_carries_the_server_sentence() {
         .album("al-9")
         .expect_err("a failed album answer must fail");
     assert!(error.to_string().contains("Wrong credentials"), "{error}");
+}
+
+// ------------------------------------------------- getCoverArt and covers (T12d)
+
+#[test]
+fn the_cover_art_endpoint_asks_for_the_id_at_600_and_returns_the_image() {
+    let transport = Recording {
+        body: b"png-bytes-not-json".to_vec(),
+        urls: std::sync::Mutex::new(Vec::new()),
+    };
+    let client = Client::new(
+        &transport,
+        "https://music.example.com",
+        "demo",
+        Auth::Token {
+            password: "demo".to_owned(),
+        },
+    );
+
+    let bytes = client
+        .cover_art_bytes("al-1")
+        .unwrap_or_else(|error| panic!("the cover fetch: {error}"));
+    assert_eq!(bytes, b"png-bytes-not-json", "the image bytes, untouched");
+
+    let urls = transport.urls.lock().unwrap();
+    assert!(
+        urls[0].starts_with("https://music.example.com/rest/getCoverArt?"),
+        "{}",
+        urls[0]
+    );
+    let pairs = query_pairs(&urls[0]);
+    for piece in ["id=al-1", "size=600", "u=demo", "f=json"] {
+        assert!(
+            pairs.contains(&piece.to_owned()),
+            "{piece} missing: {}",
+            urls[0]
+        );
+    }
+}
+
+#[test]
+fn a_failed_cover_art_answer_reports_the_server_sentence() {
+    let transport = Recording {
+        body: error_envelope(70, "Song not found"),
+        urls: std::sync::Mutex::new(Vec::new()),
+    };
+    let client = Client::new(
+        transport,
+        "https://music.example.com",
+        "demo",
+        Auth::Token {
+            password: "demo".to_owned(),
+        },
+    );
+    let error = client
+        .cover_art_bytes("missing")
+        .expect_err("a failed cover answer must fail, not become a cover");
+    assert!(error.to_string().contains("Song not found"), "{error}");
+}
+
+#[test]
+fn a_cover_lands_in_the_covers_cache_under_a_stable_name_and_a_hit_needs_no_network() {
+    // The track cache is nested inside the test's tree so the covers cache —
+    // its sibling, the way `…/velo/subsonic` and `…/velo/covers` sit beside
+    // each other — stays inside the tree too and is removed with it.
+    let dir = temp_dir("covers-cache").join("subsonic");
+    let transport = Recording {
+        body: b"png-bytes-not-json".to_vec(),
+        urls: std::sync::Mutex::new(Vec::new()),
+    };
+    let client = Client::new(
+        &transport,
+        "https://music.example.com",
+        "demo",
+        Auth::Token {
+            password: "demo".to_owned(),
+        },
+    );
+    let resolver = SubsonicResolver::new(
+        client,
+        "subsonic:music.example.com".to_owned(),
+        Cache::new(dir.clone()),
+    );
+
+    let first = resolver.cover_file("al-1").expect("the cover fetch");
+    // Named by a stable hash of the cover id, inside the covers cache that
+    // sits beside the track cache.
+    let covers = dir.with_file_name("covers");
+    assert!(
+        first.starts_with(&covers),
+        "{} must live in {}",
+        first.display(),
+        covers.display()
+    );
+    assert_eq!(fs::read(&first).unwrap(), b"png-bytes-not-json");
+
+    // The same id again: the same file, and no second request.
+    let second = resolver.cover_file("al-1").expect("the cached cover");
+    assert_eq!(first, second, "one cover id, one cached file");
+    assert_eq!(transport.urls.lock().unwrap().len(), 1);
+
+    // A different id names a different file.
+    let other = resolver.cover_file("al-2").expect("the other cover");
+    assert_ne!(other, first);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_failed_cover_fetch_yields_no_cover_and_no_error_the_user_sees() {
+    // Nested like the other covers test, so the covers cache — the track
+    // cache's sibling — stays inside the tree this test removes.
+    let dir = temp_dir("covers-fail").join("subsonic");
+    let transport = Canned::new(vec![(
+        "getCoverArt",
+        Err(Error::Unreachable {
+            detail: "connection refused".to_owned(),
+        }),
+    )]);
+    let client = Client::new(
+        transport,
+        "https://music.example.com",
+        "demo",
+        Auth::Token {
+            password: "demo".to_owned(),
+        },
+    );
+    let resolver = SubsonicResolver::new(
+        client,
+        "subsonic:music.example.com".to_owned(),
+        Cache::new(dir.clone()),
+    );
+
+    assert!(
+        resolver.cover_file("al-1").is_none(),
+        "a failed fetch is no cover, never a panic"
+    );
+    let covers = dir.with_file_name("covers");
+    assert!(
+        fs::read_dir(&covers).map_or(true, |entries| entries.count() == 0),
+        "no partial file survives a failed fetch"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// ------------------------------------------------------------ scrobble (T12d)
+
+#[test]
+fn the_scrobble_endpoint_sends_the_id_and_the_submission_flag() {
+    let transport = Recording {
+        body: ok_envelope(""),
+        urls: std::sync::Mutex::new(Vec::new()),
+    };
+    let client = Client::new(
+        &transport,
+        "https://music.example.com",
+        "demo",
+        Auth::Token {
+            password: "demo".to_owned(),
+        },
+    );
+
+    client
+        .scrobble("s-1", false)
+        .unwrap_or_else(|error| panic!("now playing: {error}"));
+    client
+        .scrobble("s-1", true)
+        .unwrap_or_else(|error| panic!("the submission: {error}"));
+
+    let urls = transport.urls.lock().unwrap();
+    assert_eq!(urls.len(), 2);
+    assert!(
+        urls[0].starts_with("https://music.example.com/rest/scrobble?"),
+        "{}",
+        urls[0]
+    );
+    let first = query_pairs(&urls[0]);
+    assert!(first.contains(&"id=s-1".to_owned()), "{}", urls[0]);
+    assert!(
+        first.contains(&"submission=false".to_owned()),
+        "{}",
+        urls[0]
+    );
+    let second = query_pairs(&urls[1]);
+    assert!(
+        second.contains(&"submission=true".to_owned()),
+        "{}",
+        urls[1]
+    );
+}
+
+#[test]
+fn a_failed_scrobble_answers_with_the_server_sentence() {
+    let transport = Recording {
+        body: error_envelope(70, "Song not found"),
+        urls: std::sync::Mutex::new(Vec::new()),
+    };
+    let client = Client::new(
+        transport,
+        "https://music.example.com",
+        "demo",
+        Auth::Token {
+            password: "demo".to_owned(),
+        },
+    );
+    let error = client.scrobble("missing", true).expect_err("must fail");
+    assert!(error.to_string().contains("Song not found"), "{error}");
 }
 
 // ------------------------------------------------------------- stream (T12c)

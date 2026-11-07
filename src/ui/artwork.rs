@@ -54,6 +54,23 @@ impl Artwork {
             .map(|image| Artwork { image })
     }
 
+    /// The cover that already sits in a file of its own: a remote track's
+    /// cover fetched into the covers cache (T12d) is a JPEG or PNG on disk
+    /// with no audio around it, so there are no tags to read. The bytes, not
+    /// the name, decide the format; bytes that are not an image are `None`,
+    /// like every other cover failure — decoration must not break the
+    /// interface.
+    #[must_use]
+    pub fn from_image_file(path: &Path) -> Option<Artwork> {
+        image::ImageReader::open(path)
+            .ok()?
+            .with_guessed_format()
+            .ok()?
+            .decode()
+            .ok()
+            .map(|image| Artwork { image })
+    }
+
     /// A decoded cover for the interface's own tests: the layout and the
     /// `[ui]` switches never look at the pixels, so any image will do.
     #[cfg(test)]
