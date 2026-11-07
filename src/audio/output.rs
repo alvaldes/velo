@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use rtrb::{Producer, RingBuffer};
 
+use super::resample::RateConverter;
 use super::{AudioError, TrackSource, TrackSpec};
 
 /// Two seconds of audio in flight: long enough to survive a slow decode, short
@@ -41,15 +42,17 @@ pub struct Player {
 
 impl Player {
     /// Plays every path as one continuous stream, in order, with no gap between
-    /// them. The first track decides the device format; a later track that
-    /// disagrees is rejected until resampling lands (T2).
+    /// them. The device runs at the first track's own format when it accepts
+    /// it, otherwise at the device default, and every track is converted to
+    /// that format so the queue never stops (T2).
     ///
     /// # Errors
     ///
     /// Returns [`AudioError::Io`] when a path cannot be read,
     /// [`AudioError::Unsupported`] when its format is not decodable,
     /// [`AudioError::Device`] when no output device accepts the format, and
-    /// [`AudioError::SpecMismatch`] when a later track disagrees with the first.
+    /// [`AudioError::SpecMismatch`] when a track's channel layout cannot be
+    /// joined to the output.
     pub fn play_gapless(paths: Vec<PathBuf>) -> Result<Self, AudioError> {
         if paths.is_empty() {
             return Err(AudioError::Unsupported("no tracks to play".to_owned()));
@@ -63,6 +66,7 @@ impl Player {
         let device = host
             .default_output_device()
             .ok_or_else(|| AudioError::Device("no audio output device".to_owned()))?;
+        let spec = output_spec(&device, spec)?;
 
         let config = cpal::StreamConfig {
             channels: spec.channels,
@@ -223,21 +227,80 @@ fn produce(
 
         let mut source = TrackSource::open(&path)?;
         let spec = source.spec();
-        if spec != expected {
-            return Err(AudioError::SpecMismatch {
-                expected,
-                got: spec,
-            });
-        }
+        // A rate difference is converted away; only a layout difference cannot
+        // be joined, because remixing channels changes the music itself.
+        let mut converter = RateConverter::new(spec, expected)?;
 
         while let Some(block) = source.read_block()? {
             if stop.load(Ordering::Relaxed) {
                 return Ok(());
             }
-            push_all(&mut ring, &block, delivered, stop);
+            let resampled = converter.convert(&block)?;
+            push_all(&mut ring, &resampled, delivered, stop);
         }
+
+        // The resampler holds the track's last frames back until it sees what
+        // follows them; without this the tail is heard as a cut-off ending.
+        let flushed = converter.flush()?;
+        push_all(&mut ring, &flushed, delivered, stop);
     }
     Ok(())
+}
+
+/// The format the device runs at: the first track's own format when the
+/// device accepts it, otherwise the device default, to which every track is
+/// then converted.
+fn output_spec(device: &cpal::Device, track: TrackSpec) -> Result<TrackSpec, AudioError> {
+    let accepts_track = device
+        .supported_output_configs()
+        .map_err(|error| AudioError::Device(error.to_string()))?
+        .any(|range| {
+            range.channels() == track.channels
+                && range.min_sample_rate() <= track.sample_rate
+                && track.sample_rate <= range.max_sample_rate()
+                && range.sample_format() == cpal::SampleFormat::F32
+        });
+    if accepts_track {
+        return Ok(track);
+    }
+
+    let default = device
+        .default_output_config()
+        .map_err(|error| AudioError::Device(error.to_string()))?;
+    let default_rate = default.sample_rate();
+    let output = TrackSpec {
+        sample_rate: default_rate,
+        channels: default.channels(),
+    };
+    if output.channels == track.channels {
+        return Ok(output);
+    }
+
+    // A multichannel default device (an HDMI receiver, say) must not turn a
+    // stereo track into an error: any configuration with a matching layout
+    // works, at the device's own default rate.
+    let accepts_layout = device
+        .supported_output_configs()
+        .map_err(|error| AudioError::Device(error.to_string()))?
+        .any(|range| {
+            range.channels() == track.channels
+                && range.sample_format() == cpal::SampleFormat::F32
+                && range.min_sample_rate() <= default_rate
+                && default_rate <= range.max_sample_rate()
+        });
+    if accepts_layout {
+        return Ok(TrackSpec {
+            sample_rate: default_rate,
+            channels: track.channels,
+        });
+    }
+
+    // Resampling repairs a rate difference; nothing repairs a layout
+    // difference without remixing, which is rejected instead.
+    Err(AudioError::SpecMismatch {
+        expected: output,
+        got: track,
+    })
 }
 
 /// Writes as much of `samples` as the ring accepts, sleeping while it is full.

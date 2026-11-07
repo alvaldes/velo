@@ -52,7 +52,7 @@ Status: MP3, FLAC, M4A/AAC, OGG Vorbis and WAV are decodable with symphonia 0.5.
 
 | ID | Task | Specs | Route | Commit |
 |:--|:--|:--|:--|:--|
-| T1 | Audio spike: decode with symphonia, output through cpal, lock-free ring buffer, gapless join between two tracks | S5, S7, S16 | inline | — |
+| T1 | Audio spike: decode with symphonia, output through cpal, lock-free ring buffer, gapless join between two tracks | S5, S7, S16 | inline | `cc2d967` |
 | T2 | Replace the spike's resampling with rubato; audible verification of the join | S7 | inline | — |
 | T3 | ratatui skeleton: layout, keybindings, themes | S1 | inline | — |
 | T4 | Library scan: jwalk + lofty + rusqlite schema, artist/album/track browser | S6 | inline | — |
@@ -68,6 +68,11 @@ Status: MP3, FLAC, M4A/AAC, OGG Vorbis and WAV are decodable with symphonia 0.5.
 | T14 | Opus decode via a bundled `libopus` (`audiopus_sys`), keeping the single-binary promise | S5 | inline | — |
 | T15 | Evaluate the symphonia 0.6 API (`codecs::audio::AudioDecoder`, generic buffers) and migrate behind the existing tests | S5, S7 | inline | — |
 | T16 | Trim AAC/MP4 encoder priming: symphonia 0.5 does not populate `delay`/`padding` for isomp4, so an M4A join carries up to ~1024 frames of priming (read `iTunSMPB` or the `elst` edit list) | S7 | inline | — |
+| T17 | Bit-perfect mode: opt in to reopening the device per track when the rate changes instead of resampling (waits for the config system in T9) | S7, S12 | inline | — |
+
+### Slice boundaries
+
+- T1 (`cc2d967`, branch `feat/audio-engine`): **926 authored lines in one commit**, over the ~400-line work-unit budget. Splitting it after the fact was measured and rejected: the decode half alone is ~540 lines, so the split buys the reviewer nothing while breaking a compile-consistent commit. Recorded as a known deviation. From T2 on, each unit stays at or under ~400 authored lines, and a unit whose Risk line names a high-risk item gets its own commit.
 
 ## Log
 
@@ -88,3 +93,10 @@ Interpretation: S1–S13 and S16–S17 are v1; S14 and S15 are required by the p
 **L6** (dependency findings): `symphonia` 0.6.1 renamed its public API (`codecs::audio::AudioDecoder`, generic audio buffers) and, like 0.5.4, ships **no Opus decoder**. The spike pins `symphonia@0.5` so the risk stays in the gapless join rather than in API archaeology; T15 handles the migration. Resolved versions: `cpal` 0.18.2, `rtrb` 0.4.1, `symphonia` 0.5.x.
 
 **L7** (functional verification, T1): decoding works for FLAC, MP3, OGG Vorbis and WAV. Two real bugs surfaced and were fixed or tracked: (a) **M4A/AAC failed at open** because the container declares no channel layout until the decoder parses the first packet — `TrackSource::open` now decodes the first block and uses it as `pending`, with the spec taken from the decoder instead of the container (`tests/formats.rs`); (b) **AAC priming is not trimmed** by symphonia 0.5 for isomp4 (an MP3 of the same 2.00s trims to exactly 88 200 frames; the M4A decodes ~1 024 frames long), so AAC joins are not yet gapless — tracked as T16. Opus is rejected at probe time, as expected until T14.
+
+**L9** (product decision, verbatim):
+> voy con tu recomendacion
+
+Interpretation: resample every track to the output format by default (T2), so a queue never stops; bit-perfect playback becomes an opt-in setting (T17) once the config system exists (T9), because an option nobody can configure is not an option. Channel-layout differences keep being rejected: converting a rate preserves pitch and level, remixing a layout does not preserve anything.: `cargo test` 5/5 green (3 gapless rules, 2 format rules); `cargo clippy --all-targets` 0 warnings; `cargo fmt --check` clean. Playing a quiet 440 Hz FLAC followed by a 660 Hz FLAC exits 0 with **zero underruns** — the first attempt reported 1 underrun, fixed by pre-filling the ring before the device starts and by counting an underrun only while the producer still has work. `velo /a.flac /mono.wav` rejects the join with `sample format mismatch: sequence is 44100 Hz/2 ch, track is 44100 Hz/1 ch` and exit code 1; a missing file exits 1; no arguments exits 2. MP3 of 2.00s reports exactly 88 200 frames, proving LAME's priming is trimmed.
+
+**L9** (2026-11-06, decision): library root is `~/Music/Library` (not `~/Music`, which holds Music.app data). Layout `Artist/YYYY - Album/NN - Title.ext` plus `cover.jpg` is a human convention only; velo browses by tags (S6, T4). T9 uses `~/Music/Library` as the default `library` path.

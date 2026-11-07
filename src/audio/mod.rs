@@ -10,6 +10,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 pub mod output;
+pub mod resample;
 
 pub use output::Player;
 

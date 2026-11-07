@@ -108,6 +108,7 @@ OPTIONS:
     --info       Report format, frame count and length without playing
     -h, --help   Show this help
 
-Audio must share one format for now: resampling lands in T2."
+Audio must share one channel layout: sample rates are converted to the
+    output device, channel layouts are not."
     );
 }
