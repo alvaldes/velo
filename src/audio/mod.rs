@@ -1,8 +1,9 @@
 //! The audio path: decode, sequence and stream.
 //!
 //! Design rule inherited from `gentle-stream` (`player.py`): the audio callback
-//! only copies memory. Decoding, resampling and sequencing happen on a producer
-//! thread one buffer ahead, never inside the callback.
+//! only copies memory. Decoding, resampling, `ReplayGain` ([`replay_gain`], T11)
+//! and sequencing happen on a producer thread one buffer ahead, never inside
+//! the callback.
 
 use std::fmt;
 use std::fs::File;
@@ -11,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub mod output;
+pub mod replay_gain;
 pub mod resample;
 
 pub use output::{GainRamp, Player, seek_target};

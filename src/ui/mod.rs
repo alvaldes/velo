@@ -33,6 +33,7 @@ use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph};
 
 use crate::audio::output::{SharedQueue, TrackFailure};
 use crate::audio::{Player, seek_target};
+use crate::config::ReplayGainMode;
 use crate::library::{AlbumEntry, ArtistEntry, Library, TrackEntry};
 
 use self::artwork::{Artwork, Picker, StatefulImage, StatefulProtocol};
@@ -166,6 +167,9 @@ pub struct App<'lib> {
     seen_area: std::cell::Cell<Rect>,
     /// Whether the reason a cover is missing has already been said.
     art_explained: bool,
+    /// How `ReplayGain` is applied, from the config; the player reads it when a
+    /// stream is built, so a seek keeps honouring it (T11).
+    replay_gain: ReplayGainMode,
     /// The open search, if any (T7). While it is open the body lists its
     /// results and nearly every key types into it; the browse state below this
     /// field is never touched, which is how `Esc` restores it exactly.
@@ -218,6 +222,7 @@ impl<'lib> App<'lib> {
             shared: None,
             seen_area: std::cell::Cell::new(Rect::new(0, 0, 0, 0)),
             art_explained: false,
+            replay_gain: ReplayGainMode::default(),
             search: None,
             search_pool: Vec::new(),
             search_haystacks: Vec::new(),
@@ -254,6 +259,7 @@ impl<'lib> App<'lib> {
             shared: None,
             seen_area: std::cell::Cell::new(Rect::new(0, 0, 0, 0)),
             art_explained: false,
+            replay_gain: ReplayGainMode::default(),
             search: None,
             search_pool: Vec::new(),
             search_haystacks: Vec::new(),
@@ -289,6 +295,20 @@ impl<'lib> App<'lib> {
     #[must_use]
     pub const fn queue_selected(&self) -> usize {
         self.queue_selected
+    }
+
+    /// How `ReplayGain` is applied, as the config resolved it.
+    pub const fn set_replay_gain(&mut self, mode: ReplayGainMode) {
+        self.replay_gain = mode;
+    }
+
+    /// The level the config asks for. Applied to a running player and kept for
+    /// the next one, so a stream built after a seek keeps it (T11).
+    pub fn set_volume(&mut self, percent: u8) {
+        self.volume = percent;
+        if let Some(player) = &self.player {
+            player.set_volume(percent);
+        }
     }
 
     /// The queue, in play order.
@@ -1494,8 +1514,9 @@ impl<'lib> App<'lib> {
         // The player reads the queue it is given, so the interface keeps the
         // handle and edits it in place (T18).
         let queue = Arc::new(Mutex::new(paths.clone()));
-        match Player::play_gapless(Arc::clone(&queue)) {
+        match Player::play_gapless_with_gain(Arc::clone(&queue), self.replay_gain) {
             Ok(player) => {
+                player.set_volume(self.volume);
                 self.queue = paths;
                 self.shared = Some(queue);
                 self.player = Some(player);
@@ -1543,7 +1564,7 @@ impl<'lib> App<'lib> {
         }
         let queue = Arc::new(Mutex::new(self.queue.clone()));
         self.shared = Some(Arc::clone(&queue));
-        match Player::play_gapless_at(queue, track, offset) {
+        match Player::play_gapless_at_with_gain(queue, track, offset, self.replay_gain) {
             Ok(player) => {
                 // A rebuilt player starts at its own default level; without this
                 // a seek would silently jump the volume back to it.

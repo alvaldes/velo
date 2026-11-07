@@ -6,7 +6,7 @@ use std::time::Duration;
 use clap::{CommandFactory as _, Parser};
 
 use velo::audio::{Player, TrackSource};
-use velo::config::{self, Cli, Config, Settings};
+use velo::config::{self, Cli, Config, ReplayGainMode, Settings};
 use velo::library::Library;
 use velo::ui::{Action, App, artwork, crossterm};
 
@@ -39,16 +39,16 @@ fn main() -> ExitCode {
             return usage_help();
         }
         // No files: the interface browses the library index.
-        return browse_interface(&settings.library);
+        return browse_interface(&settings.library, settings.replay_gain, settings.volume);
     }
 
     if cli.info {
         return print_info(&cli.files);
     }
     if cli.play {
-        return play(&cli.files);
+        return play(&cli.files, settings.replay_gain);
     }
-    run_interface(cli.files)
+    run_interface(cli.files, settings.replay_gain, settings.volume)
 }
 
 /// Resolves the user's settings: the config file (a missing file is normal
@@ -150,7 +150,7 @@ fn print_info(paths: &[PathBuf]) -> ExitCode {
 }
 
 /// The terminal interface. Restores the terminal even when the loop errors.
-fn run_interface(paths: Vec<PathBuf>) -> ExitCode {
+fn run_interface(paths: Vec<PathBuf>, replay_gain: ReplayGainMode, volume: u8) -> ExitCode {
     if !std::io::stdout().is_terminal() {
         eprintln!("velo: the interface needs an interactive terminal");
         return ExitCode::FAILURE;
@@ -161,6 +161,8 @@ fn run_interface(paths: Vec<PathBuf>) -> ExitCode {
     let picker = artwork::detect();
     let outcome = with_terminal(|terminal| {
         let mut app = App::new(paths);
+        app.set_replay_gain(replay_gain);
+        app.set_volume(volume);
         app.show_artwork(picker);
         event_loop(&mut app, terminal)
     });
@@ -171,7 +173,7 @@ fn run_interface(paths: Vec<PathBuf>) -> ExitCode {
 /// second launch is fast) with progress in the status line, then browses the
 /// index. A missing root or an empty index still opens the interface and says
 /// so instead of exiting.
-fn browse_interface(root: &Path) -> ExitCode {
+fn browse_interface(root: &Path, replay_gain: ReplayGainMode, volume: u8) -> ExitCode {
     if !std::io::stdout().is_terminal() {
         eprintln!("velo: the interface needs an interactive terminal");
         return ExitCode::FAILURE;
@@ -185,6 +187,8 @@ fn browse_interface(root: &Path) -> ExitCode {
             Ok(library) => App::browse(Some(library)),
             Err(_) => App::browse(None),
         };
+        app.set_replay_gain(replay_gain);
+        app.set_volume(volume);
         app.show_artwork(picker);
         match &opened {
             Ok(library) => {
@@ -263,9 +267,9 @@ fn event_loop(
     terminal.show_cursor()
 }
 
-fn play(paths: &[PathBuf]) -> ExitCode {
+fn play(paths: &[PathBuf], replay_gain: ReplayGainMode) -> ExitCode {
     let queue = std::sync::Arc::new(std::sync::Mutex::new(paths.to_vec()));
-    let mut player = match Player::play_gapless(queue) {
+    let mut player = match Player::play_gapless_with_gain(queue, replay_gain) {
         Ok(player) => player,
         Err(error) => {
             eprintln!("velo: {error}");

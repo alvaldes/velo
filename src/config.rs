@@ -11,8 +11,8 @@
 //! The merged [`Settings`] carries keys today's code does not read yet —
 //! notably `bit_perfect`, stored and passed through for T17 (bit-perfect
 //! playback opt-in) — so the config schema does not have to change when the
-//! feature that consumes them arrives. Nothing reads them today; that is why
-//! they exist.
+//! feature that consumes them arrives. `replay_gain` arrived the other way
+//! round (T11, S15): its [`ReplayGainMode`] is what the audio path reads.
 
 use std::ffi::OsStr;
 use std::fmt;
@@ -28,6 +28,23 @@ pub const DEFAULT_LIBRARY_ROOT: &str = "/Users/alvaldes/Music/Library";
 
 /// The volume the player has always started at (T3 kept it at full).
 pub const DEFAULT_VOLUME: u8 = 100;
+
+/// The way `ReplayGain` is applied (T11, S15): `track` is the default, `album`
+/// prefers the album tags and falls back to the track tags, `off` applies
+/// nothing. serde's own unknown-variant error is the strictness the config
+/// wants: it names the value it refused and every allowed one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReplayGainMode {
+    /// Apply the track's own gain and peak (the default).
+    #[default]
+    Track,
+    /// Apply the album gain and peak when the track carries them, otherwise
+    /// the track's.
+    Album,
+    /// Apply no `ReplayGain` at all.
+    Off,
+}
 
 /// The parsed command line.
 ///
@@ -63,7 +80,7 @@ Audio must share one channel layout: sample rates are converted to the
     output device, channel layouts are not.
 
 Configuration: $XDG_CONFIG_HOME/velo/config.toml, or
-    ~/.config/velo/config.toml — keys: library, volume, bit_perfect. A
+    ~/.config/velo/config.toml — keys: library, volume, bit_perfect, replay_gain. A
     missing file is normal and silent; an unknown key is an error."
 )]
 pub struct Cli {
@@ -99,6 +116,9 @@ pub struct Config {
     /// `bit_perfect` — stored and passed through for T17; nothing reads it
     /// yet, and saying so here is the point.
     pub bit_perfect: Option<bool>,
+    /// `replay_gain` — which `ReplayGain` tags the audio path applies (T11,
+    /// S15); the audio path reads it through [`ReplayGainMode`].
+    pub replay_gain: Option<ReplayGainMode>,
 }
 
 impl Config {
@@ -133,6 +153,7 @@ impl Config {
             library: file.library,
             volume: file.volume,
             bit_perfect: file.bit_perfect,
+            replay_gain: file.replay_gain,
         })
     }
 
@@ -148,6 +169,7 @@ impl Config {
                 .unwrap_or_else(|| PathBuf::from(DEFAULT_LIBRARY_ROOT)),
             volume: self.volume.unwrap_or(DEFAULT_VOLUME),
             bit_perfect: self.bit_perfect.unwrap_or(false),
+            replay_gain: self.replay_gain.unwrap_or(ReplayGainMode::Track),
         }
     }
 }
@@ -156,11 +178,14 @@ impl Config {
 /// file and the defaults have been resolved.
 ///
 /// `bit_perfect` is set here and read nowhere; T17 will read it.
+/// `replay_gain` is consumed by the audio path (T11): the gain is applied in
+/// the producer, once per track, before the ring.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
     pub library: PathBuf,
     pub volume: u8,
     pub bit_perfect: bool,
+    pub replay_gain: ReplayGainMode,
 }
 
 /// Resolves the default config file location from the two environment values
@@ -219,6 +244,8 @@ struct FileConfig {
     volume: Option<u8>,
     library: Option<PathBuf>,
     bit_perfect: Option<bool>,
+    #[serde(default)]
+    replay_gain: Option<ReplayGainMode>,
 }
 
 fn deserialize_volume<'de, D>(deserializer: D) -> Result<Option<u8>, D::Error>
