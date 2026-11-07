@@ -27,7 +27,9 @@ Stage 1 changes `src/ui/` (and its tests) only. Stage 2 (the spectrum) taps the 
 | T2 | Now-playing block: title and subtitle of the playing track, clock and state pill, progress bar, volume slider, transport buttons | S1, S3, S4 | inline | `6b5fdd6` |
 | T3 | Lists restyled (browse, queue, search): header line, numbered rows, right-aligned facts, subtle selection, `▸` on the playing row | S1, S3 | inline | `4b236ff` |
 | T4 | Footer key hints and help overlay restyled; golden screen re-recorded | S1, S3, S4 | inline | `ad0e3ee` (hints landed in T1) |
-| T5 | Stage 2: spectrum analyzer from an audio tap (FFT), replacing the progress band's spare room | S2 | — (deferred) | — |
+| T5a | Audio tap: the device callback pushes each frame's mono mix into a second lock-free SPSC ring; full ring drops, never blocks. Risk: item 4 (concurrency) | S2 | inline + independent verifier | — |
+| T5b | Spectrum analysis: Hann window, radix-2 FFT, log-spaced bands, rise at once and fall smoothly, silence falls to zero | S2 | inline | — |
+| T5c | Spectrum in the now-playing block (4 rows of eighth-block bars with a vertical gradient, baseline when silent) on windows tall enough; ~30 fps redraw while playing | S1, S2, S4 | inline | — |
 | T6 | Cover art from the folder (`cover`/`folder`/`front` `.jpg`/`.png`) when the file embeds none | S1, S3 | inline | `2053d98` |
 | T7 | The volume number takes three columns so the right-aligned slider stops jumping | S1 | inline | `d47ce9a` |
 
@@ -54,3 +56,5 @@ Stage 1 changes `src/ui/` (and its tests) only. Stage 2 (the spectrum) taps the 
 **L10** (2026-11-07, user, after trying the build): "la lo probe pero la imagen no la veo por ninguna parte. Y ademas el vol hace un salto al estar alineado a la derecha y pasar de 100 a 99 un digito menos. cuando termiines sigue con el espectro"
 
 **L11** Analysis of the missing cover: only 43 of the 247 tracks in `~/Music/Library` embed a picture, while 12 of 18 album folders hold a `cover.jpg`; velo read only the embedded one and a track without art is silent by design (T8b). Second possible cause: this session runs under `TERM_PROGRAM=herdr` (inside Ghostty); `ratatui-image` guesses by env vars, then queries the terminal, and a multiplexer that does not pass kitty graphics through yields no protocol — then the status line says so. T6: folder fallback, decoded by content (a PNG named `.jpg` still decodes); RED observed (1 test), the embedded-wins test passed already and pins existing behavior. T7: RED observed (the slider moved at 95%); `●─ 95` became `●─  95` in the older slider test, deliberately.
+
+**L12** T5 design. The tap sits in the device callback, not the producer: the producer runs up to 2 s ahead (the ring), so only the callback is in sync with what is heard. It taps pre-gain samples, so the bars show the music, not the volume knob; a paused callback returns early, pushes nothing, and the bars fall. A hand-written radix-2 FFT (tested against a known sine) instead of adding `rustfft`: one dependency fewer in a published single binary. The event loop polls every 100 ms (10 fps), too choppy for bars: 33 ms while playing, 100 ms otherwise. The 11-row block with the spectrum needs ≥22 content rows, so the 80×24 golden screen does not change.
