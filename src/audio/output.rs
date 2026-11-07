@@ -107,17 +107,28 @@ pub struct Player {
     /// The queue index the producer is currently decoding; the UI reads it to
     /// mark the playing row.
     current: Arc<AtomicUsize>,
-    /// For each queue index, how many ring samples had been delivered when the
-    /// producer started pushing that track. `position` subtracts it from the
-    /// played counter to get elapsed time within the current track. Written by
-    /// the producer once per track, read by the UI; never by the callback.
-    track_starts: Arc<Mutex<Vec<usize>>>,
-    /// The track a seek landed on and how deep into it, in output frames.
+    /// Which track the producer is on and how many ring samples had been
+    /// delivered when it started it, in one record. Publishing these as two
+    /// pieces let the UI read an index whose start had not been written yet and
+    /// report a position of zero — a seek from there lands at the delta, not at
+    /// the delta from where the music actually is.
+    progress: Arc<Mutex<Progress>>,
+    /// The track a seek landed on and how deep into it, in interleaved samples
+    /// — the same unit as the played counter, which is what made a stereo seek
+    /// report half its position when this was stored as frames.
     /// Without this the played counter makes the clock restart at zero in the
     /// middle of a song after every seek.
     start_track: usize,
-    start_offset_frames: usize,
+    start_offset_samples: usize,
     producer: Option<JoinHandle<Result<(), AudioError>>>,
+}
+
+/// Where the producer is: the queue index and the delivered count at which the
+/// current track began. Only the producer writes it, only the UI reads it.
+#[derive(Clone, Copy, Debug, Default)]
+struct Progress {
+    track: usize,
+    start: usize,
 }
 
 /// The atomics the device callback reads and writes. Created once per player
@@ -179,8 +190,10 @@ impl Player {
 
         let (device, config, spec) = open_output(spec)?;
         // `offset_frames` is in the track's own frames, which is what the decoder
-        // needs; the clock below counts in output frames, so it needs its own.
-        let clock_offset_frames = duration_to_frames(offset, spec.sample_rate);
+        // needs. The played counter, however, counts interleaved samples — rate
+        // times channels — so the clock's offset has to be scaled the same way
+        // or a stereo seek reports half the position it landed on.
+        let clock_offset_samples = offset_samples(offset, spec);
 
         let (ring, consumer) = RingBuffer::<f32>::new(spec.interleaved_rate() * RING_SECONDS);
 
@@ -189,7 +202,10 @@ impl Player {
         // The requested track is the one being produced until the producer says
         // otherwise; it sets the index before it opens each track.
         let current = Arc::new(AtomicUsize::new(track_index));
-        let track_starts = Arc::new(Mutex::new(Vec::new()));
+        let progress = Arc::new(Mutex::new(Progress {
+            track: track_index,
+            start: 0,
+        }));
         let wires = CallbackWires {
             playing: Arc::new(AtomicBool::new(true)),
             producing: Arc::new(AtomicBool::new(true)),
@@ -202,7 +218,7 @@ impl Player {
             let delivered = Arc::clone(&delivered);
             let stop = Arc::clone(&stop);
             let current = Arc::clone(&current);
-            let track_starts = Arc::clone(&track_starts);
+            let progress = Arc::clone(&progress);
             let producing = Arc::clone(&wires.producing);
             thread::Builder::new()
                 .name("velo-producer".to_owned())
@@ -212,8 +228,7 @@ impl Player {
                         start_track: track_index,
                         offset_frames,
                     };
-                    let result =
-                        produce(job, spec, ring, &delivered, &stop, &current, &track_starts);
+                    let result = produce(job, spec, ring, &delivered, &stop, &current, &progress);
                     producing.store(false, Ordering::Release);
                     result
                 })
@@ -238,9 +253,9 @@ impl Player {
             stop,
             delivered,
             current,
-            track_starts,
+            progress,
             start_track: track_index,
-            start_offset_frames: usize::try_from(clock_offset_frames).unwrap_or(usize::MAX),
+            start_offset_samples: usize::try_from(clock_offset_samples).unwrap_or(usize::MAX),
             producer: Some(producer),
         })
     }
@@ -312,27 +327,22 @@ impl Player {
     /// does not advance, because it does not play.
     #[must_use]
     pub fn position(&self) -> Duration {
-        let track = self.current.load(Ordering::Acquire);
-        let start = match self.track_starts.lock() {
-            Ok(starts) => starts.get(track).copied(),
-            Err(poisoned) => poisoned.into_inner().get(track).copied(),
+        let progress = match self.progress.lock() {
+            Ok(progress) => *progress,
+            Err(poisoned) => *poisoned.into_inner(),
         };
-        let Some(start) = start else {
-            // The producer has not pushed this track's first sample yet.
-            return Duration::ZERO;
-        };
-        let frames = elapsed_frames(
+        let samples = elapsed_samples(
             self.wires.played.load(Ordering::Acquire),
-            start,
-            track,
+            progress.start,
+            progress.track,
             self.start_track,
-            self.start_offset_frames,
+            self.start_offset_samples,
         );
         #[expect(
             clippy::cast_precision_loss,
             reason = "a track holds fewer frames than f64 represents exactly"
         )]
-        let seconds = frames as f64 / self.spec.interleaved_rate() as f64;
+        let seconds = samples as f64 / self.spec.interleaved_rate() as f64;
         Duration::from_secs_f64(seconds)
     }
 
@@ -427,7 +437,7 @@ fn produce(
     delivered: &AtomicUsize,
     stop: &AtomicBool,
     current: &AtomicUsize,
-    track_starts: &Mutex<Vec<usize>>,
+    progress: &Mutex<Progress>,
 ) -> Result<(), AudioError> {
     let Sequence {
         paths,
@@ -454,22 +464,15 @@ fn produce(
             TrackSource::open(&path)?
         };
 
-        // Record where this track begins in the delivered stream, so position
-        // can subtract it from what the device has played.
-        match track_starts.lock() {
-            Ok(mut starts) => {
-                if starts.len() <= index {
-                    starts.resize(index + 1, 0);
-                }
-                starts[index] = delivered.load(Ordering::Acquire);
-            }
-            Err(poisoned) => {
-                let mut starts = poisoned.into_inner();
-                if starts.len() <= index {
-                    starts.resize(index + 1, 0);
-                }
-                starts[index] = delivered.load(Ordering::Acquire);
-            }
+        // One write publishes both halves, so a reader can never see a track
+        // without the point it began.
+        let record = Progress {
+            track: index,
+            start: delivered.load(Ordering::Acquire),
+        };
+        match progress.lock() {
+            Ok(mut current) => *current = record,
+            Err(poisoned) => *poisoned.into_inner() = record,
         }
 
         let spec = source.spec();
@@ -491,6 +494,15 @@ fn produce(
         push_all(&mut ring, &flushed, delivered, stop);
     }
     Ok(())
+}
+
+/// Converts a playback offset into interleaved samples at `spec`'s format.
+///
+/// The played counter counts interleaved samples, so a seek offset must be
+/// expressed the same way. Storing it as frames made a stereo seek report half
+/// the position it had landed on, and every later seek compounded the error.
+fn offset_samples(offset: Duration, spec: TrackSpec) -> u64 {
+    duration_to_frames(offset, spec.sample_rate) * u64::from(spec.channels)
 }
 
 /// Converts a playback offset into frames of the track's own sample rate.
@@ -625,7 +637,7 @@ fn push_all(
 /// deep inside the track the user asked for, so that track's offset has to be
 /// added back or the clock restarts mid-song. Tracks after the seek target are
 /// played from their beginning and take no offset.
-const fn elapsed_frames(
+const fn elapsed_samples(
     played: usize,
     track_start: usize,
     track: usize,
@@ -642,26 +654,44 @@ const fn elapsed_frames(
 
 #[cfg(test)]
 mod tests {
-    use super::elapsed_frames;
+    use super::elapsed_samples;
 
     #[test]
     fn playing_from_the_start_counts_only_what_was_played() {
-        assert_eq!(elapsed_frames(1_000, 0, 0, 0, 0), 1_000);
+        assert_eq!(elapsed_samples(1_000, 0, 0, 0, 0), 1_000);
     }
 
     #[test]
     fn a_seek_is_added_to_the_clock_instead_of_restarting_it() {
         // Seeks 5 s into the first track at 44.1 kHz, then plays 1 000 frames.
-        assert_eq!(elapsed_frames(1_000, 0, 0, 0, 220_500), 221_500);
+        assert_eq!(elapsed_samples(1_000, 0, 0, 0, 220_500), 221_500);
     }
 
     #[test]
     fn a_later_track_still_counts_from_its_own_beginning() {
-        assert_eq!(elapsed_frames(3_000, 2_000, 1, 0, 220_500), 1_000);
+        assert_eq!(elapsed_samples(3_000, 2_000, 1, 0, 220_500), 1_000);
+    }
+
+    #[test]
+    fn a_seek_offset_counts_interleaved_samples_not_frames() {
+        use super::{TrackSpec, offset_samples};
+        use std::time::Duration;
+        let stereo = TrackSpec {
+            sample_rate: 44_100,
+            channels: 2,
+        };
+        // One second of stereo at 44.1 kHz is 88 200 samples, not 44 100: the
+        // counter it is subtracted from counts interleaved samples.
+        assert_eq!(offset_samples(Duration::from_secs(1), stereo), 88_200);
+        let mono = TrackSpec {
+            sample_rate: 44_100,
+            channels: 1,
+        };
+        assert_eq!(offset_samples(Duration::from_secs(1), mono), 44_100);
     }
 
     #[test]
     fn a_negative_clock_is_clamped_to_zero() {
-        assert_eq!(elapsed_frames(0, 500, 1, 0, 220_500), 0);
+        assert_eq!(elapsed_samples(0, 500, 1, 0, 220_500), 0);
     }
 }
