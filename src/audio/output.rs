@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use rtrb::{Producer, RingBuffer};
 
-use super::resample::RateConverter;
+use super::resample::{ChannelMap, RateConverter};
 use super::{AudioError, TrackSource, TrackSpec};
 
 /// Two seconds of audio in flight: long enough to survive a slow decode, short
@@ -591,11 +591,26 @@ fn run_sequence(
         }
 
         let spec = source.spec();
-        // A rate difference is converted away; only a layout difference cannot
-        // be joined, because remixing channels changes the music itself. That
-        // disagreement stays a sequence error rather than a skip: it is not a
-        // broken file, it is a queue that must not be mixed.
-        let mut converter = RateConverter::new(spec, expected)?;
+        // A rate difference is converted away, and a layout difference is
+        // mapped: mono into stereo is a duplicate, not a remix, and refusing it
+        // made every mono file unplayable. A layout that would need real
+        // downmix coefficients is announced and skipped, because a device that
+        // cannot hold one track must not silence the album (T20).
+        let map = match ChannelMap::new(spec.channels, expected.channels) {
+            Ok(map) => map,
+            Err(error) => {
+                on_failure(TrackFailure {
+                    path: path.clone(),
+                    message: error.to_string(),
+                });
+                continue 'tracks;
+            }
+        };
+        let mapped_spec = TrackSpec {
+            sample_rate: spec.sample_rate,
+            channels: expected.channels,
+        };
+        let mut converter = RateConverter::new(mapped_spec, expected)?;
 
         loop {
             if stop.load(Ordering::Relaxed) {
@@ -615,7 +630,7 @@ fn run_sequence(
                     continue 'tracks;
                 }
             };
-            let resampled = match converter.convert(&block) {
+            let resampled = match converter.convert(&map.apply(&block)) {
                 Ok(resampled) => resampled,
                 Err(error) => {
                     on_failure(TrackFailure {
@@ -754,35 +769,9 @@ fn output_spec(device: &cpal::Device, track: TrackSpec) -> Result<TrackSpec, Aud
         sample_rate: default_rate,
         channels: default.channels(),
     };
-    if output.channels == track.channels {
-        return Ok(output);
-    }
-
-    // A multichannel default device (an HDMI receiver, say) must not turn a
-    // stereo track into an error: any configuration with a matching layout
-    // works, at the device's own default rate.
-    let accepts_layout = device
-        .supported_output_configs()
-        .map_err(|error| AudioError::Device(error.to_string()))?
-        .any(|range| {
-            range.channels() == track.channels
-                && range.sample_format() == cpal::SampleFormat::F32
-                && range.min_sample_rate() <= default_rate
-                && default_rate <= range.max_sample_rate()
-        });
-    if accepts_layout {
-        return Ok(TrackSpec {
-            sample_rate: default_rate,
-            channels: track.channels,
-        });
-    }
-
-    // Resampling repairs a rate difference; nothing repairs a layout
-    // difference without remixing, which is rejected instead.
-    Err(AudioError::SpecMismatch {
-        expected: output,
-        got: track,
-    })
+    // A layout difference no longer rules the device out: every track is
+    // mapped into the device's layout, so its default format is always usable.
+    Ok(output)
 }
 
 /// Writes as much of `samples` as the ring accepts, sleeping while it is full.

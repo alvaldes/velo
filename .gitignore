@@ -1,4 +1,6 @@
 /target
 *.wav
+# Committed fixtures belong to the tests; generated files stay ignored.
+!tests/fixtures/*.wav
 .DS_Store
 .atl/

@@ -261,3 +261,65 @@ fn run_chunk(
         .map_err(|error| AudioError::Decode(format!("resampling failed: {error}")))?;
     Ok(converted.take_data())
 }
+
+/// How to fit a track's channel layout into the device's.
+///
+/// A layout difference is not a remix when one side is mono: duplicating one
+/// channel or averaging two is the only faithful thing to do, and refusing it
+/// made every mono file unplayable. A layout with real downmix coefficients
+/// (5.1 into stereo) is still refused — inventing those coefficients is a
+/// product decision, not a default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChannelMap {
+    from: u16,
+    to: u16,
+}
+
+impl ChannelMap {
+    /// # Errors
+    ///
+    /// Returns [`AudioError::Unsupported`] when neither layout is mono and they
+    /// differ, because that would need a surround downmix.
+    pub fn new(from: u16, to: u16) -> Result<Self, AudioError> {
+        if from == to || from == 1 || to == 1 {
+            return Ok(Self { from, to });
+        }
+        Err(AudioError::Unsupported(format!(
+            "cannot play a {from}-channel track on a {to}-channel device: \
+             a surround downmix is not supported yet"
+        )))
+    }
+
+    /// Applies the mapping to interleaved samples. Every path is exact for mono.
+    #[must_use]
+    pub fn apply(self, samples: &[f32]) -> Vec<f32> {
+        if self.from == self.to {
+            return samples.to_vec();
+        }
+        if self.from == 1 {
+            let mut mapped = Vec::with_capacity(samples.len() * usize::from(self.to));
+            for sample in samples {
+                for _ in 0..self.to {
+                    mapped.push(*sample);
+                }
+            }
+            return mapped;
+        }
+        let mut mapped = Vec::with_capacity(samples.len() / usize::from(self.from));
+        for frame in samples.chunks_exact(usize::from(self.from)) {
+            let sum: f32 = frame.iter().sum();
+            mapped.push(sum / f32::from(self.from));
+        }
+        mapped
+    }
+}
+
+/// Maps interleaved samples from one channel layout to another.
+///
+/// # Errors
+///
+/// Returns [`AudioError::Unsupported`] when the layouts cannot be reconciled
+/// without a surround downmix.
+pub fn remap_channels(samples: &[f32], from: u16, to: u16) -> Result<Vec<f32>, AudioError> {
+    Ok(ChannelMap::new(from, to)?.apply(samples))
+}
