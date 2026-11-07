@@ -5,6 +5,7 @@
 //! that carry no tag — a missing tag never drops a file from the index.
 
 mod scan;
+mod sync;
 
 use std::collections::HashMap;
 use std::fmt;
@@ -14,6 +15,7 @@ use rusqlite::Connection;
 
 pub use scan::AUDIO_EXTENSIONS;
 use scan::scan;
+pub use sync::{SyncReport, source_for};
 
 /// The index: a SQLite connection holding the `tracks` table.
 pub struct Library {
@@ -65,10 +67,17 @@ pub struct GenreEntry {
 /// missing from the genre browser.
 pub const NO_GENRE: &str = "(no genre)";
 
-/// The schema this build writes: 1 added the `genre` column.
-const SCHEMA_VERSION: i64 = 1;
+/// The source value of every row a local scan wrote.
+pub const LOCAL_SOURCE: &str = "local";
 
-/// One track of one album, for the track browser.
+/// The schema this build writes: 1 added the `genre` column, 2 added the
+/// `source`/`remote_id` pair that lets a Subsonic server's library live in
+/// the same table as the local files (T12b).
+const SCHEMA_VERSION: i64 = 2;
+
+/// One track of one album, for the track browser. A row synced from a
+/// Subsonic server carries the `source` it came from and the server's own
+/// song id; a local row is `source = "local"`, `remote_id = None`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrackEntry {
     pub artist: String,
@@ -78,6 +87,20 @@ pub struct TrackEntry {
     pub disc_no: Option<i64>,
     pub duration_ms: i64,
     pub path: PathBuf,
+    /// Which index the row came from: [`LOCAL_SOURCE`] or `subsonic:<host>`.
+    pub source: String,
+    /// The server's own song id, when the row is remote.
+    pub remote_id: Option<String>,
+}
+
+impl TrackEntry {
+    /// Whether this row came from a Subsonic server rather than a file.
+    /// Playback of such rows needs the cache (T12c), so the interface
+    /// refuses them with a sentence instead of opening their path.
+    #[must_use]
+    pub fn is_remote(&self) -> bool {
+        self.source != LOCAL_SOURCE
+    }
 }
 
 /// Every failure the index can produce, as one type.
@@ -86,6 +109,9 @@ pub enum LibraryError {
     Io(std::io::Error),
     Db(rusqlite::Error),
     DataDir,
+    /// The sync could not talk to the server; the message is the Subsonic
+    /// error's own sentence. Nothing was written.
+    Remote(String),
 }
 
 impl fmt::Display for LibraryError {
@@ -94,6 +120,7 @@ impl fmt::Display for LibraryError {
             Self::Io(error) => write!(f, "{error}"),
             Self::Db(error) => write!(f, "{error}"),
             Self::DataDir => write!(f, "cannot determine the system data directory"),
+            Self::Remote(message) => write!(f, "{message}"),
         }
     }
 }
@@ -164,7 +191,11 @@ impl Library {
     pub fn index(&self, root: &Path) -> Result<IndexReport, LibraryError> {
         let mut known: HashMap<String, (i64, i64)> = HashMap::new();
         {
-            let mut statement = self.conn.prepare("SELECT path, mtime, size FROM tracks")?;
+            // Only local rows belong to a scan; the remote rows belong to
+            // their sync and are never touched here.
+            let mut statement = self
+                .conn
+                .prepare("SELECT path, mtime, size FROM tracks WHERE source = 'local'")?;
             let mut rows = statement.query([])?;
             while let Some(row) = rows.next()? {
                 let path: String = row.get(0)?;
@@ -202,7 +233,10 @@ impl Library {
         }
         let mut removed = 0_usize;
         {
-            let mut delete = transaction.prepare_cached("DELETE FROM tracks WHERE path = ?1")?;
+            // The same bound as the `known` read: a scan removes local rows
+            // only, never a row a sync wrote.
+            let mut delete = transaction
+                .prepare_cached("DELETE FROM tracks WHERE path = ?1 AND source = 'local'")?;
             for path in known.keys() {
                 if !outcome.seen.contains(path) {
                     removed += delete.execute([path])?;
@@ -247,6 +281,29 @@ impl Library {
             albums: one("SELECT COUNT(*) FROM (SELECT 1 FROM tracks GROUP BY artist, album)")?,
             artists: one("SELECT COUNT(*) FROM (SELECT 1 FROM tracks GROUP BY artist)")?,
         })
+    }
+
+    /// The number of tracks per source, ordered by source name — `local`
+    /// first, then each `subsonic:<host>`. This is what `velo --sync` prints.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the query cannot run.
+    pub fn counts_by_source(&self) -> Result<Vec<(String, u64)>, LibraryError> {
+        // `local` is named even when it holds nothing: the printed line is
+        // `local: 0 tracks · subsonic:<host>: N tracks`, never silently
+        // missing the local index the user indexed yesterday.
+        let mut statement = self.conn.prepare(
+            "SELECT source, COUNT(*) FROM tracks GROUP BY source
+             UNION SELECT 'local', 0
+               WHERE NOT EXISTS (SELECT 1 FROM tracks WHERE source = 'local')
+             ORDER BY 1",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let count: i64 = row.get(1)?;
+            Ok((row.get(0)?, sign_to_count(count)))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     /// Every artist with its track and album counts, name-insensitively ordered.
@@ -302,7 +359,7 @@ impl Library {
     /// Fails when the query cannot run.
     pub fn tracks_of(&self, artist: &str, album: &str) -> Result<Vec<TrackEntry>, LibraryError> {
         let mut statement = self.conn.prepare(
-            "SELECT title, track_no, disc_no, duration_ms, path
+            "SELECT title, track_no, disc_no, duration_ms, path, source, remote_id
              FROM tracks WHERE artist = ?1 AND album = ?2
              ORDER BY COALESCE(disc_no, 0), COALESCE(track_no, 1000000), title",
         )?;
@@ -315,6 +372,8 @@ impl Library {
                 disc_no: row.get(2)?,
                 duration_ms: row.get(3)?,
                 path: PathBuf::from(row.get::<_, String>(4)?),
+                source: row.get(5)?,
+                remote_id: row.get(6)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -422,7 +481,7 @@ impl Library {
     /// Every track with its raw genre tag, in [`Library::all_tracks`] order.
     fn tracks_with_genre(&self) -> Result<Vec<(TrackEntry, Option<String>)>, LibraryError> {
         let mut statement = self.conn.prepare(
-            "SELECT title, track_no, disc_no, duration_ms, path, artist, album, genre
+            "SELECT title, track_no, disc_no, duration_ms, path, artist, album, genre, source, remote_id
              FROM tracks
              ORDER BY artist, album, COALESCE(disc_no, 0), COALESCE(track_no, 1000000), title",
         )?;
@@ -436,6 +495,8 @@ impl Library {
                     path: PathBuf::from(row.get::<_, String>(4)?),
                     artist: row.get(5)?,
                     album: row.get(6)?,
+                    source: row.get(8)?,
+                    remote_id: row.get(9)?,
                 },
                 row.get(7)?,
             ))
@@ -466,6 +527,11 @@ fn split_genres(tag: &str) -> Vec<(String, String)> {
 /// losing a row. Version 0 had no `genre` column: it is added, and every
 /// stored mtime is forgotten so the next [`Library::index`] re-reads each
 /// file's tags — the rows themselves stay until that scan replaces them.
+/// Version 1 had no `source`/`remote_id` pair: the columns are added with
+/// every existing row labelled `local`, and the `(source, remote_id)`
+/// uniqueness that remote rows live under comes with them (T12b). The whole
+/// migration is one transaction on columns that `ALTER TABLE` already
+/// refuses to add twice, so running it twice is harmless.
 fn migrate(conn: &Connection) -> Result<(), LibraryError> {
     let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
     if version >= SCHEMA_VERSION {
@@ -477,8 +543,26 @@ fn migrate(conn: &Connection) -> Result<(), LibraryError> {
         .exists([])?;
     if !has_genre {
         transaction.execute_batch("ALTER TABLE tracks ADD COLUMN genre TEXT")?;
+        // A genre-migrated index forgets its mtimes so the next scan re-reads
+        // each file's tags; a source migration below must not force one.
+        transaction.execute("UPDATE tracks SET mtime = -1", [])?;
     }
-    transaction.execute("UPDATE tracks SET mtime = -1", [])?;
+    // T12b: the `source`/`remote_id` pair. An old file's rows all came from
+    // the local scan, so `DEFAULT 'local'` is exactly what they are.
+    let has_source = transaction
+        .prepare("SELECT 1 FROM pragma_table_info('tracks') WHERE name = 'source'")?
+        .exists([])?;
+    if !has_source {
+        transaction
+            .execute_batch("ALTER TABLE tracks ADD COLUMN source TEXT NOT NULL DEFAULT 'local'")?;
+        transaction.execute_batch("ALTER TABLE tracks ADD COLUMN remote_id TEXT")?;
+    }
+    // One server may not hold two rows with the same song id. A partial
+    // unique index: local rows have no remote id and are unconstrained here.
+    transaction.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_tracks_source_remote
+         ON tracks(source, remote_id) WHERE remote_id IS NOT NULL",
+    )?;
     transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     transaction.commit()?;
     Ok(())
@@ -505,7 +589,9 @@ CREATE TABLE IF NOT EXISTS tracks (
     has_cover    INTEGER NOT NULL DEFAULT 0,
     mtime        INTEGER NOT NULL,
     size         INTEGER NOT NULL,
-    genre        TEXT
+    genre        TEXT,
+    source       TEXT NOT NULL DEFAULT 'local',
+    remote_id    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tracks_artist_album ON tracks(artist, album);
 CREATE INDEX IF NOT EXISTS idx_tracks_album ON tracks(album);
@@ -532,6 +618,28 @@ ON CONFLICT(path) DO UPDATE SET
     mtime = excluded.mtime,
     size = excluded.size,
     genre = excluded.genre
+";
+
+/// The sync's upsert (T12b). The conflict target is `path`: a remote row's
+/// path is built from its source and remote id, so the same song re-synced
+/// updates its row and never duplicates it. `album_artist`, `sample_rate`,
+/// `channels` and `has_cover` have nothing to say about a remote song;
+/// `mtime`/`size` are meaningless off the file system and stay 0.
+const UPSERT_REMOTE: &str = "
+INSERT INTO tracks (path, title, artist, album, album_artist, track_no, disc_no,
+                    year, duration_ms, sample_rate, channels, format, has_cover,
+                    mtime, size, genre, source, remote_id)
+VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7, ?8, NULL, NULL, 'subsonic', 0, 0, 0, NULL, ?9, ?10)
+ON CONFLICT(path) DO UPDATE SET
+    title = excluded.title,
+    artist = excluded.artist,
+    album = excluded.album,
+    track_no = excluded.track_no,
+    disc_no = excluded.disc_no,
+    year = excluded.year,
+    duration_ms = excluded.duration_ms,
+    source = excluded.source,
+    remote_id = excluded.remote_id
 ";
 
 #[expect(

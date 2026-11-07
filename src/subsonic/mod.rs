@@ -1,10 +1,11 @@
-//! The Subsonic/Navidrome client and its authentication (T12a, S14).
+//! The Subsonic/Navidrome client and its authentication (T12a, S14), plus
+//! the two read endpoints the sync needs (T12b).
 //!
 //! Scope of this module today: speak the protocol over a [`Transport`]
-//! seam, resolve the server's secret, and answer "can I use this server?"
-//! through `velo --subsonic-test`. No library and no playback yet: remote
-//! tracks land in the existing SQLite index later (T12b), and playback is
-//! cache-on-play (T12c).
+//! seam, resolve the server's secret, answer "can I use this server?"
+//! through `velo --subsonic-test`, and serve `getAlbumList2`/`getAlbum` to
+//! the sync in `crate::library::sync`. No playback yet: playing a remote
+//! row is cache-on-play (T12c).
 //!
 //! The four decisions this shape rests on:
 //!

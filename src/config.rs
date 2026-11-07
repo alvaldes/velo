@@ -84,6 +84,10 @@ Library mode:
 Subsonic:
     velo --subsonic-test         Probe the configured Subsonic server, report
                                      what it supports, then exit
+    velo --sync                  Sync the server's library into the index
+                                     (browse and search reach it; playback
+                                     comes with the cache), print counts
+                                     per source, then exit
 
 Interface keys: j/k move, enter open/play, tab switches to the queue view
     (a append, d remove, J/K move, enter play from there), / search, ←/→ or
@@ -133,6 +137,12 @@ pub struct Cli {
     /// advertises and which authentication worked, then exit.
     #[arg(long)]
     pub subsonic_test: bool,
+
+    /// Sync the configured Subsonic server into the library index: fetch
+    /// every album, write the rows, print the counts per source, then exit.
+    /// Never runs automatically.
+    #[arg(long)]
+    pub sync: bool,
 
     /// Library root to index or browse; overrides `library` in the config file.
     #[arg(long, value_name = "PATH")]
@@ -285,7 +295,9 @@ bit_perfect = false
 replay_gain = \"track\"
 
 # A Subsonic-compatible server (Navidrome and friends), optional. Uncomment
-# the table to browse a remote server; `velo --subsonic-test` checks it.
+# the table to browse a remote server; `velo --subsonic-test` checks it and
+# `velo --sync` copies the server's library into the index, so browsing and
+# search reach it (playback from the server comes later).
 # url is required when the table exists, as is user. api_key is where a
 # server-issued API key goes; without it velo asks the environment
 # ($VELO_SUBSONIC_SECRET) and then ~/.config/velo/subsonic.key (one line,
