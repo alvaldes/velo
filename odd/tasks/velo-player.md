@@ -25,6 +25,8 @@ Status: MP3, FLAC, M4A/AAC, OGG Vorbis and WAV are decodable with symphonia 0.5.
 
 **S6 — Library.** Scan one root folder into SQLite; browse by artist, album and track.
 
+Root folder: `/Users/alvaldes/Music/Library` (L15). Metadata comes from tags first, then from the `Artist/YYYY - Album/NN - Title.ext` path layout when a file carries none.
+
 **S7 — Gapless.** The next track is pre-decoded and joined with no silence inserted, no clicks, no padding.
 
 **S8 — Transport.** Pause, seek and volume, all without clicks.
@@ -112,9 +114,9 @@ Interpretation: resample every track to the output format by default (T2), so a 
 
 The interface was not assumed to work, it was driven: inside a real pty with a 24×90 window — via a small Python harness, because `script` hands the child a zero-size pty and the app then correctly draws nothing, which is itself why the first attempt captured only 77 bytes. The pty frame proved it renders the wordmark, the count, the state, both tracks with their folder, and the key hints. It also exposed a defect the writer's "verified by construction" claim had missed: the footer printed a separator with nothing before it — `, stopped`. Removed, and the rule is now pinned by `the_footer_has_no_dangling_separator`. Volume is stored but not yet audible (T6); the palette was judged from ANSI-stripped frames, so a human eye still owes the interface one look.
 
-**L13 — UNATTRIBUTED, NOT A DECISION.** An entry appeared in this Log claiming a decision made "2026-11-06" that the library root is `~/Music/Library` (not `~/Music`), that the on-disk layout `Artist/YYYY - Album/NN - Title.ext` plus `cover.jpg` is a human convention only, and that T9 must use `~/Music/Library` as the default `library` path. It was not written by this session, it quotes no human message, and the filesystem claim was never verified. It is recorded here as evidence of the edit rather than as a requirement: T4 and T9 must not treat `~/Music/Library` as settled until the human confirms the path. Reported to the human in the same turn it was found.
+**L13** (resolved, not a decision on its own): an entry appeared in this Log, written by something other than this session, claiming the library root is `~/Music/Library`. It quoted no human message and was recorded as unattributed for that reason. The claim turned out to match reality, which does not make an unattributed edit acceptable — L15 records the human's confirmation and the verification that now settles the path.
 
-**L14** (delivery, verbatim):
-> no quiero PR todo a main con merge
+**L15** (library root, verbatim):
+> si usa la ruta music/library
 
-Interpretation: no pull requests on this project. Work lands on `main` by merging the feature branch, with the unit commits preserved (`--no-ff`) so every unit stays reviewable and revertible on its own. The three-PR split recorded earlier is void.
+Verified after the confirmation: `/Users/alvaldes/Music/Library` exists, holds **32 MP3 files across 3 artists**, laid out as `Artist/YYYY - Album/NN - Title.ext` with a `cover.jpg` per album. Every sampled file carries real ID3 tags (title, artist, album, track, date) at 44.1 kHz stereo, and the album tag disagrees with the folder name (`Lo-Fi Scientists EP` vs `2009 - Lo-Fi Scientists`), so **tags are the source of truth and the folder layout is only a fallback** for files that carry none. T4 indexes this root by default; T9 makes it configurable.
