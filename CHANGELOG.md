@@ -1,6 +1,10 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.4.1] - 2026-11-07
+
+### Fixes
+- **ui:** Set the cover inside the now-playing block, beside the title
 ## [0.4.0] - 2026-11-07
 
 ### Features
