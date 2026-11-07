@@ -456,12 +456,15 @@ impl<'lib> App<'lib> {
     }
 
     /// How long the event loop may wait for a key before drawing again:
-    /// about thirty frames a second while the bars move, ten otherwise.
+    /// about thirty frames a second while bars on screen move, ten otherwise
+    /// — a window too short for the spectrum has nothing to animate.
     #[must_use]
     pub fn frame_interval(&self) -> Duration {
-        let moving = self.state == PlayState::Playing
-            || self.spectrum.levels().iter().any(|&level| level > 0.0);
-        Duration::from_millis(if moving { 33 } else { 100 })
+        cadence(
+            self.spectrum_bands.get() > 0,
+            self.state == PlayState::Playing,
+            self.spectrum.levels().iter().any(|&level| level > 0.0),
+        )
     }
 
     /// Tells the user once why a cover they own is not on screen, instead of
@@ -628,6 +631,8 @@ impl<'lib> App<'lib> {
     pub fn draw(&self, frame: &mut Frame) {
         let area = frame.area();
         self.seen_area.set(area);
+        // Set again by `draw_spectrum` only when this frame has room for it.
+        self.spectrum_bands.set(0);
         frame.render_widget(Block::new().style(Style::new().bg(BACKGROUND)), area);
 
         // The window: a rounded frame around a title bar, the content and
@@ -1927,6 +1932,17 @@ const fn now_playing_rows(height: u16) -> u16 {
 /// How tall the spectrum is, in rows; each row resolves eight steps.
 const SPECTRUM_ROWS: u16 = 4;
 
+/// The redraw cadence: about thirty frames a second only while a spectrum is
+/// on screen and moving — the music playing, or bars still falling after it
+/// stopped. Hidden bars and still ones are drawn at ten.
+const fn cadence(visible: bool, playing: bool, falling: bool) -> Duration {
+    Duration::from_millis(if visible && (playing || falling) {
+        33
+    } else {
+        100
+    })
+}
+
 /// Partial blocks by eighths, empty to full.
 const EIGHTHS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
@@ -2127,6 +2143,34 @@ mod tests {
         assert_eq!(filled(Some(1.0), 10), 10);
         assert_eq!(filled(Some(0.5), 10), 5);
         assert_eq!(filled(None, 10), 0);
+    }
+
+    #[test]
+    fn only_a_spectrum_on_screen_that_moves_earns_thirty_frames_a_second() {
+        use std::time::Duration;
+        let (fast, slow) = (Duration::from_millis(33), Duration::from_millis(100));
+
+        assert_eq!(
+            super::cadence(true, true, false),
+            fast,
+            "visible and playing"
+        );
+        assert_eq!(
+            super::cadence(true, false, true),
+            fast,
+            "visible, bars falling"
+        );
+        assert_eq!(
+            super::cadence(false, true, false),
+            slow,
+            "playing, but hidden"
+        );
+        assert_eq!(super::cadence(false, false, true), slow, "hidden, falling");
+        assert_eq!(
+            super::cadence(true, false, false),
+            slow,
+            "visible and still"
+        );
     }
 
     #[test]
