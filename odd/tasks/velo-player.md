@@ -72,7 +72,8 @@ Root folder: `/Users/alvaldes/Music/Library` (L15). Metadata comes from tags fir
 | T16 | Trim AAC/MP4 encoder priming: symphonia 0.5 does not populate `delay`/`padding` for isomp4, so an M4A join carries up to ~1024 frames of priming (read `iTunSMPB` or the `elst` edit list) | S7 | inline | — |
 | T18 | Edit the queue: add, remove, reorder | S11 | inline | — |
 | T19 | Report a track that fails mid-queue instead of playing silence to the end | S7, S8 | worker `gentle-ai-worker` | `207dc0f` |
-| T20 | Remap the channel layout instead of refusing it: a mono track cannot be played at all today, and in a queue it takes the album down with it (found while verifying T19) | S5, S7 | inline | — |
+| T20 | Remap the channel layout instead of refusing it: a mono track could not be played at all, and in a queue it took the album down with it (found while verifying T19) | S5, S7 | inline | `0bd1e9d` |
+| T21 | Expose the current track's duration so the clock clamps and the footer shows `/ total` when the queue came from the command line (found while proving T20) | S8 | inline | — |
 | T17 | Bit-perfect mode: opt in to reopening the device per track when the rate changes instead of resampling (waits for the config system in T9) | S7, S12 | inline | — |
 
 ### Slice boundaries
@@ -184,3 +185,11 @@ so **a mono track cannot be reproduced at all** — not in a queue, not alone. `
 `SpecMismatch` aborting the sequence stays correct for the case that motivated it (a 5.1 track against a stereo device needs a real downmix decision, not a duplicate), which is exactly the distinction T20 has to draw.
 
 T19's own acceptance, measured not assumed: a queue of `[good, broken, good]` in a terminal showed `velo: skipped broken.mp3: unsupported format: unsupported feature: core (probe): no suitable format reader found` in the status line and moved the playing marker to the second good file; `--play` on the same three announced the skip and exited 0, because a skip is not a failure. The headless test pins the stronger claim: the drained samples are exactly the two good files concatenated, with no silence where the broken one was.
+
+**L25** (T20 done, T21 found): the mono bug was one line of arrogance repeated in two places. `RateConverter::new` refused any channel difference — reasonable for a *surround* downmix, absurd for mono, where duplicating a channel is not a remix — and `output_spec` additionally demanded that the device accept the first track's layout, so the refusal happened before a single block was decoded. Together: **a mono file was unplayable**, alone or in a queue, and inside a queue it aborted the sequence and silenced the album.
+
+`ChannelMap` now owns the decision: matching layouts pass through, mono duplicates into every output channel, several channels average into mono, and a layout needing real downmix coefficients is still refused — those coefficients are a product decision, and inventing them by averaging a 5.1 film mix into stereo is exactly the kind of "helpful" default that ruins audio. A refusal is now a **skip with an announcement**, not a fatal queue error, because a device that cannot hold one track must not silence the album.
+
+The proof that matters is a fixture, not an opinion: a mono WAV drained into a stereo expected spec yields **twice the samples with both channels identical**, and a six-channel WAV is announced once and skipped. The same mono file that printed `sample format mismatch` now plays and reaches `00:03` in the interface, which is where the whole detour started.
+
+**T21**, found while proving it: when the queue comes from the command line, `current_track_duration()` returns nothing, so the footer shows a bare `mm:ss` and `seek_target` has no duration to clamp against — a seek past the end of a 3 s file leaves the clock frozen at `00:08`. The decoder knows the duration; the interface just never asks it. Small, real, and it belongs with the CLI work rather than here.
