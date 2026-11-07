@@ -71,7 +71,8 @@ Root folder: `/Users/alvaldes/Music/Library` (L15). Metadata comes from tags fir
 | T15 | Evaluate the symphonia 0.6 API (`codecs::audio::AudioDecoder`, generic buffers) and migrate behind the existing tests | S5, S7 | inline | — |
 | T16 | Trim AAC/MP4 encoder priming: symphonia 0.5 does not populate `delay`/`padding` for isomp4, so an M4A join carries up to ~1024 frames of priming (read `iTunSMPB` or the `elst` edit list) | S7 | inline | — |
 | T18 | Edit the queue: add, remove, reorder | S11 | inline | — |
-| T19 | Report a track that fails mid-queue instead of playing silence to the end | S7, S8 | inline | — |
+| T19 | Report a track that fails mid-queue instead of playing silence to the end | S7, S8 | worker `gentle-ai-worker` | `207dc0f` |
+| T20 | Remap the channel layout instead of refusing it: a mono track cannot be played at all today, and in a queue it takes the album down with it (found while verifying T19) | S5, S7 | inline | — |
 | T17 | Bit-perfect mode: opt in to reopening the device per track when the rate changes instead of resampling (waits for the config system in T9) | S7, S12 | inline | — |
 
 ### Slice boundaries
@@ -174,3 +175,12 @@ Two further defects could freeze the position at zero, both now gone in the same
 Verified end to end with a 40 s fixture whose each second carries its own DC level, read back from the device callback: a seek from 4.5 s lands at 9.5 s, and the clock reads `00:03` before the press and `00:10` after, where it used to read `00:05`.
 
 **Lesson:** when a symptom says "it lands in the wrong place", instrument *both* sides of the decision that produced it — what was read, and what was written — not just the side that looks guilty. Four correct measurements of the wrong layer feel exactly like proof.
+
+**L24** (T19 done, and a worse bug found while proving it): verifying the skip in a terminal exposed a bug T19 could not fix. The fixtures were mono, and the player answered
+> velo: sample format mismatch: sequence is 44100 Hz/2 ch, track is 44100 Hz/1 ch
+
+so **a mono track cannot be reproduced at all** — not in a queue, not alone. `RateConverter::new` rejects a channel-layout difference because remixing channels changes the music itself, which is right for a *surround* downmix and absurd for mono: duplicating one channel into two is not a remix, and mono is everywhere (voice memos, old recordings, half of what a random folder holds). In a queue it is worse than useless: the layout mismatch aborts the sequence, so one mono file silences the whole album. T20 is that, and it moves ahead of T18 and T7 because a library player that refuses mono is not publishable.
+
+`SpecMismatch` aborting the sequence stays correct for the case that motivated it (a 5.1 track against a stereo device needs a real downmix decision, not a duplicate), which is exactly the distinction T20 has to draw.
+
+T19's own acceptance, measured not assumed: a queue of `[good, broken, good]` in a terminal showed `velo: skipped broken.mp3: unsupported format: unsupported feature: core (probe): no suitable format reader found` in the status line and moved the playing marker to the second good file; `--play` on the same three announced the skip and exited 0, because a skip is not a failure. The headless test pins the stronger claim: the drained samples are exactly the two good files concatenated, with no silence where the broken one was.
