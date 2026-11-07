@@ -312,3 +312,20 @@ Both wait for the main checkout to have no uncommitted work in `src/ui/mod.rs`. 
 **Two findings worth keeping.** First, a partial sync deletes nothing: the transaction is written at the end, so a failure anywhere before it leaves the index exactly as it was — destructive in intent, conservative in behaviour. Second, and this one is a UX gap T12b exposed: with only `[subsonic]` configured, the interface still demands a local `library` path, so a remote-only user is asked for a folder they do not have. That belongs with T12c or the config work; it is written here so it is not discovered twice.
 
 **What the tests pin that my terminal did not show me**: pressing Enter on a remote row (and on a remote search result) writes `velo: remote playback arrives with the cache (T12c)` and starts nothing — two tests assert the exact sentence and pass. My pty capture of the same interaction showed no status line at all, which is the known diff-stream trap of this project: ratatui only writes what changed. The tests are the evidence here; the terminal was the unreliable witness.
+
+**L39 — the three merges landed, and what the conflicts actually taught.** `c26f4bf` (T17), `e3f38f3` (T12a), `d123740` (T12b): one unit per merge, as planned in L37, each tested before the next.
+
+**None of the conflicts were textual.** They happened because both branches had grown *the same abstraction in different shapes*, and a three-way merge produces a hybrid that compiles nowhere:
+
+- T17 was written before the settings layer existed, so the binary took volume, theme and ui apart; main took a `Settings`. The merge left a function signature nobody called correctly until the call sites were joined by hand.
+- T12a had written its own `FileConfig` plus a resolved `SubsonicConfig`, while main had made `Config` *be* the file shape. The merge produced a `load_from` that parsed and then referenced a `file` binding that did not exist.
+- T12b read `source` and `remote_id` unconditionally, while main had learned that a read-only index cannot be migrated and made `genre` conditional. Merged, `tracks_of` failed on an old file with **no such column: source** — a bug main had already fixed once, reintroduced by a branch that could not see the fix.
+
+**The lesson worth keeping**: when two branches grow the same abstraction, the compiler is the only honest guide through the merge, and its first error is usually several steps downstream of the real seam. Each of the three merges needed a hand-written decision about *which* shape wins for *which* role — `Config` as the file, `Settings` as the resolved state, the library learning both `has_genre` and `has_source` — followed by a full suite run before the next merge started.
+
+**And a test that had quietly stopped covering the truth**: main's schema test asserted `user_version == 1`. After the second migration it had to be 2, and the helper now reports all three facts (version, genre, source) — a test that asserts only the first migration would keep passing while the second one silently failed to run.
+
+Verified **from main** after the merges, not from the branch: a fresh copy of the real 251-track index migrated `1 → 2` with every row `local` and all three columns present; `--subsonic-test` against Navidrome 0.64.2 reported token authentication verified; `--sync` brought 501 tracks and 50 albums in 52 requests.
+
+The clone at `../velo-clone` and the worktree at `../velo-worktrees/next` are now redundant: everything they carried lives on `main`. They can be removed whenever the human says so — nothing here deletes them on its own.
+
