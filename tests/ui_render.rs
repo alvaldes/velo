@@ -203,6 +203,34 @@ fn the_volume_slider_follows_the_volume_keys() {
     );
 }
 
+/// ui-redesign T10: `ReplayGain` arrived from `main` (T11 there) as a config
+/// key with nothing on screen; the transport row now says which mode the
+/// audio path applies, in the config's own words, beside the volume.
+#[test]
+fn the_transport_row_names_the_replay_gain_mode_beside_the_volume() {
+    use velo::config::ReplayGainMode;
+
+    let mut app = App::new(tracks(&["one.flac"]));
+    for (mode, label) in [
+        (ReplayGainMode::Track, "RG track"),
+        (ReplayGainMode::Album, "RG album"),
+        (ReplayGainMode::Off, "RG off"),
+    ] {
+        app.set_replay_gain(mode);
+        let screen = screen_at(&app, 80, 24);
+        let row = screen
+            .lines()
+            .find(|line| line.contains("VOL"))
+            .expect("a volume row");
+        let rg = row.find(label);
+        let vol = row.find("VOL").unwrap();
+        assert!(
+            rg.is_some_and(|at| at < vol),
+            "{label:?} sits before VOL, got: {row}"
+        );
+    }
+}
+
 /// ui-redesign T7, reported by the user: the slider is set against the right
 /// edge, so a number one digit shorter (100 → 95, 10 → 5) shifted the whole
 /// slider one column. The number now always takes three columns.
@@ -625,7 +653,8 @@ fn the_queue_view_draws_the_queued_file_names_and_empty_state() {
 /// not move a single cell of it: no protocol is ever attached to a
 /// [`TestBackend`]-backed app. Re-recorded on purpose whenever the design
 /// changes (ui-redesign T1: the window frame, the title bar, the key hints;
-/// T2: the now-playing block; T3: the list header and numbered rows).
+/// T2: the now-playing block; T3: the list header and numbered rows; T10:
+/// the `ReplayGain` mode beside the volume).
 const SCREEN_WITHOUT_COVER_ART: &str = concat!(
     "╭──────────────────────────────────────────────────────────────────────────────╮\n",
     "│ library  queue                                                       V E L O │\n",
@@ -634,7 +663,7 @@ const SCREEN_WITHOUT_COVER_ART: &str = concat!(
     "│                                                                              │\n",
     "│ --:--   ■ stopped                                                            │\n",
     "│ ──────────────────────────────────────────────────────────────────────────── │\n",
-    "│  ◂◂   ▶ play   ▸▸                                       VOL ━━━━━━━━━━━● 100 │\n",
+    "│  ◂◂   ▶ play   ▸▸                            RG track   VOL ━━━━━━━━━━━● 100 │\n",
     "│                                                                              │\n",
     "│ ▸─ Files  [3 tracks]                                                         │\n",
     "│ ▸ 1. one.flac  /music                                                        │\n",

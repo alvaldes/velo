@@ -14,7 +14,7 @@ you actually drive, not a playlist viewer.
 │                                                                              │
 │ --:--   ■ stopped                                                            │
 │ ──────────────────────────────────────────────────────────────────────────── │
-│  ◂◂   ▶ play   ▸▸                                       VOL ━━━━━━━━━━━● 100 │
+│  ◂◂   ▶ play   ▸▸                            RG track   VOL ━━━━━━━━━━━● 100 │
 │                                                                              │
 │ ▸─ Artists  [3 artists]                                                      │
 │ ▸ 1. Lo-Fi Scientists                                    2 albums · 3 tracks │

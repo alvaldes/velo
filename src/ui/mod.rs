@@ -876,12 +876,20 @@ impl<'lib> App<'lib> {
             Span::raw(" "),
             Span::styled(" ▸▸ ", button),
         ]);
-        split_row(
-            frame,
-            area,
-            buttons,
-            Line::from(volume_slider(volume, VOLUME_CELLS)),
-        );
+        // The ReplayGain mode in the config's own words, padded to the
+        // longest so the slider never moves with it (ui-redesign T10).
+        let mode = match self.replay_gain {
+            ReplayGainMode::Track => "track",
+            ReplayGainMode::Album => "album",
+            ReplayGainMode::Off => "off",
+        };
+        let mut right = vec![
+            Span::styled("RG ", Style::new().fg(DIM)),
+            Span::styled(format!("{mode:<5}"), Style::new().fg(SECONDARY)),
+            Span::raw("   "),
+        ];
+        right.extend(volume_slider(volume, VOLUME_CELLS));
+        split_row(frame, area, buttons, Line::from(right));
     }
 
     /// The position, and the length when it is known; a dim placeholder
