@@ -209,6 +209,47 @@ fn the_volume_slider_follows_the_volume_keys() {
     );
 }
 
+/// playback-and-library T2: shuffle and repeat sit beside the transport
+/// buttons, dim while off and in the accent while on.
+#[test]
+fn the_transport_row_shows_shuffle_and_repeat_and_lights_them_when_on() {
+    use velo::ui::theme::{ACCENT, DIM};
+
+    let mut app = App::new(tracks(&["one.flac"]));
+    let row_of = |app: &App| {
+        screen_at(app, 80, 24)
+            .lines()
+            .find(|line| line.contains("VOL"))
+            .expect("a transport row")
+            .to_owned()
+    };
+    let column = |row: &str, word: &str| {
+        let byte = row.find(word).expect("the word on the row");
+        u16::try_from(row[..byte].chars().count()).unwrap()
+    };
+
+    let row = row_of(&app);
+    assert!(
+        row.contains("shuffle") && row.contains("repeat off"),
+        "{row}"
+    );
+    let y = u16::try_from(
+        screen_at(&app, 80, 24)
+            .lines()
+            .position(|line| line.contains("VOL"))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(cell_at(&app, column(&row, "shuffle"), y).fg, DIM);
+
+    press(&mut app, KeyCode::Char('r'));
+    press(&mut app, KeyCode::Char('s'));
+    let row = row_of(&app);
+    assert!(row.contains("repeat all"), "{row}");
+    assert_eq!(cell_at(&app, column(&row, "shuffle"), y).fg, ACCENT);
+    assert_eq!(cell_at(&app, column(&row, "all"), y).fg, ACCENT);
+}
+
 /// ui-redesign T10: `ReplayGain` arrived from `main` (T11 there) as a config
 /// key with nothing on screen; the transport row now says which mode the
 /// audio path applies, in the config's own words, beside the volume.
@@ -669,7 +710,7 @@ const SCREEN_WITHOUT_COVER_ART: &str = concat!(
     "│                                                                              │\n",
     "│ --:--   ■ stopped                                                            │\n",
     "│ ──────────────────────────────────────────────────────────────────────────── │\n",
-    "│  ◂◂   ▶ play   ▸▸                            RG track   VOL ━━━━━━━━━━━● 100 │\n",
+    "│  ◂◂   ▶ play   ▸▸    shuffle  repeat off     RG track   VOL ━━━━━━━━━━━● 100 │\n",
     "│                                                                              │\n",
     "│ ▸─ Files  [3 tracks]                                                         │\n",
     "│ ▸ 1. one.flac  /music                                                        │\n",

@@ -14,7 +14,7 @@ you actually drive, not a playlist viewer.
 │                                                                              │
 │ --:--   ■ stopped                                                            │
 │ ──────────────────────────────────────────────────────────────────────────── │
-│  ◂◂   ▶ play   ▸▸                            RG track   VOL ━━━━━━━━━━━● 100 │
+│  ◂◂   ▶ play   ▸▸    shuffle  repeat off     RG track   VOL ━━━━━━━━━━━● 100 │
 │                                                                              │
 │ ▸─ Artists  [3 artists]                                                      │
 │ ▸ 1. Lo-Fi Scientists                                    2 albums · 3 tracks │
@@ -50,6 +50,8 @@ Every key below is what the code does today.
 | `space` | Pause / resume |
 | `←` / `→` (or `,` / `.`) | Seek 5 s back / forward |
 | `n` / `p` | Next track / previous track — `p` restarts a track already 3 s in |
+| `s` | Shuffle what is left of the queue; again to put it back in order |
+| `r` | Repeat: off → all (the queue again) → one (the track again) |
 | `+` / `-` | Volume up / down, 5% at a time |
 | `tab` | Switch between the library browser and the queue |
 | `a` | Append the selection to the queue — a track, or every track of an album |

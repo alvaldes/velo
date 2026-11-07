@@ -14,6 +14,7 @@
 
 pub mod artwork;
 pub mod search;
+pub mod shuffle;
 pub mod theme;
 
 pub use ratatui;
@@ -31,7 +32,7 @@ use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, ListState, Paragraph};
 
-use crate::audio::output::{SharedQueue, TrackFailure};
+use crate::audio::output::{Repeat, SharedQueue, TrackFailure};
 use crate::audio::spectrum::Spectrum;
 use crate::audio::{Player, seek_target, skip_target};
 use crate::config::ReplayGainMode;
@@ -66,6 +67,10 @@ pub enum Action {
     Next,
     /// Restart the track, or play the one before it when it just began.
     Previous,
+    /// Shuffle what is left of the queue, or put it back in order.
+    ToggleShuffle,
+    /// What follows the end of a track from now on.
+    SetRepeat(Repeat),
 }
 
 /// Where in the library the interface stands while browsing.
@@ -94,19 +99,17 @@ enum Position {
     },
 }
 
-/// The stream that is playing, so rows can be marked with `▸`.
+/// Where the stream that is playing came from. The row it plays is found by
+/// the file's path, so the stream's start index is no longer kept: a
+/// shuffled queue does not follow any list's order.
 #[derive(Debug)]
 enum Playback {
-    /// A flat command-line stream started at this index.
-    Files { from: usize },
+    /// The files given on the command line.
+    Files,
     /// The queue itself, rotated so the entry it started from is its head.
     Queue,
-    /// An album stream started at this index of that album's track list.
-    Album {
-        artist: String,
-        album: String,
-        from: usize,
-    },
+    /// An album, from the selected track onwards.
+    Album,
 }
 
 /// Which list the arrow keys and the editing commands act on.
@@ -175,6 +178,12 @@ pub struct App<'lib> {
     /// How `ReplayGain` is applied, from the config; the player reads it when a
     /// stream is built, so a seek keeps honouring it (T11).
     replay_gain: ReplayGainMode,
+    /// Whether what is left of the queue plays in a mixed order.
+    shuffle: bool,
+    /// The queue as it was before it was shuffled, to put it back.
+    unshuffled: Vec<PathBuf>,
+    /// What follows the end of a track; handed to every player built.
+    repeat: Repeat,
     /// The open search, if any (T7). While it is open the body lists its
     /// results and nearly every key types into it; the browse state below this
     /// field is never touched, which is how `Esc` restores it exactly.
@@ -235,6 +244,9 @@ impl<'lib> App<'lib> {
             seen_area: std::cell::Cell::new(Rect::new(0, 0, 0, 0)),
             art_explained: false,
             replay_gain: ReplayGainMode::default(),
+            shuffle: false,
+            unshuffled: Vec::new(),
+            repeat: Repeat::Off,
             search: None,
             search_pool: Vec::new(),
             search_haystacks: Vec::new(),
@@ -275,6 +287,9 @@ impl<'lib> App<'lib> {
             seen_area: std::cell::Cell::new(Rect::new(0, 0, 0, 0)),
             art_explained: false,
             replay_gain: ReplayGainMode::default(),
+            shuffle: false,
+            unshuffled: Vec::new(),
+            repeat: Repeat::Off,
             search: None,
             search_pool: Vec::new(),
             search_haystacks: Vec::new(),
@@ -608,6 +623,11 @@ impl<'lib> App<'lib> {
             KeyCode::Right | KeyCode::Char('.') => Action::Seek { delta_secs: 5 },
             KeyCode::Char('n') => Action::Next,
             KeyCode::Char('p') => Action::Previous,
+            KeyCode::Char('s') => Action::ToggleShuffle,
+            KeyCode::Char('r') => {
+                self.repeat = self.repeat.next();
+                Action::SetRepeat(self.repeat)
+            }
             KeyCode::Char('?') => {
                 self.help = !self.help;
                 Action::None
@@ -652,6 +672,12 @@ impl<'lib> App<'lib> {
             Action::Seek { delta_secs } => self.seek_by(delta_secs),
             Action::Next => self.skip(true),
             Action::Previous => self.skip(false),
+            Action::ToggleShuffle => self.toggle_shuffle(),
+            Action::SetRepeat(mode) => {
+                if let Some(player) = &self.player {
+                    player.set_repeat(mode);
+                }
+            }
         }
     }
 
@@ -883,6 +909,14 @@ impl<'lib> App<'lib> {
             Span::styled(primary, Style::new().bg(ACCENT).fg(INK).bold()),
             Span::raw(" "),
             Span::styled(" ▸▸ ", button),
+            // Shuffle and repeat: dim while off, the accent while on.
+            Span::raw("   "),
+            Span::styled("shuffle", Style::new().fg(lit(self.shuffle))),
+            Span::styled("  repeat ", Style::new().fg(DIM)),
+            Span::styled(
+                self.repeat.label(),
+                Style::new().fg(lit(self.repeat != Repeat::Off)),
+            ),
         ]);
         // The ReplayGain mode in the config's own words, padded to the
         // longest so the slider never moves with it (ui-redesign T10).
@@ -1214,14 +1248,17 @@ impl<'lib> App<'lib> {
     /// showed a bare clock that a seek could push past the end of the file.
     fn current_track_duration(&self) -> Option<Duration> {
         let player = self.player.as_ref()?;
-        let from_row = match (&self.playing, &self.position) {
-            (Some(Playback::Album { from, .. }), Position::Tracks { .. }) => {
-                let entry = self.tracks.get(from + player.current_index())?;
-                let millis = u64::try_from(entry.duration_ms).ok()?;
-                (millis > 0).then(|| Duration::from_millis(millis))
-            }
-            _ => None,
-        };
+        // The row is found by the file that plays, so a shuffled queue reads
+        // the length of the track that is actually playing.
+        let from_row = self.playing_path().and_then(|path| {
+            let entry = self
+                .tracks
+                .iter()
+                .chain(&self.search_pool)
+                .find(|entry| entry.path == path)?;
+            let millis = u64::try_from(entry.duration_ms).ok()?;
+            (millis > 0).then(|| Duration::from_millis(millis))
+        });
         from_row.or_else(|| player.current_duration())
     }
 
@@ -1238,6 +1275,8 @@ impl<'lib> App<'lib> {
             ("← / →", "seek 5 s back / forward"),
             (", / .", "seek 5 s back / forward"),
             ("n / p", "next / previous track"),
+            ("s", "shuffle what is left of the queue"),
+            ("r", "repeat: off, all, one"),
             ("+ / -", "volume up / down"),
             ("?", "toggle this help"),
             ("tab", "library / queue"),
@@ -1307,24 +1346,16 @@ impl<'lib> App<'lib> {
         }
     }
 
-    /// The list position of the row whose samples are being produced: where
-    /// the stream was started plus the producer's track index.
+    /// The list position of the row whose samples are being produced: the row
+    /// holding the file that plays. Found by path, not by where the stream
+    /// started plus the producer's index, because a shuffled queue no longer
+    /// follows the list's order.
     fn playing_row(&self) -> Option<usize> {
-        let produced = self.player.as_ref().map_or(0, Player::current_index);
-        match (&self.playing, &self.position) {
-            (Some(Playback::Files { from }), Position::Files) => Some(from + produced),
-            (
-                Some(Playback::Album {
-                    artist,
-                    album,
-                    from,
-                }),
-                Position::Tracks {
-                    artist: level_artist,
-                    album: level_album,
-                },
-            ) if artist == level_artist && album == level_album => Some(from + produced),
-            _ => None,
+        let path = self.playing_path()?;
+        match &self.position {
+            Position::Files => self.argv.iter().position(|row| row == path),
+            Position::Tracks { .. } => self.tracks.iter().position(|row| row.path == path),
+            Position::Artists | Position::Albums { .. } => None,
         }
     }
 
@@ -1725,19 +1756,13 @@ impl<'lib> App<'lib> {
     /// in the status line instead of exiting.
     fn play_from(&mut self, from: usize) {
         let started = match &self.position {
-            Position::Files if from < self.argv.len() => {
-                Some((self.argv.clone(), Playback::Files { from }))
-            }
-            Position::Tracks { artist, album } if from < self.tracks.len() => Some((
+            Position::Files if from < self.argv.len() => Some((self.argv.clone(), Playback::Files)),
+            Position::Tracks { .. } if from < self.tracks.len() => Some((
                 self.tracks[from..]
                     .iter()
                     .map(|entry| entry.path.clone())
                     .collect(),
-                Playback::Album {
-                    artist: artist.clone(),
-                    album: album.clone(),
-                    from,
-                },
+                Playback::Album,
             )),
             _ => None,
         };
@@ -1764,10 +1789,23 @@ impl<'lib> App<'lib> {
         if let Some(old) = self.player.take() {
             old.stop();
         }
+        // Under shuffle the first track is the one asked for and the rest
+        // follow mixed; the order they came in is kept to put them back.
+        let mut paths = paths;
+        self.unshuffled.clone_from(&paths);
+        if self.shuffle {
+            shuffle::shuffle_after(&mut paths, 1, shuffle::seed());
+        }
         // The player reads the queue it is given, so the interface keeps the
         // handle and edits it in place (T18).
         let queue = Arc::new(Mutex::new(paths.clone()));
-        match Player::play_gapless_with_gain(Arc::clone(&queue), self.replay_gain) {
+        match Player::play_gapless_at_with(
+            Arc::clone(&queue),
+            0,
+            Duration::ZERO,
+            self.replay_gain,
+            self.repeat,
+        ) {
             Ok(player) => {
                 player.set_volume(self.volume);
                 self.queue = paths;
@@ -1799,6 +1837,22 @@ impl<'lib> App<'lib> {
         let duration = self.current_track_duration();
         let target = seek_target(position, delta_secs, duration);
         self.start_at(target);
+    }
+
+    /// Mixes what is left of the queue, or puts it back in the order it came
+    /// in. What played and what plays now never move, and the change goes
+    /// through the one queue edit, so the player follows it at its next track.
+    fn toggle_shuffle(&mut self) {
+        let keep = self.playing_queue_index().map_or(0, |index| index + 1);
+        self.shuffle = !self.shuffle;
+        if self.shuffle {
+            self.unshuffled.clone_from(&self.queue);
+            let seed = shuffle::seed();
+            self.edit_queue(|queue| shuffle::shuffle_after(queue, keep, seed));
+        } else {
+            let original = std::mem::take(&mut self.unshuffled);
+            self.edit_queue(|queue| shuffle::restore_order(queue, keep, &original));
+        }
     }
 
     /// Moves to the next track, or back one (see [`skip_target`]), by
@@ -1840,7 +1894,7 @@ impl<'lib> App<'lib> {
         }
         let queue = Arc::new(Mutex::new(self.queue.clone()));
         self.shared = Some(Arc::clone(&queue));
-        match Player::play_gapless_at_with_gain(queue, track, offset, self.replay_gain) {
+        match Player::play_gapless_at_with(queue, track, offset, self.replay_gain, self.repeat) {
             Ok(player) => {
                 // A rebuilt player starts at its own default level; without this
                 // a seek would silently jump the volume back to it.
@@ -2133,6 +2187,11 @@ fn split_row(frame: &mut Frame, area: Rect, left: Line<'static>, right: Line<'st
 /// Three one-row areas from the top of `area`.
 fn rows3(area: Rect) -> [Rect; 3] {
     Layout::vertical([Constraint::Length(1); 3]).areas(area)
+}
+
+/// The color of a mode's word: the accent while it is on, dim while off.
+const fn lit(on: bool) -> ratatui::style::Color {
+    if on { ACCENT } else { DIM }
 }
 
 /// The name in the title bar, spaced out the way a wordmark is set.

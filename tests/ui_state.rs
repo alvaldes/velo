@@ -24,6 +24,12 @@ fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::from(code)
 }
 
+/// One key press, its action applied.
+fn press(app: &mut App<'_>, code: KeyCode) {
+    let action = app.on_key(key(code));
+    app.apply(action);
+}
+
 #[test]
 fn j_moves_down_and_clamps_at_the_last_row() {
     let mut app = app_with_three_tracks();
@@ -159,6 +165,74 @@ fn enter_returns_play_from_the_selection() {
 }
 
 // ---- transport keys (T6) ------------------------------------------------
+
+// ---- shuffle and repeat --------------------------------------------------------
+
+#[test]
+fn r_cycles_repeat_through_off_all_and_one() {
+    use velo::audio::output::Repeat;
+    let mut app = app_with_three_tracks();
+
+    assert_eq!(
+        app.on_key(key(KeyCode::Char('r'))),
+        Action::SetRepeat(Repeat::All)
+    );
+    assert_eq!(
+        app.on_key(key(KeyCode::Char('r'))),
+        Action::SetRepeat(Repeat::One)
+    );
+    assert_eq!(
+        app.on_key(key(KeyCode::Char('r'))),
+        Action::SetRepeat(Repeat::Off)
+    );
+}
+
+/// Five tracks queued with `a`, in their list order.
+fn five_queued() -> (App<'static>, Vec<PathBuf>) {
+    let paths: Vec<PathBuf> = (1..=5)
+        .map(|n| PathBuf::from(format!("/library/artist/{n}.flac")))
+        .collect();
+    let mut app = App::new(paths.clone());
+    for _ in 0..5 {
+        let action = app.on_key(key(KeyCode::Char('a')));
+        app.apply(action);
+        app.on_key(key(KeyCode::Char('j')));
+    }
+    assert_eq!(app.queue(), paths.as_slice());
+    (app, paths)
+}
+
+#[test]
+fn s_shuffles_the_queue_and_s_again_puts_it_back_in_order() {
+    let (mut app, paths) = five_queued();
+
+    let action = app.on_key(key(KeyCode::Char('s')));
+    assert_eq!(action, Action::ToggleShuffle);
+    app.apply(action);
+    let mut shuffled = app.queue().to_vec();
+    shuffled.sort();
+    let mut sorted = paths.clone();
+    sorted.sort();
+    assert_eq!(shuffled, sorted, "the same tracks, nothing lost or doubled");
+
+    let action = app.on_key(key(KeyCode::Char('s')));
+    app.apply(action);
+    assert_eq!(app.queue(), paths.as_slice(), "back in the order they came");
+}
+
+#[test]
+fn a_track_queued_while_shuffled_follows_the_rest_when_shuffle_ends() {
+    let (mut app, mut paths) = five_queued();
+    press(&mut app, KeyCode::Char('s'));
+    // Back to the top of the list and queue the first track once more.
+    app.on_key(key(KeyCode::Char('g')));
+    let action = app.on_key(key(KeyCode::Char('a')));
+    app.apply(action);
+    press(&mut app, KeyCode::Char('s'));
+
+    paths.push(paths[0].clone());
+    assert_eq!(app.queue(), paths.as_slice());
+}
 
 #[test]
 fn n_and_p_ask_for_the_next_and_the_previous_track() {
