@@ -28,6 +28,8 @@ Stage 1 changes `src/ui/` (and its tests) only. Stage 2 (the spectrum) taps the 
 | T3 | Lists restyled (browse, queue, search): header line, numbered rows, right-aligned facts, subtle selection, `▸` on the playing row | S1, S3 | inline | `4b236ff` |
 | T4 | Footer key hints and help overlay restyled; golden screen re-recorded | S1, S3, S4 | inline | `ad0e3ee` (hints landed in T1) |
 | T5 | Stage 2: spectrum analyzer from an audio tap (FFT), replacing the progress band's spare room | S2 | — (deferred) | — |
+| T6 | Cover art from the folder (`cover`/`folder`/`front` `.jpg`/`.png`) when the file embeds none | S1, S3 | inline | `2053d98` |
+| T7 | The volume number takes three columns so the right-aligned slider stops jumping | S1 | inline | `d47ce9a` |
 
 ## Log
 
@@ -48,3 +50,7 @@ Stage 1 changes `src/ui/` (and its tests) only. Stage 2 (the spectrum) taps the 
 **L8** T4 (`ad0e3ee`): RED observed (1 test). The help is a rounded card titled `keys` on SURFACE, keys in SECONDARY in their own column; every row's text is unchanged, so the existing help tests still pass. The footer hints were already restyled in T1. Stage 1 tasks T1–T4 done; next per L7: bring `main` in and update the UI over it.
 
 **L9** Per L7: merged `main` (T10: CI, release workflow, README, `--version`) with no conflicts. The README's text screenshot showed the old interface; it now holds a real 80×23 render of the new one (browse level, stopped), with a note on the playing state and the shrinking block. CI's checks pass on the merge: `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`. Open: the playing/paused look has only been checked by construction (no sound device in the tests); T5 (spectrum, stage 2) is next.
+
+**L10** (2026-11-07, user, after trying the build): "la lo probe pero la imagen no la veo por ninguna parte. Y ademas el vol hace un salto al estar alineado a la derecha y pasar de 100 a 99 un digito menos. cuando termiines sigue con el espectro"
+
+**L11** Analysis of the missing cover: only 43 of the 247 tracks in `~/Music/Library` embed a picture, while 12 of 18 album folders hold a `cover.jpg`; velo read only the embedded one and a track without art is silent by design (T8b). Second possible cause: this session runs under `TERM_PROGRAM=herdr` (inside Ghostty); `ratatui-image` guesses by env vars, then queries the terminal, and a multiplexer that does not pass kitty graphics through yields no protocol — then the status line says so. T6: folder fallback, decoded by content (a PNG named `.jpg` still decodes); RED observed (1 test), the embedded-wins test passed already and pins existing behavior. T7: RED observed (the slider moved at 95%); `●─ 95` became `●─  95` in the older slider test, deliberately.
