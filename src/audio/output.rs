@@ -833,12 +833,16 @@ fn run_sequence(
         match outcome {
             Turn::Stopped => return Ok(()),
             Turn::Played => failed_in_a_row = 0,
-            Turn::Failed => {
+            // A turn that delivered no audio counts like a failure: nothing
+            // reached the ring to slow the loop down, so repeating it would
+            // reopen the file as fast as the disk allows.
+            Turn::Failed | Turn::Silent => {
                 failed_in_a_row += 1;
                 if failed_in_a_row >= len {
                     return Ok(());
                 }
-                // A track that failed is never repeated on its own.
+                // A track that failed or held nothing is never repeated on
+                // its own.
                 if repeat == Repeat::One {
                     repeat = Repeat::Off;
                 }
@@ -864,6 +868,8 @@ struct TurnJob {
 enum Turn {
     /// The track played to its end.
     Played,
+    /// The track opened and ended without a single sample.
+    Silent,
     /// The track was skipped and announced.
     Failed,
     /// The stream was asked to stop.
@@ -936,6 +942,7 @@ fn play_turn(
     // per queue (T11, T18); multiplied below, before the ring, so the user's
     // volume ramp stays exactly what it was.
     let gain = Gain::read_from(path, turn.gain_mode);
+    let mut heard = false;
     loop {
         if shared.stop.load(Ordering::Relaxed) {
             return Ok(Turn::Stopped);
@@ -960,6 +967,7 @@ fn play_turn(
         // The gain's one multiplication, before the ring: the callback keeps
         // copying and ramping (T11).
         gain.apply(&mut resampled);
+        heard |= !resampled.is_empty();
         on_block(&resampled);
     }
 
@@ -973,8 +981,11 @@ fn play_turn(
         }
     };
     gain.apply(&mut flushed);
-    on_block(&flushed);
-    Ok(Turn::Played)
+    heard |= !flushed.is_empty();
+    if !flushed.is_empty() {
+        on_block(&flushed);
+    }
+    Ok(if heard { Turn::Played } else { Turn::Silent })
 }
 
 /// Drains a queue the way the producer writes it, without a device: every

@@ -718,3 +718,39 @@ fn a_repeating_queue_whose_every_track_fails_stops_instead_of_spinning() {
 
     assert_eq!(failures.len(), 3, "{failures:?}");
 }
+
+#[test]
+fn a_track_with_no_audio_is_not_repeated_forever() {
+    // A header-only WAV opens and decodes nothing. Repeating it would reopen
+    // it as fast as the disk allows with nothing ever reaching the ring to
+    // slow the loop down; it counts as a turn that failed instead.
+    let spec = TrackSpec {
+        sample_rate: 44_100,
+        channels: 2,
+    };
+    let empty = scratch_path("repeat-empty");
+    write_indexed_wav(&empty, 0, spec);
+    let queue = std::sync::Arc::new(std::sync::Mutex::new(vec![empty]));
+    let repeat = RepeatCell::new(Repeat::One);
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let guard = std::sync::Arc::clone(&stop);
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(500));
+        guard.store(true, std::sync::atomic::Ordering::Relaxed);
+    });
+    let mut turns = 0;
+
+    drain_headless_repeating(
+        queue,
+        0,
+        0,
+        spec,
+        &repeat,
+        &stop,
+        &mut |_: &[f32]| turns += 1,
+        &mut |_: TrackFailure| {},
+    )
+    .expect("the sequence runs");
+
+    assert!(turns <= 1, "the empty track was replayed {turns} times");
+}
