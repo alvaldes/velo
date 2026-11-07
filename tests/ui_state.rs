@@ -646,3 +646,135 @@ fn ascending_from_the_artist_level_stays_at_the_artists() {
     app.apply(Action::Ascend);
     assert_eq!(app.level(), Some(Level::Artists));
 }
+
+// ---- the library search (T7, S9) -----------------------------------------
+
+#[test]
+fn slash_opens_a_search_and_typing_narrows_the_results() {
+    let temp = TempLibrary::new("search-open");
+    temp.write_wav("Poldoore/2012 - Lush Life/01 - Moochi.wav");
+    temp.write_wav("Tide/2019 - Harbor/01 - Moonlight.wav");
+    temp.write_wav("Tide/2019 - Harbor/02 - Nightfall.wav");
+    temp.index();
+
+    let mut app = App::browse(Some(&temp.library));
+    assert!(!app.search_open());
+
+    assert_eq!(app.on_key(key(KeyCode::Char('/'))), Action::None);
+    assert!(app.search_open());
+    assert_eq!(app.search_query(), "");
+    assert_eq!(app.search_selected(), 0);
+    // An empty query lists the whole library, in index order.
+    assert_eq!(app.search_matches().len(), 3);
+
+    // Like every result list, `j` and `k` move through it — they do not type
+    // themselves into the query.
+    app.on_key(key(KeyCode::Char('j')));
+    assert_eq!(app.search_selected(), 1);
+    app.on_key(key(KeyCode::Char('k')));
+    assert_eq!(app.search_selected(), 0);
+
+    for character in "moon".chars() {
+        assert_eq!(app.on_key(key(KeyCode::Char(character))), Action::None);
+    }
+    assert_eq!(app.search_query(), "moon");
+    let titles: Vec<&str> = app
+        .search_matches()
+        .iter()
+        .map(|track| track.title.as_str())
+        .collect();
+    assert_eq!(titles, ["Moonlight"]);
+
+    // Backspace untypes; Esc is still `Esc` — it is handled elsewhere.
+    app.on_key(key(KeyCode::Backspace));
+    assert_eq!(app.search_query(), "moo");
+}
+
+#[test]
+fn slash_without_a_library_is_not_a_search() {
+    let mut app = app_with_three_tracks();
+    assert_eq!(app.on_key(key(KeyCode::Char('/'))), Action::None);
+    assert!(!app.search_open(), "argv files are not a library to search");
+}
+
+#[test]
+fn esc_cancels_the_search_and_restores_the_previous_position_and_selection() {
+    let temp = TempLibrary::new("search-esc");
+    temp.write_wav("Poldoore/2012 - Lush Life/01 - Moochi.wav");
+    temp.write_wav("Tide/2019 - Harbor/01 - Moonlight.wav");
+    temp.index();
+
+    let mut app = App::browse(Some(&temp.library));
+    app.on_key(key(KeyCode::Char('j'))); // onto the second artist
+    let previous_level = app.level();
+    let previous_selected = app.selected();
+
+    app.on_key(key(KeyCode::Char('/')));
+    app.on_key(key(KeyCode::Char('m')));
+    app.on_key(key(KeyCode::Char('j'))); // moves the search selection, not the library one
+    assert_eq!(
+        app.selected(),
+        previous_selected,
+        "searching does not browse"
+    );
+
+    assert_eq!(app.on_key(key(KeyCode::Esc)), Action::None);
+    assert!(!app.search_open());
+    assert_eq!(app.level(), previous_level);
+    assert_eq!(app.selected(), previous_selected);
+    assert_eq!(app.search_query(), "", "the query is gone with the search");
+}
+
+#[test]
+fn enter_in_the_search_plays_from_the_selected_result() {
+    let temp = TempLibrary::new("search-enter");
+    temp.write_wav("Tide/2019 - Harbor/01 - Moonlight.wav");
+    temp.write_wav("Poldoore/2012 - Lush Life/01 - Moonrise.wav");
+    temp.write_wav("Tide/2019 - Harbor/02 - Nightfall.wav");
+    temp.index();
+
+    let mut app = App::browse(Some(&temp.library));
+    app.on_key(key(KeyCode::Char('/')));
+    for character in "moo".chars() {
+        app.on_key(key(KeyCode::Char(character)));
+    }
+    assert_eq!(app.search_matches().len(), 2, "`moo` finds both");
+    app.on_key(key(KeyCode::Char('j'))); // onto the second result
+
+    // Not applied here: `apply` would open a sound device. The queue change
+    // and the stream start happen in `apply`, from the same state.
+    assert_eq!(app.on_key(key(KeyCode::Enter)), Action::Play { from: 1 });
+}
+
+#[test]
+fn a_search_opened_from_the_queue_view_returns_to_the_queue_on_esc() {
+    let temp = TempLibrary::new("search-queue");
+    temp.write_wav("Tide/2019 - Harbor/01 - Dawn.wav");
+    temp.write_wav("Tide/2019 - Harbor/02 - Later.wav");
+    temp.index();
+
+    let mut app = App::browse(Some(&temp.library));
+    app.on_key(key(KeyCode::Enter));
+    app.apply(Action::Descend); // the albums of Tide
+    app.on_key(key(KeyCode::Char('a'))); // queues both tracks of Harbor
+    app.on_key(key(KeyCode::Tab));
+    assert_eq!(app.view(), View::Queue);
+    app.on_key(key(KeyCode::Char('j')));
+    let queue_selection = app.queue_selected();
+
+    app.on_key(key(KeyCode::Char('/')));
+    assert!(app.search_open());
+    // Even `d`, `J` or `Tab` type into the query while it is open: nothing
+    // edits the queue from inside a search.
+    app.on_key(key(KeyCode::Char('d')));
+    assert_eq!(app.search_query(), "d");
+
+    assert_eq!(app.on_key(key(KeyCode::Esc)), Action::None);
+    assert_eq!(app.view(), View::Queue);
+    assert_eq!(
+        app.queue_selected(),
+        queue_selection,
+        "the queue selection is untouched"
+    );
+    assert_eq!(app.queue().len(), 2, "the queue is untouched");
+}

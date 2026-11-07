@@ -341,3 +341,34 @@ fn queries_group_and_order_correctly() {
         .collect();
     assert_eq!(stone, ["Still", "Rolling"]);
 }
+
+#[test]
+fn all_tracks_lists_every_indexed_track() {
+    let temp = TempLibrary::new("all-tracks");
+    temp.write_wav("Tide/2019 - Harbor/01 - Dawn.wav");
+    temp.write_wav("Tide/2019 - Harbor/02 - Tide.wav");
+    temp.write_wav("Baltazar/2001 - Views/01 - Rising.wav");
+    temp.library.index(&temp.root).unwrap();
+
+    let tracks = temp.library.all_tracks().unwrap();
+    assert_eq!(tracks.len(), temp.count_tracks());
+
+    // The search builds its candidate rows from artist, album and title, so
+    // those have to travel with every row.
+    let rows: Vec<(String, String, String)> = tracks
+        .into_iter()
+        .map(|track| (track.artist, track.album, track.title))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            (
+                "Baltazar".to_owned(),
+                "Views".to_owned(),
+                "Rising".to_owned()
+            ),
+            ("Tide".to_owned(), "Harbor".to_owned(), "Dawn".to_owned()),
+            ("Tide".to_owned(), "Harbor".to_owned(), "Tide".to_owned()),
+        ]
+    );
+}

@@ -12,6 +12,7 @@
 //! come from an in-memory snapshot that is refreshed when the position
 //! changes, never once per frame.
 
+pub mod search;
 pub mod theme;
 
 pub use ratatui;
@@ -32,6 +33,7 @@ use crate::audio::output::{SharedQueue, TrackFailure};
 use crate::audio::{Player, seek_target};
 use crate::library::{AlbumEntry, ArtistEntry, Library, TrackEntry};
 
+use self::search::Search;
 use self::theme::{ACCENT, BACKGROUND, DIM, SECONDARY, TEXT};
 
 /// What one key press asks the runtime to do.
@@ -157,6 +159,19 @@ pub struct App<'lib> {
     /// The handle the running player reads its queue from, so an edit reaches
     /// the audio instead of only the screen (T18).
     shared: Option<SharedQueue>,
+    /// The open search, if any (T7). While it is open the body lists its
+    /// results and nearly every key types into it; the browse state below this
+    /// field is never touched, which is how `Esc` restores it exactly.
+    search: Option<Search>,
+    /// Every track of the library, read once when the search opens.
+    search_pool: Vec<TrackEntry>,
+    /// `"artist album title"` per pooled track, in pool order: the haystacks
+    /// the query matches across.
+    search_haystacks: Vec<String>,
+    /// Ranked indices into `search_pool`.
+    search_results: Vec<usize>,
+    /// The selected row of the result list.
+    search_selected: usize,
     help: bool,
     volume: u8,
     state: PlayState,
@@ -181,6 +196,11 @@ impl<'lib> App<'lib> {
             view: View::Library,
             queue_selected: 0,
             shared: None,
+            search: None,
+            search_pool: Vec::new(),
+            search_haystacks: Vec::new(),
+            search_results: Vec::new(),
+            search_selected: 0,
             help: false,
             volume: 100,
             state: PlayState::Stopped,
@@ -206,6 +226,11 @@ impl<'lib> App<'lib> {
             view: View::Library,
             queue_selected: 0,
             shared: None,
+            search: None,
+            search_pool: Vec::new(),
+            search_haystacks: Vec::new(),
+            search_results: Vec::new(),
+            search_selected: 0,
             help: false,
             volume: 100,
             state: PlayState::Stopped,
@@ -298,6 +323,36 @@ impl<'lib> App<'lib> {
         &self.status
     }
 
+    /// The selected row of the result list while a search is open.
+    #[must_use]
+    pub const fn search_selected(&self) -> usize {
+        self.search_selected
+    }
+
+    /// Whether the library search is open.
+    #[must_use]
+    pub const fn search_open(&self) -> bool {
+        self.search.is_some()
+    }
+
+    /// The query as typed, empty when the search is closed.
+    #[must_use]
+    pub fn search_query(&self) -> &str {
+        self.search.as_ref().map_or("", Search::query)
+    }
+
+    /// The matching entries in ranked order, empty when the search is closed.
+    #[must_use]
+    pub fn search_matches(&self) -> Vec<&TrackEntry> {
+        if self.search.is_none() {
+            return Vec::new();
+        }
+        self.search_results
+            .iter()
+            .filter_map(|&index| self.search_pool.get(index))
+            .collect()
+    }
+
     /// Runs once per turn of the event loop — the same cadence as key
     /// polling — so the producer's announcements surface without a key
     /// press. Without a player there is nothing to collect.
@@ -340,6 +395,13 @@ impl<'lib> App<'lib> {
     /// library: it only moves state and answers with an [`Action`].
     pub fn on_key(&mut self, event: ratatui::crossterm::event::KeyEvent) -> Action {
         use ratatui::crossterm::event::KeyCode;
+
+        // An open search owns almost every key: `j`/`k` move through the
+        // results, printable characters type in, `Esc` cancels. The browse
+        // state is never touched while it is open.
+        if self.search.is_some() {
+            return self.on_search_key(event.code);
+        }
 
         match event.code {
             KeyCode::Char('j') | KeyCode::Down => {
@@ -407,6 +469,10 @@ impl<'lib> App<'lib> {
                 self.help = !self.help;
                 Action::None
             }
+            KeyCode::Char('/') if self.library.is_some() => {
+                self.open_search();
+                Action::None
+            }
             KeyCode::Esc | KeyCode::Backspace => {
                 // `Esc` closes the help overlay when it is open, before it
                 // would ascend; ascending is browse-only.
@@ -434,6 +500,7 @@ impl<'lib> App<'lib> {
                 }
             }
             Action::Quit => self.shutdown(),
+            Action::Play { from } if self.search.is_some() => self.play_search_from(from),
             Action::Play { from } => self.play_from(from),
             Action::PlayQueue { from } => self.play_queue_from(from),
             Action::Descend => self.descend(),
@@ -510,6 +577,10 @@ impl<'lib> App<'lib> {
     }
 
     fn draw_body(&self, frame: &mut Frame, area: Rect) {
+        if self.search.is_some() {
+            self.draw_search(frame, area);
+            return;
+        }
         if self.view == View::Queue {
             if self.queue.is_empty() {
                 frame.render_widget(
@@ -679,25 +750,75 @@ impl<'lib> App<'lib> {
         let [status_row, hints_row] =
             Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area);
 
-        let status = if self.status.is_empty() {
-            self.transport_line()
+        let status = if self.search.is_some() {
+            // The query itself, over the transport line, so the user sees what
+            // they are typing while the body lists the results.
+            Line::styled(format!("/{}", self.search_query()), Style::new().fg(ACCENT))
+        } else if self.status.is_empty() {
+            Line::styled(self.transport_line(), Style::new().fg(ACCENT))
         } else {
-            self.status.clone()
+            Line::styled(self.status.clone(), Style::new().fg(ACCENT))
         };
-        if !status.is_empty() {
-            frame.render_widget(
-                Paragraph::new(Line::styled(status, Style::new().fg(ACCENT))),
-                status_row,
-            );
+        if !status.spans.is_empty() {
+            frame.render_widget(Paragraph::new(status), status_row);
         }
 
+        let hints = if self.search.is_some() {
+            "type to search  j/k move  enter play  backspace delete  esc cancel"
+        } else {
+            "j/k move  enter open/play  ←/→ seek  space pause  +/- volume  ? help  q quit"
+        };
         frame.render_widget(
-            Paragraph::new(Line::styled(
-                "j/k move  enter open/play  ←/→ seek  space pause  +/- volume  ? help  q quit",
-                Style::new().fg(DIM),
-            )),
+            Paragraph::new(Line::styled(hints, Style::new().fg(DIM))),
             hints_row,
         );
+    }
+
+    /// The search results: a track title with its artist and album dimmed,
+    /// and the playing marker drawn the way every other list draws it.
+    fn draw_search(&self, frame: &mut Frame, area: Rect) {
+        if self.search_results.is_empty() {
+            frame.render_widget(
+                Paragraph::new(Line::styled("no tracks match", Style::new().fg(DIM))),
+                area,
+            );
+            return;
+        }
+        let playing = self.playing_path();
+        let items: Vec<ListItem<'_>> = self
+            .search_results
+            .iter()
+            .filter_map(|&index| self.search_pool.get(index))
+            .map(|entry| {
+                let marker = if playing == Some(entry.path.as_path()) {
+                    Span::styled("▸ ", Style::new().fg(ACCENT))
+                } else {
+                    Span::raw("  ")
+                };
+                ListItem::new(Line::from(vec![
+                    marker,
+                    Span::styled(entry.title.clone(), Style::new().fg(TEXT)),
+                    Span::styled(
+                        format!("  {} · {}", entry.artist, entry.album),
+                        Style::new().fg(DIM),
+                    ),
+                ]))
+            })
+            .collect();
+        let list = List::new(items)
+            .style(Style::new().bg(BACKGROUND))
+            .highlight_style(Style::new().bg(ACCENT).fg(BACKGROUND));
+        let mut state = ListState::default().with_selected(Some(self.search_selected));
+        frame.render_stateful_widget(list, area, &mut state);
+    }
+
+    /// The path of the file whose samples are being produced, if any: the
+    /// marker has to find the playing row wherever a list shows whole tracks.
+    fn playing_path(&self) -> Option<&std::path::Path> {
+        let player = self.player.as_ref()?;
+        self.queue
+            .get(player.current_index())
+            .map(std::path::PathBuf::as_path)
     }
 
     /// The transport line: `mm:ss / mm:ss` when the track's length is known,
@@ -748,6 +869,7 @@ impl<'lib> App<'lib> {
             "G          last track",
             "enter      open, or play from the selection",
             "esc        back one level / close help",
+            "/          search the whole library",
             "space      pause / resume",
             "← / →      seek 5 s back / forward",
             ", / .      seek 5 s back / forward",
@@ -823,6 +945,125 @@ impl<'lib> App<'lib> {
             ) if artist == level_artist && album == level_album => Some(from + produced),
             _ => None,
         }
+    }
+
+    /// The search keys while a search is open: they type into the query and
+    /// move through the results, and never reach the browse state below.
+    fn on_search_key(&mut self, code: ratatui::crossterm::event::KeyCode) -> Action {
+        use ratatui::crossterm::event::KeyCode;
+
+        match code {
+            KeyCode::Esc => {
+                // Cancel. The interface never moved while the search was open,
+                // so the position and selection it had are still there.
+                self.close_search();
+                Action::None
+            }
+            KeyCode::Backspace => {
+                self.backspace_search();
+                Action::None
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.move_search_selection(true);
+                Action::None
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.move_search_selection(false);
+                Action::None
+            }
+            KeyCode::Enter if self.search_results.is_empty() => Action::None,
+            KeyCode::Enter => Action::Play {
+                from: self.search_selected,
+            },
+            KeyCode::Char(character) => {
+                if let Some(search) = &mut self.search {
+                    search.push(character);
+                }
+                self.rerank();
+                Action::None
+            }
+            _ => Action::None,
+        }
+    }
+
+    /// Reads every track of the library once and opens the search over it.
+    fn open_search(&mut self) {
+        let Some(library) = self.library else {
+            return;
+        };
+        match library.all_tracks() {
+            Ok(pool) => {
+                self.search_haystacks = pool
+                    .iter()
+                    .map(|entry| format!("{} {} {}", entry.artist, entry.album, entry.title))
+                    .collect();
+                self.search_pool = pool;
+                self.search_results = (0..self.search_pool.len()).collect();
+                self.search_selected = 0;
+                self.search = Some(Search::new());
+            }
+            Err(error) => self.status = format!("velo: {error}"),
+        }
+    }
+
+    /// Ranks the pool again after the query changed, keeping the selection on
+    /// the screen.
+    fn rerank(&mut self) {
+        let Some(search) = &self.search else {
+            return;
+        };
+        self.search_results = search.rank(&self.search_haystacks);
+        self.search_selected = self
+            .search_selected
+            .min(self.search_results.len().saturating_sub(1));
+    }
+
+    fn backspace_search(&mut self) {
+        let Some(search) = &mut self.search else {
+            return;
+        };
+        if search.pop().is_some() {
+            self.rerank();
+        }
+    }
+
+    fn move_search_selection(&mut self, down: bool) {
+        self.search_selected = if down {
+            (self.search_selected + 1).min(self.search_results.len().saturating_sub(1))
+        } else {
+            self.search_selected.saturating_sub(1)
+        };
+    }
+
+    /// Closes the search, dropping the pool with it; the next `/` re-reads
+    /// the library, which may have been re-indexed in the meantime.
+    fn close_search(&mut self) {
+        self.search = None;
+        self.search_pool = Vec::new();
+        self.search_haystacks = Vec::new();
+        self.search_results = Vec::new();
+        self.search_selected = 0;
+    }
+
+    /// Plays the search results from the selection onwards: the queue becomes
+    /// every result from that one to the end. The search closes, so the
+    /// interface returns to exactly where it was.
+    fn play_search_from(&mut self, from: usize) {
+        let paths: Vec<PathBuf> = self
+            .search_results
+            .get(from..)
+            .map_or(Vec::new(), |picked| {
+                picked
+                    .iter()
+                    .filter_map(|&index| self.search_pool.get(index))
+                    .map(|entry| entry.path.clone())
+                    .collect()
+            });
+        if paths.is_empty() {
+            return;
+        }
+        self.close_search();
+        self.start_stream(paths, Playback::Queue);
     }
 
     /// How many rows the view the keys act on holds.

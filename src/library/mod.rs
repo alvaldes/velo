@@ -56,6 +56,8 @@ pub struct AlbumEntry {
 /// One track of one album, for the track browser.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrackEntry {
+    pub artist: String,
+    pub album: String,
     pub title: String,
     pub track_no: Option<i64>,
     pub disc_no: Option<i64>,
@@ -288,11 +290,41 @@ impl Library {
         )?;
         let rows = statement.query_map([artist, album], |row| {
             Ok(TrackEntry {
+                artist: artist.to_owned(),
+                album: album.to_owned(),
                 title: row.get(0)?,
                 track_no: row.get(1)?,
                 disc_no: row.get(2)?,
                 duration_ms: row.get(3)?,
                 path: PathBuf::from(row.get::<_, String>(4)?),
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Every indexed track, `artist`/`album` first and, inside one album, in
+    /// the same order the album browser shows. The search over the whole
+    /// library reads through this: one indexed scan over the `(artist, album)`
+    /// sorted rows, not one query per row.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the query cannot run.
+    pub fn all_tracks(&self) -> Result<Vec<TrackEntry>, LibraryError> {
+        let mut statement = self.conn.prepare(
+            "SELECT title, track_no, disc_no, duration_ms, path, artist, album
+             FROM tracks
+             ORDER BY artist, album, COALESCE(disc_no, 0), COALESCE(track_no, 1000000), title",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(TrackEntry {
+                title: row.get(0)?,
+                track_no: row.get(1)?,
+                disc_no: row.get(2)?,
+                duration_ms: row.get(3)?,
+                path: PathBuf::from(row.get::<_, String>(4)?),
+                artist: row.get(5)?,
+                album: row.get(6)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
