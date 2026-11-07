@@ -1,0 +1,25 @@
+[package]
+name = "velo"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+description = "A fast, single-binary music player for your terminal"
+repository = "https://github.com/alvaldes/velo"
+readme = "README.md"
+keywords = ["music", "player", "tui", "terminal", "audio"]
+categories = ["multimedia::audio", "command-line-utilities"]
+
+[dependencies]
+cpal = "0.18.2"
+rtrb = "0.4.1"
+symphonia = { version = "0.5", features = ["mp3", "aac", "flac", "vorbis", "ogg", "wav", "isomp4"] }
+
+[dev-dependencies]
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"
