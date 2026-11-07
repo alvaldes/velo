@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::io::{IsTerminal, Stdout};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -7,6 +8,7 @@ use clap::{CommandFactory as _, Parser};
 use velo::audio::{Player, TrackSource};
 use velo::config::{self, Cli, Config, Settings};
 use velo::library::Library;
+use velo::subsonic;
 use velo::ui::indexing::Indexer;
 use velo::ui::{Action, App, artwork, crossterm};
 
@@ -46,6 +48,11 @@ fn main() -> ExitCode {
         .as_deref()
         .map(|raw| config::expand_path(raw, home.as_deref().map(Path::new), &cwd));
 
+    // The Subsonic probe needs no terminal and no library root, so it runs
+    // before both — it must work over ssh (T12a).
+    if cli.subsonic_test {
+        return subsonic_test(&settings, home.as_deref());
+    }
     // `bit_perfect` is resolved and carried in `settings`; the audio path
     // and the interface read it (T17).
     if cli.index {
@@ -95,6 +102,74 @@ fn user_settings(cli: &Cli, path: Option<&Path>) -> Result<Settings, config::Con
 fn usage_help() -> ExitCode {
     let _ = Cli::command().print_help();
     ExitCode::from(2)
+}
+
+/// Answers "can I use this server?" (T12a): resolves the credentials, probes
+/// the server and prints what it is, what it advertises and which
+/// authentication was verified. Exit 0 on success, 1 with a one-line reason
+/// on failure.
+fn subsonic_test(settings: &Settings, home: Option<&OsStr>) -> ExitCode {
+    let Some(server) = &settings.subsonic else {
+        eprintln!("velo: no [subsonic] table in the config file — nothing to test");
+        return ExitCode::FAILURE;
+    };
+
+    let credentials = subsonic::credentials::resolve(
+        &server.url,
+        &server.user,
+        server.api_key.as_deref(),
+        std::env::var_os("VELO_SUBSONIC_SECRET").as_deref(),
+        std::env::var_os("XDG_CONFIG_HOME").as_deref(),
+        home,
+    );
+    let credentials = match credentials {
+        Ok(credentials) => credentials,
+        Err(error) => {
+            eprintln!("velo: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    // A key file readable by group or others is advice, not a failure.
+    for warning in &credentials.warnings {
+        eprintln!("velo: warning: {warning}");
+    }
+
+    let transport = match subsonic::client::HttpTransport::new(server.insecure) {
+        Ok(transport) => transport,
+        Err(error) => {
+            eprintln!("velo: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match subsonic::client::Client::probe(
+        transport,
+        &credentials.url,
+        &credentials.user,
+        &credentials.secret,
+    ) {
+        Ok(report) => {
+            let server = &report.server;
+            let name = server
+                .server_type
+                .as_deref()
+                .unwrap_or("unknown Subsonic server");
+            let version = server.server_version.as_deref().unwrap_or("?");
+            let api = server.api_version.as_deref().unwrap_or("?");
+            let open = if server.open_subsonic { "yes" } else { "no" };
+            println!("server: {name} {version} (API {api}, OpenSubsonic: {open})");
+            if server.extensions.is_empty() {
+                println!("extensions: none");
+            } else {
+                println!("extensions: {}", server.extensions.join(", "));
+            }
+            println!("authentication: {} — verified", report.auth);
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("velo: {error}");
+            ExitCode::FAILURE
+        }
+    }
 }
 /// Builds or refreshes the library index and reports its counts.
 fn index_library(root: &Path) -> ExitCode {

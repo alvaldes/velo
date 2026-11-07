@@ -203,6 +203,46 @@ to set it. `velo --index` without a library exits 2 and names the key and the
 flag. An unknown key is an error naming the key; a bad value names the file
 and the line.
 
+### Subsonic servers (early access)
+
+velo can talk to a Subsonic-compatible server (Navidrome and friends).
+This is early: there is no library browsing and no playback from the server
+yet — what exists today is the connection and its authentication, plus one
+command that answers "can I use this server?":
+
+```sh
+velo --subsonic-test
+```
+
+It prints the server's type, version, API version and the OpenSubsonic
+extensions it advertises, says which authentication it used and whether it
+worked, and exits `0` on success and `1` with a one-line reason on failure.
+It needs no interactive terminal, so it works over ssh.
+
+Add the table to the same `config.toml` (it must come after the other keys;
+`url` and `user` are required when the table exists):
+
+```toml
+[subsonic]
+url = "https://music.example.com"
+user = "you"
+# api_key = "the-key-from-the-server"   # see below
+# insecure = false                      # true accepts a self-signed certificate
+```
+
+The secret is resolved in this order: `api_key` in the table, then the
+`VELO_SUBSONIC_SECRET` environment variable, then the first line of the file
+`$XDG_CONFIG_HOME/velo/subsonic.key` (else `~/.config/velo/subsonic.key`),
+which you create yourself. When that file is readable by group or others,
+velo warns once on stderr and names the path and the mode — restrict it with
+`chmod 600`.
+
+The wire format is JSON; a server too old to answer JSON is reported as too
+old, never parsed as XML. When the server advertises the `apiKeyAuthentication`
+extension the secret is sent as an API key, otherwise as token authentication
+(`t = md5(password + salt)` with a fresh salt per request). An unreachable
+server is reported as unreachable — never as a credential problem.
+
 ## Requirements
 
 - Linux or macOS. Windows is untested.
@@ -238,7 +278,9 @@ Honest list; none of these exist behind a flag:
 
 - ReplayGain tag writing (reading and applying them is in: the `replay_gain`
   setting).
-- Subsonic/Navidrome (streaming from a server).
+- Subsonic/Navidrome: the connection, its authentication and
+  `velo --subsonic-test` exist (see above); browsing the server's library,
+  and playback from it, do not yet.
 - Opus — symphonia has no Opus decoder yet, so `.opus` files are rejected at
   probe time.
 - Playlists.

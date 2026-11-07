@@ -698,6 +698,123 @@ fn a_configured_library_still_loads_exactly_as_before() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+// ---------------------------------------------------------- subsonic (T12a)
+
+#[test]
+fn the_subsonic_table_parses_with_all_its_keys() {
+    let dir = temp_dir("subsonic-full");
+    let path = write_config(
+        &dir,
+        r#"[subsonic]
+url = "https://music.example.com"
+user = "admin"
+api_key = "the-key"
+insecure = true
+"#,
+    );
+    let settings = Config::load_from(&path)
+        .unwrap_or_else(|error| panic!("load failed: {error}"))
+        .merged(&cli_with_no_flags());
+    let subsonic = settings
+        .subsonic
+        .unwrap_or_else(|| panic!("the [subsonic] table was lost"));
+    assert_eq!(subsonic.url, "https://music.example.com");
+    assert_eq!(subsonic.user, "admin");
+    assert_eq!(subsonic.api_key.as_deref(), Some("the-key"));
+    assert!(subsonic.insecure);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_subsonic_table_defaults_insecure_to_false_and_api_key_to_none() {
+    let dir = temp_dir("subsonic-minimal");
+    let path = write_config(&dir, "[subsonic]\nurl = \"http://s\"\nuser = \"admin\"\n");
+    let settings = Config::load_from(&path)
+        .unwrap_or_else(|error| panic!("load failed: {error}"))
+        .merged(&cli_with_no_flags());
+    let subsonic = settings.subsonic.unwrap_or_else(|| panic!("table lost"));
+    assert!(!subsonic.insecure);
+    assert_eq!(subsonic.api_key, None);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_subsonic_table_without_url_is_an_error_naming_the_key() {
+    let dir = temp_dir("subsonic-no-url");
+    let path = write_config(&dir, "[subsonic]\nuser = \"admin\"\n");
+    let error = Config::load_from(&path).unwrap_err().to_string();
+    assert!(
+        error.contains(path.display().to_string().as_str()),
+        "error must name the file: {error}"
+    );
+    assert!(error.contains("url"), "error must name url: {error}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_unknown_key_inside_the_subsonic_table_is_an_error_naming_it() {
+    let dir = temp_dir("subsonic-unknown-key");
+    let path = write_config(
+        &dir,
+        "[subsonic]\nurl = \"http://s\"\nuser = \"admin\"\napikey = \"x\"\n",
+    );
+    let error = Config::load_from(&path).unwrap_err().to_string();
+    assert!(
+        error.contains(path.display().to_string().as_str()),
+        "error must name the file: {error}"
+    );
+    assert!(error.contains("apikey"), "error must name the key: {error}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_bad_subsonic_url_names_the_file_the_line_and_the_rule() {
+    let dir = temp_dir("subsonic-bad-url");
+    let path = write_config(
+        &dir,
+        "[subsonic]\nurl = \"ftp://music.example.com\"\nuser = \"a\"\n",
+    );
+    let error = Config::load_from(&path).unwrap_err().to_string();
+    assert!(
+        error.contains(path.display().to_string().as_str()),
+        "error must name the file: {error}"
+    );
+    assert!(error.contains("line 2"), "error must name line 2: {error}");
+    assert!(error.contains("http"), "error must state the rule: {error}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn existing_keys_keep_working_alongside_a_subsonic_table() {
+    let dir = temp_dir("subsonic-alongside");
+    let path = write_config(
+        &dir,
+        "library = \"/music\"\nvolume = 33\n\n[subsonic]\nurl = \"http://s\"\nuser = \"admin\"\n",
+    );
+    let settings = Config::load_from(&path)
+        .unwrap_or_else(|error| panic!("load failed: {error}"))
+        .merged(&cli_with_no_flags());
+    assert_eq!(settings.library, Some(PathBuf::from("/music")));
+    assert_eq!(settings.volume, 33);
+    assert!(settings.subsonic.is_some());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_default_config_mentions_the_subsonic_table_only_as_a_comment() {
+    let text = default_config_text();
+    assert!(text.contains("# [subsonic]"), "{text}");
+    // And the written default file still parses strictly.
+    let dir = temp_dir("default-with-subsonic-comment");
+    let path = dir.join("velo").join("config.toml");
+    write_default_config(&path).unwrap();
+    let settings = Config::load_from(&path)
+        .unwrap_or_else(|error| panic!("load failed: {error}"))
+        .merged(&cli_with_no_flags());
+    assert!(settings.subsonic.is_none());
+    let _ = fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn no_personal_path_is_hard_coded() {
     for source in [

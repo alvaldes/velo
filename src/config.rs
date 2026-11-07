@@ -54,6 +54,21 @@ pub enum ReplayGainMode {
     Off,
 }
 
+/// The `[subsonic]` table as the config carries it, with the optionals
+/// resolved: the file's `insecure` defaults to false (T12a).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubsonicConfig {
+    /// The server base URL, e.g. `https://music.example.com`.
+    pub url: String,
+    /// The Subsonic user.
+    pub user: String,
+    /// The API key, when the user wrote one; the credential resolver falls
+    /// back to the environment and the key file without it.
+    pub api_key: Option<String>,
+    /// Accept self-signed certificates, for a server on the home network.
+    pub insecure: bool,
+}
+
 /// The parsed command line.
 ///
 /// The observable contract is the one the hand-rolled loop had: positional
@@ -78,6 +93,9 @@ Library mode:
     velo                         Browse and play the library index
     velo --index                 Build or refresh the library index, print
                                      track, album and artist counts, then exit
+Subsonic:
+    velo --subsonic-test         Probe the configured Subsonic server, report
+                                     what it supports, then exit
 
 Interface keys: j/k move, enter open/play, tab switches to the queue view
     (a append, d remove, J/K move, enter play from there), / search, ←/→ or
@@ -92,12 +110,21 @@ Audio must share one channel layout: sample rates are converted to the
 Configuration: $XDG_CONFIG_HOME/velo/config.toml, or
     ~/.config/velo/config.toml — keys: library, bit_perfect, replay_gain, and
     the tables [state] (volume, shuffle, repeat, the tab and the open node),
-    [theme] (every colour, as \"#rrggbb\") and [ui] (cover_art, spectrum, hints,
-    top_bar, advisories, view_numbers). When the file is missing, velo writes it with every key at its
-    default and a comment per key; an unknown key is an error. library (and --library)
+    [theme] (every colour, as \"#rrggbb\"), [ui] (cover_art, spectrum, hints,
+    top_bar, advisories, view_numbers) and the optional [subsonic] table (url,
+    user, api_key, insecure) for a Subsonic-compatible server; `velo
+    --subsonic-test` answers \"can I use this server?\" and works over ssh.
+    When the file is missing, velo writes it with every key at its default and
+    a comment per key; an unknown key is an error. library (and --library)
     takes an absolute path, ~/... or a path relative to the current directory.
     With no library set, the interface asks for it in a floating prompt that
     starts at ~/ (tab completes folders) and saves the answer to the file; velo --index needs one and exits 2 without."
+)]
+// The four flags are four distinct modes the user asks for; folding them
+// into an enum would not simplify the parse or the match in main.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is an independent mode the user asks for"
 )]
 pub struct Cli {
     /// Tracks to play as one continuous, gapless stream. Without files, the
@@ -116,6 +143,11 @@ pub struct Cli {
     /// Build or refresh the library index, print its counts, then exit.
     #[arg(long)]
     pub index: bool,
+
+    /// Probe the configured Subsonic server: report what it is, what it
+    /// advertises and which authentication worked, then exit.
+    #[arg(long)]
+    pub subsonic_test: bool,
 
     /// Library root to index or browse; overrides `library` in the config file.
     #[arg(long, value_name = "PATH")]
@@ -152,6 +184,10 @@ pub struct Config {
     /// `[ui]` — which parts of the screen are drawn (S5).
     #[serde(default)]
     pub ui: UiKeys,
+    /// `[subsonic]` — the Subsonic-compatible server (T12a), when the
+    /// table exists. `url` and `user` are required inside it.
+    #[serde(default)]
+    pub subsonic: Option<SubsonicFile>,
 }
 
 impl Config {
@@ -205,6 +241,12 @@ impl Config {
             },
             theme: self.theme.resolved(),
             ui: self.ui.resolved(),
+            subsonic: self.subsonic.map(|server| SubsonicConfig {
+                url: server.url,
+                user: server.user,
+                api_key: server.api_key,
+                insecure: server.insecure.unwrap_or(false),
+            }),
         }
     }
 }
@@ -232,6 +274,8 @@ pub struct Settings {
     pub theme: ThemeColors,
     /// Which parts of the interface are drawn (S5).
     pub ui: UiParts,
+    /// The Subsonic server (T12a), when the config has the table.
+    pub subsonic: Option<SubsonicConfig>,
 }
 
 /// Where the next launch picks up (S3): the tab, the library view and the
@@ -574,6 +618,18 @@ top_bar = true
 advisories = true
 # The numbers 1–4 before the library view names in the header.
 view_numbers = true
+
+# A Subsonic-compatible server (Navidrome and friends), optional. Uncomment
+# the table to browse a remote server; `velo --subsonic-test` checks it.
+# url is required when the table exists, as is user. api_key is where a
+# server-issued API key goes; without it velo asks the environment
+# ($VELO_SUBSONIC_SECRET) and then ~/.config/velo/subsonic.key (one line,
+# readable only by you). insecure = true accepts a self-signed certificate.
+# [subsonic]
+# url = \"https://music.example.com\"
+# user = \"you\"
+# api_key = \"the-key-from-the-server\"
+# insecure = false
 ",
         theme.background.to_key(),
         theme.text.to_key(),
@@ -981,4 +1037,39 @@ where
     }
 
     deserializer.deserialize_i64(VolumeVisitor).map(Some)
+}
+
+/// The serde shape of the `[subsonic]` table: the same keys and nothing
+/// else. `url` and `user` are required when the table exists.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubsonicFile {
+    #[serde(deserialize_with = "deserialize_server_url")]
+    url: String,
+    user: String,
+    #[serde(default)]
+    api_key: Option<String>,
+    #[serde(default)]
+    insecure: Option<bool>,
+}
+
+/// Accepts only an `http://` or `https://` server address: the scheme must
+/// be there and something must follow it. The toml error keeps the value's
+/// span, so the message names the file and the line.
+fn deserialize_server_url<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let url: String = serde::Deserialize::deserialize(deserializer)?;
+    let trimmed = url.trim();
+    let rest = trimmed
+        .strip_prefix("http://")
+        .or_else(|| trimmed.strip_prefix("https://"))
+        .filter(|rest| !rest.is_empty());
+    match rest {
+        Some(_) => Ok(url),
+        None => Err(de::Error::custom(
+            "subsonic.url must be an http:// or https:// server address",
+        )),
+    }
 }
