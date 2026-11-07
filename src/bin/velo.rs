@@ -3,7 +3,10 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
+use clap::{CommandFactory as _, Parser};
+
 use velo::audio::{Player, TrackSource};
+use velo::config::{self, Cli, Config, Settings};
 use velo::library::Library;
 use velo::ui::{Action, App, artwork, crossterm};
 
@@ -13,74 +16,63 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
 fn main() -> ExitCode {
-    let mut args = std::env::args().skip(1).peekable();
-    let mut info_only = false;
-    let mut play_and_exit = false;
-    let mut index_only = false;
-    let mut library_root: Option<PathBuf> = None;
-    let mut paths: Vec<PathBuf> = Vec::new();
-
-    while let Some(argument) = args.next() {
-        match argument.as_str() {
-            "--info" => info_only = true,
-            "--play" => play_and_exit = true,
-            "--index" => index_only = true,
-            "--library" => {
-                if let Some(path) = args.next() {
-                    library_root = Some(PathBuf::from(path));
-                } else {
-                    eprintln!("velo: --library needs a path");
-                    return ExitCode::from(2);
-                }
-            }
-            option if let Some(path) = option.strip_prefix("--library=") => {
-                library_root = Some(PathBuf::from(path));
-            }
-            "--help" | "-h" => {
-                print_help();
-                return ExitCode::SUCCESS;
-            }
-            option if option.starts_with('-') => {
-                eprintln!("velo: unknown option {option}");
-                return ExitCode::from(2);
-            }
-            path => paths.push(PathBuf::from(path)),
-        }
-    }
-
-    if index_only {
-        return index_library(
-            library_root
-                .as_deref()
-                .unwrap_or(Path::new(DEFAULT_LIBRARY_ROOT)),
-        );
-    }
-
-    if paths.is_empty() {
-        if info_only || play_and_exit {
-            print_help();
+    let cli = Cli::parse();
+    let settings = match user_settings(&cli) {
+        Ok(settings) => settings,
+        Err(error) => {
+            // A config the user wrote and that does not parse is a usage
+            // error of theirs, not a crash of ours.
+            eprintln!("velo: {error}");
             return ExitCode::from(2);
         }
-        // No files: the interface browses the library index.
-        return browse_interface(
-            library_root
-                .as_deref()
-                .unwrap_or(Path::new(DEFAULT_LIBRARY_ROOT)),
-        );
+    };
+
+    // `bit_perfect` is resolved and carried in `settings`; T17 reads it.
+    if cli.index {
+        return index_library(&settings.library);
     }
 
-    if info_only {
-        return print_info(&paths);
+    if cli.files.is_empty() {
+        if cli.info || cli.play {
+            // The old loop printed the help and exited 2 when a file mode
+            // pointed at nothing; that contract stays.
+            return usage_help();
+        }
+        // No files: the interface browses the library index.
+        return browse_interface(&settings.library);
     }
-    if play_and_exit {
-        return play(&paths);
+
+    if cli.info {
+        return print_info(&cli.files);
     }
-    run_interface(paths)
+    if cli.play {
+        return play(&cli.files);
+    }
+    run_interface(cli.files)
 }
 
-/// The library root indexed by `velo --index` until T9 makes it configurable.
-const DEFAULT_LIBRARY_ROOT: &str = "/Users/alvaldes/Music/Library";
+/// Resolves the user's settings: the config file (a missing file is normal
+/// and silent) merged under the command line.
+///
+/// The two environment values are read here, at the edge, so the config
+/// layer itself stays testable without touching the user's environment.
+fn user_settings(cli: &Cli) -> Result<Settings, config::ConfigError> {
+    let path = config::config_path(
+        std::env::var_os("XDG_CONFIG_HOME").as_deref(),
+        std::env::var_os("HOME").as_deref(),
+    );
+    match path {
+        Some(path) => Config::load_from(&path).map(|file| file.merged(cli)),
+        None => Ok(Config::default().merged(cli)),
+    }
+}
 
+/// The help screen plus the usage-error exit code, for a file mode pointed
+/// at nothing.
+fn usage_help() -> ExitCode {
+    let _ = Cli::command().print_help();
+    ExitCode::from(2)
+}
 /// Builds or refreshes the library index and reports its counts.
 fn index_library(root: &Path) -> ExitCode {
     if !root.is_dir() {
@@ -302,32 +294,4 @@ fn play(paths: &[PathBuf]) -> ExitCode {
         eprintln!("velo: played with {underruns} underruns");
     }
     ExitCode::SUCCESS
-}
-
-fn print_help() {
-    println!(
-        "velo — a fast, single-binary music player for your terminal
-
-USAGE:
-    velo [--library <PATH>]    Browse and play the library index
-    velo [--info | --play] <file>...
-    velo [--library <PATH>] --index
-
-ARGS:
-    <file>...       Tracks to play as one continuous, gapless stream
-
-OPTIONS:
-    --info          Report format, frame count and length without playing
-    --play          Play the list and exit, without the terminal interface
-    --index         Build or refresh the library index, print track, album
-                        and artist counts, then exit
-    --library <PATH>  Library root to index (default /Users/alvaldes/Music/Library)
-    -h, --help      Show this help
-
-Interface keys: j/k move, enter open/play, ←/→ or ,/. seek ±5 s, space pause,
-    +/- volume, ? help, q quit. Without files, the interface browses the library.
-
-Audio must share one channel layout: sample rates are converted to the
-    output device, channel layouts are not."
-    );
 }
