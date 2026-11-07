@@ -602,18 +602,21 @@ impl<'lib> App<'lib> {
         line
     }
 
-    /// The length of the track that is playing, from the interface's own track
-    /// row — never from a decoder. A flat command-line list carries none.
+    /// The length of the track that is playing: from the interface's own track
+    /// row when the queue came from the library, otherwise from the decoder,
+    /// which has always known it. Without the fallback a command-line queue
+    /// showed a bare clock that a seek could push past the end of the file.
     fn current_track_duration(&self) -> Option<Duration> {
-        let track = self.player.as_ref()?.current_index();
-        match (&self.playing, &self.position) {
+        let player = self.player.as_ref()?;
+        let from_row = match (&self.playing, &self.position) {
             (Some(Playback::Album { from, .. }), Position::Tracks { .. }) => {
-                let entry = self.tracks.get(from + track)?;
+                let entry = self.tracks.get(from + player.current_index())?;
                 let millis = u64::try_from(entry.duration_ms).ok()?;
                 (millis > 0).then(|| Duration::from_millis(millis))
             }
             _ => None,
-        }
+        };
+        from_row.or_else(|| player.current_duration())
     }
 
     fn draw_help(frame: &mut Frame, area: Rect) {

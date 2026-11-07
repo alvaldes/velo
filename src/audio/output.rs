@@ -145,6 +145,7 @@ pub struct Player {
 struct Progress {
     track: usize,
     start: usize,
+    duration: Option<Duration>,
 }
 
 /// The atomics the device callback reads and writes. Created once per player
@@ -221,6 +222,7 @@ impl Player {
         let progress = Arc::new(Mutex::new(Progress {
             track: track_index,
             start: 0,
+            duration: None,
         }));
         let failures = Arc::new(Mutex::new(VecDeque::new()));
         let wires = CallbackWires {
@@ -336,6 +338,16 @@ impl Player {
             Err(poisoned) => poisoned.into_inner(),
         };
         queue.drain(..).collect()
+    }
+
+    /// How long the track that is playing lasts, when the decoder knows.
+    #[must_use]
+    pub fn current_duration(&self) -> Option<Duration> {
+        let progress = match self.progress.lock() {
+            Ok(progress) => *progress,
+            Err(poisoned) => *poisoned.into_inner(),
+        };
+        progress.duration
     }
 
     /// Moments where the device asked for samples the producer had not written
@@ -584,6 +596,7 @@ fn run_sequence(
         let record = Progress {
             track: index,
             start: delivered.load(Ordering::Acquire),
+            duration: source.duration(),
         };
         match progress.lock() {
             Ok(mut slot) => *slot = record,
@@ -685,6 +698,7 @@ pub fn drain_headless(
     let progress = Mutex::new(Progress {
         track: start_track,
         start: 0,
+        duration: None,
     });
     run_sequence(
         Sequence {

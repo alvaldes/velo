@@ -6,7 +6,8 @@
 //! specific config. Opening a track must still report a usable spec, because the
 //! device is configured before the first sample is played.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use velo::audio::TrackSource;
 
@@ -61,4 +62,14 @@ fn an_aac_track_decodes_every_frame_it_reports() {
         frames.abs_diff(expected) <= tolerance,
         "0.3s of audio: expected about {expected} frames, decoded {frames}"
     );
+}
+
+#[test]
+fn a_track_reports_how_long_it_is() {
+    // The interface clamps a seek against this and shows it as the total, so a
+    // queue coming from the command line is no longer blind (T21).
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mono-tone.wav");
+    let source = TrackSource::open(&path).expect("the fixture opens");
+    let duration = source.duration().expect("a WAV states its length");
+    assert_eq!(duration, Duration::from_millis(250));
 }

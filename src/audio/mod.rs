@@ -8,6 +8,7 @@ use std::fmt;
 use std::fs::File;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 pub mod output;
 pub mod resample;
@@ -259,6 +260,18 @@ impl TrackSource {
                 self.finished = true;
             }
         }
+    }
+
+    /// How long this track is, when the container states it.
+    ///
+    /// The interface needs it to clamp a seek and to show a total. A queue that
+    /// came from the library has lengths from the index, but a queue that came
+    /// from the command line has nothing but what the decoder knows (T21).
+    #[must_use]
+    pub fn duration(&self) -> Option<Duration> {
+        let frames = self.n_frames?;
+        let rate = u64::from(self.spec.sample_rate.max(1));
+        Some(Duration::from_millis(frames.saturating_mul(1000) / rate))
     }
 
     /// Returns the next block of interleaved `f32` samples, or `None` at the end.
