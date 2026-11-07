@@ -70,6 +70,8 @@ Root folder: `/Users/alvaldes/Music/Library` (L15). Metadata comes from tags fir
 | T14 | Opus decode via a bundled `libopus` (`audiopus_sys`), keeping the single-binary promise | S5 | inline | — |
 | T15 | Evaluate the symphonia 0.6 API (`codecs::audio::AudioDecoder`, generic buffers) and migrate behind the existing tests | S5, S7 | inline | — |
 | T16 | Trim AAC/MP4 encoder priming: symphonia 0.5 does not populate `delay`/`padding` for isomp4, so an M4A join carries up to ~1024 frames of priming (read `iTunSMPB` or the `elst` edit list) | S7 | inline | — |
+| T18 | Edit the queue: add, remove, reorder | S11 | inline | — |
+| T19 | Report a track that fails mid-queue instead of playing silence to the end | S7, S8 | inline | — |
 | T17 | Bit-perfect mode: opt in to reopening the device per track when the rate changes instead of resampling (waits for the config system in T9) | S7, S12 | inline | — |
 
 ### Slice boundaries
@@ -136,3 +138,7 @@ Counts are again a snapshot: the tree reached 140 tracks / 27 albums / 20 artist
 Known limits recorded, not fixed: the queue-editing half of S11 is not implemented (S11 says the user can edit the queue; today an album plays from the selected track to its end); and a track that fails *mid*-queue still plays silence to the end, because the interface never polls `wait_until_finished`, so producer errors surface only when the first file fails at selection time.
 
 **L18 — UNATTRIBUTED, NOT A DECISION.** An uncommitted `[tasks.dev]` block appeared in `.mise.toml`: it builds velo in release and opens one album from `~/Music/Library`, defaulting to `Poldoore/2012 - Lush Life`, using `fd`. Neither this session nor the delegated writer wrote it. It is useful and was left untouched and uncommitted rather than adopted or deleted; the human should say whether it is theirs. This is the second unexplained edit to appear in this repository, after the L13 entry.
+
+**L19** (the `.mise.toml` block, resolved): the human confirmed authorship — verbatim *"si lo hice yo para probar la app"* — and asked that it not be committed: *"pero no lo comitees"*. Verified by running it in a real pty: `mise run dev` prints mise's own echo, then opens the interface in argv mode on the seven tracks of `Poldoore/2012 - Lush Life` (`velo  7 tracks … stopped … 01 - Lush Life.mp3`), and exits 0 on `q`. The task is correct as written: it validates the directory, collects the six formats with `fd`, keeps paths with spaces quoted, and `exec`s so no shell wrapper survives. L18 is resolved: the block is the human's, it works, and it stays out of the repository on their instruction. Every future commit must stage files explicitly so it is never swept in.
+
+**L20** (the two gaps, decided by the parent): the human's answer was *"no se que quieres que responda aqui"*, so the decision is mine and it is not theirs to make in the abstract. Both gaps are real and neither belongs inside T6: queue editing becomes **T18** and mid-queue failure reporting becomes **T19**, both after the transport. S11 stays open until T18 lands, and the silent-to-the-end failure is recorded as a known defect of the current player rather than as a limitation of the spec. No further question is needed for them.
