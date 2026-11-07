@@ -59,7 +59,7 @@ Root folder: `/Users/alvaldes/Music/Library` (L15). Metadata comes from tags fir
 | T3 | ratatui skeleton: layout, keybindings, themes | S1, S13 | inline (worker) | `f8aee9f` |
 | T4 | Library scan: jwalk + lofty + rusqlite schema, artist/album/track browser | S6 | inline (worker) | `8b42092` |
 | T5 | Play from the library and manage the queue | S11 | inline (worker) | `b931250` |
-| T6 | Pause, seek, volume with fades | S8 | inline (worker) | `8e2c4bc` |
+| T6 | Pause, seek, volume with fades | S8 | inline (worker) + fix `9a8dff1` | `8e2c4bc` |
 | T7 | Fuzzy search with nucleo | S9 | inline | — |
 | T8 | Cover art with ratatui-image | S10 | inline | — |
 | T9 | clap CLI, config TOML, `--help` | S12, S13 | inline | — |
@@ -150,3 +150,14 @@ Parent review caught one real defect the worker's tests could not: after a seek 
 **Verification technique worth keeping.** Twice I read a raw pty byte stream and concluded a defect that did not exist: the footer looked stuck at `vol 10%` and the clock looked frozen at `00:00`. Both were my mistake — ratatui writes only the bytes that changed, so a diff stream is not a screen. The fix is to force a full redraw by resizing the pty (`TIOCSWINSZ`), which makes ratatui repaint everything; that immediately showed `00:03 / 01:45` while playing and `00:05 / 01:45` after a 5 s seek. Never diagnose a TUI from a raw diff stream.
 
 Still only a human ear can confirm: that the fades are click-free at the device's real buffer size (the ramp math is pinned, the device is not), and that a seek sounds clean on MP3 and M4A (the tests pin WAV, sample-exact).
+
+**L22** (T6 defects found by using it, verbatim report):
+> el seek -> no funciona no se mueve a delante sino a donde mismo esta por lo que pude ver y el otro si parece funcionar. los volumenes funcionan bien pero al hacer seek se suben de repente y no respetan el volumen que esta puesto.
+
+Three separate things came out of that report, and only two were code:
+
+1. **The volume jump was real and is fixed** (`9a8dff1`). A seek rebuilds the player, and the rebuilt player began at its own default level of 100. The level is now re-applied on every rebuild, and the footer reads it from the player instead of a mirror that can drift. Verified in a pty: three steps down to 85%, seek, forced full redraw → `vol 85%`, unchanged.
+2. **A units bug in the previous fix**: the seek offset was stored in the track's frames and then divided by the *output* rate, so the clock was wrong whenever the two differed (the user's library is 48 kHz MP3 on a 48 kHz device, so it did not show for them). The decoder keeps the track-rate offset; the clock now keeps its own.
+3. **The seek itself could not be reproduced as broken**, and four independent measurements say it moves: a UI trace showed `position=2.438s → target=7.438s`; a producer trace showed `index=0 == start_track=0 offset_frames=362592` (7.554 s × 48 kHz) reaching the decoder; a WAV test with every frame carrying its own index showed the first decoded sample after the seek is exactly frame 1000's; and a new MP3 fixture (one second of silence, then a tone) decoded exactly the tone's level after a seek to 1.5 s. The honest conclusion is that the seek now works and the earlier perception was dominated by the volume jump, but that is an inference, not a proof — it needs the human's ear on a rebuilt binary.
+
+**Lesson, again about test calibration:** the new MP3 test first failed and looked like proof that MP3 seeking is broken. It was my threshold that was wrong: I assumed the fixture's tone would measure near full scale, and it measures **0.084 RMS** (a 32 kbps mono encode of a pure sine). The fix was to assert against the fixture's own measured level, not against an invented one. A test can lie in the accusing direction, and a failing test is a claim to verify, not a verdict.
