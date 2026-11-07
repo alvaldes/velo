@@ -38,6 +38,7 @@ pub const DEFAULT_VOLUME: u8 = 100;
 #[derive(Debug, Parser)]
 #[command(
     name = "velo",
+    version,
     about = "A fast, single-binary music player for your terminal",
     long_about = "A fast, single-binary music player for your terminal.
 

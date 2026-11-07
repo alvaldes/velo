@@ -9,6 +9,8 @@ repository = "https://github.com/alvaldes/velo"
 readme = "README.md"
 keywords = ["music", "player", "tui", "terminal", "audio"]
 categories = ["multimedia::audio", "command-line-utilities"]
+# Internal project notes never belong in a published crate.
+exclude = [".mise.toml", "odd/", "design/"]
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
@@ -18,8 +20,8 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 jwalk = "0.9.0"
 lofty = "0.24.0"
 nucleo-matcher = "0.3.1"
-ratatui = "0.29"
-ratatui-image = { version = "1.0.1", default-features = false, features = ["crossterm", "rustix"] }
+ratatui = "0.28"
+ratatui-image = { version = "2", default-features = false, features = ["crossterm", "rustix"] }
 rtrb = "0.4.1"
 rubato = "5.0.1"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
@@ -35,3 +37,7 @@ unsafe_code = "forbid"
 [lints.clippy]
 all = "warn"
 pedantic = "warn"
+
+[[bin]]
+name = "velo"
+path = "src/bin/velo.rs"
