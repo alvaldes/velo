@@ -139,6 +139,13 @@ pub struct Player {
     producer: Option<JoinHandle<Result<(), AudioError>>>,
 }
 
+/// The queue a player reads from, shared with whoever edits it.
+///
+/// The producer takes one entry at a time under this lock, so appending,
+/// removing or moving a pending entry while it plays changes what plays next
+/// (T18). The audio callback never touches it.
+pub type SharedQueue = Arc<Mutex<Vec<PathBuf>>>;
+
 /// Where the producer is: the queue index and the delivered count at which the
 /// current track began. Only the producer writes it, only the UI reads it.
 #[derive(Clone, Copy, Debug, Default)]
@@ -172,8 +179,8 @@ impl Player {
     /// [`AudioError::Device`] when no output device accepts the format, and
     /// [`AudioError::SpecMismatch`] when a track's channel layout cannot be
     /// joined to the output.
-    pub fn play_gapless(paths: Vec<PathBuf>) -> Result<Self, AudioError> {
-        Self::play_gapless_at(paths, 0, Duration::ZERO)
+    pub fn play_gapless(queue: SharedQueue) -> Result<Self, AudioError> {
+        Self::play_gapless_at(queue, 0, Duration::ZERO)
     }
 
     /// Plays every path from `track_index` onwards as one continuous stream,
@@ -187,22 +194,34 @@ impl Player {
     /// `track_index` is past it, and otherwise the same errors as
     /// [`Player::play_gapless`].
     pub fn play_gapless_at(
-        paths: Vec<PathBuf>,
+        queue: SharedQueue,
         track_index: usize,
         offset: Duration,
     ) -> Result<Self, AudioError> {
-        if paths.is_empty() {
+        let (is_empty, len, first) = {
+            let queue = match queue.lock() {
+                Ok(queue) => queue,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            (
+                queue.is_empty(),
+                queue.len(),
+                queue.get(track_index).cloned(),
+            )
+        };
+        if is_empty {
             return Err(AudioError::Unsupported("no tracks to play".to_owned()));
         }
-        if track_index >= paths.len() {
+        let Some(first) = first else {
             return Err(AudioError::Unsupported(
                 "no such track in the queue".to_owned(),
             ));
-        }
+        };
+        let _ = len;
 
         // Opening once up front means a missing or broken first file fails
         // before a device is opened, and gives us the format to configure.
-        let spec = TrackSource::open(&paths[track_index])?.spec();
+        let spec = TrackSource::open(&first)?.spec();
         let offset_frames = duration_to_frames(offset, spec.sample_rate);
 
         let (device, config, spec) = open_output(spec)?;
@@ -244,7 +263,7 @@ impl Player {
                 .name("velo-producer".to_owned())
                 .spawn(move || {
                     let job = Sequence {
-                        paths,
+                        queue,
                         start_track: track_index,
                         offset_frames,
                     };
@@ -416,7 +435,7 @@ impl Player {
 
 /// Where a sequence starts: which track, and how far into it.
 struct Sequence {
-    paths: Vec<PathBuf>,
+    queue: SharedQueue,
     start_track: usize,
     offset_frames: u64,
 }
@@ -529,6 +548,14 @@ fn produce(
     )
 }
 
+/// Copies one queue entry out, so the lock is held only for the copy.
+fn queued_path(queue: &Mutex<Vec<PathBuf>>, index: usize) -> Option<PathBuf> {
+    match queue.lock() {
+        Ok(queue) => queue.get(index).cloned(),
+        Err(poisoned) => poisoned.into_inner().get(index).cloned(),
+    }
+}
+
 /// Produces every track of a job from `start_track` onwards, handing each
 /// block of output samples to `on_block` and every track it had to skip to
 /// `on_failure`. The ring, the counters and the failure slot all live behind
@@ -549,14 +576,13 @@ fn run_sequence(
     on_failure: &mut dyn FnMut(TrackFailure),
 ) -> Result<(), AudioError> {
     let Sequence {
-        paths,
+        queue,
         start_track,
         offset_frames,
     } = job;
-    'tracks: for (index, path) in paths.into_iter().enumerate() {
-        if index < start_track {
-            continue;
-        }
+    // One entry per turn, under the lock, because the queue is shared: what the
+    // interface appended, removed or moved while this runs is what plays next.
+    'tracks: for index in start_track.. {
         if stop.load(Ordering::Relaxed) {
             return Ok(());
         }
@@ -565,6 +591,10 @@ fn run_sequence(
         // if it cannot be opened now, that is the sequence error the interface
         // already reports. Every other track is skipped, so one bad file costs
         // one file, not the rest of the album (T19).
+        // Past the end is how a sequence finishes: the queue can also shrink.
+        let Some(path) = queued_path(&queue, index) else {
+            return Ok(());
+        };
         let requested = index == start_track;
 
         let opened = if requested && offset_frames > 0 {
@@ -685,7 +715,7 @@ fn run_sequence(
 /// selection time — and [`AudioError::SpecMismatch`] when two tracks in the
 /// queue disagree on their channel layout.
 pub fn drain_headless(
-    paths: Vec<PathBuf>,
+    queue: SharedQueue,
     start_track: usize,
     offset_frames: u64,
     expected: TrackSpec,
@@ -702,7 +732,7 @@ pub fn drain_headless(
     });
     run_sequence(
         Sequence {
-            paths,
+            queue,
             start_track,
             offset_frames,
         },

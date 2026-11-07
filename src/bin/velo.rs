@@ -265,7 +265,8 @@ fn event_loop(
 }
 
 fn play(paths: &[PathBuf]) -> ExitCode {
-    let mut player = match Player::play_gapless(paths.to_vec()) {
+    let queue = std::sync::Arc::new(std::sync::Mutex::new(paths.to_vec()));
+    let mut player = match Player::play_gapless(queue) {
         Ok(player) => player,
         Err(error) => {
             eprintln!("velo: {error}");

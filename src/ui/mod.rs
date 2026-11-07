@@ -19,6 +19,7 @@ pub use ratatui::crossterm;
 
 use std::fmt::Write as _;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ratatui::Frame;
@@ -810,7 +811,10 @@ impl<'lib> App<'lib> {
         if let Some(old) = self.player.take() {
             old.stop();
         }
-        match Player::play_gapless(paths.clone()) {
+        // The player reads the queue it is given, so the interface keeps the
+        // handle and edits it in place (T18).
+        let queue = Arc::new(Mutex::new(paths.clone()));
+        match Player::play_gapless(queue) {
             Ok(player) => {
                 self.queue = paths;
                 self.player = Some(player);
@@ -855,7 +859,8 @@ impl<'lib> App<'lib> {
             self.state = PlayState::Stopped;
             return;
         }
-        match Player::play_gapless_at(self.queue.clone(), track, offset) {
+        let queue = Arc::new(Mutex::new(self.queue.clone()));
+        match Player::play_gapless_at(queue, track, offset) {
             Ok(player) => {
                 // A rebuilt player starts at its own default level; without this
                 // a seek would silently jump the volume back to it.

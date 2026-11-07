@@ -77,7 +77,7 @@ fn a_mono_track_plays_into_a_stereo_device() {
     let mut failures: Vec<TrackFailure> = Vec::new();
 
     drain_headless(
-        vec![mono],
+        std::sync::Arc::new(std::sync::Mutex::new(vec![mono])),
         0,
         0,
         spec(2),
@@ -111,7 +111,7 @@ fn a_track_the_device_cannot_hold_is_skipped_not_fatal() {
     let mut failures: Vec<TrackFailure> = Vec::new();
 
     let result = drain_headless(
-        vec![surround.clone()],
+        std::sync::Arc::new(std::sync::Mutex::new(vec![surround.clone()])),
         0,
         0,
         spec(2),

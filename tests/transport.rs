@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
+use velo::audio::output::{TrackFailure, drain_headless};
 use velo::audio::{GainRamp, TrackSource, TrackSpec, seek_target};
 
 /// Writes a minimal PCM16 WAV file so the tests need no external tooling.
@@ -348,7 +349,11 @@ fn a_corrupt_track_mid_queue_is_skipped_without_silence_and_is_named() {
     let mut failures: Vec<TrackFailure> = Vec::new();
     let stop = AtomicBool::new(false);
     let result = drain_headless(
-        vec![good_a.clone(), broken.clone(), good_b.clone()],
+        std::sync::Arc::new(std::sync::Mutex::new(vec![
+            good_a.clone(),
+            broken.clone(),
+            good_b.clone(),
+        ])),
         0,
         0,
         spec,
@@ -400,7 +405,7 @@ fn a_queue_whose_only_track_is_broken_fails_instead_of_finishing_silently() {
     let mut failures: Vec<TrackFailure> = Vec::new();
     let stop = AtomicBool::new(false);
     let result = drain_headless(
-        vec![broken.clone()],
+        std::sync::Arc::new(std::sync::Mutex::new(vec![broken.clone()])),
         0,
         0,
         spec,
@@ -451,4 +456,84 @@ fn an_mp3_seek_lands_past_the_silence() {
         seek_rms > 0.05 && seek_rms > start_rms * 10.0,
         "a seek past the silence must land on the tone: silence {start_rms}, after seek {seek_rms}"
     );
+}
+
+#[test]
+fn a_track_appended_while_it_plays_is_played_next() {
+    // The queue is shared, so an append made in the middle of the first track
+    // is what plays after it. This is the test that makes T18 a fact: if the
+    // producer took a snapshot, the second track would never be heard.
+    let spec = TrackSpec {
+        sample_rate: 44_100,
+        channels: 2,
+    };
+    let first = scratch_path("append-first");
+    let second = scratch_path("append-second");
+    write_indexed_wav(&first, 500, spec);
+    write_indexed_wav(&second, 700, spec);
+
+    let queue = std::sync::Arc::new(std::sync::Mutex::new(vec![first]));
+    let for_append = std::sync::Arc::clone(&queue);
+    let stop = AtomicBool::new(false);
+    let mut samples: Vec<f32> = Vec::new();
+    let mut failures: Vec<TrackFailure> = Vec::new();
+    let mut appended = false;
+    let mut on_block = |block: &[f32]| {
+        samples.extend_from_slice(block);
+        if !appended {
+            appended = true;
+            for_append.lock().expect("queue").push(second.clone());
+        }
+    };
+
+    drain_headless(
+        queue,
+        0,
+        0,
+        spec,
+        &stop,
+        &mut on_block,
+        &mut |failure: TrackFailure| failures.push(failure),
+    )
+    .expect("the sequence runs");
+
+    assert!(failures.is_empty(), "nothing failed: {failures:?}");
+    assert_eq!(samples.len(), (500 + 700) * 2, "both tracks were heard");
+}
+
+#[test]
+fn a_queue_that_shrinks_to_nothing_ends_cleanly() {
+    let spec = TrackSpec {
+        sample_rate: 44_100,
+        channels: 2,
+    };
+    let first = scratch_path("shrink-first");
+    write_indexed_wav(&first, 400, spec);
+
+    let queue = std::sync::Arc::new(std::sync::Mutex::new(vec![first]));
+    let for_clear = std::sync::Arc::clone(&queue);
+    let stop = AtomicBool::new(false);
+    let mut samples: Vec<f32> = Vec::new();
+    let mut cleared = false;
+    let mut on_block = |block: &[f32]| {
+        samples.extend_from_slice(block);
+        if !cleared {
+            cleared = true;
+            for_clear.lock().expect("queue").clear();
+        }
+    };
+
+    drain_headless(
+        queue,
+        0,
+        0,
+        spec,
+        &stop,
+        &mut on_block,
+        &mut |_failure: TrackFailure| panic!("nothing failed here"),
+    )
+    .expect("an emptied queue is an ending, not an error");
+
+    // The track that was already playing finishes; there is nothing after it.
+    assert_eq!(samples.len(), 400 * 2);
 }
