@@ -1,6 +1,15 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.7.0] - 2026-11-07
+
+### Features
+- **ui:** L sets the library folder at any time
+- **ui:** Index in the background on launch and on u, with an indicator
+
+### Fixes
+- **library:** An old index in a read-only file opens again, with genres unknown
+- **library:** A read-only index reads the rows still in its WAL, and a reload keeps the tab
 ## [0.6.0] - 2026-11-07
 
 ### Features
