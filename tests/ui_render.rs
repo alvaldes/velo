@@ -271,3 +271,61 @@ fn the_queue_view_draws_the_queued_file_names_and_empty_state() {
         "the empty-state hint is gone once something is queued"
     );
 }
+
+// ---- cover art (T8, S10) ---------------------------------------------------
+
+/// The interface's 80×24 screen exactly as it was the commit before cover art
+/// touched [`App::draw`]. The artwork change may not move a single cell at
+/// this size: no protocol is ever attached to a [`TestBackend`]-backed app.
+const SCREEN_BEFORE_COVER_ART: &str = concat!(
+    "velo  3 tracks                                                           stopped\n",
+    "  one.flac  /music                                                              \n",
+    "  two.flac  /music                                                              \n",
+    "  three.flac  /music                                                            \n",
+    "                                                                                \n",
+    "                                                                                \n",
+    "                                                                                \n",
+    "                                                                                \n",
+    "                                                                                \n",
+    "                                                                                \n",
+    "                                                                                \n",
+    "                                                                                \n",
+    "                                                                                \n",
+    "                                                                                \n",
+    "                                                                                \n",
+    "                                                                                \n",
+    "                                                                                \n",
+    "                                                                                \n",
+    "                                                                                \n",
+    "                                                                                \n",
+    "                                                                                \n",
+    "                                                                                \n",
+    "vol 100%                                                                        \n",
+    "j/k move  enter play  space pause  ←/→ seek  / search  tab queue  ? help  q quit",
+);
+
+fn screen_at(app: &App, width: u16, height: u16) -> String {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("a test terminal");
+    terminal
+        .draw(|frame| app.draw(frame))
+        .expect("the frame draws");
+    let buffer: &Buffer = terminal.backend().buffer();
+    let screen: String = buffer.content().iter().map(Cell::symbol).collect();
+    let chars: Vec<char> = screen.chars().collect();
+    chars
+        .chunks(usize::from(width))
+        .map(|line| line.iter().collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn no_protocol_and_an_80x24_terminal_draw_exactly_the_screen_before_cover_art() {
+    let app = App::new(tracks(&["one.flac", "two.flac", "three.flac"]));
+    let screen = screen_at(&app, 80, 24);
+
+    assert_eq!(
+        screen, SCREEN_BEFORE_COVER_ART,
+        "cover art must leave the 80×24 interface unchanged"
+    );
+}

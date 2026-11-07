@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use velo::audio::{Player, TrackSource};
 use velo::library::Library;
-use velo::ui::{Action, App, crossterm};
+use velo::ui::{Action, App, artwork, crossterm};
 
 use crossterm::event::{Event, KeyEventKind};
 use crossterm::{execute, terminal};
@@ -164,8 +164,12 @@ fn run_interface(paths: Vec<PathBuf>) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    // Cover art is detected once, before the alternate screen, while the
+    // terminal still answers queries (T8). `None` draws no art at all.
+    let picker = artwork::detect();
     let outcome = with_terminal(|terminal| {
         let mut app = App::new(paths);
+        app.show_artwork(picker);
         event_loop(&mut app, terminal)
     });
     report_outcome(outcome)
@@ -181,12 +185,15 @@ fn browse_interface(root: &Path) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    // The same one-time detection as the file interface (T8).
+    let picker = artwork::detect();
     let outcome = with_terminal(|terminal| {
         let opened = Library::open();
         let mut app = match &opened {
             Ok(library) => App::browse(Some(library)),
             Err(_) => App::browse(None),
         };
+        app.show_artwork(picker);
         match &opened {
             Ok(library) => {
                 if root.is_dir() {

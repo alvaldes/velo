@@ -12,14 +12,16 @@
 //! come from an in-memory snapshot that is refreshed when the position
 //! changes, never once per frame.
 
+pub mod artwork;
 pub mod search;
 pub mod theme;
 
 pub use ratatui;
 pub use ratatui::crossterm;
 
+use std::cell::RefCell;
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -33,6 +35,7 @@ use crate::audio::output::{SharedQueue, TrackFailure};
 use crate::audio::{Player, seek_target};
 use crate::library::{AlbumEntry, ArtistEntry, Library, TrackEntry};
 
+use self::artwork::{Artwork, Picker, StatefulImage, StatefulProtocol};
 use self::search::Search;
 use self::theme::{ACCENT, BACKGROUND, DIM, SECONDARY, TEXT};
 
@@ -172,6 +175,19 @@ pub struct App<'lib> {
     search_results: Vec<usize>,
     /// The selected row of the result list.
     search_selected: usize,
+    /// The picker the shell detected once at startup, `None` when the
+    /// terminal speaks no graphics protocol (T8). No picker, no art.
+    picker: Option<Picker>,
+    /// The decoded cover of the track that is playing, if its file has one.
+    /// Replaced only when the track changes; a file is never re-read per frame.
+    artwork: Option<Artwork>,
+    /// The file the current artwork was decoded from, so a track change is
+    /// seen with one comparison instead of a re-extraction.
+    artwork_path: Option<PathBuf>,
+    /// The rendered image protocol, keyed to the current artwork. Interior
+    /// mutability because `draw` takes `&self`: the stateful protocol re-encodes
+    /// only when its area changes, so redrawing stays cheap.
+    protocol: RefCell<Option<Box<dyn StatefulProtocol>>>,
     help: bool,
     volume: u8,
     state: PlayState,
@@ -201,6 +217,10 @@ impl<'lib> App<'lib> {
             search_haystacks: Vec::new(),
             search_results: Vec::new(),
             search_selected: 0,
+            picker: None,
+            artwork: None,
+            artwork_path: None,
+            protocol: RefCell::new(None),
             help: false,
             volume: 100,
             state: PlayState::Stopped,
@@ -231,6 +251,10 @@ impl<'lib> App<'lib> {
             search_haystacks: Vec::new(),
             search_results: Vec::new(),
             search_selected: 0,
+            picker: None,
+            artwork: None,
+            artwork_path: None,
+            protocol: RefCell::new(None),
             help: false,
             volume: 100,
             state: PlayState::Stopped,
@@ -353,10 +377,18 @@ impl<'lib> App<'lib> {
             .collect()
     }
 
+    /// Installs the cover-art capability detected once at startup. `None`
+    /// leaves the interface exactly as it draws without art (T8).
+    pub fn show_artwork(&mut self, picker: Option<Picker>) {
+        self.picker = picker;
+    }
+
     /// Runs once per turn of the event loop — the same cadence as key
     /// polling — so the producer's announcements surface without a key
-    /// press. Without a player there is nothing to collect.
+    /// press, and the cover art follows the track it plays (T8). Without a
+    /// player there is nothing to collect.
     pub fn tick(&mut self) {
+        self.refresh_artwork();
         let Some(player) = &self.player else {
             return;
         };
@@ -376,6 +408,20 @@ impl<'lib> App<'lib> {
             |name| name.to_string_lossy().to_string(),
         );
         self.status = format!("velo: skipped {name}: {}", failure.message);
+    }
+
+    /// Swaps the decoded cover when the track that is playing changes, and
+    /// only then: the file is read once per track, never per frame, and never
+    /// from the audio callback (T8). A track whose file carries no picture
+    /// draws no art until a different track plays.
+    fn refresh_artwork(&mut self) {
+        let path = self.playing_path().map(Path::to_path_buf);
+        if path == self.artwork_path {
+            return;
+        }
+        self.protocol.borrow_mut().take();
+        self.artwork = path.as_deref().and_then(Artwork::from_path);
+        self.artwork_path = path;
     }
 
     /// Re-reads the artists snapshot from the index, e.g. right after
@@ -521,12 +567,46 @@ impl<'lib> App<'lib> {
             Constraint::Length(2),
         ])
         .areas(area);
+        // Cover art (T8): when a protocol was detected, the art is set to draw
+        // and the terminal meets the threshold, it takes the rightmost columns
+        // of the header and the body, and those make way. Otherwise the frame
+        // is exactly what it is without art — nothing to fake, nothing to move.
+        let pane = self
+            .picker
+            .filter(|_| self.artwork.is_some())
+            .and_then(|_| artwork::pane(area));
+        let mut header = header;
+        let mut body = body;
+        if let Some(art) = pane {
+            header.width = header.width.saturating_sub(art.width);
+            body.width = body.width.saturating_sub(art.width);
+        }
         self.draw_header(frame, header);
         self.draw_body(frame, body);
         self.draw_footer(frame, footer);
+        self.draw_artwork(frame, pane);
         if self.help {
             Self::draw_help(frame, area);
         }
+    }
+
+    /// Renders the cover beside the header, fitting the source image into the
+    /// pane. The protocol re-encodes only when its area changes, so a redraw
+    /// costs it nothing.
+    fn draw_artwork(&self, frame: &mut Frame, pane: Option<Rect>) {
+        let (Some(pane), Some(mut picker), Some(artwork)) =
+            (pane, self.picker, self.artwork.as_ref())
+        else {
+            return;
+        };
+        let mut protocol = self.protocol.borrow_mut();
+        if protocol.is_none() {
+            *protocol = Some(picker.new_resize_protocol(artwork.image().clone()));
+        }
+        let Some(state) = protocol.as_mut() else {
+            return;
+        };
+        frame.render_stateful_widget(StatefulImage::new(None), pane, state);
     }
 
     fn draw_header(&self, frame: &mut Frame, area: Rect) {
@@ -766,7 +846,7 @@ impl<'lib> App<'lib> {
         let hints = if self.search.is_some() {
             "type to search  j/k move  enter play  backspace delete  esc cancel"
         } else {
-            "j/k move  enter open/play  ←/→ seek  space pause  +/- volume  ? help  q quit"
+            "j/k move  enter play  space pause  ←/→ seek  / search  tab queue  ? help  q quit"
         };
         frame.render_widget(
             Paragraph::new(Line::styled(hints, Style::new().fg(DIM))),
