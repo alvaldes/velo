@@ -15,8 +15,8 @@ use clap::Parser as _;
 use velo::audio::output::Repeat;
 use velo::config::{
     Cli, Config, DEFAULT_VOLUME, OpenNode, ReplayGainMode, ThemeColor, ThemeColors, UiParts,
-    config_path, default_config_text, expand_path, library_to_save, set_library,
-    write_default_config,
+    config_path, default_config_text, expand_path, library_to_save, remove_value, set_library,
+    set_value, write_default_config,
 };
 use velo::ui::{BrowseBy, View};
 
@@ -773,6 +773,218 @@ fn setting_the_library_adds_the_key_when_the_file_has_none() {
     assert_eq!(
         fs::read_to_string(&path).unwrap(),
         "library = \"/music\"\nvolume = 3\n"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// ------------------------------------------- writing and removing values (T4, S2)
+
+#[test]
+fn a_key_is_inserted_into_an_existing_table_between_its_neighbours() {
+    let dir = temp_dir("set-value-insert");
+    let path = write_config(
+        &dir,
+        "# mine\n\n[state]\nvolume = 72\nrepeat = \"off\"\n\n[theme]\naccent = \"#af00af\"\n",
+    );
+
+    set_value(&path, Some("state"), "shuffle", "false")
+        .unwrap_or_else(|error| panic!("set: {error}"));
+
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        "# mine\n\n[state]\nvolume = 72\nrepeat = \"off\"\nshuffle = false\n\n[theme]\naccent = \"#af00af\"\n"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_active_key_inside_a_table_is_replaced_in_place() {
+    let dir = temp_dir("set-value-replace");
+    let before = "[state]\nvolume = 30\nshuffle = true\nrepeat = \"off\"\n";
+    let path = write_config(&dir, before);
+
+    set_value(&path, Some("state"), "shuffle", "false")
+        .unwrap_or_else(|error| panic!("set: {error}"));
+
+    let after = fs::read_to_string(&path).unwrap();
+    assert_eq!(
+        after,
+        "[state]\nvolume = 30\nshuffle = false\nrepeat = \"off\"\n"
+    );
+    assert_eq!(
+        after.lines().count(),
+        before.lines().count(),
+        "a replacement must not change the line count\n{after}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_commented_key_inside_a_table_is_uncommented_not_duplicated() {
+    let dir = temp_dir("set-value-uncomment");
+    let path = write_config(&dir, "[ui]\n# cover_art = true\nspectrum = true\n");
+
+    set_value(&path, Some("ui"), "cover_art", "false")
+        .unwrap_or_else(|error| panic!("set: {error}"));
+
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        "[ui]\ncover_art = false\nspectrum = true\n"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_key_is_written_into_a_table_that_does_not_exist_yet() {
+    let dir = temp_dir("set-value-new-table");
+    let path = write_config(&dir, "library = \"/music\"\nbit_perfect = false\n");
+
+    set_value(&path, Some("ui"), "top_bar", "true").unwrap_or_else(|error| panic!("set: {error}"));
+
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        "library = \"/music\"\nbit_perfect = false\n[ui]\ntop_bar = true\n"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_top_level_key_is_inserted_above_the_first_table_never_inside_one() {
+    let dir = temp_dir("set-value-top-level");
+    let path = write_config(&dir, "[state]\nvolume = 72\n[ui]\ncover_art = true\n");
+
+    set_value(&path, None, "bit_perfect", "true").unwrap_or_else(|error| panic!("set: {error}"));
+
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        "bit_perfect = true\n[state]\nvolume = 72\n[ui]\ncover_art = true\n"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn writing_to_a_missing_file_starts_from_the_default_text() {
+    let dir = temp_dir("set-value-missing");
+    let path = dir.join("velo").join("config.toml");
+
+    set_value(&path, Some("state"), "volume", "50").unwrap_or_else(|error| panic!("set: {error}"));
+
+    let expected = default_config_text().replace("volume = 100", "volume = 50");
+    assert_eq!(fs::read_to_string(&path).unwrap(), expected);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn remove_value_drops_one_key_and_leaves_everything_else_identical() {
+    let dir = temp_dir("remove-value");
+    let path = write_config(
+        &dir,
+        "[state]\nvolume = 72\n# shuffle = true\nshuffle = false\n\n[theme]\naccent = \"#af00af\"\n",
+    );
+
+    remove_value(&path, Some("state"), "shuffle").unwrap_or_else(|error| panic!("remove: {error}"));
+
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        "[state]\nvolume = 72\n\n[theme]\naccent = \"#af00af\"\n"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn removing_a_missing_key_or_table_or_file_is_a_silent_no_op() {
+    // A missing key and a missing table: the file is not rewritten.
+    let dir = temp_dir("remove-no-op");
+    let path = write_config(&dir, "[state]\nvolume = 72\n");
+    remove_value(&path, Some("state"), "shuffle").unwrap();
+    remove_value(&path, Some("theme"), "accent").unwrap();
+    assert_eq!(fs::read_to_string(&path).unwrap(), "[state]\nvolume = 72\n");
+    let _ = fs::remove_dir_all(&dir);
+
+    // A missing file: no file appears.
+    let dir = temp_dir("remove-no-file");
+    let path = dir.join("velo").join("config.toml");
+    remove_value(&path, Some("state"), "volume").unwrap();
+    assert!(!path.exists());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// The legacy migration (S2.5): the first write of `volume` under `[state]`
+/// appends the table; the stale top-level line stays where it is, so the
+/// write stays a per-key edit. The parser reads `[state]` and ignores the
+/// stale one, and no table ever holds two `volume` keys.
+#[test]
+fn the_first_state_write_puts_volume_under_state_without_touching_the_old_line() {
+    let dir = temp_dir("legacy-volume");
+    let path = write_config(&dir, "volume = 40\n");
+
+    set_value(&path, Some("state"), "volume", "72").unwrap_or_else(|error| panic!("set: {error}"));
+
+    let text = fs::read_to_string(&path).unwrap();
+    assert_eq!(text, "volume = 40\n[state]\nvolume = 72\n");
+    let state_volume_lines = text
+        .lines()
+        .skip_while(|line| *line != "[state]")
+        .filter(|line| line.starts_with("volume"))
+        .count();
+    assert_eq!(
+        state_volume_lines, 1,
+        "one volume line under [state]:\n{text}"
+    );
+    let settings = Config::load_from(&path)
+        .unwrap_or_else(|error| panic!("load: {error}"))
+        .merged(&cli_with_no_flags());
+    assert_eq!(settings.volume, 72, "[state] volume is the one that counts");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_written_value_round_trips_through_the_parser() {
+    let dir = temp_dir("write-round-trip");
+    let path = write_config(&dir, &default_config_text());
+
+    set_value(&path, Some("state"), "repeat", "\"all\"")
+        .unwrap_or_else(|error| panic!("set repeat: {error}"));
+    set_value(&path, Some("theme"), "accent", "\"#123456\"")
+        .unwrap_or_else(|error| panic!("set accent: {error}"));
+    set_value(&path, Some("ui"), "cover_art", "false")
+        .unwrap_or_else(|error| panic!("set cover_art: {error}"));
+
+    let settings = Config::load_from(&path)
+        .unwrap_or_else(|error| panic!("load: {error}"))
+        .merged(&cli_with_no_flags());
+    assert_eq!(settings.session.repeat, Repeat::All);
+    assert_eq!(
+        settings.theme.accent,
+        ThemeColor::Rgb {
+            red: 0x12,
+            green: 0x34,
+            blue: 0x56,
+        }
+    );
+    assert!(!settings.ui.cover_art);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn comments_between_keys_survive_a_write_and_a_removal() {
+    let dir = temp_dir("comments-survive");
+    let path = write_config(
+        &dir,
+        "[state]\n# my volume\nvolume = 72\n# shuffle on?\n# shuffle = true\nrepeat = \"off\"\n",
+    );
+
+    set_value(&path, Some("state"), "shuffle", "false")
+        .unwrap_or_else(|error| panic!("set: {error}"));
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        "[state]\n# my volume\nvolume = 72\n# shuffle on?\nshuffle = false\nrepeat = \"off\"\n"
+    );
+
+    remove_value(&path, Some("state"), "shuffle").unwrap_or_else(|error| panic!("remove: {error}"));
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        "[state]\n# my volume\nvolume = 72\n# shuffle on?\nrepeat = \"off\"\n"
     );
     let _ = fs::remove_dir_all(&dir);
 }

@@ -598,8 +598,12 @@ pub fn set_library(path: &Path, value: &str) -> std::io::Result<()> {
     let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
     let target = lines
         .iter()
-        .position(|line| is_library_line(line, false))
-        .or_else(|| lines.iter().position(|line| is_library_line(line, true)));
+        .position(|line| is_key_line(line, "library", false))
+        .or_else(|| {
+            lines
+                .iter()
+                .position(|line| is_key_line(line, "library", true))
+        });
     match target {
         Some(index) => lines[index] = entry,
         None => lines.insert(0, entry),
@@ -614,8 +618,8 @@ pub fn set_library(path: &Path, value: &str) -> std::io::Result<()> {
     fs::write(path, out)
 }
 
-/// Whether `line` assigns `library`, active or (with `commented`) behind `#`.
-fn is_library_line(line: &str, commented: bool) -> bool {
+/// Whether `line` assigns `key`, active or (with `commented`) behind `#`.
+fn is_key_line(line: &str, key: &str, commented: bool) -> bool {
     let line = line.trim_start();
     let line = if commented {
         match line.strip_prefix('#') {
@@ -625,8 +629,158 @@ fn is_library_line(line: &str, commented: bool) -> bool {
     } else {
         line
     };
-    line.strip_prefix("library")
+    line.strip_prefix(key)
         .is_some_and(|rest| rest.trim_start().starts_with('='))
+}
+
+/// Whether `line` opens a table: any unindented `[` — a commented
+/// `# [theme]` is just a comment, not a header.
+fn is_table_header(line: &str) -> bool {
+    line.trim_start().starts_with('[')
+}
+
+/// The half-open range of lines a table's keys live in: for `Some(name)`, the
+/// lines under its `[name]` header and above the next header; for `None`, the
+/// lines above the first header — the top-level table. `None` when the named
+/// table is not in the file; the top-level table always has a span.
+fn table_span(lines: &[String], section: Option<&str>) -> Option<(usize, usize)> {
+    if let Some(name) = section {
+        let header = format!("[{name}]");
+        let header_index = lines.iter().position(|line| line.trim() == header)?;
+        let end = lines[header_index + 1..]
+            .iter()
+            .position(|line| is_table_header(line))
+            .map_or(lines.len(), |offset| header_index + 1 + offset);
+        Some((header_index + 1, end))
+    } else {
+        let end = lines
+            .iter()
+            .position(|line| is_table_header(line))
+            .unwrap_or(lines.len());
+        Some((0, end))
+    }
+}
+
+/// Writes `key = value` into the config file at `path`, one key at a time,
+/// keeping every other line — comments, blank lines, keys and their order,
+/// table headers — byte for byte. `value` is already the TOML literal to
+/// write after the `=` (`72`, `"all"`, `false`), so the caller decides the
+/// quoting; the function writes exactly `key = value`.
+///
+/// `section` names the table without its brackets: `Some("state")` writes
+/// into `[state]`, `None` into the top-level table, the lines above the
+/// first header. Inside that table an active `key = …` line is replaced in
+/// place, else a commented `# key = …` line there is uncommented, else the
+/// line is appended at the end of the table. A table that does not exist is
+/// opened at the end of the file with the key under it. A missing file
+/// starts from [`default_config_text`]; otherwise the file is rewritten only
+/// when the key actually lands somewhere.
+///
+/// One key, one table: `set_value` never touches the same key in another
+/// table. In particular, the legacy top-level `volume` (S2.5) stays behind
+/// when the first `[state] volume` is written — the parser reads `[state]`
+/// and ignores the stale line, so the file never holds two `volume` keys in
+/// one table. A caller that wants the stale line gone pairs the write with
+/// `remove_value(path, None, "volume")`.
+///
+/// # Errors
+///
+/// Fails when the file cannot be read or written.
+pub fn set_value(
+    path: &Path,
+    section: Option<&str>,
+    key: &str,
+    value: &str,
+) -> std::io::Result<()> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => default_config_text(),
+        Err(error) => return Err(error),
+    };
+    let entry = format!("{key} = {value}");
+    let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
+
+    let (start, end) = if let Some(span) = table_span(&lines, section) {
+        span
+    } else if let Some(name) = section {
+        // The table does not exist: open it at the end of the file, with the
+        // key to go right under the header written here.
+        let header = format!("[{name}]");
+        lines.push(header);
+        (lines.len(), lines.len())
+    } else {
+        // `table_span` always finds the top-level table; refusing the write
+        // beats panicking in the middle of saving if that ever stops holding.
+        return Err(std::io::Error::other("the top-level table has no span"));
+    };
+
+    let found = (start..end)
+        .find(|index| is_key_line(&lines[*index], key, false))
+        .or_else(|| (start..end).find(|index| is_key_line(&lines[*index], key, true)));
+    let appended_at_end = if let Some(index) = found {
+        lines[index] = entry;
+        false
+    } else {
+        // Append right after the table's last content line, before any blank
+        // lines that separate it from the next table.
+        let mut at = end;
+        while at > start && lines[at - 1].trim().is_empty() {
+            at -= 1;
+        }
+        lines.insert(at, entry);
+        at + 1 == lines.len()
+    };
+
+    let mut out = lines.join("\n");
+    if text.ends_with('\n') || text.is_empty() || appended_at_end {
+        out.push('\n');
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, out)
+}
+
+/// Removes `key` from `section`, using the same section convention as
+/// [`set_value`]: the key's active line and its commented twin are dropped,
+/// everything else — a table left empty included — is left as it is. A
+/// missing file, a missing table or a missing key is a silent no-op that
+/// writes nothing.
+///
+/// # Errors
+///
+/// Fails when the file cannot be read or written.
+pub fn remove_value(path: &Path, section: Option<&str>, key: &str) -> std::io::Result<()> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let lines: Vec<String> = text.lines().map(str::to_owned).collect();
+
+    let Some((start, end)) = table_span(&lines, section) else {
+        // The named table is not in the file, so the key cannot be either.
+        return Ok(());
+    };
+
+    let mut kept: Vec<String> = Vec::with_capacity(lines.len());
+    for (index, line) in lines.iter().enumerate() {
+        if index >= start
+            && index < end
+            && (is_key_line(line, key, false) || is_key_line(line, key, true))
+        {
+            continue;
+        }
+        kept.push(line.clone());
+    }
+    if kept.len() == lines.len() {
+        return Ok(());
+    }
+    let mut out = kept.join("\n");
+    if text.ends_with('\n') {
+        out.push('\n');
+    }
+    fs::write(path, out)
 }
 
 /// Resolves a library path as the user wrote it: `~` and `~/...` against
