@@ -39,7 +39,7 @@ use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, ListState, Para
 use crate::audio::output::{Repeat, SharedQueue, TrackFailure};
 use crate::audio::spectrum::Spectrum;
 use crate::audio::{Player, seek_target, skip_target};
-use crate::config::{ReplayGainMode, ThemeColors, UiParts};
+use crate::config::{OpenNode, ReplayGainMode, Session, ThemeColors, UiParts};
 use crate::library::{AlbumEntry, ArtistEntry, GenreEntry, IndexReport, Library, TrackEntry};
 
 use self::artwork::{Artwork, Picker, StatefulImage, StatefulProtocol};
@@ -347,8 +347,14 @@ pub struct App<'lib> {
     /// Present while no library root is set (S4): the empty browser then
     /// says how to set one, and while its prompt is open every key edits it.
     library_setup: Option<LibrarySetup>,
-    /// The config file a library chosen with `L` is saved to.
+    /// The config file a library chosen with `L` is saved to, and the file
+    /// every persisted value is written to (S2).
     config_file: Option<PathBuf>,
+    /// What the file already says (S2): the session it launched from and the
+    /// volume it launched at. Every persisted write compares against this,
+    /// so a value the file holds is never written back.
+    saved: Session,
+    saved_volume: u8,
     /// An accepted library root, or the one `u` refreshes, waiting for the
     /// shell to index it.
     library_root: Option<PathBuf>,
@@ -406,6 +412,8 @@ impl<'lib> App<'lib> {
             help: None,
             library_setup: None,
             config_file: None,
+            saved: Session::default(),
+            saved_volume: crate::config::DEFAULT_VOLUME,
             library_root: None,
             refresh: Refresh::default(),
             volume: 100,
@@ -458,6 +466,8 @@ impl<'lib> App<'lib> {
             help: None,
             library_setup: None,
             config_file: None,
+            saved: Session::default(),
+            saved_volume: crate::config::DEFAULT_VOLUME,
             library_root: None,
             refresh: Refresh::default(),
             volume: 100,
@@ -505,6 +515,217 @@ impl<'lib> App<'lib> {
     /// the four switches the layout reads, everything on by default.
     pub fn set_ui(&mut self, ui: UiParts) {
         self.ui = ui;
+    }
+
+    /// Comes back to where the config file says the last session stood (S3):
+    /// the shuffle and repeat it saved, then — in the browser — the tab, the
+    /// library view and the node that was open. Call it after
+    /// [`App::set_volume`], as the launch paths do: the volume on the app
+    /// then is remembered as what the file says, so restoring never writes.
+    /// A node the index no longer has falls back silently to the level above.
+    pub fn set_session(&mut self, session: Session) {
+        // Every one of these came from the file, and the change hooks below
+        // compare against `saved`: nothing here is ever written back.
+        let Session {
+            shuffle,
+            repeat,
+            view,
+            browse_by,
+            node,
+        } = session;
+        self.saved = Session {
+            shuffle,
+            repeat,
+            view,
+            browse_by,
+            node: node.clone(),
+        };
+        self.saved_volume = self.volume;
+        self.shuffle = shuffle;
+        self.repeat = repeat;
+        // The tab, the library view and the node belong to the browser; a
+        // flat command-line list has none of them to come back to.
+        if matches!(self.position, Position::Files) {
+            return;
+        }
+        self.browse_view(browse_by);
+        if let Some(node) = &node {
+            self.reopen_node(browse_by, node);
+        }
+        self.view = view;
+    }
+
+    /// Re-opens the saved node inside `by`, level by level, reading each
+    /// child list from the index. A level the index no longer has — a gone
+    /// artist, album or genre, or an empty list where one should be — stops
+    /// the descent right there, silently: the level above stays on screen.
+    fn reopen_node(&mut self, by: BrowseBy, node: &OpenNode) {
+        let Some(library) = self.library else {
+            return;
+        };
+        match by {
+            BrowseBy::Artists => {
+                let Some(artist) = node.artist.as_deref() else {
+                    return;
+                };
+                let Ok(albums) = library.albums_of(artist) else {
+                    return;
+                };
+                if albums.is_empty() {
+                    return;
+                }
+                self.position = Position::Albums {
+                    artist: artist.to_owned(),
+                };
+                self.albums = albums;
+                self.selected = 0;
+                let Some(album) = node.album.as_deref() else {
+                    return;
+                };
+                let Ok(tracks) = library.tracks_of(artist, album) else {
+                    return;
+                };
+                if tracks.is_empty() {
+                    return;
+                }
+                self.position = Position::Tracks {
+                    artist: artist.to_owned(),
+                    album: album.to_owned(),
+                };
+                self.tracks = tracks;
+                self.selected = 0;
+            }
+            BrowseBy::Albums | BrowseBy::Tracks => {
+                let (Some(artist), Some(album)) = (node.artist.as_deref(), node.album.as_deref())
+                else {
+                    return;
+                };
+                let Ok(tracks) = library.tracks_of(artist, album) else {
+                    return;
+                };
+                if tracks.is_empty() {
+                    return;
+                }
+                self.position = Position::Tracks {
+                    artist: artist.to_owned(),
+                    album: album.to_owned(),
+                };
+                self.tracks = tracks;
+                self.selected = 0;
+            }
+            BrowseBy::Genres => {
+                let Some(genre) = node.genre.as_deref() else {
+                    return;
+                };
+                let Ok(tracks) = library.tracks_of_genre(genre) else {
+                    return;
+                };
+                if tracks.is_empty() {
+                    return;
+                }
+                self.position = Position::Genre {
+                    genre: genre.to_owned(),
+                };
+                self.tracks = tracks;
+                self.selected = 0;
+            }
+        }
+    }
+
+    /// Writes one key of the user's config file (S2). Renders nothing; a
+    /// failed write becomes the status line and the app keeps running.
+    /// Without a config file there is nothing to write and nothing to say.
+    fn remember(&mut self, section: Option<&str>, key: &str, value: &str) {
+        let Some(path) = &self.config_file else {
+            return;
+        };
+        if let Err(error) = crate::config::set_value(path, section, key, value) {
+            self.status = format!("velo: {error}");
+        }
+    }
+
+    /// Removes one key of the user's config file, with the same silence and
+    /// the same error rule as [`App::remember`].
+    fn forget(&mut self, section: Option<&str>, key: &str) {
+        let Some(path) = &self.config_file else {
+            return;
+        };
+        if let Err(error) = crate::config::remove_value(path, section, key) {
+            self.status = format!("velo: {error}");
+        }
+    }
+
+    /// A string as the TOML literal `set_value` writes after the `=`.
+    fn toml_string(value: &str) -> String {
+        toml::Value::String(value.to_owned()).to_string()
+    }
+
+    /// Saves the tab, but only when it leaves what the file says. Called
+    /// from the two user paths that move it — the tab key and a number key
+    /// from the queue — never from `browse_view` itself, which the launch
+    /// restore and the reload fallback also call and which must write
+    /// nothing.
+    fn remember_view(&mut self) {
+        if self.view == self.saved.view {
+            return;
+        }
+        let label = match self.view {
+            View::Library => "library",
+            View::Queue => "queue",
+        };
+        self.saved.view = self.view;
+        self.remember(Some("state"), "view", &Self::toml_string(label));
+    }
+
+    /// The node the current position names, in the file's terms (S3).
+    fn open_node(&self) -> OpenNode {
+        match &self.position {
+            Position::Albums { artist } => OpenNode {
+                artist: Some(artist.clone()),
+                ..OpenNode::default()
+            },
+            Position::Tracks { artist, album } => OpenNode {
+                artist: Some(artist.clone()),
+                album: Some(album.clone()),
+                ..OpenNode::default()
+            },
+            Position::Genre { genre } => OpenNode {
+                genre: Some(genre.clone()),
+                ..OpenNode::default()
+            },
+            _ => OpenNode::default(),
+        }
+    }
+
+    /// Saves the open node, one key at a time: a key the position still
+    /// names is written when it changed, and a key it left behind is
+    /// removed, so the file never keeps a node the user has walked out of
+    /// (S3).
+    fn remember_node(&mut self) {
+        let node = self.open_node();
+        let saved = if node == OpenNode::default() {
+            None
+        } else {
+            Some(node.clone())
+        };
+        if saved == self.saved.node {
+            return;
+        }
+        let was = self.saved.node.take().unwrap_or_default();
+        self.saved.node = saved;
+        for (key, now, before) in [
+            ("artist", node.artist.clone(), was.artist),
+            ("album", node.album.clone(), was.album),
+            ("genre", node.genre.clone(), was.genre),
+        ] {
+            match now {
+                Some(name) if Some(&name) != before.as_ref() => {
+                    self.remember(Some("state"), key, &Self::toml_string(&name));
+                }
+                None if before.is_some() => self.forget(Some("state"), key),
+                _ => {}
+            }
+        }
     }
 
     /// How many rows the now-playing block takes out of a content area this
@@ -995,7 +1216,9 @@ impl<'lib> App<'lib> {
     }
 
     /// Stands at the top of `by` and reads its list; the library tab comes
-    /// to the front.
+    /// to the front. The view is saved here (S3), but only when it changed:
+    /// the launch restore and the reload fallback call this with the view
+    /// the file already holds, and must write nothing.
     fn browse_view(&mut self, by: BrowseBy) {
         self.view = View::Library;
         self.browse_by = by;
@@ -1007,6 +1230,10 @@ impl<'lib> App<'lib> {
         };
         self.selected = 0;
         self.load_top();
+        if by != self.saved.browse_by {
+            self.saved.browse_by = by;
+            self.remember(Some("state"), "browse_by", &Self::toml_string(by.label()));
+        }
     }
 
     /// Reads the list of the view's top level from the index.
@@ -1148,6 +1375,16 @@ impl<'lib> App<'lib> {
                 if let Some(player) = &self.player {
                     player.set_volume(percent);
                 }
+                // Saved when it leaves what the file says (S2): `+` at the
+                // launch volume writes nothing.
+                if percent != self.saved_volume {
+                    self.saved_volume = percent;
+                    self.remember(Some("state"), "volume", &percent.to_string());
+                    // The first `[state] volume` moves the legacy top-level
+                    // line out of the file (S2.5); afterwards this removes
+                    // nothing and writes nothing.
+                    self.forget(None, "volume");
+                }
             }
             Action::Quit => self.shutdown(),
             Action::Play { from } if self.search.is_some() => self.play_search_from(from),
@@ -1164,10 +1401,21 @@ impl<'lib> App<'lib> {
                 if let Some(player) = &self.player {
                     player.set_repeat(mode);
                 }
+                if mode != self.saved.repeat {
+                    self.saved.repeat = mode;
+                    self.remember(Some("state"), "repeat", &Self::toml_string(mode.label()));
+                }
             }
             Action::SetLibrary => self.accept_library(),
             Action::CompleteLibraryPath => self.complete_library_path(),
-            Action::Browse(by) => self.browse_view(by),
+            Action::Browse(by) => {
+                self.browse_view(by);
+                // A number key from the queue tab brings the library tab
+                // back with the view; `browse_view` itself stays hook-free,
+                // because the launch restore and the reload fallback also
+                // call it and must write nothing.
+                self.remember_view();
+            }
             // Handed to the shell, which owns the thread.
             Action::Reindex => self.library_root.clone_from(&self.refresh.root),
         }
@@ -2429,6 +2677,8 @@ impl<'lib> App<'lib> {
             }
             View::Library => self.status.clear(),
         }
+        // The tab is persisted (S3), but only when it changed.
+        self.remember_view();
     }
 
     /// The queue index that is playing, when anything is: the player counts
@@ -2674,6 +2924,8 @@ impl<'lib> App<'lib> {
             | Position::AllTracks
             | Position::Genre { .. } => {}
         }
+        // The open node is persisted (S3), but only when it changed.
+        self.remember_node();
     }
 
     /// Goes one level up. The parent's row snapshot is kept as it was when
@@ -2707,6 +2959,9 @@ impl<'lib> App<'lib> {
                 self.selected = 0;
             }
         }
+        // The open node is persisted (S3): walking out of a level removes
+        // its keys, so the file never keeps a node the user has left.
+        self.remember_node();
     }
 
     /// Starts a gapless stream of [`App::playlist_from`]: on a track list
@@ -2809,6 +3064,15 @@ impl<'lib> App<'lib> {
         } else {
             let original = std::mem::take(&mut self.unshuffled);
             self.edit_queue(|queue| shuffle::restore_order(queue, keep, &original));
+        }
+        // The shuffle state is persisted (S2), but only when it changed.
+        if self.shuffle != self.saved.shuffle {
+            self.saved.shuffle = self.shuffle;
+            self.remember(
+                Some("state"),
+                "shuffle",
+                if self.shuffle { "true" } else { "false" },
+            );
         }
     }
 
