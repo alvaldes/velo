@@ -14,6 +14,7 @@ use std::time::Duration;
 pub mod output;
 pub mod replay_gain;
 pub mod resample;
+pub mod spectrum;
 
 pub use output::{GainRamp, Player, seek_target};
 

@@ -1,7 +1,6 @@
 use std::io::{IsTerminal, Stdout};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::Duration;
 
 use clap::{CommandFactory as _, Parser};
 
@@ -248,11 +247,12 @@ fn event_loop(
 ) -> std::io::Result<()> {
     loop {
         // The producer announces skipped tracks asynchronously; every turn
-        // of the loop — the ~100 ms poll cadence — collects what it published.
+        // of the loop — every ~33 ms while the spectrum moves, ~100 ms otherwise —
+        // collects what it published and feeds the spectrum.
         app.tick();
         terminal.draw(|frame| app.draw(frame))?;
 
-        if crossterm::event::poll(Duration::from_millis(100))?
+        if crossterm::event::poll(app.frame_interval())?
             && let Event::Key(key) = crossterm::event::read()?
             && key.kind == KeyEventKind::Press
         {

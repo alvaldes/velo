@@ -195,3 +195,51 @@ fn a_hidden_cover_says_why_instead_of_vanishing() {
     let no_protocol = hidden_reason(false, true, Rect::new(0, 0, 120, 40)).expect("a reason");
     assert!(no_protocol.contains("no image protocol"), "{no_protocol}");
 }
+
+// ---- the cover beside the file (ui-redesign T6) ----------------------------
+
+/// A plain `size`×`size` PNG, so two covers can be told apart by their size.
+fn square_png(size: u32) -> Vec<u8> {
+    let image: ImageBuffer<Rgba<u8>, Vec<u8>> =
+        ImageBuffer::from_pixel(size, size, Rgba([200, 100, 50, 255]));
+    let mut bytes = Vec::new();
+    image::codecs::png::PngEncoder::new(Cursor::new(&mut bytes))
+        .write_image(image.as_raw(), size, size, ExtendedColorType::Rgba8)
+        .expect("the fixture PNG encodes");
+    bytes
+}
+
+#[test]
+fn a_file_without_a_picture_shows_the_cover_in_its_folder() {
+    let path = tagged_wav("folder-cover", "01 - Dawn.wav", None);
+    let folder = path.parent().unwrap();
+    let _ = fs::remove_file(folder.join("Cover.JPG"));
+    assert!(
+        Artwork::from_path(&path).is_none(),
+        "no picture anywhere is still no art"
+    );
+
+    // Albums ripped the common way keep the cover beside the tracks; the
+    // name is matched without regard to case.
+    fs::write(folder.join("Cover.JPG"), square_png(4)).unwrap();
+    let art = Artwork::from_path(&path).expect("the folder's cover");
+    assert_eq!(art.image().dimensions(), (4, 4));
+
+    let _ = fs::remove_dir_all(folder);
+}
+
+#[test]
+fn the_picture_inside_the_file_wins_over_the_folder_cover() {
+    let path = tagged_wav("both-covers", "01 - Dawn.wav", Some(&cover_png()));
+    let folder = path.parent().unwrap();
+    fs::write(folder.join("cover.jpg"), square_png(4)).unwrap();
+
+    let art = Artwork::from_path(&path).expect("a cover");
+    assert_eq!(
+        art.image().dimensions(),
+        (8, 8),
+        "the embedded 8×8 picture, not the 4×4 file beside it"
+    );
+
+    let _ = fs::remove_dir_all(folder);
+}

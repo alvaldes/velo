@@ -20,7 +20,7 @@ pub use ratatui;
 pub use ratatui::crossterm;
 
 use std::cell::RefCell;
-use std::fmt::Write as _;
+
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -29,16 +29,17 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, ListState, Paragraph};
 
 use crate::audio::output::{SharedQueue, TrackFailure};
+use crate::audio::spectrum::Spectrum;
 use crate::audio::{Player, seek_target};
 use crate::config::ReplayGainMode;
 use crate::library::{AlbumEntry, ArtistEntry, Library, TrackEntry};
 
 use self::artwork::{Artwork, Picker, StatefulImage, StatefulProtocol};
 use self::search::Search;
-use self::theme::{ACCENT, BACKGROUND, DIM, SECONDARY, TEXT};
+use self::theme::{ACCENT, BACKGROUND, BORDER, DIM, INK, SECONDARY, TEXT};
 
 /// What one key press asks the runtime to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -201,6 +202,13 @@ pub struct App<'lib> {
     state: PlayState,
     player: Option<Player>,
     status: String,
+    /// The analyzer the spectrum draws (T5): fed from the player's tap on
+    /// every tick, shown or not, so the tap never holds stale audio.
+    spectrum: Spectrum,
+    /// The tap's samples between draining and analysis, reused per tick.
+    heard: Vec<f32>,
+    /// How many bands the last frame had room for.
+    spectrum_bands: std::cell::Cell<usize>,
 }
 
 impl<'lib> App<'lib> {
@@ -237,6 +245,9 @@ impl<'lib> App<'lib> {
             state: PlayState::Stopped,
             player: None,
             status: String::new(),
+            spectrum: Spectrum::new(),
+            heard: Vec::new(),
+            spectrum_bands: std::cell::Cell::new(0),
         }
     }
 
@@ -274,6 +285,9 @@ impl<'lib> App<'lib> {
             state: PlayState::Stopped,
             player: None,
             status: String::new(),
+            spectrum: Spectrum::new(),
+            heard: Vec::new(),
+            spectrum_bands: std::cell::Cell::new(0),
         };
         app.reload();
         app
@@ -418,6 +432,7 @@ impl<'lib> App<'lib> {
     pub fn tick(&mut self) {
         self.refresh_artwork();
         self.explain_hidden_art();
+        self.listen();
         let Some(player) = &self.player else {
             return;
         };
@@ -443,6 +458,35 @@ impl<'lib> App<'lib> {
     /// only then: the file is read once per track, never per frame, and never
     /// from the audio callback (T8). A track whose file carries no picture
     /// draws no art until a different track plays.
+    /// Feeds the spectrum what the device played since the last tick and
+    /// moves its bars one step: up to the music, or down when none came.
+    /// Runs whether or not the spectrum is on screen, so the tap is always
+    /// drained and never shows half a second of old audio when it returns.
+    fn listen(&mut self) {
+        if let Some(player) = &self.player {
+            player.drain_tap(&mut self.heard);
+            self.spectrum.push(&self.heard);
+            self.heard.clear();
+        }
+        let rate = self
+            .player
+            .as_ref()
+            .map_or(48_000, |player| player.spec().sample_rate);
+        self.spectrum.update(self.spectrum_bands.get(), rate);
+    }
+
+    /// How long the event loop may wait for a key before drawing again:
+    /// about thirty frames a second while bars on screen move, ten otherwise
+    /// — a window too short for the spectrum has nothing to animate.
+    #[must_use]
+    pub fn frame_interval(&self) -> Duration {
+        cadence(
+            self.spectrum_bands.get() > 0,
+            self.state == PlayState::Playing,
+            self.spectrum.levels().iter().any(|&level| level > 0.0),
+        )
+    }
+
     /// Tells the user once why a cover they own is not on screen, instead of
     /// leaving them staring at a panel that never appears (T8).
     fn explain_hidden_art(&mut self) {
@@ -607,28 +651,53 @@ impl<'lib> App<'lib> {
     pub fn draw(&self, frame: &mut Frame) {
         let area = frame.area();
         self.seen_area.set(area);
+        // Set again by `draw_spectrum` only when this frame has room for it.
+        self.spectrum_bands.set(0);
         frame.render_widget(Block::new().style(Style::new().bg(BACKGROUND)), area);
 
-        let [header, body, footer] = Layout::vertical([
+        // The window: a rounded frame around a title bar, the content and
+        // the footer. The art threshold below is still measured on the whole
+        // terminal, so `artwork::hidden_reason` keeps telling the truth.
+        let window = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(Style::new().fg(BORDER))
+            .style(Style::new().bg(BACKGROUND));
+        let inner = window.inner(area);
+        frame.render_widget(window, area);
+
+        let [title_bar, content, footer] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Min(0),
             Constraint::Length(2),
         ])
-        .areas(area);
+        .areas(inner);
+        self.draw_title_bar(frame, title_bar);
+        let mut content = pad(content);
+        let footer = pad(footer);
         // Cover art (T8): when a protocol was detected, the art is set to draw
-        // and the terminal meets the threshold, it takes the rightmost columns
-        // of the header and the body, and those make way. Otherwise the frame
-        // is exactly what it is without art — nothing to fake, nothing to move.
+        // and the terminal meets the threshold, it takes the rightmost quarter
+        // of the content and the rest makes way. Otherwise the window is
+        // exactly what it is without art — nothing to fake, nothing to move.
         let pane = self
             .picker
             .filter(|_| self.artwork.is_some())
-            .and_then(|_| artwork::pane(area));
-        let mut header = header;
-        let mut body = body;
-        if let Some(art) = pane {
-            header.width = header.width.saturating_sub(art.width);
-            body.width = body.width.saturating_sub(art.width);
-        }
+            .and_then(|_| artwork::pane(area))
+            .map(|_| {
+                let width = content.width / 4;
+                content.width = content.width.saturating_sub(width + 1);
+                Rect {
+                    x: content.x + content.width + 1,
+                    width,
+                    ..content
+                }
+            });
+        let [now, header, body] = Layout::vertical([
+            Constraint::Length(now_playing_rows(content.height)),
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ])
+        .areas(content);
+        self.draw_now_playing(frame, now);
         self.draw_header(frame, header);
         self.draw_body(frame, body);
         self.draw_footer(frame, footer);
@@ -657,125 +726,341 @@ impl<'lib> App<'lib> {
         frame.render_stateful_widget(StatefulImage::new(None), pane, state);
     }
 
-    fn draw_header(&self, frame: &mut Frame, area: Rect) {
-        let state = self.state.label();
-        let [left, right] =
-            Layout::horizontal([Constraint::Min(0), Constraint::Length(10)]).areas(area);
-        let mut spans = vec![Span::styled("velo", Style::new().fg(ACCENT).bold())];
-        match &self.position {
-            Position::Files => {
-                spans.push(Span::styled(
-                    format!("  {}", plural(self.argv.len(), "track", "tracks")),
-                    Style::new().fg(SECONDARY),
-                ));
+    /// The title bar: the two views as tabs on the left, the one `tab`
+    /// switches between, and the letter-spaced wordmark on the right.
+    fn draw_title_bar(&self, frame: &mut Frame, area: Rect) {
+        frame.render_widget(Block::new().style(Style::new().bg(BACKGROUND)), area);
+        let tab = |label: &'static str, view: View| {
+            if self.view == view {
+                Span::styled(label, Style::new().fg(ACCENT).bold())
+            } else {
+                Span::styled(label, Style::new().fg(DIM))
             }
-            Position::Artists => {
-                spans.push(Span::styled("  artists", Style::new().fg(SECONDARY)));
-                spans.push(Span::styled(
-                    format!("  {}", self.artists.len()),
-                    Style::new().fg(SECONDARY),
-                ));
-            }
-            Position::Albums { artist } => {
-                spans.push(Span::styled(
-                    format!("  {artist}"),
-                    Style::new().fg(SECONDARY),
-                ));
-                spans.push(Span::styled(
-                    format!("  {}", plural(self.albums.len(), "album", "albums")),
-                    Style::new().fg(SECONDARY),
-                ));
-            }
-            Position::Tracks { artist, album } => {
-                spans.push(Span::styled(
-                    format!("  {artist} · {album}"),
-                    Style::new().fg(SECONDARY),
-                ));
-                spans.push(Span::styled(
-                    format!("  {}", plural(self.tracks.len(), "track", "tracks")),
-                    Style::new().fg(SECONDARY),
-                ));
-            }
-        }
-        frame.render_widget(Paragraph::new(Line::from(spans)), left);
+        };
+        let tabs = Line::from(vec![
+            Span::raw(" "),
+            tab("library", View::Library),
+            Span::raw("  "),
+            tab("queue", View::Queue),
+        ]);
+        frame.render_widget(Paragraph::new(tabs), area);
         frame.render_widget(
-            Paragraph::new(Span::styled(state, Style::new().fg(DIM))).alignment(Alignment::Right),
-            right,
+            Paragraph::new(Span::styled(WORDMARK, Style::new().fg(ACCENT).bold()))
+                .alignment(Alignment::Right),
+            area,
         );
     }
 
-    fn draw_body(&self, frame: &mut Frame, area: Rect) {
-        if self.search.is_some() {
-            self.draw_search(frame, area);
+    /// The track that is playing, as large as the window allows: the full
+    /// block on a tall window, three rows on a short one, one row on a tiny
+    /// one — the list below keeps its rows before the block keeps its air.
+    fn draw_now_playing(&self, frame: &mut Frame, area: Rect) {
+        let (title, subtitle) = self.playing_path().map_or_else(
+            || {
+                (
+                    "nothing playing".to_owned(),
+                    "enter plays the selection".to_owned(),
+                )
+            },
+            |path| describe(path, self.tracks.iter().chain(&self.search_pool)),
+        );
+        let title = Line::from(vec![
+            Span::styled("♫ ", Style::new().fg(ACCENT)),
+            Span::styled(title, Style::new().fg(TEXT).bold()),
+        ]);
+        let volume = self.player.as_ref().map_or(self.volume, Player::volume);
+
+        match area.height {
+            0 => {}
+            1 => {
+                let pill = self.state_pill();
+                let right = vec![pill, Span::raw("  ")]
+                    .into_iter()
+                    .chain(volume_slider(volume, 0))
+                    .collect::<Vec<_>>();
+                split_row(frame, area, title, Line::from(right));
+            }
+            2..=6 => {
+                let [top, middle, bottom] = rows3(area);
+                let mut title = title;
+                title
+                    .spans
+                    .push(Span::styled(format!("  {subtitle}"), Style::new().fg(DIM)));
+                split_row(frame, top, title, Line::from(self.state_pill()));
+                self.draw_clock_and_progress(frame, middle);
+                self.draw_transport(frame, bottom, volume);
+            }
+            _ => {
+                // The spectrum sits between the clock and the progress bar
+                // when the block was given room for it.
+                let bars = area.height.saturating_sub(7);
+                let [
+                    title_row,
+                    subtitle_row,
+                    _,
+                    clock_row,
+                    spectrum_area,
+                    progress_row,
+                    transport_row,
+                    _,
+                ] = Layout::vertical([
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                    Constraint::Length(bars),
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                ])
+                .areas(area);
+                self.draw_spectrum(frame, spectrum_area);
+                frame.render_widget(Paragraph::new(title), title_row);
+                frame.render_widget(
+                    Paragraph::new(Line::styled(subtitle, Style::new().fg(DIM))),
+                    subtitle_row,
+                );
+                let mut clock = self.clock_spans();
+                clock.push(Span::raw("  "));
+                clock.push(self.state_pill());
+                let position = self.player.as_ref().map(|player| {
+                    format!(
+                        "track {} of {}",
+                        player.current_index() + 1,
+                        self.queue.len()
+                    )
+                });
+                split_row(
+                    frame,
+                    clock_row,
+                    Line::from(clock),
+                    Line::styled(position.unwrap_or_default(), Style::new().fg(DIM)),
+                );
+                frame.render_widget(
+                    Paragraph::new(Line::from(progress_bar(
+                        self.progress(),
+                        progress_row.width,
+                    ))),
+                    progress_row,
+                );
+                self.draw_transport(frame, transport_row, volume);
+            }
+        }
+    }
+
+    /// `01:23 / 04:56` and the bar after it, on one row of the compact block.
+    fn draw_clock_and_progress(&self, frame: &mut Frame, area: Rect) {
+        let mut spans = self.clock_spans();
+        let used = Line::from(spans.clone()).width();
+        let room = usize::from(area.width).saturating_sub(used + 2);
+        spans.push(Span::raw("  "));
+        spans.extend(progress_bar(
+            self.progress(),
+            u16::try_from(room).unwrap_or(0),
+        ));
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    }
+
+    /// The buttons on the left, the volume slider on the right.
+    fn draw_transport(&self, frame: &mut Frame, area: Rect, volume: u8) {
+        let button = Style::new().fg(SECONDARY);
+        let primary = if self.state == PlayState::Playing {
+            " ❚❚ pause "
+        } else {
+            " ▶ play "
+        };
+        let buttons = Line::from(vec![
+            Span::styled(" ◂◂ ", button),
+            Span::raw(" "),
+            Span::styled(primary, Style::new().bg(ACCENT).fg(INK).bold()),
+            Span::raw(" "),
+            Span::styled(" ▸▸ ", button),
+        ]);
+        // The ReplayGain mode in the config's own words, padded to the
+        // longest so the slider never moves with it (ui-redesign T10).
+        let mode = match self.replay_gain {
+            ReplayGainMode::Track => "track",
+            ReplayGainMode::Album => "album",
+            ReplayGainMode::Off => "off",
+        };
+        let mut right = vec![
+            Span::styled("RG ", Style::new().fg(DIM)),
+            Span::styled(format!("{mode:<5}"), Style::new().fg(SECONDARY)),
+            Span::raw("   "),
+        ];
+        right.extend(volume_slider(volume, VOLUME_CELLS));
+        split_row(frame, area, buttons, Line::from(right));
+    }
+
+    /// The position, and the length when it is known; a dim placeholder
+    /// when nothing plays.
+    fn clock_spans(&self) -> Vec<Span<'static>> {
+        let Some(player) = &self.player else {
+            return vec![Span::styled("--:--", Style::new().fg(DIM))];
+        };
+        let mut clock = mmss(player.position());
+        if let Some(total) = self.current_track_duration() {
+            clock.push_str(" / ");
+            clock.push_str(&mmss(total));
+        }
+        vec![Span::styled(clock, Style::new().fg(ACCENT))]
+    }
+
+    /// How far into the track playback is, `0.0..=1.0`; `None` when nothing
+    /// plays or the length is unknown, so the bar never claims a fraction.
+    fn progress(&self) -> Option<f64> {
+        let position = self.player.as_ref()?.position();
+        let total = self.current_track_duration()?;
+        if total.is_zero() {
+            return None;
+        }
+        Some((position.as_secs_f64() / total.as_secs_f64()).clamp(0.0, 1.0))
+    }
+
+    /// The spectrum bars, as many as the row holds at two columns each, and
+    /// the band count remembered so the next tick analyzes exactly that many.
+    fn draw_spectrum(&self, frame: &mut Frame, area: Rect) {
+        if area.height == 0 {
             return;
         }
-        if self.view == View::Queue {
-            if self.queue.is_empty() {
-                frame.render_widget(
-                    Paragraph::new(Line::styled(
-                        "nothing queued — press a on a track to add it",
-                        Style::new().fg(DIM),
-                    )),
-                    area,
-                );
+        let bands = usize::from(area.width).div_ceil(2);
+        self.spectrum_bands.set(bands);
+        let mut levels = self.spectrum.levels().to_vec();
+        levels.resize(bands, 0.0);
+        frame.render_widget(Paragraph::new(spectrum_lines(&levels, area.height)), area);
+    }
+
+    /// The play state as a pill: `▶ playing` in the accent, the others dim.
+    fn state_pill(&self) -> Span<'static> {
+        let (glyph, color) = match self.state {
+            PlayState::Playing => ("▶", ACCENT),
+            PlayState::Paused => ("❚❚", SECONDARY),
+            PlayState::Stopped => ("■", DIM),
+        };
+        Span::styled(
+            format!(" {glyph} {} ", self.state.label()),
+            Style::new().fg(color),
+        )
+    }
+
+    /// The line over the list: what it lists and how many of them, as in
+    /// `▸─ Tide › Harbor  [12 tracks]`.
+    fn draw_header(&self, frame: &mut Frame, area: Rect) {
+        let (label, count) = if let Some(search) = &self.search {
+            (
+                format!("Search /{}", search.query()),
+                plural(self.search_results.len(), "match", "matches"),
+            )
+        } else if self.view == View::Queue {
+            (
+                "Queue".to_owned(),
+                plural(self.queue.len(), "track", "tracks"),
+            )
+        } else {
+            match &self.position {
+                Position::Files => (
+                    "Files".to_owned(),
+                    plural(self.argv.len(), "track", "tracks"),
+                ),
+                Position::Artists => (
+                    "Artists".to_owned(),
+                    plural(self.artists.len(), "artist", "artists"),
+                ),
+                Position::Albums { artist } => {
+                    (artist.clone(), plural(self.albums.len(), "album", "albums"))
+                }
+                Position::Tracks { artist, album } => (
+                    format!("{artist} › {album}"),
+                    plural(self.tracks.len(), "track", "tracks"),
+                ),
+            }
+        };
+        let line = Line::from(vec![
+            Span::styled("▸─ ", Style::new().fg(BORDER)),
+            Span::styled(label, Style::new().fg(TEXT).bold()),
+            Span::styled(format!("  [{count}]"), Style::new().fg(DIM)),
+        ]);
+        frame.render_widget(Paragraph::new(line), area);
+    }
+
+    /// The list the keys act on — the search results, the queue or the
+    /// library level — or the sentence an empty one says about itself.
+    fn draw_body(&self, frame: &mut Frame, area: Rect) {
+        let width = area.width;
+        let (rows, selected) = if self.search.is_some() {
+            if self.search_results.is_empty() {
+                draw_empty(frame, area, "no tracks match");
                 return;
             }
-            let list = List::new(self.queue_rows())
-                .style(Style::new().bg(BACKGROUND))
-                .highlight_style(Style::new().bg(ACCENT).fg(BACKGROUND));
-            let mut state = ListState::default().with_selected(Some(self.queue_selected));
-            frame.render_stateful_widget(list, area, &mut state);
-            return;
-        }
-        if let Some(message) = self.empty_message() {
-            frame.render_widget(
-                Paragraph::new(Line::styled(message, Style::new().fg(DIM))),
-                area,
-            );
-            return;
-        }
-
-        let list = List::new(self.rows())
+            (self.search_rows(width), self.search_selected)
+        } else if self.view == View::Queue {
+            if self.queue.is_empty() {
+                draw_empty(frame, area, "nothing queued — press a on a track to add it");
+                return;
+            }
+            (self.queue_rows(width), self.queue_selected)
+        } else {
+            if let Some(message) = self.empty_message() {
+                draw_empty(frame, area, message);
+                return;
+            }
+            (self.rows(width), self.selected)
+        };
+        // Only the background changes on the selected row, so its dim notes
+        // stay dim and the playing row keeps its accent.
+        let list = List::new(rows)
             .style(Style::new().bg(BACKGROUND))
-            .highlight_style(Style::new().bg(ACCENT).fg(BACKGROUND));
-        let mut state = ListState::default().with_selected(Some(self.selected));
+            .highlight_style(Style::new().bg(ACCENT).fg(INK));
+        let mut state = ListState::default().with_selected(Some(selected));
         frame.render_stateful_widget(list, area, &mut state);
     }
 
     /// The rows of the current level, as they are on screen.
-    fn rows(&self) -> Vec<ListItem<'_>> {
+    fn rows(&self, width: u16) -> Vec<ListItem<'static>> {
+        let digits = digits(self.row_count());
+        let playing = self.playing_row();
+        let row = |index: usize, name: &str, note: String, fact: String| {
+            ListItem::new(list_row(
+                ListRow {
+                    playing: playing == Some(index),
+                    number: index + 1,
+                    digits,
+                    name: name.to_owned(),
+                    note,
+                    fact,
+                },
+                width,
+            ))
+        };
         match &self.position {
             Position::Files => self
                 .argv
                 .iter()
                 .enumerate()
-                .map(|(index, path)| ListItem::new(self.file_row(index, path)))
+                .map(|(index, path)| {
+                    let (name, folder) = describe(path, []);
+                    row(index, &name, folder, String::new())
+                })
                 .collect(),
             Position::Artists => self
                 .artists
                 .iter()
                 .enumerate()
                 .map(|(index, entry)| {
-                    ListItem::new(Line::from(vec![
-                        self.marker(index),
-                        Span::styled(entry.name.clone(), Style::new().fg(TEXT)),
-                        Span::styled(
-                            format!(
-                                "  {} · {}",
-                                plural(
-                                    usize::try_from(entry.albums).unwrap_or(usize::MAX),
-                                    "album",
-                                    "albums"
-                                ),
-                                plural(
-                                    usize::try_from(entry.tracks).unwrap_or(usize::MAX),
-                                    "track",
-                                    "tracks"
-                                )
-                            ),
-                            Style::new().fg(DIM),
+                    let counts = format!(
+                        "{} · {}",
+                        plural(
+                            usize::try_from(entry.albums).unwrap_or(usize::MAX),
+                            "album",
+                            "albums"
                         ),
-                    ]))
+                        plural(
+                            usize::try_from(entry.tracks).unwrap_or(usize::MAX),
+                            "track",
+                            "tracks"
+                        )
+                    );
+                    row(index, &entry.name, String::new(), counts)
                 })
                 .collect(),
             Position::Albums { .. } => self
@@ -783,14 +1068,8 @@ impl<'lib> App<'lib> {
                 .iter()
                 .enumerate()
                 .map(|(index, entry)| {
-                    let year = entry
-                        .year
-                        .map_or_else(String::new, |year| format!("  {year}"));
-                    ListItem::new(Line::from(vec![
-                        self.marker(index),
-                        Span::styled(entry.title.clone(), Style::new().fg(TEXT)),
-                        Span::styled(year, Style::new().fg(DIM)),
-                    ]))
+                    let year = entry.year.map_or_else(String::new, |year| year.to_string());
+                    row(index, &entry.title, String::new(), year)
                 })
                 .collect(),
             Position::Tracks { .. } => self
@@ -798,71 +1077,65 @@ impl<'lib> App<'lib> {
                 .iter()
                 .enumerate()
                 .map(|(index, entry)| {
-                    ListItem::new(Line::from(vec![
-                        self.marker(index),
-                        Span::styled(entry.title.clone(), Style::new().fg(TEXT)),
-                        Span::styled(Self::duration(entry.duration_ms), Style::new().fg(DIM)),
-                    ]))
+                    row(
+                        index,
+                        &entry.title,
+                        String::new(),
+                        Self::duration(entry.duration_ms),
+                    )
                 })
                 .collect(),
         }
     }
 
-    /// The queue, in play order, marked the way every other list marks the row
-    /// that is playing.
-    fn queue_rows(&self) -> Vec<ListItem<'static>> {
+    /// The queue, in play order, named the way the now-playing block names
+    /// a file and marked the way every other list marks the row that plays.
+    fn queue_rows(&self, width: u16) -> Vec<ListItem<'static>> {
+        let digits = digits(self.queue.len());
         let playing = self.playing_queue_index();
         self.queue
             .iter()
             .enumerate()
             .map(|(index, path)| {
-                let marker = if playing == Some(index) {
-                    Span::styled("▸ ", Style::new().fg(ACCENT))
-                } else {
-                    Span::raw("  ")
-                };
-                let mut spans = vec![
-                    marker,
-                    Span::styled(Self::file_name(path), Style::new().fg(TEXT)),
-                ];
-                if let Some(parent) = path.parent() {
-                    spans.push(Span::styled(
-                        format!("  {}", parent.display()),
-                        Style::new().fg(DIM),
-                    ));
-                }
-                ListItem::new(Line::from(spans))
+                let (name, note) = describe(path, self.tracks.iter().chain(&self.search_pool));
+                ListItem::new(list_row(
+                    ListRow {
+                        playing: playing == Some(index),
+                        number: index + 1,
+                        digits,
+                        name,
+                        note,
+                        fact: String::new(),
+                    },
+                    width,
+                ))
             })
             .collect()
     }
 
-    /// One flat row: the play marker, the file name, the parent directory dimmed.
-    fn file_row(&self, index: usize, path: &std::path::Path) -> Line<'_> {
-        let name = path.file_name().map_or_else(
-            || path.display().to_string(),
-            |name| name.to_string_lossy().to_string(),
-        );
-        let mut spans = vec![
-            self.marker(index),
-            Span::styled(name, Style::new().fg(TEXT)),
-        ];
-
-        if let Some(parent) = path.parent() {
-            let parent = parent.display().to_string();
-            if !parent.is_empty() {
-                spans.push(Span::styled(format!("  {parent}"), Style::new().fg(DIM)));
-            }
-        }
-        Line::from(spans)
-    }
-
-    /// The play marker: `▸` on the row whose samples are being produced.
-    fn marker(&self, index: usize) -> Span<'static> {
-        if self.playing_row() == Some(index) {
-            Span::styled("▸ ", Style::new().fg(ACCENT))
-        } else {
-            Span::raw("  ")
-        }
+    /// The search results: a title with its artist and album dimmed after
+    /// it and its length at the right edge.
+    fn search_rows(&self, width: u16) -> Vec<ListItem<'static>> {
+        let digits = digits(self.search_results.len());
+        let playing = self.playing_path();
+        self.search_results
+            .iter()
+            .filter_map(|&index| self.search_pool.get(index))
+            .enumerate()
+            .map(|(row, entry)| {
+                ListItem::new(list_row(
+                    ListRow {
+                        playing: playing == Some(entry.path.as_path()),
+                        number: row + 1,
+                        digits,
+                        name: entry.title.clone(),
+                        note: format!("{} · {}", entry.artist, entry.album),
+                        fact: Self::duration(entry.duration_ms),
+                    },
+                    width,
+                ))
+            })
+            .collect()
     }
 
     /// A duration in `m:ss`, empty for tracks with no known length.
@@ -871,7 +1144,7 @@ impl<'lib> App<'lib> {
             return String::new();
         }
         let seconds = u64::try_from(duration_ms / 1000).unwrap_or(0);
-        format!("  {}:{:02}", seconds / 60, seconds % 60)
+        format!("{}:{:02}", seconds / 60, seconds % 60)
     }
 
     fn draw_footer(&self, frame: &mut Frame, area: Rect) {
@@ -883,7 +1156,8 @@ impl<'lib> App<'lib> {
             // they are typing while the body lists the results.
             Line::styled(format!("/{}", self.search_query()), Style::new().fg(ACCENT))
         } else if self.status.is_empty() {
-            Line::styled(self.transport_line(), Style::new().fg(ACCENT))
+            // The clock and the volume live in the now-playing block.
+            Line::default()
         } else {
             Line::styled(self.status.clone(), Style::new().fg(ACCENT))
         };
@@ -891,53 +1165,27 @@ impl<'lib> App<'lib> {
             frame.render_widget(Paragraph::new(status), status_row);
         }
 
-        let hints = if self.search.is_some() {
-            "type to search  j/k move  enter play  backspace delete  esc cancel"
+        let hints: &[(&str, &str)] = if self.search.is_some() {
+            &[
+                ("type", "to search"),
+                ("j/k", "move"),
+                ("enter", "play"),
+                ("backspace", "delete"),
+                ("esc", "cancel"),
+            ]
         } else {
-            "j/k move  enter play  space pause  ←/→ seek  / search  tab queue  ? help  q quit"
+            &[
+                ("j/k", "move"),
+                ("enter", "play"),
+                ("space", "pause"),
+                ("←/→", "seek"),
+                ("/", "search"),
+                ("tab", "queue"),
+                ("?", "help"),
+                ("q", "quit"),
+            ]
         };
-        frame.render_widget(
-            Paragraph::new(Line::styled(hints, Style::new().fg(DIM))),
-            hints_row,
-        );
-    }
-
-    /// The search results: a track title with its artist and album dimmed,
-    /// and the playing marker drawn the way every other list draws it.
-    fn draw_search(&self, frame: &mut Frame, area: Rect) {
-        if self.search_results.is_empty() {
-            frame.render_widget(
-                Paragraph::new(Line::styled("no tracks match", Style::new().fg(DIM))),
-                area,
-            );
-            return;
-        }
-        let playing = self.playing_path();
-        let items: Vec<ListItem<'_>> = self
-            .search_results
-            .iter()
-            .filter_map(|&index| self.search_pool.get(index))
-            .map(|entry| {
-                let marker = if playing == Some(entry.path.as_path()) {
-                    Span::styled("▸ ", Style::new().fg(ACCENT))
-                } else {
-                    Span::raw("  ")
-                };
-                ListItem::new(Line::from(vec![
-                    marker,
-                    Span::styled(entry.title.clone(), Style::new().fg(TEXT)),
-                    Span::styled(
-                        format!("  {} · {}", entry.artist, entry.album),
-                        Style::new().fg(DIM),
-                    ),
-                ]))
-            })
-            .collect();
-        let list = List::new(items)
-            .style(Style::new().bg(BACKGROUND))
-            .highlight_style(Style::new().bg(ACCENT).fg(BACKGROUND));
-        let mut state = ListState::default().with_selected(Some(self.search_selected));
-        frame.render_stateful_widget(list, area, &mut state);
+        frame.render_widget(Paragraph::new(hint_line(hints, hints_row.width)), hints_row);
     }
 
     /// The path of the file whose samples are being produced, if any: the
@@ -947,29 +1195,6 @@ impl<'lib> App<'lib> {
         self.queue
             .get(player.current_index())
             .map(std::path::PathBuf::as_path)
-    }
-
-    /// The transport line: `mm:ss / mm:ss` when the track's length is known,
-    /// then the volume percentage.
-    fn transport_line(&self) -> String {
-        let mut line = String::new();
-        if self.player.is_some() {
-            let position = self
-                .player
-                .as_ref()
-                .map_or(Duration::ZERO, Player::position);
-            line.push_str(&mmss(position));
-            if let Some(total) = self.current_track_duration() {
-                line.push_str(" / ");
-                line.push_str(&mmss(total));
-            }
-            line.push_str("  ");
-        }
-        // Once a player exists it owns the level: showing a mirrored copy is
-        // exactly how a rebuild's default volume went unnoticed and unheard.
-        let volume = self.player.as_ref().map_or(self.volume, Player::volume);
-        let _ = write!(line, "vol {volume}%");
-        line
     }
 
     /// The length of the track that is playing: from the interface's own track
@@ -991,42 +1216,58 @@ impl<'lib> App<'lib> {
 
     fn draw_help(frame: &mut Frame, area: Rect) {
         let rows = [
-            "j / Down   move down",
-            "k / Up     move up",
-            "g          first track",
-            "G          last track",
-            "enter      open, or play from the selection",
-            "esc        back one level / close help",
-            "/          search the whole library",
-            "space      pause / resume",
-            "← / →      seek 5 s back / forward",
-            ", / .      seek 5 s back / forward",
-            "+ / -      volume up / down",
-            "?          toggle this help",
-            "tab        library / queue",
-            "a          add the selection to the queue",
-            "d          remove from the queue",
-            "J / K      move it down / up",
-            "q          quit",
+            ("j / Down", "move down"),
+            ("k / Up", "move up"),
+            ("g", "first track"),
+            ("G", "last track"),
+            ("enter", "open, or play from the selection"),
+            ("esc", "back one level / close help"),
+            ("/", "search the whole library"),
+            ("space", "pause / resume"),
+            ("← / →", "seek 5 s back / forward"),
+            (", / .", "seek 5 s back / forward"),
+            ("+ / -", "volume up / down"),
+            ("?", "toggle this help"),
+            ("tab", "library / queue"),
+            ("a", "add the selection to the queue"),
+            ("d", "remove from the queue"),
+            ("J / K", "move it down / up"),
+            ("q", "quit"),
         ];
-        let widest = rows.iter().map(|row| row.len()).max().unwrap_or(0);
-        let width = u16::try_from(widest + 4).unwrap_or(area.width);
+        let key_width = rows
+            .iter()
+            .map(|(key, _)| key.chars().count())
+            .max()
+            .unwrap_or(0);
+        let label_width = rows
+            .iter()
+            .map(|(_, label)| label.chars().count())
+            .max()
+            .unwrap_or(0);
+        // Two border columns, one of air per side, three between the columns.
+        let width = u16::try_from(key_width + 3 + label_width + 4).unwrap_or(area.width);
         let height = u16::try_from(rows.len() + 2).unwrap_or(area.height);
         let box_area = centered(area, width, height);
 
         frame.render_widget(Clear, box_area);
         let text: Vec<Line> = rows
             .iter()
-            .map(|row| Line::styled((*row).to_string(), Style::new().fg(TEXT)))
+            .map(|(key, label)| {
+                Line::from(vec![
+                    Span::styled(format!("{key:<key_width$}   "), Style::new().fg(SECONDARY)),
+                    Span::styled((*label).to_owned(), Style::new().fg(TEXT)),
+                ])
+            })
             .collect();
         frame.render_widget(
-            Paragraph::new(text)
-                .style(Style::new().bg(BACKGROUND))
-                .block(
-                    Block::bordered()
-                        .border_style(Style::new().fg(ACCENT))
-                        .style(Style::new().bg(BACKGROUND)),
-                ),
+            Paragraph::new(text).block(
+                Block::bordered()
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::new().fg(ACCENT))
+                    .title(Span::styled(" keys ", Style::new().fg(ACCENT).bold()))
+                    .padding(ratatui::widgets::Padding::horizontal(1))
+                    .style(Style::new().bg(BACKGROUND)),
+            ),
             box_area,
         );
     }
@@ -1611,6 +1852,266 @@ impl Default for App<'_> {
 }
 
 /// A duration as `mm:ss`.
+/// Key hints as `key label` pairs, the key bright and the label dim. When the
+/// row is too narrow, pairs are dropped from the middle: the first ones say
+/// how to move and the last two how to get help and leave, and those last
+/// two are never the ones that go.
+fn hint_line(hints: &[(&str, &str)], width: u16) -> Line<'static> {
+    let fits = |pairs: &[&(&str, &str)]| {
+        let used: usize = pairs
+            .iter()
+            .map(|(key, label)| key.chars().count() + 1 + label.chars().count())
+            .sum::<usize>()
+            + 2 * pairs.len().saturating_sub(1);
+        used <= usize::from(width)
+    };
+    let mut kept: Vec<&(&str, &str)> = hints.iter().collect();
+    while !fits(&kept) && kept.len() > 2 {
+        kept.remove(kept.len() - 3);
+    }
+    let mut spans = Vec::new();
+    for (index, (key, label)) in kept.into_iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::raw("  "));
+        }
+        spans.push(Span::styled((*key).to_owned(), Style::new().fg(SECONDARY)));
+        spans.push(Span::styled(format!(" {label}"), Style::new().fg(DIM)));
+    }
+    Line::from(spans)
+}
+
+/// What one list row says, before it is laid out.
+struct ListRow {
+    playing: bool,
+    number: usize,
+    digits: usize,
+    name: String,
+    /// Dimmed after the name: a folder, or an artist and album.
+    note: String,
+    /// Dimmed against the right edge: a length, a year, counts.
+    fact: String,
+}
+
+/// `▸ 3. Dawn  Tide · Harbor ……… 4:12`: the marker (`▶` in the accent on
+/// the row that plays), the number, the name, the note, and the fact against
+/// the right edge when it fits beside the rest; a fact that does not fit is
+/// the part left out, never the name.
+fn list_row(row: ListRow, width: u16) -> Line<'static> {
+    let (marker, number, name) = if row.playing {
+        (
+            Style::new().fg(ACCENT),
+            Style::new().fg(ACCENT),
+            Style::new().fg(ACCENT).bold(),
+        )
+    } else {
+        (
+            Style::new().fg(BORDER),
+            Style::new().fg(DIM),
+            Style::new().fg(TEXT),
+        )
+    };
+    let digits = row.digits;
+    let mut spans = vec![
+        Span::styled(if row.playing { "▶ " } else { "▸ " }, marker),
+        Span::styled(format!("{:>digits$}. ", row.number), number),
+        Span::styled(row.name, name),
+    ];
+    if !row.note.is_empty() {
+        spans.push(Span::styled(
+            format!("  {}", row.note),
+            Style::new().fg(DIM),
+        ));
+    }
+    let used = Line::from(spans.clone()).width();
+    let fact = row.fact.chars().count();
+    let width = usize::from(width);
+    if fact > 0 && used + 2 + fact <= width {
+        spans.push(Span::raw(" ".repeat(width - used - fact)));
+        spans.push(Span::styled(row.fact, Style::new().fg(DIM)));
+    }
+    Line::from(spans)
+}
+
+/// How many digits the largest row number of a list this long takes.
+fn digits(count: usize) -> usize {
+    count.max(1).to_string().len()
+}
+
+/// The sentence an empty list says about itself, dimmed.
+fn draw_empty(frame: &mut Frame, area: Rect, message: &str) {
+    frame.render_widget(
+        Paragraph::new(Line::styled(message.to_owned(), Style::new().fg(DIM))),
+        area,
+    );
+}
+
+/// How many rows the now-playing block takes out of a content area this tall.
+/// The list below always keeps rows of its own: the block carries the
+/// spectrum only on a tall window, is seven rows when twelve are left over,
+/// three on a short window, one on a tiny one.
+const fn now_playing_rows(height: u16) -> u16 {
+    match height {
+        22.. => 7 + SPECTRUM_ROWS,
+        18.. => 7,
+        7.. => 3,
+        _ => 1,
+    }
+}
+
+/// How tall the spectrum is, in rows; each row resolves eight steps.
+const SPECTRUM_ROWS: u16 = 4;
+
+/// The redraw cadence: about thirty frames a second only while a spectrum is
+/// on screen and moving — the music playing, or bars still falling after it
+/// stopped. Hidden bars and still ones are drawn at ten.
+const fn cadence(visible: bool, playing: bool, falling: bool) -> Duration {
+    Duration::from_millis(if visible && (playing || falling) {
+        33
+    } else {
+        100
+    })
+}
+
+/// Partial blocks by eighths, empty to full.
+const EIGHTHS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+/// The spectrum as `rows` lines, top first: one column per band and one of
+/// air after it, each bar filling from the bottom in eighths of a row and
+/// colored by height. A silent band keeps a baseline in the frame's color,
+/// so the analyzer reads as there and quiet rather than missing.
+fn spectrum_lines(levels: &[f32], rows: u16) -> Vec<Line<'static>> {
+    let rows = usize::from(rows);
+    let steps = rows * 8;
+    (0..rows)
+        .map(|row| {
+            let from_bottom = rows - 1 - row;
+            let color = bar_color(from_bottom, rows);
+            let spans: Vec<Span<'static>> = levels
+                .iter()
+                .flat_map(|&level| {
+                    #[expect(
+                        clippy::cast_possible_truncation,
+                        clippy::cast_sign_loss,
+                        clippy::cast_precision_loss,
+                        reason = "a level is 0..=1 and a bar a few dozen steps"
+                    )]
+                    let filled = (level.clamp(0.0, 1.0) * steps as f32).round() as usize;
+                    let here = filled.saturating_sub(from_bottom * 8).min(8);
+                    let cell = if here == 0 && from_bottom == 0 {
+                        Span::styled("▁", Style::new().fg(BORDER))
+                    } else {
+                        Span::styled(EIGHTHS[here].to_string(), Style::new().fg(color))
+                    };
+                    [cell, Span::raw(" ")]
+                })
+                .collect();
+            Line::from(spans)
+        })
+        .collect()
+}
+
+/// The bar color `from_bottom` rows up out of `rows`: the accent in the
+/// lower half, its bright twin above — the two-step gradient the terminal's
+/// own palette can give.
+const fn bar_color(from_bottom: usize, rows: usize) -> ratatui::style::Color {
+    if from_bottom * 2 >= rows {
+        theme::ACCENT_BRIGHT
+    } else {
+        ACCENT
+    }
+}
+
+/// The title and the dim subtitle of a playing file: its library row when
+/// one of `known` has its path (`artist · album`), otherwise its file name
+/// over its folder. Nothing is invented for a file the index never saw.
+fn describe<'a>(path: &Path, known: impl IntoIterator<Item = &'a TrackEntry>) -> (String, String) {
+    if let Some(entry) = known.into_iter().find(|entry| entry.path == path) {
+        return (
+            entry.title.clone(),
+            format!("{} · {}", entry.artist, entry.album),
+        );
+    }
+    let name = path.file_name().map_or_else(
+        || path.display().to_string(),
+        |name| name.to_string_lossy().to_string(),
+    );
+    let folder = path
+        .parent()
+        .map(|parent| parent.display().to_string())
+        .unwrap_or_default();
+    (name, folder)
+}
+
+/// The width of the volume slider's track, in cells.
+const VOLUME_CELLS: u16 = 12;
+
+/// `VOL ━━━━━━●───── 90`: the filled part in the accent, the knob, the rest
+/// in the border color, then the number. With no cells it is `VOL 90`.
+fn volume_slider(volume: u8, cells: u16) -> Vec<Span<'static>> {
+    let mut spans = vec![Span::styled("VOL ", Style::new().fg(DIM))];
+    if cells > 0 {
+        let cells = usize::from(cells);
+        let knob = usize::from(volume.min(100)) * (cells - 1) / 100;
+        spans.push(Span::styled("━".repeat(knob), Style::new().fg(ACCENT)));
+        spans.push(Span::styled("●", Style::new().fg(TEXT)));
+        spans.push(Span::styled(
+            "─".repeat(cells - 1 - knob),
+            Style::new().fg(BORDER),
+        ));
+        spans.push(Span::raw(" "));
+    }
+    // Three columns whatever the number, so a slider set against the right
+    // edge does not jump when 100 becomes 95 (T7).
+    spans.push(Span::styled(format!("{volume:>3}"), Style::new().fg(TEXT)));
+    spans
+}
+
+/// A bar `width` cells wide, filled to `ratio` in the accent; with no ratio
+/// (nothing plays, or the length is unknown) the whole bar is unfilled.
+fn progress_bar(ratio: Option<f64>, width: u16) -> Vec<Span<'static>> {
+    let width = usize::from(width);
+    // Rounded down, so a bar is never shown full before the track ends.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
+    let filled = ratio
+        .map_or(0, |ratio| (ratio * width as f64) as usize)
+        .min(width);
+    vec![
+        Span::styled("━".repeat(filled), Style::new().fg(ACCENT)),
+        Span::styled("─".repeat(width - filled), Style::new().fg(BORDER)),
+    ]
+}
+
+/// One row with `left` against the left edge and `right` against the right;
+/// the right side is measured first so a long left side is the one cut.
+fn split_row(frame: &mut Frame, area: Rect, left: Line<'static>, right: Line<'static>) {
+    let right_width = u16::try_from(right.width()).unwrap_or(area.width);
+    let [left_area, right_area] =
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(right_width)]).areas(area);
+    frame.render_widget(Paragraph::new(left), left_area);
+    frame.render_widget(Paragraph::new(right), right_area);
+}
+
+/// Three one-row areas from the top of `area`.
+fn rows3(area: Rect) -> [Rect; 3] {
+    Layout::vertical([Constraint::Length(1); 3]).areas(area)
+}
+
+/// The name in the title bar, spaced out the way a wordmark is set.
+const WORDMARK: &str = "V E L O ";
+
+/// The area inside the window less one column of breathing room per side.
+fn pad(area: Rect) -> Rect {
+    Rect {
+        x: area.x.saturating_add(1),
+        width: area.width.saturating_sub(2),
+        ..area
+    }
+}
+
 fn mmss(duration: Duration) -> String {
     let seconds = duration.as_secs();
     format!("{:02}:{:02}", seconds / 60, seconds % 60)
@@ -1638,6 +2139,100 @@ mod tests {
     // `move_in_queue` both read, so it is pinned here, and the wiring from
     // `on_key` into `App::status` is pinned headlessly in `tests/ui_state.rs`
     // through the empty-queue refusal, which walks the same code path.
+
+    #[test]
+    fn a_playing_file_is_named_by_its_library_row_or_else_by_its_file() {
+        use std::path::{Path, PathBuf};
+
+        let known = [crate::library::TrackEntry {
+            artist: "Tide".to_owned(),
+            album: "Harbor".to_owned(),
+            title: "Dawn".to_owned(),
+            track_no: Some(1),
+            disc_no: None,
+            duration_ms: 1000,
+            path: PathBuf::from("/music/Tide/01.flac"),
+        }];
+
+        assert_eq!(
+            super::describe(Path::new("/music/Tide/01.flac"), &known),
+            ("Dawn".to_owned(), "Tide · Harbor".to_owned())
+        );
+        assert_eq!(
+            super::describe(Path::new("/elsewhere/two.flac"), &known),
+            ("two.flac".to_owned(), "/elsewhere".to_owned()),
+            "a file the index never saw keeps its own name, nothing invented"
+        );
+    }
+
+    #[test]
+    fn the_progress_bar_is_never_full_before_the_end_and_empty_without_a_length() {
+        let filled = |ratio, width| super::progress_bar(ratio, width)[0].content.chars().count();
+        assert_eq!(filled(Some(0.999), 10), 9);
+        assert_eq!(filled(Some(1.0), 10), 10);
+        assert_eq!(filled(Some(0.5), 10), 5);
+        assert_eq!(filled(None, 10), 0);
+    }
+
+    #[test]
+    fn only_a_spectrum_on_screen_that_moves_earns_thirty_frames_a_second() {
+        use std::time::Duration;
+        let (fast, slow) = (Duration::from_millis(33), Duration::from_millis(100));
+
+        assert_eq!(
+            super::cadence(true, true, false),
+            fast,
+            "visible and playing"
+        );
+        assert_eq!(
+            super::cadence(true, false, true),
+            fast,
+            "visible, bars falling"
+        );
+        assert_eq!(
+            super::cadence(false, true, false),
+            slow,
+            "playing, but hidden"
+        );
+        assert_eq!(super::cadence(false, false, true), slow, "hidden, falling");
+        assert_eq!(
+            super::cadence(true, false, false),
+            slow,
+            "visible and still"
+        );
+    }
+
+    #[test]
+    fn spectrum_bars_fill_from_the_bottom_in_eighths_with_a_gap_between() {
+        let rows = |levels: &[f32]| -> Vec<String> {
+            super::spectrum_lines(levels, 4)
+                .iter()
+                .map(ToString::to_string)
+                .collect()
+        };
+
+        // Full, half, an eighth of the lowest row, and silence.
+        assert_eq!(
+            rows(&[1.0, 0.5, 1.0 / 32.0, 0.0]),
+            ["█       ", "█       ", "█ █     ", "█ █ ▁ ▁ "],
+            "four bars, each one column with one of air"
+        );
+    }
+
+    #[test]
+    fn hints_that_do_not_fit_lose_the_middle_and_keep_help_and_quit() {
+        let hints = [
+            ("j/k", "move"),
+            ("enter", "play"),
+            ("?", "help"),
+            ("q", "quit"),
+        ];
+        let text = |width| super::hint_line(&hints, width).to_string();
+
+        assert_eq!(text(80), "j/k move  enter play  ? help  q quit");
+        assert_eq!(text(28), "j/k move  ? help  q quit");
+        assert_eq!(text(5), "? help  q quit", "the last two always stay");
+    }
 
     #[test]
     fn an_edit_refuses_the_entry_that_is_playing() {

@@ -1,9 +1,10 @@
 //! The realtime half of the audio path: a lock-free ring buffer fed by a
 //! producer thread and drained by the device callback.
 //!
-//! The callback does exactly three things: measure how many samples are ready,
-//! copy them, and fill the rest with silence. No allocation, no locking, no
-//! logging, no decoding. Everything expensive happens on the producer thread.
+//! The callback does exactly four things: measure how many samples are ready,
+//! copy them, hand their mono mix to the spectrum tap, and fill the rest with
+//! silence. No allocation, no locking, no logging, no decoding. Everything
+//! expensive happens on the producer thread or in the interface.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -27,6 +28,11 @@ const RING_SECONDS: usize = 2;
 /// How long the producer waits when the ring is full, i.e. how far ahead the
 /// device is allowed to lag before we poll again.
 const POLL_INTERVAL: Duration = Duration::from_millis(2);
+
+/// How much mono audio the spectrum tap holds, in fractions of a second: the
+/// interface drains it at least ten times a second, so half a second of room
+/// means a slow frame drops samples, never the callback's time.
+const TAP_DIVISOR: usize = 2;
 
 /// How long the main thread waits before re-checking whether playback drained.
 const DRAIN_POLL: Duration = Duration::from_millis(20);
@@ -139,6 +145,10 @@ pub struct Player {
     start_track: usize,
     start_offset_samples: usize,
     producer: Option<JoinHandle<Result<(), AudioError>>>,
+    /// The reading end of the spectrum tap (ui-redesign T5): the mono mix of
+    /// every frame the callback played. The callback owns the writing end and
+    /// never waits on this one; the lock is only ever taken by the interface.
+    tap: Mutex<rtrb::Consumer<f32>>,
 }
 
 /// The queue a player reads from, shared with whoever edits it.
@@ -313,7 +323,10 @@ impl Player {
         // a click. The wait is bounded, so a broken first file cannot hang here.
         wait_for_preroll(&delivered, spec.interleaved_rate() / 10);
 
-        let stream = build_stream(&device, config, consumer, &wires)?;
+        let (tap, tap_reader) = RingBuffer::<f32>::new(
+            usize::try_from(spec.sample_rate).unwrap_or(48_000) / TAP_DIVISOR,
+        );
+        let stream = build_stream(&device, config, consumer, tap, &wires)?;
 
         stream
             .play()
@@ -331,7 +344,26 @@ impl Player {
             start_track: track_index,
             start_offset_samples: usize::try_from(clock_offset_samples).unwrap_or(usize::MAX),
             producer: Some(producer),
+            tap: Mutex::new(tap_reader),
         })
+    }
+
+    /// Moves every mono sample the callback has played since the last call
+    /// into `into`, oldest first. A paused player plays nothing and so taps
+    /// nothing, which is how the spectrum falls when the music stops.
+    pub fn drain_tap(&self, into: &mut Vec<f32>) {
+        let mut tap = match self.tap.lock() {
+            Ok(tap) => tap,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let ready = tap.slots();
+        let Ok(chunk) = tap.read_chunk(ready) else {
+            return;
+        };
+        let (first, second) = chunk.as_slices();
+        into.extend_from_slice(first);
+        into.extend_from_slice(second);
+        chunk.commit_all();
     }
 
     /// The format the device was opened at.
@@ -476,14 +508,16 @@ struct Sequence {
 }
 
 /// Builds the device stream: the callback that drains the ring. Its whole job
-/// is copying samples and applying the gain ramp — no allocation, no locks,
-/// no logging, no decoding.
+/// is copying samples, handing their mono mix to the spectrum tap and applying
+/// the gain ramp — no allocation, no locks, no logging, no decoding.
 fn build_stream(
     device: &cpal::Device,
     config: cpal::StreamConfig,
     mut consumer: rtrb::Consumer<f32>,
+    mut tap: Producer<f32>,
     wires: &CallbackWires,
 ) -> Result<cpal::Stream, AudioError> {
+    let channels = usize::from(config.channels);
     let CallbackWires {
         playing,
         producing,
@@ -522,6 +556,9 @@ fn build_stream(
                     *slot = sample;
                     copied += 1;
                 }
+                // Before the gain: the spectrum shows the music, not the
+                // volume knob. Wait-free; a full tap drops, never blocks.
+                tap_mono(&out[..copied], channels, &mut tap);
 
                 if copied < out.len() {
                     out[copied..].fill(0.0);
@@ -542,6 +579,25 @@ fn build_stream(
             None,
         )
         .map_err(|error| AudioError::Device(error.to_string()))
+}
+
+/// Pushes the mono mix of every whole frame of `samples` into the spectrum
+/// tap. Called from the device callback, so it may not wait: a sample that
+/// does not fit is dropped, and a trailing partial frame is not a frame.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "a channel count is a handful, exact in f32"
+)]
+pub fn tap_mono(samples: &[f32], channels: usize, tap: &mut Producer<f32>) {
+    if channels == 0 {
+        return;
+    }
+    let scale = 1.0 / channels as f32;
+    for frame in samples.chunks_exact(channels) {
+        if tap.push(frame.iter().sum::<f32>() * scale).is_err() {
+            return;
+        }
+    }
 }
 
 /// Fills the ring buffer from the file system until the queue is exhausted.

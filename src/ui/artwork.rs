@@ -41,17 +41,17 @@ pub struct Artwork {
 }
 
 impl Artwork {
-    /// The first picture of the file's primary tag, decoded. A missing file,
-    /// a missing tag, a missing picture, and picture bytes that are not an
-    /// image are all `None` rather than an error — a cover is decoration, and
-    /// nothing about it may break the interface.
+    /// The cover of a file, decoded: the first picture of its primary tag,
+    /// or else the cover image in its folder (`cover`, `folder` or `front`,
+    /// as `.jpg`, `.jpeg` or `.png`, in any case) — the way most albums are
+    /// ripped. A missing file, tag, picture or cover, and bytes that are not
+    /// an image are all `None` rather than an error — a cover is decoration,
+    /// and nothing about it may break the interface.
     #[must_use]
     pub fn from_path(path: &Path) -> Option<Artwork> {
-        let tagged = lofty::read_from_path(path).ok()?;
-        let tag = tagged.primary_tag()?;
-        let picture = tag.pictures().first()?;
-        let image = image::load_from_memory(picture.data()).ok()?;
-        Some(Artwork { image })
+        embedded(path)
+            .or_else(|| folder_cover(path))
+            .map(|image| Artwork { image })
     }
 
     /// The decoded cover at its own resolution.
@@ -59,6 +59,47 @@ impl Artwork {
     pub const fn image(&self) -> &DynamicImage {
         &self.image
     }
+}
+
+/// The first picture of the file's primary tag.
+fn embedded(path: &Path) -> Option<DynamicImage> {
+    let tagged = lofty::read_from_path(path).ok()?;
+    let tag = tagged.primary_tag()?;
+    let picture = tag.pictures().first()?;
+    image::load_from_memory(picture.data()).ok()
+}
+
+/// The names a folder's cover goes by, in the order they are preferred.
+const COVER_STEMS: [&str; 3] = ["cover", "folder", "front"];
+const COVER_EXTENSIONS: [&str; 3] = ["jpg", "jpeg", "png"];
+
+/// The cover image beside the file, matched without regard to case. Read
+/// once per track change, like the embedded picture, never per frame.
+fn folder_cover(path: &Path) -> Option<DynamicImage> {
+    let folder = path.parent()?;
+    let mut candidates: Vec<(usize, std::path::PathBuf)> = std::fs::read_dir(folder)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().to_lowercase();
+            let (stem, extension) = name.rsplit_once('.')?;
+            let rank = COVER_STEMS.iter().position(|known| *known == stem)?;
+            COVER_EXTENSIONS
+                .contains(&extension)
+                .then(|| (rank, entry.path()))
+        })
+        .collect();
+    candidates.sort();
+    // Decoded by what the bytes are, not by the name: a PNG saved as
+    // `cover.jpg` is common enough and still a cover.
+    candidates.into_iter().find_map(|(_, cover)| {
+        image::ImageReader::open(cover)
+            .ok()?
+            .with_guessed_format()
+            .ok()?
+            .decode()
+            .ok()
+    })
 }
 
 /// Where the art sits beside the header and the body: the rightmost quarter
