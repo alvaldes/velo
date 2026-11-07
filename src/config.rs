@@ -121,8 +121,11 @@ Configuration: $XDG_CONFIG_HOME/velo/config.toml, or
     When the file is missing, velo writes it with every key at its default and
     a comment per key; an unknown key is an error. library (and --library)
     takes an absolute path, ~/... or a path relative to the current directory.
-    With no library set, the interface asks for it in a floating prompt that
-    starts at ~/ (tab completes folders) and saves the answer to the file; velo --index needs one and exits 2 without."
+    With no library set, the interface no longer demands a folder: with a
+    [subsonic] server configured the synced index is the library, and with
+    neither, one sentence says what to configure; press L to enter a folder
+    in a floating prompt that starts at ~/ (tab completes folders) and saves
+    the answer to the file; velo --index needs one and exits 2 without."
 )]
 // The four flags are four distinct modes the user asks for; folding them
 // into an enum would not simplify the parse or the match in main.
@@ -579,7 +582,8 @@ pub fn default_config_text() -> String {
 
 # The folder velo indexes and browses: an absolute path, ~/... (your home) or
 # a path relative to the directory velo starts in. --library overrides it.
-# Unset, the interface asks for it the first time and saves the answer here.
+# Unset, the interface says how to configure one (a folder here, or a
+# [subsonic] server); press L in the interface to enter it here.
 # library = \"~/Music\"
 
 # Bit-perfect playback: the samples the decoder produces reach the device

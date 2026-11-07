@@ -794,3 +794,85 @@ fn a_failed_album_answer_carries_the_server_sentence() {
         .expect_err("a failed album answer must fail");
     assert!(error.to_string().contains("Wrong credentials"), "{error}");
 }
+
+// ------------------------------------------------------------- stream (T12c)
+
+#[test]
+fn the_stream_endpoint_asks_for_the_raw_bytes_with_auth() {
+    let transport = Recording {
+        body: b"ID3-audio-bytes".to_vec(),
+        urls: std::sync::Mutex::new(Vec::new()),
+    };
+    let client = Client::new(
+        &transport,
+        "https://music.example.com",
+        "demo",
+        Auth::Token {
+            password: "demo".to_owned(),
+        },
+    );
+
+    let bytes = client.stream_bytes("s-1").expect("the stream fetch");
+    assert_eq!(
+        bytes, b"ID3-audio-bytes",
+        "the track's original bytes, untouched"
+    );
+
+    let urls = transport.urls.lock().unwrap();
+    assert_eq!(urls.len(), 1);
+    assert!(
+        urls[0].starts_with("https://music.example.com/rest/stream?"),
+        "{}",
+        urls[0]
+    );
+    let pairs = query_pairs(&urls[0]);
+    for piece in ["id=s-1", "format=raw", "u=demo", "f=json"] {
+        assert!(
+            pairs.contains(&piece.to_owned()),
+            "{piece} missing: {}",
+            urls[0]
+        );
+    }
+}
+
+#[test]
+fn a_failed_stream_reports_the_server_s_own_sentence() {
+    let transport = Recording {
+        body: error_envelope(70, "Song not found"),
+        urls: std::sync::Mutex::new(Vec::new()),
+    };
+    let client = Client::new(
+        &transport,
+        "https://music.example.com",
+        "demo",
+        Auth::Token {
+            password: "demo".to_owned(),
+        },
+    );
+    let error = client
+        .stream_bytes("missing")
+        .expect_err("a failed stream must fail, not play the error envelope");
+    assert!(error.to_string().contains("Song not found"), "{error}");
+}
+
+#[test]
+fn a_stream_of_audio_that_is_not_json_is_the_track_itself() {
+    // Raw audio is never JSON; the answer must reach the caller as bytes,
+    // not be mistaken for a too-old server.
+    let transport = Recording {
+        body: vec![0xFF, 0xFB, 0x90, 0x00],
+        urls: std::sync::Mutex::new(Vec::new()),
+    };
+    let client = Client::new(
+        &transport,
+        "https://music.example.com",
+        "demo",
+        Auth::Token {
+            password: "demo".to_owned(),
+        },
+    );
+    assert_eq!(
+        client.stream_bytes("s-1").unwrap(),
+        vec![0xFF, 0xFB, 0x90, 0x00]
+    );
+}

@@ -7,7 +7,7 @@
 //! expensive happens on the producer thread or in the interface.
 
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -303,6 +303,27 @@ impl StreamCell {
 /// (T18). The audio callback never touches it.
 pub type SharedQueue = Arc<Mutex<Vec<PathBuf>>>;
 
+/// Resolves one queue entry into the file the producer opens, right before
+/// the producer reaches it (T12c). A remote row's `subsonic://…` entry
+/// becomes the cached file of its original bytes — a hit costs no network, a
+/// miss downloads first — and a failure is a skip the producer announces, not
+/// a death of the queue (T19). `None` (the default everywhere) means every
+/// entry already is a file, which is today's behaviour.
+///
+/// Called only from the producer thread — never from the audio callback —
+/// and as many times as a track starts, so implementations must be cheap on
+/// a hit and safe to call again.
+pub trait PathResolver: Send + Sync {
+    /// The file to open for `path`. A local path is usually returned as it
+    /// is; only implementations know which entries are theirs.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the entry cannot be turned into a playable file: the
+    /// producer announces the failure and continues with the queue.
+    fn resolve(&self, path: &Path) -> Result<PathBuf, AudioError>;
+}
+
 /// Where the producer is: the queue index and the delivered count at which the
 /// current track began. Only the producer writes it, only the UI reads it.
 #[derive(Clone, Copy, Debug, Default)]
@@ -411,6 +432,7 @@ impl Player {
             gain_mode,
             repeat,
             /* bit_perfect = */ false,
+            /* resolver = */ None,
         )
     }
 
@@ -424,9 +446,16 @@ impl Player {
     /// player falls back to the converted path and says so once — see
     /// [`Player::take_notices`].
     ///
+    /// `resolver` (T12c) turns queue entries into files just before the
+    /// producer opens them: `None` means every entry already is a file, which
+    /// is today's behaviour. A remote entry's fetch failure past the first
+    /// track is a skip, not a death; the first track failing here is the
+    /// selection-time error the caller reports.
+    ///
     /// # Errors
     ///
-    /// The same errors as [`Player::play_gapless_at_with`].
+    /// The same errors as [`Player::play_gapless_at_with`], including the
+    /// first entry's resolution failure.
     #[expect(
         clippy::too_many_lines,
         reason = "the construction is one story: open the first track, open\n    the device on it, wire the cells and hand the rest to the producer\n    thread; splitting it would scatter that story"
@@ -438,6 +467,7 @@ impl Player {
         gain_mode: ReplayGainMode,
         repeat: Repeat,
         bit_perfect: bool,
+        resolver: Option<Arc<dyn PathResolver>>,
     ) -> Result<Self, AudioError> {
         let (is_empty, len, first) = {
             let queue = match queue.lock() {
@@ -460,9 +490,18 @@ impl Player {
         };
         let _ = len;
 
+        // The first entry is resolved here, at selection time, so a remote
+        // track is fetched once and then opened like any file (T12c); its
+        // failure is the error the caller reports, as for a missing file.
+        // The producer resolves every entry again when it reaches it — a hit
+        // costs no network.
+        let first_path = match resolver.as_ref() {
+            Some(resolver) => resolver.resolve(&first)?,
+            None => first.clone(),
+        };
         // Opening once up front means a missing or broken first file fails
         // before a device is opened, and gives us the format to configure.
-        let track_spec = TrackSource::open(&first)?.spec();
+        let track_spec = TrackSource::open(&first_path)?.spec();
         let offset_frames = duration_to_frames(offset, track_spec.sample_rate);
 
         let requested_bit_perfect = bit_perfect;
@@ -543,6 +582,7 @@ impl Player {
                         offset_frames,
                         gain_mode,
                         bit_perfect,
+                        resolver,
                     };
                     let shared = Shared {
                         stop: &stop,
@@ -804,6 +844,9 @@ struct Sequence {
     /// into it, and the gain is skipped. Under a real device the reopen is a
     /// stream swap; headless, it only moves the expected spec.
     bit_perfect: bool,
+    /// Turns queue entries into files just before the producer opens them
+    /// (T12c); `None` means every entry already is a file.
+    resolver: Option<Arc<dyn PathResolver>>,
 }
 
 /// What a sequence writes into: the ring of a running stream, or a headless
@@ -1139,6 +1182,7 @@ fn run_sequence(
         offset_frames,
         gain_mode,
         bit_perfect,
+        resolver,
     } = job;
     let mut expected = expected;
     let mut turn = TurnJob {
@@ -1162,10 +1206,20 @@ fn run_sequence(
         // the interface appended, removed or moved while this runs is what
         // plays next. Past the end is how a sequence finishes; the queue can
         // also shrink.
-        let (Some(path), _) = queued_entry(&queue, turn.index) else {
+        let (Some(entry), _) = queued_entry(&queue, turn.index) else {
             return Ok(());
         };
-        let outcome = play_turn(&path, &turn, &mut expected, shared, sink)?;
+        // The entry is resolved when the producer reaches it (T12c): a cache
+        // hit opens the file it is, a miss downloads first, and a failed
+        // download is announced and skipped like any other bad track (T19) —
+        // a network dying mid-album must not end the session.
+        let outcome = match resolve_entry(resolver.as_ref(), &entry) {
+            Ok(path) => play_turn(&entry, &path, &turn, &mut expected, shared, sink)?,
+            Err(error) => {
+                sink.failure(track_failure(&entry, &error));
+                Turn::Failed
+            }
+        };
         sink.after_turn();
 
         // The length now, not when the track began: an entry appended while
@@ -1219,12 +1273,29 @@ enum Turn {
     Stopped,
 }
 
+/// Resolves one queue entry into the file the producer opens (T12c).
+/// Without a resolver every entry already is a file, which is today's
+/// behaviour.
+fn resolve_entry(
+    resolver: Option<&Arc<dyn PathResolver>>,
+    entry: &Path,
+) -> Result<PathBuf, AudioError> {
+    match resolver {
+        Some(resolver) => resolver.resolve(entry),
+        None => Ok(entry.to_path_buf()),
+    }
+}
+
 /// Plays one track into the sink. The track the player was built from
 /// failing to open is the sequence error the interface already reports;
 /// every other failure is announced and costs this one track, so one bad file
-/// does not take the rest of the album with it (T19).
+/// does not take the rest of the album with it (T19). Failures are named for
+/// the queue entry, so a skipped remote track reports the remote row and not
+/// the hash-named cached file (T12c); the samples, however, come from the
+/// resolved file — the cache — whose tags are the originals'.
 fn play_turn(
-    path: &std::path::Path,
+    entry: &Path,
+    path: &Path,
     turn: &TurnJob,
     expected: &mut TrackSpec,
     shared: &Shared<'_>,
@@ -1239,7 +1310,7 @@ fn play_turn(
         Ok(source) => source,
         Err(error) if turn.first => return Err(error),
         Err(error) => {
-            sink.failure(track_failure(path, &error));
+            sink.failure(track_failure(entry, &error));
             return Ok(Turn::Failed);
         }
     };
@@ -1277,7 +1348,7 @@ fn play_turn(
     let map = match ChannelMap::new(spec.channels, expected.channels) {
         Ok(map) => map,
         Err(error) => {
-            sink.failure(track_failure(path, &error));
+            sink.failure(track_failure(entry, &error));
             return Ok(Turn::Failed);
         }
     };
@@ -1307,14 +1378,14 @@ fn play_turn(
             // A track that stops decoding costs itself, not the album: what it
             // decoded stays, the rest is skipped, the next one follows.
             Err(error) => {
-                sink.failure(track_failure(path, &error));
+                sink.failure(track_failure(entry, &error));
                 return Ok(Turn::Failed);
             }
         };
         let mut resampled = match converter.convert(&map.apply(&block)) {
             Ok(resampled) => resampled,
             Err(error) => {
-                sink.failure(track_failure(path, &error));
+                sink.failure(track_failure(entry, &error));
                 return Ok(Turn::Failed);
             }
         };
@@ -1330,7 +1401,7 @@ fn play_turn(
     let mut flushed = match converter.flush() {
         Ok(flushed) => flushed,
         Err(error) => {
-            sink.failure(track_failure(path, &error));
+            sink.failure(track_failure(entry, &error));
             return Ok(Turn::Failed);
         }
     };
@@ -1404,6 +1475,57 @@ pub fn drain_headless_with_gain(
         offset_frames,
         gain_mode,
         bit_perfect: false,
+        resolver: None,
+    };
+    let mut refuse = |_: TrackSpec| -> Result<TrackSpec, AudioError> {
+        unreachable!("only bit-perfect sequences reopen the stream")
+    };
+    drain(
+        job,
+        expected,
+        &RepeatCell::default(),
+        stop,
+        &mut FnSink {
+            block: on_block,
+            failure: on_failure,
+            reopen: &mut refuse,
+        },
+    )
+}
+
+/// [`drain_headless_with_gain`] with a resolver (T12c): each queue entry is
+/// resolved into a file when the loop reaches it — a remote entry's cache hit
+/// opens the cached file, and a failed resolution is announced through
+/// `on_failure` and skipped, exactly the way the producer thread does it.
+/// This is the headless proof that remote playback never touches the audio
+/// path: the drained samples are the cached files', decoded as any local
+/// track would be.
+///
+/// # Errors
+///
+/// The same errors as [`drain_headless`].
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the job, the mode, the resolver and the two sinks are the whole\n    contract of the drain; bundling them would only hide what is shared"
+)]
+pub fn drain_headless_resolving(
+    queue: SharedQueue,
+    start_track: usize,
+    offset_frames: u64,
+    expected: TrackSpec,
+    gain_mode: ReplayGainMode,
+    resolver: Option<Arc<dyn PathResolver>>,
+    stop: &AtomicBool,
+    on_block: &mut dyn FnMut(&[f32]),
+    on_failure: &mut dyn FnMut(TrackFailure),
+) -> Result<(), AudioError> {
+    let job = Sequence {
+        queue,
+        start_track,
+        offset_frames,
+        gain_mode,
+        bit_perfect: false,
+        resolver,
     };
     let mut refuse = |_: TrackSpec| -> Result<TrackSpec, AudioError> {
         unreachable!("only bit-perfect sequences reopen the stream")
@@ -1449,6 +1571,7 @@ pub fn drain_headless_repeating(
         offset_frames,
         gain_mode: ReplayGainMode::default(),
         bit_perfect: false,
+        resolver: None,
     };
     let mut refuse = |_: TrackSpec| -> Result<TrackSpec, AudioError> {
         unreachable!("only bit-perfect sequences reopen the stream")
@@ -1495,6 +1618,7 @@ pub fn drain_headless_bit_perfect(
         offset_frames,
         gain_mode,
         bit_perfect: true,
+        resolver: None,
     };
     let channels = expected.channels;
     let mut follow = move |track: TrackSpec| -> Result<TrackSpec, AudioError> {

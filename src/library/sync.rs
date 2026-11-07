@@ -4,8 +4,9 @@
 //! rows the browse queries and the fuzzy search already read — so there is
 //! no second code path for browsing. What a row gains is a `source` (the
 //! server that holds it, [`source_for`]) and the server's own song id as
-//! `remote_id`. Playback of such a row needs the cache (T12c); the
-//! interface refuses it with a sentence instead of opening a file.
+//! `remote_id`. Playback of such a row goes through the cache: the producer
+//! resolves the `subsonic://` path into a downloaded file before opening it
+//! (T12c).
 //!
 //! Syncing is explicit (`velo --sync`), never on startup, and it is bounded:
 //! the albums come from `getAlbumList2` in pages (alphabeticalByName), and
@@ -80,8 +81,8 @@ struct RemoteRow {
 /// A row's `path` is not a file: it is `subsonic://<host>/<song id>`, built
 /// from the source so two servers that reuse a song id never collide, and
 /// shaped like a URL so it can never be mistaken for a file in a folder.
-/// The interface's play paths refuse remote rows before anything would open
-/// such a path (T12c replaces this with a cache fetch).
+/// The producer resolves such a path through the cache before opening
+/// anything (T12c), so a remote row plays exactly like a local one.
 fn rows_from_album(detail: &RemoteAlbumDetail, source: &str) -> Vec<RemoteRow> {
     let host = source.strip_prefix("subsonic:").unwrap_or(source);
     let album = detail.name.clone();

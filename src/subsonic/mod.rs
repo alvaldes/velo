@@ -5,7 +5,8 @@
 //! seam, resolve the server's secret, answer "can I use this server?"
 //! through `velo --subsonic-test`, and serve `getAlbumList2`/`getAlbum` to
 //! the sync in `crate::library::sync`. No playback yet: playing a remote
-//! row is cache-on-play (T12c).
+//! row is cache-on-play (T12c): `src/subsonic/cache.rs` owns the fetch and
+//! the on-disk cache the producer opens.
 //!
 //! The four decisions this shape rests on:
 //!
@@ -20,6 +21,7 @@
 //! - Remote tracks will live in the existing SQLite index as rows with a
 //!   `source` column (T12b, not here).
 
+pub mod cache;
 pub mod client;
 pub mod credentials;
 pub mod error;

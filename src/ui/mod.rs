@@ -36,7 +36,7 @@ use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, ListState, Paragraph};
 
-use crate::audio::output::{Repeat, SharedQueue, TrackFailure};
+use crate::audio::output::{PathResolver, Repeat, SharedQueue, TrackFailure};
 use crate::audio::spectrum::Spectrum;
 use crate::audio::{Player, seek_target, skip_target};
 use crate::config::{OpenNode, ReplayGainMode, Session, ThemeColor, ThemeColors, UiParts};
@@ -46,10 +46,13 @@ use self::artwork::{Artwork, Picker, StatefulImage, StatefulProtocol};
 use self::search::Search;
 use self::theme::Theme;
 
-/// What the interface says when a remote row is asked to play, until the
-/// cache brings playback (T12c). It starts nothing and never opens a
-/// remote row's `subsonic://…` path as if it were a file.
-pub const REMOTE_PLAYBACK_MESSAGE: &str = "velo: remote playback arrives with the cache (T12c)";
+/// What the interface says at a launch with neither a library nor a Subsonic
+/// server configured (T12c): one sentence naming both ways to configure, in
+/// the place the floating prompt used to take over. `L` still opens the
+/// prompt at any time.
+pub const NO_LIBRARY_OR_SERVER_MESSAGE: &str = "velo: no library and no server configured — set \
+    `library` in the config file (or run velo --library <PATH>), or add a \
+    [subsonic] server and run velo --sync";
 
 /// What one key press asks the runtime to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -364,6 +367,11 @@ pub struct App<'lib> {
     /// The config file a library chosen with `L` is saved to, and the file
     /// every persisted value is written to (S2).
     config_file: Option<PathBuf>,
+    /// Turns queue entries into files just before the producer opens them
+    /// (T12c): the remote rows' `subsonic://…` entries resolve through the
+    /// subsonic cache. `None` (a local-only launch) means every entry already
+    /// is a file.
+    resolver: Option<Arc<dyn PathResolver>>,
     /// What the file already says (S2): the session it launched from and the
     /// volume it launched at. Every persisted write compares against this,
     /// so a value the file holds is never written back.
@@ -434,6 +442,7 @@ impl<'lib> App<'lib> {
             colors: ThemeColors::default(),
             library_setup: None,
             config_file: None,
+            resolver: None,
             saved: Session::default(),
             saved_volume: crate::config::DEFAULT_VOLUME,
             library_root: None,
@@ -492,6 +501,7 @@ impl<'lib> App<'lib> {
             colors: ThemeColors::default(),
             library_setup: None,
             config_file: None,
+            resolver: None,
             saved: Session::default(),
             saved_volume: crate::config::DEFAULT_VOLUME,
             library_root: None,
@@ -928,6 +938,26 @@ impl<'lib> App<'lib> {
     /// The config file a library chosen later with `L` is saved to.
     pub fn set_config_file(&mut self, config_file: Option<PathBuf>) {
         self.config_file = config_file;
+    }
+
+    /// The resolver the player uses to turn queue entries into files (T12c):
+    /// a remote row's `subsonic://…` entry resolves through the subsonic
+    /// cache when the producer reaches it. `None` (a local-only launch)
+    /// means every entry already is a file.
+    pub fn set_resolver(&mut self, resolver: Option<Arc<dyn PathResolver>>) {
+        self.resolver = resolver;
+    }
+
+    /// The launch with no `library` configured (T12c): with a Subsonic server
+    /// configured, the synced index is the library — nothing is asked, and
+    /// `/` reaches its search; with neither, one sentence says what to
+    /// configure instead of asking for a folder. `L` still opens the prompt
+    /// at any time.
+    pub fn launch_without_library(&mut self, subsonic_configured: bool) {
+        if subsonic_configured {
+            return;
+        }
+        self.note(NO_LIBRARY_OR_SERVER_MESSAGE);
     }
 
     /// The folders the last `Tab` in the library prompt offered.
@@ -2996,18 +3026,10 @@ impl<'lib> App<'lib> {
 
     /// Plays the search results from the selection onwards: the queue becomes
     /// every result from that one to the end. The search closes, so the
-    /// interface returns to exactly where it was.
+    /// interface returns to exactly where it was. A remote result plays like
+    /// a local one: the producer resolves it through the cache when the
+    /// stream reaches it (T12c).
     fn play_search_from(&mut self, from: usize) {
-        // The same refusal as the library views (T12c brings the cache).
-        if self
-            .search_results
-            .get(from)
-            .and_then(|&index| self.search_pool.get(index))
-            .is_some_and(TrackEntry::is_remote)
-        {
-            self.note(REMOTE_PLAYBACK_MESSAGE);
-            return;
-        }
         let paths: Vec<PathBuf> = self
             .search_results
             .get(from..)
@@ -3180,17 +3202,14 @@ impl<'lib> App<'lib> {
     }
 
     /// Appends the current selection to the queue without interrupting what is
-    /// playing. A track appends itself; an album appends its tracks.
+    /// playing. A track appends itself; an album appends its tracks. A remote
+    /// row appends itself too (T12c): the queue holds the `subsonic://…`
+    /// entry, and the producer resolves it through the cache when it is
+    /// reached — appending never starts a download.
     fn append_selection(&mut self) {
         let paths: Vec<PathBuf> = match (&self.position, self.view) {
             (Position::Tracks { .. } | Position::AllTracks | Position::Genre { .. }, _) => {
                 match self.tracks.get(self.selected) {
-                    // A remote row cannot join the queue yet (T12c): the
-                    // same sentence as Enter, and nothing appended.
-                    Some(entry) if entry.is_remote() => {
-                        self.note(REMOTE_PLAYBACK_MESSAGE);
-                        return;
-                    }
                     Some(entry) => vec![entry.path.clone()],
                     None => return,
                 }
@@ -3382,14 +3401,9 @@ impl<'lib> App<'lib> {
     /// Starts a gapless stream of [`App::playlist_from`]: on a track list
     /// that is the rest of the album, of the genre or of every track, from the
     /// selection onwards; a track that cannot play is reported in the status
-    /// line instead of exiting.
+    /// line instead of exiting. A remote row plays like a local one (T12c):
+    /// the producer resolves it through the cache when the stream reaches it.
     fn play_from(&mut self, from: usize) {
-        // A remote row has no file to open yet (T12c): Enter says so and
-        // starts nothing instead of trying to play a URL as a path.
-        if self.tracks.get(from).is_some_and(TrackEntry::is_remote) {
-            self.note(REMOTE_PLAYBACK_MESSAGE);
-            return;
-        }
         let paths = self.playlist_from(from);
         if paths.is_empty() {
             return;
@@ -3439,6 +3453,7 @@ impl<'lib> App<'lib> {
             self.replay_gain,
             self.repeat,
             self.bit_perfect,
+            self.resolver.clone(),
         ) {
             Ok(player) => {
                 player.set_volume(self.volume);
@@ -3544,6 +3559,7 @@ impl<'lib> App<'lib> {
             self.replay_gain,
             self.repeat,
             self.bit_perfect,
+            self.resolver.clone(),
         ) {
             Ok(player) => {
                 // A rebuilt player starts at its own default level; without this

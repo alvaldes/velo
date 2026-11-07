@@ -2240,3 +2240,33 @@ fn a_question_mark_inside_the_settings_card_does_nothing() {
     assert!(app.settings_open(), "the card stays open");
     assert!(!app.help_open(), "? does not open the help over the card");
 }
+
+// --------------------------------------------------- a launch with no library
+
+#[test]
+fn a_launch_without_library_or_server_says_what_to_do_instead_of_asking_for_a_folder() {
+    let mut app = App::browse(None);
+    app.launch_without_library(false);
+    assert!(
+        !app.library_prompt_open(),
+        "no prompt: the sentence replaces it"
+    );
+    // One sentence, naming both ways to configure.
+    assert_eq!(
+        app.status(),
+        "velo: no library and no server configured — set `library` in the \
+         config file (or run velo --library <PATH>), or add a [subsonic] \
+         server and run velo --sync"
+    );
+}
+
+#[test]
+fn a_launch_with_only_a_subsonic_server_asks_for_no_folder() {
+    let mut app = App::browse(None);
+    app.launch_without_library(true);
+    assert!(
+        !app.library_prompt_open(),
+        "the synced index is the library"
+    );
+    assert_eq!(app.status(), "");
+}

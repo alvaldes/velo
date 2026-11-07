@@ -343,6 +343,34 @@ impl<T: Transport> Client<T> {
         Ok(self.request("getOpenSubsonicExtensions", &[])?.extensions)
     }
 
+    /// The base URL every request is built from: no trailing slash, ready
+    /// for `/rest/…` to be appended.
+    #[must_use]
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    /// `stream?id=<id>&format=raw`: the track's original bytes, fetched for
+    /// the cache (T12c). `format=raw` asks for no transcoding, so what lands
+    /// on disk is what the server holds — that is what makes bit-perfect and
+    /// `ReplayGain`-from-tags honest over a remote track.
+    ///
+    /// A failed stream answers with the JSON error envelope, not audio: it
+    /// is mapped to the server's own sentence. Any other body — and a real
+    /// track's bytes are never JSON — is the track itself.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::bytes`], plus [`Error::Server`] when the server answers
+    /// the stream request with its error envelope.
+    pub fn stream_bytes(&self, id: &str) -> Result<Vec<u8>, Error> {
+        let body = self.bytes("stream", &[("id", id), ("format", "raw")])?;
+        match parse_response(&body) {
+            Err(error @ Error::Server { .. }) => Err(error),
+            _ => Ok(body),
+        }
+    }
+
     /// `getAlbumList2`: one page of the server's albums, in the given
     /// listing order — the sync (T12b) pages through them with
     /// `alphabeticalByName`, `size` albums at a time starting at `offset`.

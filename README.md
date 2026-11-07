@@ -192,24 +192,27 @@ The brighter shade behind the accent is derived from `accent`, not written.
 | `advisories` | Let the status line explain why something is not drawn — today, a cover the window is too small for. Errors and ordinary messages are never silenced | `true` |
 | `view_numbers` | Number the library views in the header (`1 artists  2 albums  3 tracks  4 genres`) | `true` |
 
-Precedence: `--library` (expanded the same way) beats the config file. With no
-library set, `velo` opens the interface with a floating prompt asking for the
-folder. It starts at `~/`, which cannot be deleted, and `tab` completes folder
+Precedence: `--library` (expanded the same way) beats the config file. With
+no library set, the interface no longer demands a folder: when a `[subsonic]`
+server is configured, the synced index *is* the library and `/` searches it;
+when neither a library nor a server is configured, one sentence in the
+interface says what to set up. `L` still opens the folder prompt at any time
+— it starts at `~/`, which cannot be deleted, and `tab` completes folder
 names the way a shell does (several matches are listed under the field). A
 path that is not a directory is refused in the prompt; an accepted one is
 saved to the file as `library = "~/<what you typed>"` (every other line
-is kept) and indexed right away; `esc` skips it and the empty browser says how
-to set it. `velo --index` without a library exits 2 and names the key and the
-flag. An unknown key is an error naming the key; a bad value names the file
-and the line.
+is kept) and indexed right away; `esc` skips it. `velo --index` without a
+library exits 2 and names the key and the flag. An unknown key is an error
+naming the key; a bad value names the file and the line.
 
 ### Subsonic servers (early access)
 
 velo can talk to a Subsonic-compatible server (Navidrome and friends).
-This is early: playback from the server does not exist yet — what exists
-today is the connection and its authentication, one command that answers
-"can I use this server?", and one command that syncs the server's library
-into the index so browsing and fuzzy search reach it:
+This is early access, and playback works by caching: what exists today is
+the connection and its authentication, one command that answers
+"can I use this server?", one command that syncs the server's library into
+the index so browsing and fuzzy search reach it, and playback of a remote
+track through that cache:
 
 ```sh
 velo --subsonic-test
@@ -234,9 +237,25 @@ local: 104 tracks · subsonic:music.example.com: 3212 tracks
 Syncing is explicit — it never runs on startup. A failed sync writes
 nothing; a successful one also removes this server's rows the server no
 longer holds (the removed count says how many). The remote rows appear in
-the artist, album, track and genre views and in `/` search like local ones;
-pressing `enter` (or `a`) on one says that playback arrives with the cache
-and starts nothing.
+the artist, album, track and genre views and in `/` search like local ones,
+and pressing `enter` (or `a`, to queue one) plays a remote track like a
+local one.
+
+### How remote playback works
+
+Playing a remote track is cache-on-play: the track's original bytes are
+fetched once with `stream?id=<id>&format=raw` (the server is asked for no
+transcoding, so what lands on disk is what it holds) and then played from
+that file. Seek, gapless, bit-perfect and ReplayGain-from-tags all keep
+working, because the audio path opens a file either way. A cache hit needs
+no network at all; a download that fails skips that track with the reason in
+the status line and the queue keeps going — a network dying mid-album does
+not end the session.
+
+The cache lives at `$XDG_CACHE_HOME/velo/subsonic`, else
+`~/.cache/velo/subsonic`; each file is named after a hash of the track's
+stream URL. Nothing prunes it yet: every track you have played stays until
+you delete the directory yourself.
 
 Add the table to the same `config.toml` (it must come after the other keys;
 `url` and `user` are required when the table exists):
@@ -297,10 +316,10 @@ Honest list; none of these exist behind a flag:
 
 - ReplayGain tag writing (reading and applying them is in: the `replay_gain`
   setting).
-- Subsonic/Navidrome: the connection, its authentication,
-  `velo --subsonic-test` and `velo --sync` exist (see above), and the
-  synced rows appear in browsing and search; playback from the server does
-  not yet — pressing `enter` on a remote row says so instead of playing.
+- Subsonic/Navidrome, still early access: the connection, authentication,
+  `velo --subsonic-test`, `velo --sync` and cache-on-play playback all exist
+  (see above). Nothing evicts the cache yet, and streaming over HTTP ranges
+  (playing before the whole track is on disk) is a later optimisation.
 - Opus — symphonia has no Opus decoder yet, so `.opus` files are rejected at
   probe time.
 - Playlists.

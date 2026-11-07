@@ -11,6 +11,7 @@ use std::io::{Read as _, Write as _};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::thread;
 
 use rusqlite::Connection;
@@ -572,12 +573,70 @@ fn the_existing_queries_see_remote_rows_and_local_rows_are_unchanged() {
 
 // ------------------------------------------------------------------ interface
 
+/// The fake cache for the interface tests: every synced song id plays the
+/// same small fixture, as if the download had already filled the cache.
+fn serve_fixture(dir: &Path) -> Arc<dyn velo::audio::output::PathResolver> {
+    let fixture = dir.join("fixture.wav");
+    fs::write(&fixture, fixture_wav_bytes()).unwrap();
+    Arc::new(serve_fixture::Fixture { fixture })
+}
+
+fn fixture_wav_bytes() -> Vec<u8> {
+    let sample_rate: u32 = 44_100;
+    let channels: u16 = 2;
+    let frames: usize = 4_410;
+    let data_len: u32 = u32::try_from(frames * usize::from(channels) * 2).unwrap();
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&(36 + data_len).to_le_bytes());
+    bytes.extend_from_slice(b"WAVE");
+    bytes.extend_from_slice(b"fmt ");
+    bytes.extend_from_slice(&16u32.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&channels.to_le_bytes());
+    bytes.extend_from_slice(&sample_rate.to_le_bytes());
+    bytes.extend_from_slice(&(sample_rate * u32::from(channels) * 2).to_le_bytes());
+    bytes.extend_from_slice(&16u16.to_le_bytes());
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&data_len.to_le_bytes());
+    bytes.extend(
+        std::iter::repeat_n(0_i16, frames * usize::from(channels)).flat_map(i16::to_le_bytes),
+    );
+    bytes
+}
+
+mod serve_fixture {
+    use std::path::{Path, PathBuf};
+
+    use velo::audio::AudioError;
+    use velo::audio::output::PathResolver;
+
+    /// Serves one fixture file for every `subsonic://` path; a local path
+    /// passes through untouched, exactly like the real resolver.
+    pub(super) struct Fixture {
+        pub(super) fixture: PathBuf,
+    }
+
+    impl PathResolver for Fixture {
+        fn resolve(&self, path: &Path) -> Result<PathBuf, AudioError> {
+            match path
+                .to_str()
+                .and_then(|text| text.strip_prefix("subsonic://"))
+            {
+                Some(_) => Ok(self.fixture.clone()),
+                None => Ok(path.to_path_buf()),
+            }
+        }
+    }
+}
+
 #[test]
-fn enter_on_a_remote_row_says_what_arrives_and_starts_nothing() {
+fn enter_on_a_remote_row_plays_through_the_cache_instead_of_refusing() {
     let dir = TempIndex::new("enter");
     sync(&dir.library, sample_library_transport());
 
     let mut app = App::browse(Some(&dir.library));
+    app.set_resolver(Some(serve_fixture(&dir.dir)));
     app.apply(Action::Browse(BrowseBy::Tracks));
     let remote = app
         .tracks()
@@ -591,19 +650,23 @@ fn enter_on_a_remote_row_says_what_arrives_and_starts_nothing() {
     let action = app.on_key(KeyEvent::from(KeyCode::Enter));
     app.apply(action);
 
-    assert_eq!(
+    // The stream starts through the cache: where a device exists the queue
+    // now holds the remote rows and the fixture plays; where it does not, the
+    // attempt is reported. Either way the T12c refusal is gone.
+    assert_ne!(
         app.status(),
-        "velo: remote playback arrives with the cache (T12c)"
+        "velo: remote playback arrives with the cache (T12c)",
+        "the refusal must be gone"
     );
-    assert!(app.queue().is_empty(), "nothing started");
 }
 
 #[test]
-fn enter_on_a_remote_search_result_says_the_same() {
+fn enter_on_a_remote_search_result_plays_through_the_cache_too() {
     let dir = TempIndex::new("search-enter");
     sync(&dir.library, sample_library_transport());
 
     let mut app = App::browse(Some(&dir.library));
+    app.set_resolver(Some(serve_fixture(&dir.dir)));
     app.on_key(KeyEvent::from(KeyCode::Char('/'))); // opens the search
     for character in "Rising".chars() {
         app.on_key(KeyEvent::from(KeyCode::Char(character)));
@@ -611,11 +674,30 @@ fn enter_on_a_remote_search_result_says_the_same() {
     let action = app.on_key(KeyEvent::from(KeyCode::Enter));
     app.apply(action);
 
-    assert_eq!(
+    assert_ne!(
         app.status(),
-        "velo: remote playback arrives with the cache (T12c)"
+        "velo: remote playback arrives with the cache (T12c)",
+        "the refusal must be gone"
     );
-    assert!(app.queue().is_empty(), "nothing started");
+}
+
+#[test]
+fn slash_reaches_the_search_when_only_a_server_is_configured() {
+    // A remote-only user has no `library` root; the synced index is the
+    // library, so `/` must search it instead of the path prompt blocking.
+    let dir = TempIndex::new("slash");
+    sync(&dir.library, sample_library_transport());
+
+    let mut app = App::browse(Some(&dir.library));
+    app.launch_without_library(true);
+    assert!(!app.library_prompt_open(), "no folder to ask for");
+
+    app.on_key(KeyEvent::from(KeyCode::Char('/')));
+    assert!(app.search_open(), "/ must reach the search");
+    for character in "Rising".chars() {
+        app.on_key(KeyEvent::from(KeyCode::Char(character)));
+    }
+    assert!(!app.search_matches().is_empty(), "the remote row is found");
 }
 
 // --------------------------------------------------------------- the command

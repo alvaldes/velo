@@ -2,13 +2,17 @@ use std::ffi::OsStr;
 use std::io::{IsTerminal, Stdout};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use clap::{CommandFactory as _, Parser};
 
+use velo::audio::output::PathResolver;
 use velo::audio::{Player, TrackSource};
 use velo::config::{self, Cli, Config, Settings};
 use velo::library::Library;
 use velo::subsonic;
+use velo::subsonic::cache::{Cache, SubsonicResolver, Unconfigured, cache_dir};
+use velo::subsonic::client::{Auth, Client, HttpTransport};
 use velo::ui::indexing::Indexer;
 use velo::ui::{Action, App, artwork, crossterm};
 
@@ -80,16 +84,80 @@ fn main() -> ExitCode {
             return usage_help();
         }
         // No files: the interface browses the library index.
-        return browse_interface(library.as_deref(), config_file, &settings);
+        let resolver = track_resolver(
+            &settings,
+            std::env::var_os("VELO_SUBSONIC_SECRET").as_deref(),
+            std::env::var_os("XDG_CONFIG_HOME").as_deref(),
+            std::env::var_os("XDG_CACHE_HOME").as_deref(),
+            home.as_deref(),
+        );
+        return browse_interface(library.as_deref(), config_file, &settings, resolver);
     }
 
     if cli.info {
         return print_info(&cli.files);
     }
     if cli.play {
-        return play(&cli.files, &settings);
+        let resolver = track_resolver(
+            &settings,
+            std::env::var_os("VELO_SUBSONIC_SECRET").as_deref(),
+            std::env::var_os("XDG_CONFIG_HOME").as_deref(),
+            std::env::var_os("XDG_CACHE_HOME").as_deref(),
+            home.as_deref(),
+        );
+        return play(&cli.files, &settings, resolver);
     }
     run_interface(cli.files, &settings, config_file)
+}
+
+/// Builds the resolver that turns queue entries into files (T12c): with a
+/// `[subsonic]` table, remote rows resolve through the on-disk cache. The
+/// environment values are arguments, read here at the edge, so the wiring
+/// stays out of the library and the tests. A server whose credentials cannot
+/// be resolved still gets a resolver — one that skips its remote tracks with
+/// the credential sentence — because the interface must start, and the queue
+/// must survive a half-configured server.
+fn track_resolver(
+    settings: &Settings,
+    env_secret: Option<&OsStr>,
+    xdg_config_home: Option<&OsStr>,
+    xdg_cache_home: Option<&OsStr>,
+    home: Option<&OsStr>,
+) -> Option<Arc<dyn PathResolver>> {
+    let server = settings.subsonic.as_ref()?;
+    match subsonic::credentials::resolve(
+        &server.url,
+        &server.user,
+        server.api_key.as_deref(),
+        env_secret,
+        xdg_config_home,
+        home,
+    ) {
+        Ok(credentials) => {
+            let transport = match HttpTransport::new(server.insecure) {
+                Ok(transport) => transport,
+                Err(error) => {
+                    // HttpTransport::new never fails today; if it ever does,
+                    // the sentence still reaches the skip path.
+                    return Some(Arc::new(Unconfigured::new(error.to_string())));
+                }
+            };
+            let client = Client::new(
+                transport,
+                &credentials.url,
+                &credentials.user,
+                // Token authentication: every Subsonic-compatible server
+                // accepts it, which is why the probe tries it first (T12a).
+                Auth::Token {
+                    password: credentials.secret,
+                },
+            );
+            let source = velo::library::source_for(&credentials.url);
+            let cache = cache_dir(xdg_cache_home, home).map(Cache::new)?;
+            Some(Arc::new(SubsonicResolver::new(client, source, cache)))
+        }
+        Err(error) => Some(Arc::new(Unconfigured::new(error.to_string()))),
+    }
 }
 
 /// Resolves the user's settings: the config file at `path` (a missing file is
@@ -424,12 +492,15 @@ fn run_interface(
 /// is re-indexed in the background (incrementally, so it is fast when little
 /// changed); the lists reload when it ends. A missing root or an empty index
 /// still opens the interface and says so instead of exiting. With no root
-/// configured, a floating prompt asks for one and the answer is saved to the
-/// config file, then indexed the same way.
+/// configured, the launch no longer demands a local folder (T12c): a
+/// Subsonic server's synced index is the library, and with neither a library
+/// nor a server the interface says what to configure in one sentence. `L`
+/// still opens the folder prompt at any time.
 fn browse_interface(
     root: Option<&Path>,
     config_file: Option<PathBuf>,
     settings: &Settings,
+    resolver: Option<Arc<dyn PathResolver>>,
 ) -> ExitCode {
     if !std::io::stdout().is_terminal() {
         eprintln!("velo: the interface needs an interactive terminal");
@@ -448,10 +519,13 @@ fn browse_interface(
         app.set_theme(settings.theme);
         app.set_ui(settings.ui);
         app.show_artwork(picker);
-        app.set_config_file(config_file.clone());
+        app.set_config_file(config_file);
         // The session comes back before anything else can move (S3), and
         // remembers the volume above as what the file says.
         app.set_session(settings.session.clone());
+        // Remote rows play through the cache (T12c); without a server this
+        // stays `None` and every entry already is a file.
+        app.set_resolver(resolver);
         match (&opened, root) {
             (Err(error), _) => app.index_unavailable(error.to_string()),
             (Ok(_), Some(root)) => {
@@ -459,7 +533,10 @@ fn browse_interface(
                 app.set_library_root(Some(root.to_path_buf()));
                 app.apply(Action::Reindex);
             }
-            (Ok(_), None) => app.ask_for_library(config_file),
+            // No folder to ask for at launch any more (T12c): with only a
+            // server configured, the synced index is the library; with
+            // neither, one sentence says what to configure instead.
+            (Ok(_), None) => app.launch_without_library(settings.subsonic.is_some()),
         }
         event_loop(&mut app, opened.as_ref().ok(), terminal)
     });
@@ -548,7 +625,11 @@ fn event_loop(
     terminal.show_cursor()
 }
 
-fn play(files: &[PathBuf], settings: &Settings) -> ExitCode {
+fn play(
+    files: &[PathBuf],
+    settings: &Settings,
+    resolver: Option<Arc<dyn PathResolver>>,
+) -> ExitCode {
     let queue = std::sync::Arc::new(std::sync::Mutex::new(files.to_vec()));
     let mut player = match Player::play_gapless_at_full(
         queue,
@@ -557,6 +638,10 @@ fn play(files: &[PathBuf], settings: &Settings) -> ExitCode {
         settings.replay_gain,
         velo::audio::output::Repeat::Off,
         settings.bit_perfect,
+        // A `subsonic://<host>/<id>` argument is fetched into the cache and
+        // played from there, exactly as the interface does it (T12c). Without
+        // a configured server it stays a file, which is what it always was.
+        resolver,
     ) {
         Ok(player) => player,
         Err(error) => {

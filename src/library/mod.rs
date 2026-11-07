@@ -100,8 +100,8 @@ pub struct TrackEntry {
 
 impl TrackEntry {
     /// Whether this row came from a Subsonic server rather than a file.
-    /// Playback of such rows needs the cache (T12c), so the interface
-    /// refuses them with a sentence instead of opening their path.
+    /// Its `path` is a `subsonic://` URL, and the producer resolves it through
+    /// the cache before opening anything (T12c).
     #[must_use]
     pub fn is_remote(&self) -> bool {
         self.source != LOCAL_SOURCE
