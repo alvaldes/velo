@@ -198,9 +198,41 @@ fn the_volume_slider_follows_the_volume_keys() {
         .expect("a volume row");
 
     assert!(
-        slider.contains("●─ 95") && !slider.contains("100"),
+        slider.contains("●─  95") && !slider.contains("100"),
         "one step down moves the knob off the end and the number to 95, got: {slider}"
     );
+}
+
+/// ui-redesign T7, reported by the user: the slider is set against the right
+/// edge, so a number one digit shorter (100 → 95, 10 → 5) shifted the whole
+/// slider one column. The number now always takes three columns.
+#[test]
+fn the_volume_slider_does_not_move_when_the_number_loses_a_digit() {
+    let mut app = App::new(tracks(&["one.flac"]));
+    let column = |app: &App| {
+        let screen = screen_at(app, 80, 24);
+        let row = screen
+            .lines()
+            .find(|line| line.contains("VOL"))
+            .expect("a volume row")
+            .to_owned();
+        row.chars()
+            .collect::<Vec<_>>()
+            .windows(3)
+            .position(|w| w == ['V', 'O', 'L'])
+            .expect("VOL on the row")
+    };
+
+    let at_100 = column(&app);
+    for step in 1..=20 {
+        press(&mut app, KeyCode::Char('-'));
+        assert_eq!(
+            column(&app),
+            at_100,
+            "the slider stays put at {}%",
+            100 - step * 5
+        );
+    }
 }
 
 #[test]

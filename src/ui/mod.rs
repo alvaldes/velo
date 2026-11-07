@@ -1892,7 +1892,9 @@ fn volume_slider(volume: u8, cells: u16) -> Vec<Span<'static>> {
         ));
         spans.push(Span::raw(" "));
     }
-    spans.push(Span::styled(format!("{volume}"), Style::new().fg(TEXT)));
+    // Three columns whatever the number, so a slider set against the right
+    // edge does not jump when 100 becomes 95 (T7).
+    spans.push(Span::styled(format!("{volume:>3}"), Style::new().fg(TEXT)));
     spans
 }
 
