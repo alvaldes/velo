@@ -922,6 +922,79 @@ fn help_at_80x14(app: &App) -> String {
     screen_at(app, 80, 14)
 }
 
+/// The help card open on `app`, drawn at 80×40: tall enough for every row.
+fn help_at_80x40(app: &App) -> String {
+    screen_at(app, 80, 40)
+}
+
+/// The rows the help card covers on `screen`: its two borders, the lines
+/// between them and nothing else.
+fn help_card_height(screen: &str) -> usize {
+    const TITLE: [char; 6] = ['╭', ' ', 'k', 'e', 'y', 's'];
+    let lines: Vec<Vec<char>> = screen.lines().map(|line| line.chars().collect()).collect();
+    let top = lines
+        .iter()
+        .position(|line| line.windows(TITLE.len()).any(|window| window == TITLE))
+        .expect("the help card is on screen");
+    let edge = lines[top]
+        .windows(TITLE.len())
+        .position(|window| window == TITLE)
+        .expect("the title opens the card");
+    let sides = lines[top + 1..]
+        .iter()
+        .take_while(|line| line.get(edge) == Some(&'│'))
+        .count();
+    sides + 2
+}
+
+#[test]
+fn the_help_card_keeps_its_height_while_the_filter_narrows_it() {
+    let mut app = App::new(tracks(&["one.flac"]));
+    press(&mut app, KeyCode::Char('?'));
+    let full = help_at_80x40(&app);
+    let height = help_card_height(&full);
+    assert!(full.contains("move down"), "{full}");
+    assert!(full.contains("pause / resume"), "{full}");
+
+    // Typing a filter adds its line without growing the card.
+    press(&mut app, KeyCode::Char('/'));
+    let typing = help_at_80x40(&app);
+    assert!(typing.contains("▏"), "the filter is being typed:\n{typing}");
+    assert_eq!(
+        help_card_height(&typing),
+        height,
+        "the card grew when the filter opened:\n{typing}"
+    );
+
+    // One match keeps the card as tall as the whole list did.
+    for character in "space".chars() {
+        press(&mut app, KeyCode::Char(character));
+    }
+    let one = help_at_80x40(&app);
+    assert!(one.contains("pause / resume"), "{one}");
+    assert!(!one.contains("move down"), "one row matches:\n{one}");
+    assert_eq!(
+        help_card_height(&one),
+        height,
+        "the card shrank to one row:\n{one}"
+    );
+
+    // And no match at all keeps it too.
+    for _ in 0.."space".len() {
+        press(&mut app, KeyCode::Backspace);
+    }
+    for character in "zzz".chars() {
+        press(&mut app, KeyCode::Char(character));
+    }
+    let none = help_at_80x40(&app);
+    assert!(none.contains("no key matches"), "{none}");
+    assert_eq!(
+        help_card_height(&none),
+        height,
+        "the card shrank to the empty message:\n{none}"
+    );
+}
+
 #[test]
 fn the_help_scrolls_with_j_k_and_jumps_with_g_and_shift_g() {
     let mut app = App::new(tracks(&["one.flac"]));

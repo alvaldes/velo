@@ -1936,9 +1936,10 @@ impl<'lib> App<'lib> {
         from_row.or_else(|| player.current_duration())
     }
 
-    /// The help card (S1): every key, as tall as the window allows, scrolled
-    /// to `help.top`, with the filter under the title while there is one and
-    /// where it is (`12–20 of 26`) on its bottom edge when it does not fit.
+    /// The help card (S1): every key, as tall as the window allows but never
+    /// shorter, scrolled to `help.top`, with the filter under the title while
+    /// there is one and where it is (`12–20 of 26`) on its bottom edge when it
+    /// does not fit.
     fn draw_help(frame: &mut Frame, area: Rect, help: &Help) {
         let key_width = HELP_ROWS
             .iter()
@@ -1950,15 +1951,15 @@ impl<'lib> App<'lib> {
             .map(|(_, label)| label.chars().count())
             .max()
             .unwrap_or(0);
-        // Measured on every row, so filtering never makes the card jump.
+        // Both measured before the filter, so that narrowing the contents
+        // never makes the card itself jump: the whole table decides its size.
         // Two border columns, one of air per side, three between the columns.
         let width = u16::try_from(key_width + 3 + label_width + 4).unwrap_or(area.width);
         let rows = help.rows();
         let shown = help.shown_rows(area);
         let top = help.top.min(help.last_top(area));
-        // The line that says nothing matches stands in for the rows.
-        let body = shown.max(usize::from(rows.is_empty()));
-        let height = u16::try_from(body + help.header_lines() + 2).unwrap_or(area.height);
+        let body = Help::card_rows(area);
+        let height = u16::try_from(body + 2).unwrap_or(area.height);
         let box_area = centered(area, width, height);
 
         let mut text: Vec<Line> = Vec::new();
@@ -3152,14 +3153,21 @@ impl Help {
         usize::from(self.filtering())
     }
 
-    /// How many rows fit in `area`: all of them before the first draw.
-    fn shown_rows(&self, area: Rect) -> usize {
-        let rows = self.rows().len();
+    /// The body rows the card keeps whatever the filter keeps: every key, or
+    /// as many as fit in `area`. Read before the filter, so that a filter
+    /// leaving a single row leaves the card just as tall.
+    fn card_rows(area: Rect) -> usize {
         if area.height == 0 {
-            return rows;
+            return HELP_ROWS.len();
         }
-        let room = usize::from(area.height).saturating_sub(2 + self.header_lines());
-        rows.min(room)
+        let room = usize::from(area.height).saturating_sub(2);
+        HELP_ROWS.len().min(room)
+    }
+
+    /// How many of the rows the filter kept fit on the card.
+    fn shown_rows(&self, area: Rect) -> usize {
+        let room = Self::card_rows(area).saturating_sub(self.header_lines());
+        self.rows().len().min(room)
     }
 
     /// The row at the top when the last row is at the bottom.

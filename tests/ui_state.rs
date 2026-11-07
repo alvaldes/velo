@@ -1575,6 +1575,30 @@ fn an_open_help_owns_the_keys_and_esc_clears_its_filter_before_closing() {
     assert_eq!(app.selected(), 1);
 }
 
+#[test]
+fn an_open_help_holds_back_q_and_space_until_it_closes() {
+    let mut app = app_with_three_tracks();
+    press(&mut app, KeyCode::Char('?'));
+    assert!(app.help_open());
+
+    // `q` quits and `space` pauses, but the card owns both while it is open.
+    for code in [KeyCode::Char('q'), KeyCode::Char(' ')] {
+        assert_eq!(
+            app.on_key(key(code)),
+            Action::None,
+            "{code:?} reached the list under the help"
+        );
+        assert!(app.help_open(), "the help stays open");
+    }
+    assert_eq!(app.selected(), 0, "the library selection never moved");
+
+    // Closed again, both keys mean what they meant before.
+    press(&mut app, KeyCode::Char('?'));
+    assert!(!app.help_open());
+    assert_eq!(app.on_key(key(KeyCode::Char('q'))), Action::Quit);
+    assert_eq!(app.on_key(key(KeyCode::Char(' '))), Action::TogglePause);
+}
+
 // ---- the minor advisories (help-and-advisories T2, S2) ----------------------
 
 #[test]
