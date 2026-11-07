@@ -585,19 +585,24 @@ fn set_mode(path: &Path, mode: u32) {
     fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
 }
 
-/// The `user_version` and whether `tracks` has a `genre` column, read
-/// directly from the file.
-fn schema_state(database: &Path) -> (i64, bool) {
+/// The `user_version` and whether `tracks` has the `genre` and `source`
+/// columns, read directly from the file.
+///
+/// Two migrations are now in the sequence: genres took the schema to 1 and the
+/// `source`/`remote_id` pair (T12b) took it to 2, so a fully migrated index
+/// reports both columns and version 2.
+fn schema_state(database: &Path) -> (i64, bool, bool) {
     let conn = rusqlite::Connection::open(database).unwrap();
     let version = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    let has_genre = conn
-        .prepare("SELECT 1 FROM pragma_table_info('tracks') WHERE name = 'genre'")
-        .unwrap()
-        .exists([])
-        .unwrap();
-    (version, has_genre)
+    let has_column = |name: &str| {
+        conn.prepare("SELECT 1 FROM pragma_table_info('tracks') WHERE name = ?1")
+            .unwrap()
+            .exists([name])
+            .unwrap()
+    };
+    (version, has_column("genre"), has_column("source"))
 }
 
 fn temp_root(name: &str) -> PathBuf {
@@ -670,7 +675,7 @@ fn a_read_only_index_built_without_genres_opens_and_browses_with_genres_unknown(
     set_mode(&root, 0o755);
     set_mode(&database, 0o644);
     // The read-only open wrote nothing.
-    assert_eq!(schema_state(&database), (0, false));
+    assert_eq!(schema_state(&database), (0, false, false));
     let _ = fs::remove_dir_all(&root);
 }
 
@@ -691,12 +696,12 @@ fn a_read_only_old_index_migrates_on_the_first_open_after_it_becomes_writable() 
         .map(|entry| entry.unwrap().file_name())
         .collect();
     assert_eq!(left, ["index.db"]);
-    assert_eq!(schema_state(&database), (0, false));
+    assert_eq!(schema_state(&database), (0, false, false));
 
     let library = Library::open_at(&database).unwrap();
     assert_eq!(library.counts().unwrap().tracks, 2, "the old rows survive");
     drop(library);
-    assert_eq!(schema_state(&database), (1, true));
+    assert_eq!(schema_state(&database), (2, true, true));
     let _ = fs::remove_dir_all(&root);
 }
 

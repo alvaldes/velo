@@ -53,6 +53,10 @@ fn main() -> ExitCode {
     if cli.subsonic_test {
         return subsonic_test(&settings, home.as_deref());
     }
+    // The sync needs no terminal either — it runs over ssh like the probe.
+    if cli.sync {
+        return sync_library(&settings, home.as_deref());
+    }
     // `bit_perfect` is resolved and carried in `settings`; the audio path
     // and the interface read it (T17).
     if cli.index {
@@ -171,6 +175,128 @@ fn subsonic_test(settings: &Settings, home: Option<&OsStr>) -> ExitCode {
         }
     }
 }
+/// Syncs the configured Subsonic server into the library index (T12b) and
+/// prints the counts per source. Exit 0 on success, 1 with a one-line reason
+/// on failure. A failed sync writes nothing, so the index is never left
+/// half-synced.
+fn sync_library(settings: &Settings, home: Option<&OsStr>) -> ExitCode {
+    let Some(server) = &settings.subsonic else {
+        eprintln!("velo: no [subsonic] table in the config file — nothing to sync");
+        return ExitCode::FAILURE;
+    };
+
+    let credentials = subsonic::credentials::resolve(
+        &server.url,
+        &server.user,
+        server.api_key.as_deref(),
+        std::env::var_os("VELO_SUBSONIC_SECRET").as_deref(),
+        std::env::var_os("XDG_CONFIG_HOME").as_deref(),
+        home,
+    );
+    let credentials = match credentials {
+        Ok(credentials) => credentials,
+        Err(error) => {
+            eprintln!("velo: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    for warning in &credentials.warnings {
+        eprintln!("velo: warning: {warning}");
+    }
+
+    let library = match Library::open() {
+        Ok(library) => library,
+        Err(error) => {
+            eprintln!("velo: cannot open the index: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let transport = match subsonic::client::HttpTransport::new(server.insecure) {
+        Ok(transport) => transport,
+        Err(error) => {
+            eprintln!("velo: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // The same authentication order as the probe (T12a): token auth first —
+    // every Subsonic-compatible server accepts it — and one api-key retry
+    // when the server rejects the credentials, because the stored secret may
+    // be a key rather than a password. The ping happens before any sync
+    // request, so bad credentials fail here, before anything was fetched.
+    let client = subsonic::client::Client::new(
+        &transport,
+        &credentials.url,
+        &credentials.user,
+        subsonic::client::Auth::Token {
+            password: credentials.secret.clone(),
+        },
+    );
+    let client = match client.ping() {
+        Ok(_) => client,
+        Err(token_error @ subsonic::Error::Server { code: 40, .. }) => {
+            // The retry rides on the same client, only to learn whether the
+            // secret is a key; the kept client is rebuilt the same way the
+            // token one was, so both arms hold the same type.
+            let accepts_key = client
+                .with_auth(subsonic::client::Auth::ApiKey {
+                    key: credentials.secret.clone(),
+                })
+                .ping()
+                .is_ok();
+            // The server's own message rides on the first error.
+            if !accepts_key {
+                eprintln!("velo: sync failed: {token_error}");
+                return ExitCode::FAILURE;
+            }
+            subsonic::client::Client::new(
+                &transport,
+                &credentials.url,
+                &credentials.user,
+                subsonic::client::Auth::ApiKey {
+                    key: credentials.secret.clone(),
+                },
+            )
+        }
+        Err(error) => {
+            eprintln!("velo: sync failed: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // The sync does not probe: the server's answers themselves say whether
+    // the credentials work, and a failed request aborts before any write.
+    let source = velo::library::source_for(&credentials.url);
+    match library.sync_subsonic(&client, &source) {
+        Ok(report) => {
+            // The credential ping above is one more request the sync cost.
+            let requests = report.requests + 1;
+            println!(
+                "synced {source}: {} tracks, {} albums, {} removed, {requests} requests",
+                report.tracks, report.albums, report.removed
+            );
+            match library.counts_by_source() {
+                Ok(counts) => {
+                    let line: Vec<String> = counts
+                        .into_iter()
+                        .map(|(source, count)| format!("{source}: {count} tracks"))
+                        .collect();
+                    println!("{}", line.join(" · "));
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("velo: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Err(error) => {
+            eprintln!("velo: sync failed: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 /// Builds or refreshes the library index and reports its counts.
 fn index_library(root: &Path) -> ExitCode {
     if !root.is_dir() {
@@ -199,6 +325,18 @@ fn index_library(root: &Path) -> ExitCode {
             println!("tracks: {}", counts.tracks);
             println!("albums: {}", counts.albums);
             println!("artists: {}", counts.artists);
+            // Totals now span sources. Printing one number for two libraries
+            // would be true and useless, so the breakdown appears as soon as
+            // there is more than the index the user scanned yesterday (T12b).
+            if let Ok(by_source) = library.counts_by_source() {
+                let breakdown: Vec<String> = by_source
+                    .iter()
+                    .map(|(source, tracks)| format!("{source} {tracks}"))
+                    .collect();
+                if by_source.len() > 1 || by_source.first().is_some_and(|(s, _)| s != "local") {
+                    println!("by source: {}", breakdown.join(" · "));
+                }
+            }
             ExitCode::SUCCESS
         }
         Err(error) => {

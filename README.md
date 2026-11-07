@@ -206,18 +206,37 @@ and the line.
 ### Subsonic servers (early access)
 
 velo can talk to a Subsonic-compatible server (Navidrome and friends).
-This is early: there is no library browsing and no playback from the server
-yet — what exists today is the connection and its authentication, plus one
-command that answers "can I use this server?":
+This is early: playback from the server does not exist yet — what exists
+today is the connection and its authentication, one command that answers
+"can I use this server?", and one command that syncs the server's library
+into the index so browsing and fuzzy search reach it:
 
 ```sh
 velo --subsonic-test
+velo --sync
 ```
 
-It prints the server's type, version, API version and the OpenSubsonic
-extensions it advertises, says which authentication it used and whether it
-worked, and exits `0` on success and `1` with a one-line reason on failure.
-It needs no interactive terminal, so it works over ssh.
+`--subsonic-test` prints the server's type, version, API version and the
+OpenSubsonic extensions it advertises, says which authentication it used and
+whether it worked, and exits `0` on success and `1` with a one-line reason on
+failure. It needs no interactive terminal, so it works over ssh.
+
+`velo --sync` fetches the server's albums (`getAlbumList2`, paged, and one
+`getAlbum` per album — never one request per track) and writes them as rows
+of the same index the local scan fills, marked with their source
+(`subsonic:<host>`). It then prints the counts per source:
+
+```
+synced subsonic:music.example.com: 3212 tracks, 310 albums, 4 removed, 311 requests
+local: 104 tracks · subsonic:music.example.com: 3212 tracks
+```
+
+Syncing is explicit — it never runs on startup. A failed sync writes
+nothing; a successful one also removes this server's rows the server no
+longer holds (the removed count says how many). The remote rows appear in
+the artist, album, track and genre views and in `/` search like local ones;
+pressing `enter` (or `a`) on one says that playback arrives with the cache
+and starts nothing.
 
 Add the table to the same `config.toml` (it must come after the other keys;
 `url` and `user` are required when the table exists):
@@ -278,9 +297,10 @@ Honest list; none of these exist behind a flag:
 
 - ReplayGain tag writing (reading and applying them is in: the `replay_gain`
   setting).
-- Subsonic/Navidrome: the connection, its authentication and
-  `velo --subsonic-test` exist (see above); browsing the server's library,
-  and playback from it, do not yet.
+- Subsonic/Navidrome: the connection, its authentication,
+  `velo --subsonic-test` and `velo --sync` exist (see above), and the
+  synced rows appear in browsing and search; playback from the server does
+  not yet — pressing `enter` on a remote row says so instead of playing.
 - Opus — symphonia has no Opus decoder yet, so `.opus` files are rejected at
   probe time.
 - Playlists.

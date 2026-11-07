@@ -656,3 +656,141 @@ fn the_cli_parses_the_subsonic_test_flag() {
         .unwrap_or_else(|error| panic!("parse failed: {error}"));
     assert!(cli.subsonic_test);
 }
+
+#[test]
+fn the_cli_parses_the_sync_flag() {
+    let cli = Cli::try_parse_from(["velo", "--sync"])
+        .unwrap_or_else(|error| panic!("parse failed: {error}"));
+    assert!(cli.sync);
+}
+
+// ------------------------------------------------ the sync's two endpoints
+
+/// A transport that answers every request with one body and records the
+/// URLs it was asked for.
+struct Recording {
+    body: Vec<u8>,
+    urls: std::sync::Mutex<Vec<String>>,
+}
+
+impl Transport for Recording {
+    fn get(&self, url: &str) -> Result<Vec<u8>, Error> {
+        self.urls.lock().unwrap().push(url.to_owned());
+        Ok(self.body.clone())
+    }
+}
+
+fn album_list_page() -> Vec<u8> {
+    r#"{"subsonic-response":{"status":"ok","albumList2":{"album":[{"id":"al-1","name":"Harbor","artist":"Tide","year":2021},{"id":"al-2","name":"Views"}]}}}"#
+        .as_bytes()
+        .to_vec()
+}
+
+#[test]
+fn album_list2_pages_with_type_size_and_offset_and_parses_the_albums() {
+    let transport = Recording {
+        body: album_list_page(),
+        urls: std::sync::Mutex::new(Vec::new()),
+    };
+    let client = Client::new(
+        &transport,
+        "http://music.example.com",
+        "admin",
+        Auth::ApiKey {
+            key: "k".to_owned(),
+        },
+    );
+
+    let albums = client
+        .album_list2("alphabeticalByName", 500, 500)
+        .unwrap_or_else(|error| panic!("album_list2 failed: {error}"));
+
+    let urls = transport.urls.into_inner().unwrap();
+    assert_eq!(urls.len(), 1);
+    assert!(urls[0].contains("/rest/getAlbumList2?"), "{}", urls[0]);
+    let pairs = query_pairs(&urls[0]);
+    for piece in ["type=alphabeticalByName", "size=500", "offset=500"] {
+        assert!(
+            pairs.contains(&piece.to_owned()),
+            "{piece} missing: {}",
+            urls[0]
+        );
+    }
+
+    // What the sync needs from a page: the id to fetch, the name and
+    // artist the views show; a missing field is absent, not an error.
+    assert_eq!(albums.len(), 2);
+    assert_eq!(albums[0].id, "al-1");
+    assert_eq!(albums[0].name, "Harbor");
+    assert_eq!(albums[0].artist.as_deref(), Some("Tide"));
+    assert_eq!(albums[0].year, Some(2021));
+    assert_eq!(albums[1].id, "al-2");
+    assert_eq!(albums[1].name, "Views");
+    assert_eq!(albums[1].artist, None);
+}
+
+#[test]
+fn album_fetches_by_id_and_parses_its_songs() {
+    let transport = Recording {
+        body: r#"{"subsonic-response":{"status":"ok","album":{"id":"al-9","name":"Harbor","artist":"Tide","year":2021,"song":[{"id":"s-1","title":"Dawn","artist":"Tide","duration":213.4,"track":1,"discNumber":2,"year":2021},{"id":"s-2","title":"Bare","duration":30}]}}}"#
+            .as_bytes()
+            .to_vec(),
+        urls: std::sync::Mutex::new(Vec::new()),
+    };
+    let client = Client::new(
+        &transport,
+        "http://music.example.com",
+        "admin",
+        Auth::Token {
+            password: "p".to_owned(),
+        },
+    );
+
+    let album = client
+        .album("al-9")
+        .unwrap_or_else(|error| panic!("album failed: {error}"));
+
+    let urls = transport.urls.into_inner().unwrap();
+    assert!(
+        urls[0].starts_with("http://music.example.com/rest/getAlbum?"),
+        "{}",
+        urls[0]
+    );
+    assert!(
+        query_pairs(&urls[0]).contains(&"id=al-9".to_owned()),
+        "{}",
+        urls[0]
+    );
+
+    assert_eq!(album.name, "Harbor");
+    assert_eq!(album.songs.len(), 2);
+    assert_eq!(album.songs[0].id, "s-1");
+    assert_eq!(album.songs[0].title.as_deref(), Some("Dawn"));
+    assert_eq!(album.songs[0].duration, Some(213.4));
+    assert_eq!(album.songs[0].track, Some(1));
+    assert_eq!(album.songs[0].disc_number, Some(2));
+    // A song without a field reads as absent, not as a parse failure.
+    assert_eq!(album.songs[1].title.as_deref(), Some("Bare"));
+    assert_eq!(album.songs[1].artist, None);
+    assert_eq!(album.songs[1].track, None);
+}
+
+#[test]
+fn a_failed_album_answer_carries_the_server_sentence() {
+    let transport = Recording {
+        body: error_envelope(40, "Wrong credentials"),
+        urls: std::sync::Mutex::new(Vec::new()),
+    };
+    let client = Client::new(
+        transport,
+        "http://music.example.com",
+        "admin",
+        Auth::Token {
+            password: "p".to_owned(),
+        },
+    );
+    let error = client
+        .album("al-9")
+        .expect_err("a failed album answer must fail");
+    assert!(error.to_string().contains("Wrong credentials"), "{error}");
+}

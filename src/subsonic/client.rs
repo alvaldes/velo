@@ -303,6 +303,14 @@ impl<T: Transport> Client<T> {
     /// Fails with the transport's [`Error::Unreachable`], the server's
     /// [`Error::Server`], or [`Error::TooOld`] when the answer is not JSON.
     pub fn request(&self, endpoint: &str, extra: &[(&str, &str)]) -> Result<Response, Error> {
+        let body = self.bytes(endpoint, extra)?;
+        parse_response(&body)
+    }
+
+    /// Builds one request URL and fetches its body through the transport.
+    /// Every endpoint method goes through here, so paging and endpoints
+    /// share one URL shape.
+    fn bytes(&self, endpoint: &str, extra: &[(&str, &str)]) -> Result<Vec<u8>, Error> {
         let salt = fresh_salt();
         let url = build_request_url(
             &self.base_url,
@@ -312,8 +320,7 @@ impl<T: Transport> Client<T> {
             endpoint,
             extra,
         );
-        let body = self.transport.get(&url)?;
-        parse_response(&body)
+        self.transport.get(&url)
     }
 
     /// `ping`: the cheapest authenticated request, the probe's first call.
@@ -334,6 +341,84 @@ impl<T: Transport> Client<T> {
     /// As [`Client::request`].
     pub fn open_subsonic_extensions(&self) -> Result<Vec<String>, Error> {
         Ok(self.request("getOpenSubsonicExtensions", &[])?.extensions)
+    }
+
+    /// `getAlbumList2`: one page of the server's albums, in the given
+    /// listing order — the sync (T12b) pages through them with
+    /// `alphabeticalByName`, `size` albums at a time starting at `offset`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::request`], plus [`Error::Server`] when an `ok` answer
+    /// carries no album list at all.
+    pub fn album_list2(
+        &self,
+        list_type: &str,
+        size: u32,
+        offset: u64,
+    ) -> Result<Vec<RemoteAlbum>, Error> {
+        let body = self.bytes(
+            "getAlbumList2",
+            &[
+                ("type", list_type),
+                ("size", &size.to_string()),
+                ("offset", &offset.to_string()),
+            ],
+        )?;
+        let envelope: AlbumListEnvelope = json_envelope(&body)?;
+        require_ok(&envelope.response.status, envelope.response.error)?;
+        let list = envelope.response.album_list2.ok_or(Error::Server {
+            code: 0,
+            message: "the answer said ok but carried no album list".to_owned(),
+        })?;
+        Ok(list
+            .album
+            .unwrap_or_default()
+            .into_iter()
+            .map(|album| RemoteAlbum {
+                id: album.id,
+                name: album.name.unwrap_or_default(),
+                artist: album.artist,
+                year: album.year,
+            })
+            .collect())
+    }
+
+    /// `getAlbum`: one album with its songs — what the sync (T12b) maps one
+    /// request per album, not one per track.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::request`], plus [`Error::Server`] when an `ok` answer
+    /// carries no album at all.
+    pub fn album(&self, id: &str) -> Result<RemoteAlbumDetail, Error> {
+        let body = self.bytes("getAlbum", &[("id", id)])?;
+        let envelope: AlbumEnvelope = json_envelope(&body)?;
+        require_ok(&envelope.response.status, envelope.response.error)?;
+        let raw = envelope.response.album.ok_or(Error::Server {
+            code: 0,
+            message: "the answer said ok but carried no album".to_owned(),
+        })?;
+        Ok(RemoteAlbumDetail {
+            id: raw.id,
+            name: raw.name.unwrap_or_default(),
+            artist: raw.artist,
+            year: raw.year,
+            songs: raw
+                .songs
+                .unwrap_or_default()
+                .into_iter()
+                .map(|song| RemoteSong {
+                    id: song.id,
+                    title: song.title,
+                    artist: song.artist,
+                    duration: song.duration,
+                    track: song.track,
+                    disc_number: song.disc_number,
+                    year: song.year,
+                })
+                .collect(),
+        })
     }
 
     /// Asks the server what it is and which authentication works, then
@@ -419,11 +504,123 @@ impl<T: Transport> Client<T> {
     }
 }
 
+/// One album of the server's library, as `getAlbumList2` names it: the id
+/// the sync fetches songs with, plus what the index's album views show.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteAlbum {
+    /// The server's album id, the `id` of the `getAlbum` call.
+    pub id: String,
+    /// The album name.
+    pub name: String,
+    /// The album artist, when the server says one.
+    pub artist: Option<String>,
+    /// The album year, when the server says one.
+    pub year: Option<i64>,
+}
+
+/// One album with its songs, what `getAlbum` answers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RemoteAlbumDetail {
+    /// The server's album id.
+    pub id: String,
+    /// The album name.
+    pub name: String,
+    /// The album artist, when the server says one.
+    pub artist: Option<String>,
+    /// The album year, when the server says one.
+    pub year: Option<i64>,
+    /// The album's songs, in the server's order.
+    pub songs: Vec<RemoteSong>,
+}
+
+/// One song of one remote album.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RemoteSong {
+    /// The server's song id — the `remote_id` of the index row.
+    pub id: String,
+    /// The song title, when the server says one.
+    pub title: Option<String>,
+    /// The song artist, when the server says one.
+    pub artist: Option<String>,
+    /// The song length in seconds, when the server says one.
+    pub duration: Option<f64>,
+    /// The track number inside the album.
+    pub track: Option<i64>,
+    /// The disc number inside the album.
+    pub disc_number: Option<i64>,
+    /// The song year.
+    pub year: Option<i64>,
+}
+
 /// The serde shape of the JSON envelope.
 #[derive(Deserialize)]
 struct Envelope {
     #[serde(rename = "subsonic-response")]
     response: RawResponse,
+}
+
+/// The serde shape of a `getAlbumList2` envelope.
+#[derive(Deserialize)]
+struct AlbumListEnvelope {
+    #[serde(rename = "subsonic-response")]
+    response: RawAlbumListResponse,
+}
+
+#[derive(Deserialize)]
+struct RawAlbumListResponse {
+    status: String,
+    error: Option<RawError>,
+    #[serde(rename = "albumList2")]
+    album_list2: Option<RawAlbumList>,
+}
+
+#[derive(Deserialize)]
+struct RawAlbumList {
+    album: Option<Vec<RawAlbum>>,
+}
+
+#[derive(Deserialize)]
+struct RawAlbum {
+    id: String,
+    name: Option<String>,
+    artist: Option<String>,
+    year: Option<i64>,
+}
+
+/// The serde shape of a `getAlbum` envelope.
+#[derive(Deserialize)]
+struct AlbumEnvelope {
+    #[serde(rename = "subsonic-response")]
+    response: RawAlbumResponse,
+}
+
+#[derive(Deserialize)]
+struct RawAlbumResponse {
+    status: String,
+    error: Option<RawError>,
+    album: Option<RawAlbumDetail>,
+}
+
+#[derive(Deserialize)]
+struct RawAlbumDetail {
+    id: String,
+    name: Option<String>,
+    artist: Option<String>,
+    year: Option<i64>,
+    #[serde(rename = "song")]
+    songs: Option<Vec<RawSong>>,
+}
+
+#[derive(Deserialize)]
+struct RawSong {
+    id: String,
+    title: Option<String>,
+    artist: Option<String>,
+    duration: Option<f64>,
+    track: Option<i64>,
+    #[serde(rename = "discNumber")]
+    disc_number: Option<i64>,
+    year: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -460,18 +657,7 @@ fn parse_response(body: &[u8]) -> Result<Response, Error> {
     let text = std::str::from_utf8(body).map_err(|_| too_old())?;
     let envelope: Envelope = miniserde::json::from_str(text).map_err(|_| too_old())?;
     let raw = envelope.response;
-    if raw.status != "ok" {
-        let (code, message) = match raw.error {
-            Some(error) => (
-                error.code,
-                error
-                    .message
-                    .unwrap_or_else(|| "the answer said failed without a message".to_owned()),
-            ),
-            None => (0, "the answer said failed without an error".to_owned()),
-        };
-        return Err(Error::Server { code, message });
-    }
+    require_ok(&raw.status, raw.error)?;
     Ok(Response {
         status: raw.status,
         version: raw.version,
@@ -485,6 +671,38 @@ fn parse_response(body: &[u8]) -> Result<Response, Error> {
             .map(|extension| extension.name)
             .collect(),
     })
+}
+
+/// Parses one `subsonic-response` body carrying an endpoint payload: same
+/// too-old rule as [`parse_response`], same failed-envelope mapping.
+fn json_envelope<T: Deserialize>(body: &[u8]) -> Result<T, Error> {
+    let too_old = || Error::TooOld {
+        detail: format!(
+            "the answer was {} bytes, not JSON: {}",
+            body.len(),
+            String::from_utf8_lossy(&body[..body.len().min(120)])
+        ),
+    };
+    let text = std::str::from_utf8(body).map_err(|_| too_old())?;
+    let envelope: T = miniserde::json::from_str(text).map_err(|_| too_old())?;
+    Ok(envelope)
+}
+
+/// Refuses a `failed` envelope with the server's own code and message.
+fn require_ok(status: &str, error: Option<RawError>) -> Result<(), Error> {
+    if status == "ok" {
+        return Ok(());
+    }
+    let (code, message) = match error {
+        Some(error) => (
+            error.code,
+            error
+                .message
+                .unwrap_or_else(|| "the answer said failed without a message".to_owned()),
+        ),
+        None => (0, "the answer said failed without an error".to_owned()),
+    };
+    Err(Error::Server { code, message })
 }
 
 /// One advertised `OpenSubsonic` extension: only the name matters here.

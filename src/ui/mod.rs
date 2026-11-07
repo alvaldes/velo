@@ -46,6 +46,11 @@ use self::artwork::{Artwork, Picker, StatefulImage, StatefulProtocol};
 use self::search::Search;
 use self::theme::Theme;
 
+/// What the interface says when a remote row is asked to play, until the
+/// cache brings playback (T12c). It starts nothing and never opens a
+/// remote row's `subsonic://…` path as if it were a file.
+pub const REMOTE_PLAYBACK_MESSAGE: &str = "velo: remote playback arrives with the cache (T12c)";
+
 /// What one key press asks the runtime to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -2993,6 +2998,16 @@ impl<'lib> App<'lib> {
     /// every result from that one to the end. The search closes, so the
     /// interface returns to exactly where it was.
     fn play_search_from(&mut self, from: usize) {
+        // The same refusal as the library views (T12c brings the cache).
+        if self
+            .search_results
+            .get(from)
+            .and_then(|&index| self.search_pool.get(index))
+            .is_some_and(TrackEntry::is_remote)
+        {
+            self.note(REMOTE_PLAYBACK_MESSAGE);
+            return;
+        }
         let paths: Vec<PathBuf> = self
             .search_results
             .get(from..)
@@ -3168,11 +3183,18 @@ impl<'lib> App<'lib> {
     /// playing. A track appends itself; an album appends its tracks.
     fn append_selection(&mut self) {
         let paths: Vec<PathBuf> = match (&self.position, self.view) {
-            (Position::Tracks { .. } | Position::AllTracks | Position::Genre { .. }, _) => self
-                .tracks
-                .get(self.selected)
-                .map(|entry| vec![entry.path.clone()])
-                .unwrap_or_default(),
+            (Position::Tracks { .. } | Position::AllTracks | Position::Genre { .. }, _) => {
+                match self.tracks.get(self.selected) {
+                    // A remote row cannot join the queue yet (T12c): the
+                    // same sentence as Enter, and nothing appended.
+                    Some(entry) if entry.is_remote() => {
+                        self.note(REMOTE_PLAYBACK_MESSAGE);
+                        return;
+                    }
+                    Some(entry) => vec![entry.path.clone()],
+                    None => return,
+                }
+            }
             (Position::Files, _) => self
                 .argv
                 .get(self.selected)
@@ -3362,6 +3384,12 @@ impl<'lib> App<'lib> {
     /// selection onwards; a track that cannot play is reported in the status
     /// line instead of exiting.
     fn play_from(&mut self, from: usize) {
+        // A remote row has no file to open yet (T12c): Enter says so and
+        // starts nothing instead of trying to play a URL as a path.
+        if self.tracks.get(from).is_some_and(TrackEntry::is_remote) {
+            self.note(REMOTE_PLAYBACK_MESSAGE);
+            return;
+        }
         let paths = self.playlist_from(from);
         if paths.is_empty() {
             return;
@@ -4263,6 +4291,8 @@ mod tests {
             disc_no: None,
             duration_ms: 1000,
             path: PathBuf::from("/music/Tide/01.flac"),
+            source: crate::library::LOCAL_SOURCE.to_owned(),
+            remote_id: None,
         }];
 
         assert_eq!(
