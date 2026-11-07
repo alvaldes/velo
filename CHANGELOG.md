@@ -1,6 +1,13 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.8.0] - 2026-11-07
+
+### Features
+- **ui:** The help scrolls with j/k and filters with /
+
+### Fixes
+- **ui:** An open search follows the index, u says why it cannot refresh, and a reload reads one snapshot
 ## [0.7.0] - 2026-11-07
 
 ### Features
