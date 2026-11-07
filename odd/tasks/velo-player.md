@@ -65,7 +65,10 @@ Root folder: `/Users/alvaldes/Music/Library` (L15). Metadata comes from tags fir
 | T9 | clap CLI, config TOML, `--help` | S12, S13 | inline | `6b7f180` |
 | T10 | README, install path (brew / cargo-binstall), release workflow | S3 | inline | `5c28143` |
 | T11 | ReplayGain read + apply in the audio path | S15 | inline | `c8a418c` |
-| T12 | Subsonic/Navidrome backend | S14 | inline | — |
+| T12a | Subsonic client and authentication: JSON, token or API key, error sentences, `--subsonic-test` | S14 | worker (clone) | `f6f7ec7` |
+| T12b | Sync the remote library into the index as rows with a `source` column; search over them | S14 | pending | — |
+| T12c | Cache-on-play: fetch the original bytes with `format=raw`, then play locally (keeps seek, gapless, bit-perfect) | S14 | pending | — |
+| T12d | Remote cover art via `getCoverArt` and scrobbling on track change | S14 | pending | — |
 | T13 | ReplayGain tag writer | S15 | inline | — |
 | T14 | Opus decode via a bundled `libopus` (`audiopus_sys`), keeping the single-binary promise | S5 | inline | — |
 | T15 | Evaluate the symphonia 0.6 API (`codecs::audio::AudioDecoder`, generic buffers) and migrate behind the existing tests | S5, S7 | inline | — |
@@ -278,3 +281,22 @@ The proof that matters is equality: a 48 kHz fixture drained with the stream ope
 **Two things owed before this is real**: the merge into `main`, blocked because the main checkout currently has uncommitted work in `src/ui/mod.rs` — the same file T17 touches — so merging over it would either lose that work or entangle two changes; and the audible check of the rate-boundary gap and the first buffer's fade-in, which no test can hear.
 
 **Tooling note for a future session**: this session could not delegate into a Git worktree — `subagent_run` and `session_worktree_register` both refuse one ("select an existing worktree in the same Git clone") for a nested path and for a sibling path alike. An **independent clone** is the supported route (`repository_root`, with consent), and it is also the cleanest: `git fetch ../velo-clone work/next` merges it back without pretending to be a worktree.
+
+**L36 — the four decisions that bind the Subsonic feature** (the human approved these defaults; recorded here so no future session reopens them):
+
+1. **Playback is cache-on-play.** The original bytes are fetched once with `stream` and `format=raw` — Navidrome returns the original whenever no transcoding profile applies — into `~/.cache/velo/subsonic/<id>`, then played from disk. This keeps seek, gapless, bit-perfect and ReplayGain-from-tags working with **no change to the audio path**. Streaming with HTTP ranges is a later optimisation, not a correctness question: a 1–3 s first play on a LAN is a fair price for not touching the engine.
+2. **Authentication prefers an API key**, and falls back to token+salt (`t = md5(password + salt)`, fresh salt per request). The token cannot be stored — it depends on the salt — so the password must be. Secret resolution order: `[subsonic] api_key` in the config, then `$VELO_SUBSONIC_SECRET`, then a one-line `subsonic.key` file with mode 0600; a group- or world-readable file earns a warning naming the path and the mode. The keyring is a later, explicit task, not a promise.
+3. **JSON only** (`f=json`). A server that answers XML is reported as too old to speak JSON; parsing XML for servers nobody runs is cost without a user. OpenSubsonic extensions are detected, never assumed: they decide whether API keys and ReplayGain are available.
+4. **One index, one search.** Remote tracks become rows in the existing SQLite index with a `source` column (`local` or `subsonic:<id>`) and a stable `remote_id`. That is what lets the fuzzy search, the genre views, the queue and `a` work on remote rows without a second code path. Syncing is explicit (`--sync`, or on open after N hours), never on every start.
+
+**Debt taken deliberately in T12a**: JSON is parsed with `miniserde` instead of `serde_json`, because serde_json's `PartialEq<Value>` makes an existing assertion in `tests/search.rs` ambiguous (`assert_eq!(hits, [])`) and that file was outside the task's surfaces. Migrating to `serde_json` means fixing that assertion first; until then, know that `#[serde(rename = ...)]` is spelled like serde here but is not serde.
+
+**A lesson this entry cost me, so it is written where it will be read**: writing this file with a *quoted* heredoc is mandatory. An unquoted `<<PY` let the shell execute every backticked word in the prose — it ran `stream` (which printed two hundred lines of ImageMagick help into the document) and substituted the rest with emptiness, destroying the section it was supposed to record. The repair was an amend, but the general rule is the one that matters: **when a script writes Markdown containing code spans, the heredoc must not be expandable.**
+
+**L37 — delivery plan for branch `work/next`** (2912 authored lines, two features, four commits). The slice rule exists to protect a reviewer, and the branch now carries two unrelated units: bit-perfect (T17) and the Subsonic client (T12a). They land as **two separate merges**, in that order, each with `--no-ff`, so either can be reverted on its own and a reviewer can read one idea per merge:
+
+1. `git fetch ../velo-clone work/next` then merge `f6f7ec7^..1ee0156` — no: merge by taking the two commits of T17 together (`6771fcc` and its docs `1ee0156`).
+2. Only then merge `f6f7ec7` and `db92eaa` for T12a.
+
+Both wait for the main checkout to have no uncommitted work in `src/ui/mod.rs`. Merging features onto someone else's uncommitted edits is how a branch loses a day.
+
