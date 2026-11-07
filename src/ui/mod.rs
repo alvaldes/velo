@@ -20,7 +20,7 @@ pub use ratatui;
 pub use ratatui::crossterm;
 
 use std::cell::RefCell;
-use std::fmt::Write as _;
+
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -625,8 +625,13 @@ impl<'lib> App<'lib> {
                     ..content
                 }
             });
-        let [header, body] =
-            Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(content);
+        let [now, header, body] = Layout::vertical([
+            Constraint::Length(now_playing_rows(content.height)),
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ])
+        .areas(content);
+        self.draw_now_playing(frame, now);
         self.draw_header(frame, header);
         self.draw_body(frame, body);
         self.draw_footer(frame, footer);
@@ -680,10 +685,163 @@ impl<'lib> App<'lib> {
         );
     }
 
+    /// The track that is playing, as large as the window allows: the full
+    /// block on a tall window, three rows on a short one, one row on a tiny
+    /// one — the list below keeps its rows before the block keeps its air.
+    fn draw_now_playing(&self, frame: &mut Frame, area: Rect) {
+        let (title, subtitle) = self.playing_path().map_or_else(
+            || {
+                (
+                    "nothing playing".to_owned(),
+                    "enter plays the selection".to_owned(),
+                )
+            },
+            |path| describe(path, self.tracks.iter().chain(&self.search_pool)),
+        );
+        let title = Line::from(vec![
+            Span::styled("♫ ", Style::new().fg(ACCENT)),
+            Span::styled(title, Style::new().fg(TEXT).bold()),
+        ]);
+        let volume = self.player.as_ref().map_or(self.volume, Player::volume);
+
+        match area.height {
+            0 => {}
+            1 => {
+                let pill = self.state_pill();
+                let right = vec![pill, Span::raw("  ")]
+                    .into_iter()
+                    .chain(volume_slider(volume, 0))
+                    .collect::<Vec<_>>();
+                split_row(frame, area, title, Line::from(right));
+            }
+            2..=6 => {
+                let [top, middle, bottom] = rows3(area);
+                let mut title = title;
+                title
+                    .spans
+                    .push(Span::styled(format!("  {subtitle}"), Style::new().fg(DIM)));
+                split_row(frame, top, title, Line::from(self.state_pill()));
+                self.draw_clock_and_progress(frame, middle);
+                self.draw_transport(frame, bottom, volume);
+            }
+            _ => {
+                let [
+                    title_row,
+                    subtitle_row,
+                    _,
+                    clock_row,
+                    progress_row,
+                    transport_row,
+                    _,
+                ] = Layout::vertical([Constraint::Length(1); 7]).areas(area);
+                frame.render_widget(Paragraph::new(title), title_row);
+                frame.render_widget(
+                    Paragraph::new(Line::styled(subtitle, Style::new().fg(DIM))),
+                    subtitle_row,
+                );
+                let mut clock = self.clock_spans();
+                clock.push(Span::raw("  "));
+                clock.push(self.state_pill());
+                let position = self.player.as_ref().map(|player| {
+                    format!(
+                        "track {} of {}",
+                        player.current_index() + 1,
+                        self.queue.len()
+                    )
+                });
+                split_row(
+                    frame,
+                    clock_row,
+                    Line::from(clock),
+                    Line::styled(position.unwrap_or_default(), Style::new().fg(DIM)),
+                );
+                frame.render_widget(
+                    Paragraph::new(Line::from(progress_bar(
+                        self.progress(),
+                        progress_row.width,
+                    ))),
+                    progress_row,
+                );
+                self.draw_transport(frame, transport_row, volume);
+            }
+        }
+    }
+
+    /// `01:23 / 04:56` and the bar after it, on one row of the compact block.
+    fn draw_clock_and_progress(&self, frame: &mut Frame, area: Rect) {
+        let mut spans = self.clock_spans();
+        let used = Line::from(spans.clone()).width();
+        let room = usize::from(area.width).saturating_sub(used + 2);
+        spans.push(Span::raw("  "));
+        spans.extend(progress_bar(
+            self.progress(),
+            u16::try_from(room).unwrap_or(0),
+        ));
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    }
+
+    /// The buttons on the left, the volume slider on the right.
+    fn draw_transport(&self, frame: &mut Frame, area: Rect, volume: u8) {
+        let button = Style::new().bg(SURFACE).fg(SECONDARY);
+        let primary = if self.state == PlayState::Playing {
+            " ❚❚ pause "
+        } else {
+            " ▶ play "
+        };
+        let buttons = Line::from(vec![
+            Span::styled(" ◂◂ ", button),
+            Span::raw(" "),
+            Span::styled(primary, Style::new().bg(ACCENT).fg(BACKGROUND).bold()),
+            Span::raw(" "),
+            Span::styled(" ▸▸ ", button),
+        ]);
+        split_row(
+            frame,
+            area,
+            buttons,
+            Line::from(volume_slider(volume, VOLUME_CELLS)),
+        );
+    }
+
+    /// The position, and the length when it is known; a dim placeholder
+    /// when nothing plays.
+    fn clock_spans(&self) -> Vec<Span<'static>> {
+        let Some(player) = &self.player else {
+            return vec![Span::styled("--:--", Style::new().fg(DIM))];
+        };
+        let mut clock = mmss(player.position());
+        if let Some(total) = self.current_track_duration() {
+            clock.push_str(" / ");
+            clock.push_str(&mmss(total));
+        }
+        vec![Span::styled(clock, Style::new().fg(ACCENT))]
+    }
+
+    /// How far into the track playback is, `0.0..=1.0`; `None` when nothing
+    /// plays or the length is unknown, so the bar never claims a fraction.
+    fn progress(&self) -> Option<f64> {
+        let position = self.player.as_ref()?.position();
+        let total = self.current_track_duration()?;
+        if total.is_zero() {
+            return None;
+        }
+        Some((position.as_secs_f64() / total.as_secs_f64()).clamp(0.0, 1.0))
+    }
+
+    /// The play state as a pill: `▶ playing` in the accent, the others dim.
+    fn state_pill(&self) -> Span<'static> {
+        let (glyph, color) = match self.state {
+            PlayState::Playing => ("▶", ACCENT),
+            PlayState::Paused => ("❚❚", SECONDARY),
+            PlayState::Stopped => ("■", DIM),
+        };
+        Span::styled(
+            format!(" {glyph} {} ", self.state.label()),
+            Style::new().bg(SURFACE).fg(color),
+        )
+    }
+
     fn draw_header(&self, frame: &mut Frame, area: Rect) {
-        let state = self.state.label();
-        let [left, right] =
-            Layout::horizontal([Constraint::Min(0), Constraint::Length(10)]).areas(area);
         let mut spans = vec![Span::styled("velo", Style::new().fg(ACCENT).bold())];
         match &self.position {
             Position::Files => {
@@ -720,11 +878,7 @@ impl<'lib> App<'lib> {
                 ));
             }
         }
-        frame.render_widget(Paragraph::new(Line::from(spans)), left);
-        frame.render_widget(
-            Paragraph::new(Span::styled(state, Style::new().fg(DIM))).alignment(Alignment::Right),
-            right,
-        );
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 
     fn draw_body(&self, frame: &mut Frame, area: Rect) {
@@ -906,7 +1060,8 @@ impl<'lib> App<'lib> {
             // they are typing while the body lists the results.
             Line::styled(format!("/{}", self.search_query()), Style::new().fg(ACCENT))
         } else if self.status.is_empty() {
-            Line::styled(self.transport_line(), Style::new().fg(ACCENT))
+            // The clock and the volume live in the now-playing block.
+            Line::default()
         } else {
             Line::styled(self.status.clone(), Style::new().fg(ACCENT))
         };
@@ -982,29 +1137,6 @@ impl<'lib> App<'lib> {
         self.queue
             .get(player.current_index())
             .map(std::path::PathBuf::as_path)
-    }
-
-    /// The transport line: `mm:ss / mm:ss` when the track's length is known,
-    /// then the volume percentage.
-    fn transport_line(&self) -> String {
-        let mut line = String::new();
-        if self.player.is_some() {
-            let position = self
-                .player
-                .as_ref()
-                .map_or(Duration::ZERO, Player::position);
-            line.push_str(&mmss(position));
-            if let Some(total) = self.current_track_duration() {
-                line.push_str(" / ");
-                line.push_str(&mmss(total));
-            }
-            line.push_str("  ");
-        }
-        // Once a player exists it owns the level: showing a mirrored copy is
-        // exactly how a rebuild's default volume went unnoticed and unheard.
-        let volume = self.player.as_ref().map_or(self.volume, Player::volume);
-        let _ = write!(line, "vol {volume}%");
-        line
     }
 
     /// The length of the track that is playing: from the interface's own track
@@ -1673,6 +1805,94 @@ fn hint_line(hints: &[(&str, &str)], width: u16) -> Line<'static> {
     Line::from(spans)
 }
 
+/// How many rows the now-playing block takes out of a content area this tall.
+/// The list below always keeps rows of its own: the block is seven rows only
+/// when twelve are left over, three on a short window, one on a tiny one.
+const fn now_playing_rows(height: u16) -> u16 {
+    match height {
+        18.. => 7,
+        7.. => 3,
+        _ => 1,
+    }
+}
+
+/// The title and the dim subtitle of a playing file: its library row when
+/// one of `known` has its path (`artist · album`), otherwise its file name
+/// over its folder. Nothing is invented for a file the index never saw.
+fn describe<'a>(path: &Path, known: impl IntoIterator<Item = &'a TrackEntry>) -> (String, String) {
+    if let Some(entry) = known.into_iter().find(|entry| entry.path == path) {
+        return (
+            entry.title.clone(),
+            format!("{} · {}", entry.artist, entry.album),
+        );
+    }
+    let name = path.file_name().map_or_else(
+        || path.display().to_string(),
+        |name| name.to_string_lossy().to_string(),
+    );
+    let folder = path
+        .parent()
+        .map(|parent| parent.display().to_string())
+        .unwrap_or_default();
+    (name, folder)
+}
+
+/// The width of the volume slider's track, in cells.
+const VOLUME_CELLS: u16 = 12;
+
+/// `VOL ━━━━━━●───── 90`: the filled part in the accent, the knob, the rest
+/// in the border color, then the number. With no cells it is `VOL 90`.
+fn volume_slider(volume: u8, cells: u16) -> Vec<Span<'static>> {
+    let mut spans = vec![Span::styled("VOL ", Style::new().fg(DIM))];
+    if cells > 0 {
+        let cells = usize::from(cells);
+        let knob = usize::from(volume.min(100)) * (cells - 1) / 100;
+        spans.push(Span::styled("━".repeat(knob), Style::new().fg(ACCENT)));
+        spans.push(Span::styled("●", Style::new().fg(TEXT)));
+        spans.push(Span::styled(
+            "─".repeat(cells - 1 - knob),
+            Style::new().fg(BORDER),
+        ));
+        spans.push(Span::raw(" "));
+    }
+    spans.push(Span::styled(format!("{volume}"), Style::new().fg(TEXT)));
+    spans
+}
+
+/// A bar `width` cells wide, filled to `ratio` in the accent; with no ratio
+/// (nothing plays, or the length is unknown) the whole bar is unfilled.
+fn progress_bar(ratio: Option<f64>, width: u16) -> Vec<Span<'static>> {
+    let width = usize::from(width);
+    // Rounded down, so a bar is never shown full before the track ends.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
+    let filled = ratio
+        .map_or(0, |ratio| (ratio * width as f64) as usize)
+        .min(width);
+    vec![
+        Span::styled("━".repeat(filled), Style::new().fg(ACCENT)),
+        Span::styled("─".repeat(width - filled), Style::new().fg(BORDER)),
+    ]
+}
+
+/// One row with `left` against the left edge and `right` against the right;
+/// the right side is measured first so a long left side is the one cut.
+fn split_row(frame: &mut Frame, area: Rect, left: Line<'static>, right: Line<'static>) {
+    let right_width = u16::try_from(right.width()).unwrap_or(area.width);
+    let [left_area, right_area] =
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(right_width)]).areas(area);
+    frame.render_widget(Paragraph::new(left), left_area);
+    frame.render_widget(Paragraph::new(right), right_area);
+}
+
+/// Three one-row areas from the top of `area`.
+fn rows3(area: Rect) -> [Rect; 3] {
+    Layout::vertical([Constraint::Length(1); 3]).areas(area)
+}
+
 /// The name in the title bar, spaced out the way a wordmark is set.
 const WORDMARK: &str = "V E L O ";
 
@@ -1712,6 +1932,40 @@ mod tests {
     // `move_in_queue` both read, so it is pinned here, and the wiring from
     // `on_key` into `App::status` is pinned headlessly in `tests/ui_state.rs`
     // through the empty-queue refusal, which walks the same code path.
+
+    #[test]
+    fn a_playing_file_is_named_by_its_library_row_or_else_by_its_file() {
+        use std::path::{Path, PathBuf};
+
+        let known = [crate::library::TrackEntry {
+            artist: "Tide".to_owned(),
+            album: "Harbor".to_owned(),
+            title: "Dawn".to_owned(),
+            track_no: Some(1),
+            disc_no: None,
+            duration_ms: 1000,
+            path: PathBuf::from("/music/Tide/01.flac"),
+        }];
+
+        assert_eq!(
+            super::describe(Path::new("/music/Tide/01.flac"), &known),
+            ("Dawn".to_owned(), "Tide · Harbor".to_owned())
+        );
+        assert_eq!(
+            super::describe(Path::new("/elsewhere/two.flac"), &known),
+            ("two.flac".to_owned(), "/elsewhere".to_owned()),
+            "a file the index never saw keeps its own name, nothing invented"
+        );
+    }
+
+    #[test]
+    fn the_progress_bar_is_never_full_before_the_end_and_empty_without_a_length() {
+        let filled = |ratio, width| super::progress_bar(ratio, width)[0].content.chars().count();
+        assert_eq!(filled(Some(0.999), 10), 9);
+        assert_eq!(filled(Some(1.0), 10), 10);
+        assert_eq!(filled(Some(0.5), 10), 5);
+        assert_eq!(filled(None, 10), 0);
+    }
 
     #[test]
     fn hints_that_do_not_fit_lose_the_middle_and_keep_help_and_quit() {

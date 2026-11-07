@@ -97,13 +97,13 @@ fn the_help_overlay_lists_the_keys_and_covers_the_list() {
 }
 
 #[test]
-fn the_footer_shows_the_volume_and_the_help_lists_the_seek_keys() {
+fn the_volume_slider_shows_the_volume_and_the_help_lists_the_seek_keys() {
     let app = App::new(tracks(&["one.flac"]));
     let screen = render(&app);
 
     assert!(
-        screen.contains("vol 100%"),
-        "the footer shows the volume percentage, got: {screen}"
+        screen.contains("VOL") && screen.contains("● 100"),
+        "the slider shows the volume with its knob and number, got: {screen}"
     );
 
     let mut app = App::new(tracks(&["one.flac"]));
@@ -159,6 +159,71 @@ fn the_title_bar_lights_the_view_that_tab_switches_to() {
     press(&mut app, KeyCode::Tab);
     assert_eq!(cell_at(&app, library_x, 1).fg, DIM);
     assert_eq!(cell_at(&app, queue_x, 1).fg, ACCENT);
+}
+
+// ---- the now-playing block (ui-redesign T2, S1, S4) ------------------------
+
+#[test]
+fn the_now_playing_block_says_nothing_plays_and_shows_the_state_and_transport() {
+    let app = App::new(tracks(&["one.flac", "two.flac"]));
+    let screen = screen_at(&app, 80, 24);
+
+    for expected in [
+        "♫ nothing playing",
+        "■ stopped",
+        "◂◂",
+        "▶ play",
+        "▸▸",
+        "VOL",
+    ] {
+        assert!(
+            screen.contains(expected),
+            "the block shows {expected:?}, got:\n{screen}"
+        );
+    }
+    assert!(
+        !screen.contains("❚❚ pause"),
+        "nothing is playing, so the primary button does not offer a pause"
+    );
+}
+
+#[test]
+fn the_volume_slider_follows_the_volume_keys() {
+    let mut app = App::new(tracks(&["one.flac"]));
+    press(&mut app, KeyCode::Char('-'));
+    let screen = screen_at(&app, 80, 24);
+    let slider = screen
+        .lines()
+        .find(|line| line.contains("VOL"))
+        .expect("a volume row");
+
+    assert!(
+        slider.contains("●─ 95") && !slider.contains("100"),
+        "one step down moves the knob off the end and the number to 95, got: {slider}"
+    );
+}
+
+#[test]
+fn a_short_terminal_shrinks_the_block_before_the_list_disappears() {
+    let app = App::new(tracks(&["one.flac", "two.flac", "three.flac"]));
+
+    // 12 rows: the compact block leaves the list two of its rows.
+    let short = screen_at(&app, 90, 12);
+    for expected in ["one.flac", "two.flac", "■ stopped", "VOL"] {
+        assert!(
+            short.contains(expected),
+            "a 90×12 window still shows {expected:?}, got:\n{short}"
+        );
+    }
+
+    // 8 rows: one line of block, and the first track is still there.
+    let tiny = screen_at(&app, 60, 8);
+    for expected in ["one.flac", "stopped"] {
+        assert!(
+            tiny.contains(expected),
+            "a 60×8 window still shows {expected:?}, got:\n{tiny}"
+        );
+    }
 }
 
 // ---- browsing the library (T5) ------------------------------------------
@@ -320,11 +385,19 @@ fn the_queue_view_draws_the_queued_file_names_and_empty_state() {
 /// The interface's whole 80×24 screen with no image protocol. Cover art may
 /// not move a single cell of it: no protocol is ever attached to a
 /// [`TestBackend`]-backed app. Re-recorded on purpose whenever the design
-/// changes (ui-redesign T1: the window frame, the title bar, the key hints).
+/// changes (ui-redesign T1: the window frame, the title bar, the key hints;
+/// T2: the now-playing block).
 const SCREEN_WITHOUT_COVER_ART: &str = concat!(
     "╭──────────────────────────────────────────────────────────────────────────────╮\n",
     "│ library  queue                                                       V E L O │\n",
-    "│ velo  3 tracks                                                       stopped │\n",
+    "│ ♫ nothing playing                                                            │\n",
+    "│ enter plays the selection                                                    │\n",
+    "│                                                                              │\n",
+    "│ --:--   ■ stopped                                                            │\n",
+    "│ ──────────────────────────────────────────────────────────────────────────── │\n",
+    "│  ◂◂   ▶ play   ▸▸                                       VOL ━━━━━━━━━━━● 100 │\n",
+    "│                                                                              │\n",
+    "│ velo  3 tracks                                                               │\n",
     "│   one.flac  /music                                                           │\n",
     "│   two.flac  /music                                                           │\n",
     "│   three.flac  /music                                                         │\n",
@@ -337,13 +410,6 @@ const SCREEN_WITHOUT_COVER_ART: &str = concat!(
     "│                                                                              │\n",
     "│                                                                              │\n",
     "│                                                                              │\n",
-    "│                                                                              │\n",
-    "│                                                                              │\n",
-    "│                                                                              │\n",
-    "│                                                                              │\n",
-    "│                                                                              │\n",
-    "│                                                                              │\n",
-    "│ vol 100%                                                                     │\n",
     "│ j/k move  enter play  space pause  ←/→ seek  / search  ? help  q quit        │\n",
     "╰──────────────────────────────────────────────────────────────────────────────╯",
 );
