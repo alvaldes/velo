@@ -63,7 +63,7 @@ Root folder: `/Users/alvaldes/Music/Library` (L15). Metadata comes from tags fir
 | T7 | Fuzzy search with nucleo | S9 | inline | `2282892` |
 | T8 | Cover art with ratatui-image | S10 | inline | `feb8a43` |
 | T9 | clap CLI, config TOML, `--help` | S12, S13 | inline | `6b7f180` |
-| T10 | README, install path (brew / cargo-binstall), release workflow | S3 | inline | — |
+| T10 | README, install path (brew / cargo-binstall), release workflow | S3 | inline | `5c28143` |
 | T11 | ReplayGain read + apply in the audio path | S15 | inline | — |
 | T12 | Subsonic/Navidrome backend | S14 | inline | — |
 | T13 | ReplayGain tag writer | S15 | inline | — |
@@ -234,3 +234,13 @@ The config is deliberately small and strict: `library`, `volume`, `bit_perfect`;
 One defect the red-first tests earned, worth keeping: the first version reported **line 3 for an error on line 2**, because it counted lines in the byte prefix of the span rather than counting newlines. A message that points at the wrong line is worse than no line at all — it teaches the user to distrust the error.
 
 The default config path is resolved by a function that **takes the two environment values as arguments**, so the resolution is testable without setting a variable. Edition 2024 made `set_var` unsafe and this repo forbids it in tests; the design that falls out of that constraint is simply better, because the test names the case it exercises instead of mutating global state and hoping.
+
+**L31** (T10 closed in `5c28143`): the project is installable by a stranger — README for somebody who has never seen it, crate metadata that makes `cargo install` and crates.io both coherent, an MIT license, publishing excludes for `.mise.toml`, `odd/` and `design/`, CI on Linux and macOS, and a release workflow for four targets on a `v*` tag.
+
+Three things worth keeping from this one:
+
+1. **A clean lockfile says nothing about a fresh resolution.** `cargo install --path .` failed with a trait mismatch because the resolver gave ratatui-image its own newest ratatui (0.30) while velo kept 0.29 — the suite was green the whole time, because the lockfile pinned the working pair. Publishing is the one act that ignores your lockfile, so **the install is the test**, and it has to be run, not reasoned about. Pinning the graph so both edges unify (ratatui 0.28, ratatui-image 2) is what makes a published install reproduce; `cargo tree -i ratatui` now shows one version.
+2. **A CLI about to be published needs `--version`.** It was missing, and only the install check surfaced it. One attribute, found by using the artifact instead of reading it.
+3. **CI is not green: it has never run.** The workflows parse, and saying more than that would be a lie. They become true the first time a human pushes and tags — which is a decision that belongs to the repository's owner, not to this agent.
+
+Scratch left outside the worktree by the delegation: `/tmp/velo-install` and `/tmp/velo-install-2` (install roots, disposable) plus a handful of `mktemp` directories; nothing in the repository.
