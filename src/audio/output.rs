@@ -178,6 +178,9 @@ impl Player {
         let offset_frames = duration_to_frames(offset, spec.sample_rate);
 
         let (device, config, spec) = open_output(spec)?;
+        // `offset_frames` is in the track's own frames, which is what the decoder
+        // needs; the clock below counts in output frames, so it needs its own.
+        let clock_offset_frames = duration_to_frames(offset, spec.sample_rate);
 
         let (ring, consumer) = RingBuffer::<f32>::new(spec.interleaved_rate() * RING_SECONDS);
 
@@ -237,7 +240,7 @@ impl Player {
             current,
             track_starts,
             start_track: track_index,
-            start_offset_frames: usize::try_from(offset_frames).unwrap_or(usize::MAX),
+            start_offset_frames: usize::try_from(clock_offset_frames).unwrap_or(usize::MAX),
             producer: Some(producer),
         })
     }

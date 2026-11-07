@@ -228,3 +228,126 @@ fn the_seek_target_clamps_at_both_ends() {
         Duration::from_secs(5)
     );
 }
+
+/// A PCM16 WAV where every frame carries its own index as its sample value, so
+/// a decoded frame can be identified exactly.
+fn write_indexed_wav(path: &Path, frames: usize, spec: TrackSpec) -> Vec<i16> {
+    let bits: u16 = 16;
+    let block_align = spec.channels * bits / 8;
+    let data_len = u32::try_from(frames * usize::from(spec.channels) * 2).expect("fits");
+    let mut out = Vec::with_capacity(44 + data_len as usize);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36 + data_len).to_le_bytes());
+    out.extend_from_slice(b"WAVE");
+    out.extend_from_slice(b"fmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&spec.channels.to_le_bytes());
+    out.extend_from_slice(&spec.sample_rate.to_le_bytes());
+    out.extend_from_slice(&(spec.sample_rate * u32::from(block_align)).to_le_bytes());
+    out.extend_from_slice(&block_align.to_le_bytes());
+    out.extend_from_slice(&bits.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data_len.to_le_bytes());
+    let mut written = Vec::with_capacity(frames * usize::from(spec.channels));
+    for frame in 0..frames {
+        let value = i16::try_from(frame % 3_000).expect("small ramp") - 1_500;
+        for _ in 0..spec.channels {
+            out.extend_from_slice(&value.to_le_bytes());
+            written.push(value);
+        }
+    }
+    std::fs::write(path, out).expect("write wav");
+    written
+}
+
+fn sample_f32(sample: i16) -> f32 {
+    f32::from(sample) / 32_768.0
+}
+
+#[test]
+fn a_seek_starts_at_the_requested_frame_not_at_the_beginning() {
+    let spec = TrackSpec {
+        sample_rate: 44_100,
+        channels: 2,
+    };
+    let path = std::env::temp_dir().join(format!("velo-seek-{}.wav", std::process::id()));
+    let total = 4_410;
+    let offset: u64 = 1_000;
+    let offset_index = usize::try_from(offset).expect("fits");
+    let written = write_indexed_wav(&path, total, spec);
+
+    let mut source = TrackSource::open_at(&path, offset).expect("open at an offset");
+    let mut decoded = Vec::new();
+    while let Some(block) = source.read_block().expect("decodes") {
+        decoded.extend(block);
+    }
+    let _ = std::fs::remove_file(&path);
+
+    let channels = usize::from(spec.channels);
+    let first_expected = sample_f32(written[offset_index * channels]);
+    let first_got = decoded[0];
+    assert!(
+        (first_got - first_expected).abs() < 1e-5,
+        "the first sample after the seek must be frame {offset}'s ({first_expected}), got {first_got}"
+    );
+
+    let expected_len = (total - offset_index) * channels;
+    assert!(
+        decoded.len().abs_diff(expected_len) <= channels * 4,
+        "the tail must keep its length: expected {expected_len} samples, got {}",
+        decoded.len()
+    );
+}
+
+/// RMS of an interleaved mono stream.
+fn rms(samples: &[f32]) -> f32 {
+    let energy: f32 = samples.iter().map(|s| s * s).sum();
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a test window holds far fewer samples than f32 represents exactly"
+    )]
+    let count = samples.len() as f32;
+    (energy / count).sqrt()
+}
+
+fn decode_all(mut source: TrackSource) -> Vec<f32> {
+    let mut out = Vec::new();
+    while let Some(block) = source.read_block().expect("decodes") {
+        out.extend(block);
+    }
+    out
+}
+
+/// The library is MP3, so a seek that only works on WAV would pass every other
+/// test in this file and still fail the user. This fixture is one second of
+/// silence followed by one second of tone: after a seek past the halfway mark
+/// there must be sound, and from the start there must not.
+#[test]
+fn an_mp3_seek_lands_past_the_silence() {
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/silence-then-tone.mp3");
+
+    let from_start = decode_all(TrackSource::open(&path).expect("opens"));
+    let start_rms = rms(&from_start[..from_start.len() / 4]);
+
+    let halfway = 66_150; // 1.5 s at 44.1 kHz, inside the tone
+    let after_seek = decode_all(TrackSource::open_at(&path, halfway).expect("opens at offset"));
+    // An MP3 seek is frame-approximate: an MPEG frame is ~26 ms and the decoder
+    // needs its own warm-up, so the landing can be up to ~0.1 s early. Measure
+    // past that, which is the guarantee the format actually offers.
+    let warm_up = 8_820; // 0.2 s
+    let window = 4_410; // 0.1 s
+    let seek_rms = rms(&after_seek[warm_up..warm_up + window]);
+
+    assert!(
+        start_rms < 0.01,
+        "the fixture starts with silence, measured {start_rms}"
+    );
+    // The fixture's tone measures ~0.084 RMS (a 32 kbps mono encode of a pure
+    // sine), so the rule is "the tone, not silence", not a level guess.
+    assert!(
+        seek_rms > 0.05 && seek_rms > start_rms * 10.0,
+        "a seek past the silence must land on the tone: silence {start_rms}, after seek {seek_rms}"
+    );
+}

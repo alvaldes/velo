@@ -563,7 +563,10 @@ impl<'lib> App<'lib> {
             }
             line.push_str("  ");
         }
-        let _ = write!(line, "vol {}%", self.volume);
+        // Once a player exists it owns the level: showing a mirrored copy is
+        // exactly how a rebuild's default volume went unnoticed and unheard.
+        let volume = self.player.as_ref().map_or(self.volume, Player::volume);
+        let _ = write!(line, "vol {volume}%");
         line
     }
 
@@ -819,6 +822,9 @@ impl<'lib> App<'lib> {
         }
         match Player::play_gapless_at(self.queue.clone(), track, offset) {
             Ok(player) => {
+                // A rebuilt player starts at its own default level; without this
+                // a seek would silently jump the volume back to it.
+                player.set_volume(self.volume);
                 self.player = Some(player);
                 self.state = PlayState::Playing;
                 self.status.clear();
