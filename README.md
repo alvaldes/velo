@@ -130,7 +130,9 @@ naming the key; a bad value names the file and the line.
 - Cover art is drawn when the terminal speaks the kitty, sixel or iTerm2
   protocol and the window is at least 100×28. Without one of those protocols
   there is no art pane at all — the layout is unchanged, and the status line
-  says why a cover is hidden rather than faking one with half-blocks.
+  says why a cover is hidden rather than faking one with half-blocks. The
+  cover is the picture embedded in the track or, when it has none, a
+  `cover`, `folder` or `front` `.jpg`/`.png` in the track's folder.
 
 ## Exit codes
 
