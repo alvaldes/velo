@@ -61,7 +61,7 @@ Root folder: `/Users/alvaldes/Music/Library` (L15). Metadata comes from tags fir
 | T5 | Play from the library and manage the queue | S11 | inline (worker) | `b931250` |
 | T6 | Pause, seek, volume with fades | S8 | inline (worker) + fixes `9a8dff1`, `8139a22` | `8e2c4bc` |
 | T7 | Fuzzy search with nucleo | S9 | inline | `2282892` |
-| T8 | Cover art with ratatui-image | S10 | inline | — |
+| T8 | Cover art with ratatui-image | S10 | inline | `feb8a43` |
 | T9 | clap CLI, config TOML, `--help` | S12, S13 | inline | — |
 | T10 | README, install path (brew / cargo-binstall), release workflow | S3 | inline | — |
 | T11 | ReplayGain read + apply in the audio path | S15 | inline | — |
@@ -218,3 +218,11 @@ Two things worth keeping from how it was built. First, **the matcher is a pure s
 Verified on the real library, not on fixtures: typing `lofi` lists `Lo-Fi Scientists` — a query with no hyphen matching a title that has one, which is the whole point.
 
 The docs had drifted while the code moved: the README still called the library database and search "not yet", and `--help` still carried the pre-T7 key line without `tab`, `a`, `d`, `J`/`K` or `/`. Both now describe what the binary actually does. A help screen that lies about the keymap is worse than no help screen.
+
+**L29** (T8 closed in `feb8a43`): cover art is in and, more importantly, **nothing else moved**. The 80x24 screen is pinned by a golden test whose expected text was captured from the code *before* the change — that is what turns "the interface still looks the same" from a hope into a check. It earned its keep within the hour: when the footer hints changed, the golden failed and named the one line that differed, which is exactly the behaviour a preservation test should have.
+
+The art is honest or absent. Half-blocks are rejected rather than used to paint a mosaic that is not the cover, and no protocol, no picture, undecodable bytes, or a terminal under 100x28 all leave the frame untouched. Decoding happens once per track change, never per frame, and never in the audio callback.
+
+**A false alarm worth recording**, because it cost time and taught something: the terminal harness reported the app dying mid-playback with cover art in place. It was the harness — it sent `q` as a test key and then sent `q` again as its own way out, so the second write hit a closed pty. The app survived every resize I threw at it afterwards, including 20x60. The lesson is the same one this project keeps relearning from the other side: **when a test harness reports a crash, suspect the harness first, and prove the binary is alive with the smallest scenario that could be guilty** `(enter, wait, resize, read)` rather than the largest one.
+
+**Not verified, and it must be said plainly**: the art as rendered pixels in a real terminal. No Kitty, Sixel or iTerm2 terminal was available here, so the drawing path is covered only up to "a protocol was detected and the size rule allows a pane". That needs a human eye on a real terminal — the one kind of check this project cannot automate.
