@@ -59,7 +59,7 @@ Root folder: `/Users/alvaldes/Music/Library` (L15). Metadata comes from tags fir
 | T3 | ratatui skeleton: layout, keybindings, themes | S1, S13 | inline (worker) | `f8aee9f` |
 | T4 | Library scan: jwalk + lofty + rusqlite schema, artist/album/track browser | S6 | inline (worker) | `8b42092` |
 | T5 | Play from the library and manage the queue | S11 | inline (worker) | `b931250` |
-| T6 | Pause, seek, volume with fades | S8 | inline | — |
+| T6 | Pause, seek, volume with fades | S8 | inline (worker) | `8e2c4bc` |
 | T7 | Fuzzy search with nucleo | S9 | inline | — |
 | T8 | Cover art with ratatui-image | S10 | inline | — |
 | T9 | clap CLI, config TOML, `--help` | S12, S13 | inline | — |
@@ -142,3 +142,11 @@ Known limits recorded, not fixed: the queue-editing half of S11 is not implement
 **L19** (the `.mise.toml` block, resolved): the human confirmed authorship — verbatim *"si lo hice yo para probar la app"* — and asked that it not be committed: *"pero no lo comitees"*. Verified by running it in a real pty: `mise run dev` prints mise's own echo, then opens the interface in argv mode on the seven tracks of `Poldoore/2012 - Lush Life` (`velo  7 tracks … stopped … 01 - Lush Life.mp3`), and exits 0 on `q`. The task is correct as written: it validates the directory, collects the six formats with `fd`, keeps paths with spaces quoted, and `exec`s so no shell wrapper survives. L18 is resolved: the block is the human's, it works, and it stays out of the repository on their instruction. Every future commit must stage files explicitly so it is never swept in.
 
 **L20** (the two gaps, decided by the parent): the human's answer was *"no se que quieres que responda aqui"*, so the decision is mine and it is not theirs to make in the abstract. Both gaps are real and neither belongs inside T6: queue editing becomes **T18** and mid-queue failure reporting becomes **T19**, both after the transport. S11 stays open until T18 lands, and the silent-to-the-end failure is recorded as a known defect of the current player rather than as a limitation of the spec. No further question is needed for them.
+
+**L21** (T6 acceptance evidence): 46 tests green (42 integration plus 4 unit tests of the clock arithmetic), `cargo clippy --all-targets` 0 warnings, `cargo fmt --check` clean. The audio callback was inspected line by line: it locks nothing, allocates nothing, logs nothing — the `Mutex` the writer introduced is touched only by the producer thread and the UI.
+
+Parent review caught one real defect the worker's tests could not: after a seek the clock restarted at `00:00` mid-song, because `position()` subtracts where the track began but never adds the seek offset back. Fixed by extracting the arithmetic into a pure `elapsed_frames(played, track_start, track, seek_track, seek_offset)` with four unit tests, rather than leaving it untestable inside `Player::position`, which needs a device.
+
+**Verification technique worth keeping.** Twice I read a raw pty byte stream and concluded a defect that did not exist: the footer looked stuck at `vol 10%` and the clock looked frozen at `00:00`. Both were my mistake — ratatui writes only the bytes that changed, so a diff stream is not a screen. The fix is to force a full redraw by resizing the pty (`TIOCSWINSZ`), which makes ratatui repaint everything; that immediately showed `00:03 / 01:45` while playing and `00:05 / 01:45` after a 5 s seek. Never diagnose a TUI from a raw diff stream.
+
+Still only a human ear can confirm: that the fades are click-free at the device's real buffer size (the ramp math is pinned, the device is not), and that a seek sounds clean on MP3 and M4A (the tests pin WAV, sample-exact).
