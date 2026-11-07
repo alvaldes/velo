@@ -28,8 +28,13 @@ you actually drive, not a playlist viewer.
 While a track plays, the block on top names it — by its library tags, or by
 its file name when it was given on the command line — counts the
 clock against its length, fills the progress bar, and the primary button
-turns into `❚❚ pause`. On a short terminal the block shrinks to three rows,
-then to one, before the list gives up any of its own.
+turns into `❚❚ pause`. On a tall terminal a spectrum of the music sits
+between the clock and the progress bar. On a short terminal the block
+shrinks to three rows, then to one, before the list gives up any of its own.
+
+velo wears your terminal's colors: its background (translucency included)
+and text, and the ANSI palette for everything else — magenta for the
+accent, blue for keys and counts, bright black for what can be dimmed.
 
 ## Keys
 

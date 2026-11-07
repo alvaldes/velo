@@ -434,8 +434,8 @@ fn press(app: &mut App<'_>, code: KeyCode) {
 // ---- the lists (ui-redesign T3, S1, S3) ------------------------------------
 
 #[test]
-fn a_list_has_a_header_line_and_numbered_rows_on_a_quiet_selection() {
-    use velo::ui::theme::{ACCENT, SURFACE};
+fn a_list_has_a_header_line_and_numbered_rows_on_an_accent_selection() {
+    use velo::ui::ratatui::style::Color;
 
     let app = App::new(tracks(&["one.flac", "two.flac", "three.flac"]));
     let screen = screen_at(&app, 80, 24);
@@ -451,8 +451,30 @@ fn a_list_has_a_header_line_and_numbered_rows_on_a_quiet_selection() {
         .position(|line| line.contains("1. one.flac"))
         .expect("the first row");
     let selected = cell_at(&app, 10, u16::try_from(row).unwrap());
-    assert_eq!(selected.bg, SURFACE, "the selection is a raised row");
-    assert_ne!(selected.bg, ACCENT, "not a solid accent bar");
+    // ui-redesign T8: no ANSI color is a raised surface on every theme, so
+    // the selection is the terminal's accent with its darkest color on top.
+    assert_eq!(selected.bg, Color::Magenta, "the selection is the accent");
+    assert_eq!(selected.fg, Color::Black, "and its text the darkest color");
+}
+
+/// ui-redesign T8 (S5): the interface wears the terminal's own colors. It
+/// paints no background of its own, so a translucent terminal stays
+/// translucent, and every role is an ANSI palette entry the theme defines.
+#[test]
+fn the_interface_takes_its_colors_from_the_terminal_palette() {
+    use velo::ui::ratatui::style::Color;
+    use velo::ui::theme::{ACCENT, BORDER, DIM, SECONDARY, TEXT};
+
+    let app = App::new(tracks(&["one.flac"]));
+    let empty = cell_at(&app, 40, 15);
+    assert_eq!(empty.bg, Color::Reset, "the terminal's own background");
+
+    let palette = [ACCENT, SECONDARY, DIM, BORDER, TEXT];
+    assert!(
+        palette.iter().all(|color| !matches!(color, Color::Rgb(..))),
+        "no role is a fixed RGB color: {palette:?}"
+    );
+    assert_eq!(cell_at(&app, 0, 0).fg, BORDER, "the frame");
 }
 
 #[test]

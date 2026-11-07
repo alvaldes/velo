@@ -38,7 +38,7 @@ use crate::library::{AlbumEntry, ArtistEntry, Library, TrackEntry};
 
 use self::artwork::{Artwork, Picker, StatefulImage, StatefulProtocol};
 use self::search::Search;
-use self::theme::{ACCENT, BACKGROUND, BORDER, DIM, SECONDARY, SURFACE, TEXT};
+use self::theme::{ACCENT, BACKGROUND, BORDER, DIM, INK, SECONDARY, TEXT};
 
 /// What one key press asks the runtime to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -704,7 +704,7 @@ impl<'lib> App<'lib> {
     /// The title bar: the two views as tabs on the left, the one `tab`
     /// switches between, and the letter-spaced wordmark on the right.
     fn draw_title_bar(&self, frame: &mut Frame, area: Rect) {
-        frame.render_widget(Block::new().style(Style::new().bg(SURFACE)), area);
+        frame.render_widget(Block::new().style(Style::new().bg(BACKGROUND)), area);
         let tab = |label: &'static str, view: View| {
             if self.view == view {
                 Span::styled(label, Style::new().fg(ACCENT).bold())
@@ -838,7 +838,7 @@ impl<'lib> App<'lib> {
 
     /// The buttons on the left, the volume slider on the right.
     fn draw_transport(&self, frame: &mut Frame, area: Rect, volume: u8) {
-        let button = Style::new().bg(SURFACE).fg(SECONDARY);
+        let button = Style::new().fg(SECONDARY);
         let primary = if self.state == PlayState::Playing {
             " ❚❚ pause "
         } else {
@@ -847,7 +847,7 @@ impl<'lib> App<'lib> {
         let buttons = Line::from(vec![
             Span::styled(" ◂◂ ", button),
             Span::raw(" "),
-            Span::styled(primary, Style::new().bg(ACCENT).fg(BACKGROUND).bold()),
+            Span::styled(primary, Style::new().bg(ACCENT).fg(INK).bold()),
             Span::raw(" "),
             Span::styled(" ▸▸ ", button),
         ]);
@@ -906,7 +906,7 @@ impl<'lib> App<'lib> {
         };
         Span::styled(
             format!(" {glyph} {} ", self.state.label()),
-            Style::new().bg(SURFACE).fg(color),
+            Style::new().fg(color),
         )
     }
 
@@ -977,7 +977,7 @@ impl<'lib> App<'lib> {
         // stay dim and the playing row keeps its accent.
         let list = List::new(rows)
             .style(Style::new().bg(BACKGROUND))
-            .highlight_style(Style::new().bg(SURFACE));
+            .highlight_style(Style::new().bg(ACCENT).fg(INK));
         let mut state = ListState::default().with_selected(Some(selected));
         frame.render_stateful_widget(list, area, &mut state);
     }
@@ -1233,7 +1233,7 @@ impl<'lib> App<'lib> {
                     .border_style(Style::new().fg(ACCENT))
                     .title(Span::styled(" keys ", Style::new().fg(ACCENT).bold()))
                     .padding(ratatui::widgets::Padding::horizontal(1))
-                    .style(Style::new().bg(SURFACE)),
+                    .style(Style::new().bg(BACKGROUND)),
             ),
             box_area,
         );
@@ -1965,18 +1965,15 @@ fn spectrum_lines(levels: &[f32], rows: u16) -> Vec<Line<'static>> {
         .collect()
 }
 
-/// The bar color `from_bottom` rows up out of `rows`: a deep rose at the
-/// floor rising to the accent's lightest tint at the top.
-fn bar_color(from_bottom: usize, rows: usize) -> ratatui::style::Color {
-    let (low, high) = (theme::BAR_LOW, theme::BAR_HIGH);
-    let mix = |a: u8, b: u8| {
-        let span = rows.saturating_sub(1).max(1);
-        let a = usize::from(a);
-        let b = usize::from(b);
-        let value = (a * (span - from_bottom) + b * from_bottom) / span;
-        u8::try_from(value).unwrap_or(u8::MAX)
-    };
-    ratatui::style::Color::Rgb(mix(low.0, high.0), mix(low.1, high.1), mix(low.2, high.2))
+/// The bar color `from_bottom` rows up out of `rows`: the accent in the
+/// lower half, its bright twin above — the two-step gradient the terminal's
+/// own palette can give.
+const fn bar_color(from_bottom: usize, rows: usize) -> ratatui::style::Color {
+    if from_bottom * 2 >= rows {
+        theme::ACCENT_BRIGHT
+    } else {
+        ACCENT
+    }
 }
 
 /// The title and the dim subtitle of a playing file: its library row when
