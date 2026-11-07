@@ -1,6 +1,13 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.5.0] - 2026-11-07
+
+### Features
+- **config:** Write every default to config.toml and ask for the library in a prompt
+
+### Fixes
+- **config:** An empty library is no library, and the prompt saves a path that loads anywhere
 ## [0.4.1] - 2026-11-07
 
 ### Fixes
