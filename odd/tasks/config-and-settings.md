@@ -67,7 +67,7 @@ Rows, in order: `sound` — volume, replay gain, repeat, shuffle; `screen` — a
 
 | ID | Task | Specs | Route | Commit |
 |----|------|-------|-------|--------|
-| T1 | The reader: `[state]`, `[theme]`, `[ui]` — types, defaults, validation, legacy top-level `volume`, `Settings` carrying all of it, `default_config_text` | S1, S2, S3, S4, S5 | inline | pending |
+| T1 | The reader: `[state]`, `[theme]`, `[ui]` — types, defaults, validation, legacy top-level `volume`, `Settings` carrying all of it, `default_config_text` | S1, S2, S3, S4, S5 | inline | `c155171` |
 | T2 | Theme at runtime: seven hex roles to `Color`, derived `accent_bright`, every draw site, README palette | S4 | inline | pending |
 | T3 | Visibility: the four flags wired into the layout | S5 | inline | pending |
 | T4 | Writer and restore: `config::set_value` per key, save-on-change, and the tab/view/node/volume/shuffle/repeat coming back at launch | S2, S3 | inline | pending |
