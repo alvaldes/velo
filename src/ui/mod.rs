@@ -15,6 +15,7 @@
 //! frame.
 
 pub mod artwork;
+pub mod complete;
 pub mod search;
 pub mod shuffle;
 pub mod theme;
@@ -76,6 +77,8 @@ pub enum Action {
     /// Check the path typed into the library prompt; save and index it when
     /// it is a directory, otherwise say why in the prompt.
     SetLibrary,
+    /// Complete the folder being typed in the library prompt.
+    CompleteLibraryPath,
     /// Show the library in this view, from its top level.
     Browse(BrowseBy),
 }
@@ -120,12 +123,25 @@ impl BrowseBy {
 }
 
 /// The floating prompt that asks for the library root when none is set.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct LibraryPrompt {
-    /// The path as typed.
+    /// The path as typed, always starting with `~/`: the library is a folder
+    /// under home, never a path relative to where velo was launched.
     input: String,
     /// Why the last answer was refused, shown in the card.
     error: Option<String>,
+    /// The folders the last `Tab` could not choose between.
+    candidates: Vec<String>,
+}
+
+impl LibraryPrompt {
+    fn new() -> Self {
+        Self {
+            input: complete::PROMPT_PREFIX.to_owned(),
+            error: None,
+            candidates: Vec::new(),
+        }
+    }
 }
 
 /// Setting the library up because none is configured (S4): where an answer
@@ -134,6 +150,8 @@ struct LibraryPrompt {
 struct LibrarySetup {
     /// The config file an accepted library path is saved to.
     config_file: Option<PathBuf>,
+    /// The home folder `~/` stands for, read once when the prompt opens.
+    home: Option<PathBuf>,
     /// The open prompt; `None` once it was skipped with `Esc`.
     prompt: Option<LibraryPrompt>,
 }
@@ -533,12 +551,44 @@ impl<'lib> App<'lib> {
 
     /// Opens the floating prompt asking for the library root, because none
     /// is configured. An accepted path is saved to `config_file` (when there
-    /// is one) as the `library` key.
+    /// is one) as the `library` key. `~/` stands for `$HOME`.
     pub fn ask_for_library(&mut self, config_file: Option<PathBuf>) {
+        let home = std::env::var_os("HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
+        self.ask_for_library_under(config_file, home);
+    }
+
+    /// [`App::ask_for_library`] with `~/` standing for `home`, so the prompt
+    /// can be driven against a folder of the caller's choosing.
+    pub fn ask_for_library_under(&mut self, config_file: Option<PathBuf>, home: Option<PathBuf>) {
         self.library_setup = Some(LibrarySetup {
             config_file,
-            prompt: Some(LibraryPrompt::default()),
+            home,
+            prompt: Some(LibraryPrompt::new()),
         });
+    }
+
+    /// The folders the last `Tab` in the library prompt offered.
+    #[must_use]
+    pub fn library_prompt_candidates(&self) -> &[String] {
+        self.library_prompt()
+            .map_or(&[], |prompt| prompt.candidates.as_slice())
+    }
+
+    /// Completes the folder being typed in the library prompt, as a shell's
+    /// `Tab` does (T7). Reads the disk, so it runs from `apply`, not the keys.
+    fn complete_library_path(&mut self) {
+        let Some(setup) = &mut self.library_setup else {
+            return;
+        };
+        let (Some(prompt), Some(home)) = (&mut setup.prompt, &setup.home) else {
+            return;
+        };
+        let (input, candidates) = complete::complete(&prompt.input, home);
+        prompt.input = input;
+        prompt.candidates = candidates;
+        prompt.error = None;
     }
 
     /// Whether the library prompt is open.
@@ -900,6 +950,7 @@ impl<'lib> App<'lib> {
                 }
             }
             Action::SetLibrary => self.accept_library(),
+            Action::CompleteLibraryPath => self.complete_library_path(),
             Action::Browse(by) => self.browse_view(by),
         }
     }
@@ -943,14 +994,20 @@ impl<'lib> App<'lib> {
                 Action::None
             }
             KeyCode::Enter => Action::SetLibrary,
+            KeyCode::Tab => Action::CompleteLibraryPath,
             KeyCode::Backspace => {
-                prompt.input.pop();
+                // `~/` stays: the library is always a folder under home.
+                if prompt.input.len() > complete::PROMPT_PREFIX.len() {
+                    prompt.input.pop();
+                }
                 prompt.error = None;
+                prompt.candidates.clear();
                 Action::None
             }
             KeyCode::Char(character) => {
                 prompt.input.push(character);
                 prompt.error = None;
+                prompt.candidates.clear();
                 Action::None
             }
             _ => Action::None,
@@ -961,11 +1018,11 @@ impl<'lib> App<'lib> {
     /// the config file as typed, closes the prompt and hands the expanded
     /// root to the shell. Otherwise the prompt stays open and says why.
     fn accept_library(&mut self) {
-        let Some(prompt) = self
-            .library_setup
-            .as_mut()
-            .and_then(|setup| setup.prompt.as_mut())
-        else {
+        let Some(setup) = self.library_setup.as_mut() else {
+            return;
+        };
+        let home = setup.home.clone();
+        let Some(prompt) = setup.prompt.as_mut() else {
             return;
         };
         let typed = prompt.input.trim().to_owned();
@@ -973,10 +1030,9 @@ impl<'lib> App<'lib> {
             prompt.error = Some("type the folder that holds your music".to_owned());
             return;
         }
-        let home = std::env::var_os("HOME").filter(|value| !value.is_empty());
-        let cwd = std::env::current_dir().unwrap_or_default();
-        let root =
-            crate::config::expand_path(Path::new(&typed), home.as_deref().map(Path::new), &cwd);
+        // The input always starts with `~/`, so the working directory never
+        // decides where the library is.
+        let root = crate::config::expand_path(Path::new(&typed), home.as_deref(), Path::new("/"));
         if !root.is_dir() {
             prompt.error = Some(format!("{} is not a directory", root.display()));
             return;
@@ -1665,7 +1721,7 @@ impl<'lib> App<'lib> {
             ("G", "last track"),
             ("enter", "open, or play from the selection"),
             ("esc", "back one level / close help"),
-            ("", "no library set: a prompt asks for its path"),
+            ("", "no library set: a prompt asks for it, tab completes"),
             ("/", "search the whole library"),
             ("space", "pause / resume"),
             ("← / →", "seek 5 s back / forward"),
@@ -1724,7 +1780,7 @@ impl<'lib> App<'lib> {
     /// path being typed and, under it, why the last one was refused.
     fn draw_library_prompt(frame: &mut Frame, area: Rect, prompt: &LibraryPrompt) {
         let width = area.width.saturating_sub(8).clamp(20, 72);
-        let box_area = centered(area, width, 8);
+        let box_area = centered(area, width, 9);
         let field_width = usize::from(width.saturating_sub(6));
         // Keep the end of a long path, where the cursor is, in view.
         let shown: String = {
@@ -1735,13 +1791,15 @@ impl<'lib> App<'lib> {
         let text = vec![
             Line::styled("Where is your music?", Style::new().fg(TEXT)),
             Line::styled(
-                "an absolute path, ~/Music, or relative to here",
+                "a folder in your home — tab completes it",
                 Style::new().fg(DIM),
             ),
             Line::from(vec![
                 Span::styled(shown, Style::new().fg(ACCENT)),
                 Span::styled("▏", Style::new().fg(SECONDARY)),
             ]),
+            // The folders the last tab could not choose between.
+            Line::styled(prompt.candidates.join("  "), Style::new().fg(SECONDARY)),
             prompt.error.as_ref().map_or_else(
                 || Line::styled("enter save · esc skip", Style::new().fg(DIM)),
                 |error| Line::styled(error.clone(), Style::new().fg(SECONDARY)),

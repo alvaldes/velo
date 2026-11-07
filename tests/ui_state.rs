@@ -903,19 +903,52 @@ fn type_text(app: &mut App<'_>, text: &str) {
 }
 
 #[test]
-fn the_prompt_opens_when_no_library_is_configured_and_typing_edits_it() {
+fn the_prompt_opens_on_home_and_its_prefix_cannot_be_deleted() {
     let mut app = App::browse(None);
     assert!(!app.library_prompt_open());
-    app.ask_for_library(None);
+    app.ask_for_library_under(None, Some(prompt_dir("prefix")));
     assert!(app.library_prompt_open());
-    assert_eq!(app.library_prompt_input(), "");
+    assert_eq!(app.library_prompt_input(), "~/", "it starts at home");
 
     // Every printable key types, `q` included: it does not quit.
     assert_eq!(app.on_key(key(KeyCode::Char('q'))), Action::None);
-    type_text(&mut app, "/mus");
+    type_text(&mut app, "mus");
     press(&mut app, KeyCode::Backspace);
-    assert_eq!(app.library_prompt_input(), "q/mu");
+    assert_eq!(app.library_prompt_input(), "~/qmu");
+    for _ in 0..10 {
+        press(&mut app, KeyCode::Backspace);
+    }
+    assert_eq!(app.library_prompt_input(), "~/", "`~/` stays put");
     assert!(app.library_prompt_open());
+}
+
+#[test]
+fn tab_completes_folders_the_way_a_shell_does() {
+    let home = prompt_dir("tab");
+    fs::create_dir_all(home.join("Music/Library")).unwrap();
+    fs::create_dir_all(home.join("Mixes")).unwrap();
+    fs::create_dir_all(home.join(".Mhidden")).unwrap();
+    fs::write(home.join("Mnotes.txt"), "a file, never a candidate").unwrap();
+    let mut app = App::browse(None);
+    app.ask_for_library_under(None, Some(home.clone()));
+
+    // Two folders start with M: nothing more in common, both are offered.
+    type_text(&mut app, "M");
+    press(&mut app, KeyCode::Tab);
+    assert_eq!(app.library_prompt_input(), "~/M");
+    assert_eq!(app.library_prompt_candidates(), ["Mixes", "Music"]);
+
+    // One left: completed, with the slash a shell adds to a folder.
+    type_text(&mut app, "u");
+    press(&mut app, KeyCode::Tab);
+    assert_eq!(app.library_prompt_input(), "~/Music/");
+    assert_eq!(app.library_prompt_candidates(), Vec::<String>::new());
+
+    // And inside it.
+    type_text(&mut app, "L");
+    press(&mut app, KeyCode::Tab);
+    assert_eq!(app.library_prompt_input(), "~/Music/Library/");
+    let _ = fs::remove_dir_all(&home);
 }
 
 #[test]
@@ -923,9 +956,8 @@ fn a_path_that_is_not_a_directory_keeps_the_prompt_open_and_says_why() {
     let dir = prompt_dir("invalid");
     let config = dir.join("velo").join("config.toml");
     let mut app = App::browse(None);
-    app.ask_for_library(Some(config.clone()));
-    let missing = dir.join("no-such-folder");
-    type_text(&mut app, &missing.display().to_string());
+    app.ask_for_library_under(Some(config.clone()), Some(dir.clone()));
+    type_text(&mut app, "no-such-folder");
 
     assert_eq!(app.on_key(key(KeyCode::Enter)), Action::SetLibrary);
     app.apply(Action::SetLibrary);
@@ -948,18 +980,16 @@ fn a_directory_is_accepted_saved_to_the_config_and_handed_to_indexing() {
     velo::config::write_default_config(&config).unwrap();
 
     let mut app = App::browse(None);
-    app.ask_for_library(Some(config.clone()));
-    type_text(&mut app, &music.display().to_string());
+    app.ask_for_library_under(Some(config.clone()), Some(dir.clone()));
+    type_text(&mut app, "Music");
     press(&mut app, KeyCode::Enter);
 
     assert!(!app.library_prompt_open());
     assert_eq!(app.take_library_root(), Some(music.clone()));
     assert_eq!(app.take_library_root(), None, "handed over once");
     let text = fs::read_to_string(&config).unwrap();
-    let expected = velo::config::default_config_text().replace(
-        "# library = \"~/Music\"",
-        &format!("library = \"{}\"", music.display()),
-    );
+    let expected = velo::config::default_config_text()
+        .replace("# library = \"~/Music\"", "library = \"~/Music\"");
     assert_eq!(text, expected);
     let _ = fs::remove_dir_all(&dir);
 }
@@ -969,8 +999,8 @@ fn esc_closes_the_prompt_without_saving_anything() {
     let dir = prompt_dir("esc");
     let config = dir.join("velo").join("config.toml");
     let mut app = App::browse(None);
-    app.ask_for_library(Some(config.clone()));
-    type_text(&mut app, "/tmp");
+    app.ask_for_library_under(Some(config.clone()), Some(dir.clone()));
+    type_text(&mut app, "tmp");
 
     assert_eq!(app.on_key(key(KeyCode::Esc)), Action::None);
     assert!(!app.library_prompt_open());
@@ -1237,7 +1267,7 @@ fn number_keys_type_into_an_open_search_and_the_library_prompt() {
     for code in ['2', '4'] {
         assert_eq!(act(&mut app, KeyCode::Char(code)), Action::None);
     }
-    assert_eq!(app.library_prompt_input(), "24");
+    assert_eq!(app.library_prompt_input(), "~/24");
     assert_eq!(app.browse_by(), BrowseBy::Artists);
 }
 

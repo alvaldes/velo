@@ -134,8 +134,10 @@ it. An existing file is never overwritten or reformatted.
 
 Precedence: `--library` (expanded the same way) beats the config file. With no
 library set, `velo` opens the interface with a floating prompt asking for the
-folder: a path that is not a directory is refused in the prompt, an accepted
-one is saved to the file as `library = "<what you typed>"` (every other line
+folder. It starts at `~/`, which cannot be deleted, and `tab` completes folder
+names the way a shell does (several matches are listed under the field). A
+path that is not a directory is refused in the prompt; an accepted one is
+saved to the file as `library = "~/<what you typed>"` (every other line
 is kept) and indexed right away; `esc` skips it and the empty browser says how
 to set it. `velo --index` without a library exits 2 and names the key and the
 flag. An unknown key is an error naming the key; a bad value names the file

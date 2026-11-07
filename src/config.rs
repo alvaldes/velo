@@ -80,8 +80,8 @@ Configuration: $XDG_CONFIG_HOME/velo/config.toml, or
     When the file is missing, velo writes it with every key at its default and
     a comment per key; an unknown key is an error. library (and --library)
     takes an absolute path, ~/... or a path relative to the current directory.
-    With no library set, the interface asks for it in a floating prompt and
-    saves the answer to the file; velo --index needs one and exits 2 without."
+    With no library set, the interface asks for it in a floating prompt that
+    starts at ~/ (tab completes folders) and saves the answer to the file; velo --index needs one and exits 2 without."
 )]
 pub struct Cli {
     /// Tracks to play as one continuous, gapless stream. Without files, the

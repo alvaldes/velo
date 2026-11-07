@@ -761,16 +761,19 @@ fn no_protocol_and_an_80x24_terminal_draw_exactly_the_screen_without_cover_art()
 fn the_library_prompt_is_a_floating_card_with_the_typed_path_and_its_error() {
     let mut app = App::browse(None);
     app.ask_for_library(None);
-    for character in "/no/such/velo-dir".chars() {
+    for character in "no/such/velo-dir".chars() {
         let action = app.on_key(KeyEvent::from(KeyCode::Char(character)));
         app.apply(action);
     }
     let screen = screen_at(&app, 90, 24);
     assert!(screen.contains("library"), "{screen}");
-    assert!(screen.contains("/no/such/velo-dir"), "{screen}");
     assert!(
-        screen.contains("~/Music"),
-        "the card shows an example\n{screen}"
+        screen.contains("~/no/such/velo-dir"),
+        "the typed path follows the fixed ~/\n{screen}"
+    );
+    assert!(
+        screen.contains("tab completes"),
+        "the card says how to complete\n{screen}"
     );
 
     let action = app.on_key(KeyEvent::from(KeyCode::Enter));
