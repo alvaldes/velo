@@ -244,3 +244,5 @@ Three things worth keeping from this one:
 3. **CI is not green: it has never run.** The workflows parse, and saying more than that would be a lie. They become true the first time a human pushes and tags — which is a decision that belongs to the repository's owner, not to this agent.
 
 Scratch left outside the worktree by the delegation: `/tmp/velo-install` and `/tmp/velo-install-2` (install roots, disposable) plus a handful of `mktemp` directories; nothing in the repository.
+
+**L32** (what T10 did *not* do, so the row does not overclaim): the task line says "install path (brew / cargo-binstall)" and only half of that exists. `cargo install --path .`, `cargo install velo` after publishing, and the four prebuilt tarballs are real and verified. Homebrew needs a tap repository and `cargo-binstall` needs release assets named `velo-<target>.tar.gz` with the binary at a known depth — ours carry the tag in the name, which `cargo-binstall` will not find. Both are follow-ups, not promises.
