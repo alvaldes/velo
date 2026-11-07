@@ -67,7 +67,7 @@ Root folder: `/Users/alvaldes/Music/Library` (L15). Metadata comes from tags fir
 | T11 | ReplayGain read + apply in the audio path | S15 | inline | `c8a418c` |
 | T12a | Subsonic client and authentication: JSON, token or API key, error sentences, `--subsonic-test` | S14 | worker (clone) | `f6f7ec7` |
 | T12b | Sync the remote library into the index as rows with a `source` column; search over them | S14 | worker (clone) | `b2eef0b` |
-| T12c | Cache-on-play: fetch the original bytes with `format=raw`, then play locally (keeps seek, gapless, bit-perfect) | S14 | pending | — |
+| T12c | Cache-on-play: fetch the original bytes with `format=raw`, then play locally (keeps seek, gapless, bit-perfect) | S14 | pending | `05e6c76` |
 | T12d | Remote cover art via `getCoverArt` and scrobbling on track change | S14 | pending | — |
 | T13 | ReplayGain tag writer | S15 | inline | — |
 | T14 | Opus decode via a bundled `libopus` (`audiopus_sys`), keeping the single-binary promise | S5 | inline | — |
@@ -328,4 +328,14 @@ Both wait for the main checkout to have no uncommitted work in `src/ui/mod.rs`. 
 Verified **from main** after the merges, not from the branch: a fresh copy of the real 251-track index migrated `1 → 2` with every row `local` and all three columns present; `--subsonic-test` against Navidrome 0.64.2 reported token authentication verified; `--sync` brought 501 tracks and 50 albums in 52 requests.
 
 The clone at `../velo-clone` and the worktree at `../velo-worktrees/next` are now redundant: everything they carried lives on `main`. They can be removed whenever the human says so — nothing here deletes them on its own.
+
+**L40** (T12c closed in `05e6c76`): a remote track plays. The original bytes are fetched once with `format=raw` — no transcoding, so bit-perfect over a server stays honest — into `$XDG_CACHE_HOME/velo/subsonic`, named by a stable hash of the stream URL, and played from disk. That is the whole reason the audio path never learned about networks: seek, gapless, bit-perfect and `ReplayGain`-from-tags all keep working because what plays is a file.
+
+**The queue did not change type**, and that was the point. T12b had already stored a remote row's path as `subsonic://<host>/<id>`, so the producer resolves each entry when it reaches it through a one-method resolver seam: cache hit costs no request, a miss downloads and then opens, a failure announces the entry and its reason and moves on like any corrupt file. Not touching `Vec<PathBuf>` kept the interface, the markers and the seek clock untouched, and the audio callback is byte-identical.
+
+**`--play` had been left out**, and the symptom was a lie: `velo --play subsonic://…` answered `cannot read the file: No such file or directory`, blaming the filesystem for something that was a URL. Wiring the same resolver there fixed the inconsistency **and** produced the end-to-end proof this task needed: a real track from Navidrome's demo came down (9.4 MB) into the cache and decoded as 44.1 kHz stereo, 312 s. When a terminal harness refuses to cooperate, a headless path that exercises the same code is worth more than a third attempt at the pty.
+
+**The gap T12b exposed is closed too**: with only `[subsonic]` configured, the launch no longer demands a local library — the synced index is the library — so `/` reaches the search instead of the path prompt. With neither configured, one sentence names both ways to set it up.
+
+**Left for later, honestly**: nothing prunes the cache yet (documented in the README), files downloaded for a removed row stay until that happens, and the credential warnings (a group-readable `subsonic.key`) are not surfaced in the interface — only in the skip reason when a fetch fails.
 
