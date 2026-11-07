@@ -68,7 +68,7 @@ Root folder: `/Users/alvaldes/Music/Library` (L15). Metadata comes from tags fir
 | T12a | Subsonic client and authentication: JSON, token or API key, error sentences, `--subsonic-test` | S14 | worker (clone) | `f6f7ec7` |
 | T12b | Sync the remote library into the index as rows with a `source` column; search over them | S14 | worker (clone) | `b2eef0b` |
 | T12c | Cache-on-play: fetch the original bytes with `format=raw`, then play locally (keeps seek, gapless, bit-perfect) | S14 | pending | `05e6c76` |
-| T12d | Remote cover art via `getCoverArt` and scrobbling on track change | S14 | pending | — |
+| T12d | Remote cover art via `getCoverArt` and scrobbling on track change | S14 | pending | `3662e85` |
 | T13 | ReplayGain tag writer | S15 | inline | — |
 | T14 | Opus decode via a bundled `libopus` (`audiopus_sys`), keeping the single-binary promise | S5 | inline | — |
 | T15 | Evaluate the symphonia 0.6 API (`codecs::audio::AudioDecoder`, generic buffers) and migrate behind the existing tests | S5, S7 | inline | — |
@@ -338,4 +338,16 @@ The clone at `../velo-clone` and the worktree at `../velo-worktrees/next` are no
 **The gap T12b exposed is closed too**: with only `[subsonic]` configured, the launch no longer demands a local library — the synced index is the library — so `/` reaches the search instead of the path prompt. With neither configured, one sentence names both ways to set it up.
 
 **Left for later, honestly**: nothing prunes the cache yet (documented in the README), files downloaded for a removed row stay until that happens, and the credential warnings (a group-readable `subsonic.key`) are not surfaced in the interface — only in the skip reason when a fetch fails.
+
+**L41** (T12d closed in `3662e85` — the Subsonic feature is complete): remote covers and scrobbling.
+
+Cover art needed an id nobody stored, so the schema took a **third** step: `cover_id`, filled by `--sync` from the song's `coverArt` or its album's. The migration keeps the shape of the previous two, and the `has_*` detection matters more than ever — a read-only index at version 1 that opens today must still open. **Verified on a copy of the real index: 1 → 3 in one open, 251 rows intact, all four columns present.** Two migrations chained in a single open is the case a single-step test misses, and it is the case a real user is in.
+
+The image is fetched once (`getCoverArt?id=…&size=600`) into `/Users/alvaldes/.cache/velo/covers` — a **sibling** directory of the track cache, reusing its atomic store instead of a second implementation of the same idea. The interface asks on a thread and decodes on a later tick, so the drawing path never waits on a network, and a failed fetch is exactly the no-cover it was before. That is the rule T8 established and this task obeyed: never fake an image, never stall a frame for one.
+
+Scrobbling sends `submission=false` when a remote track starts and `submission=true` exactly once after half the track or four minutes, whichever comes first — Navidrome's documented rule, and the only one its API states. Background thread, failures swallowed, local tracks never scrobbled.
+
+Against the demo server: 501 synced rows, **every one carrying a cover id**, and a real `getCoverArt` answering with an 88 KB 600×600 JPEG.
+
+**What the whole remote feature cost, in order**: a client that explains its failures (T12a), rows in the index so search and browsing did not fork (T12b), a cache so the audio path never learned about networks (T12c), and the two niceties that make it feel like the local library (T12d). Four tasks, four mergeable units, and the one part still owed is the one no test can give: **seeing the cover in a real terminal**, which has been owed since L34.
 
