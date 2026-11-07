@@ -75,7 +75,7 @@ is English. Footer shows `● live` instead of a position and total.
 | ID | Spec | Route | Task | Commit |
 |:--|:--|:--|:--|:--|
 | T1 | S4 | worker | `src/radio/icy.rs`: ICY length-prefixed demux over a `Read`, `StreamTitle` extraction, passthrough when no metaint | `b9bb2c2` |
-| T2 | S7 | worker | `src/radio/lists.rs`: PLS and M3U parse to the first playable entry | |
+| T2 | S7 | worker | `src/radio/lists.rs`: PLS and M3U parse to the first playable entry | `f804a64` |
 | T3 | S1, S8 | worker | `src/radio/{client,directory}.rs`: Radio Browser client, indexes, station search, codec filter from symphonia features | |
 | T4 | S5 | worker | `src/radio/store.rs`: atomic `radio.toml` for favourites, pins and hand-added stations | |
 | T5 | S2, S3 | parent | stream engine: `MediaSource` over the HTTP body, queue entry `File \| Station`, live semantics; **blocked on the other session's T15 (symphonia 0.6)** | |
@@ -127,3 +127,22 @@ a trabajar" — worktree `.worktrees/radio` on branch `feat/radio`, started from
 authored lines: past the ~400-line review slice, so slice 2 starts at T2 and the
 two are offered as separate reviews. Each task keeps its own commit, tests and
 docs in that commit, and no task is split across slices.
+
+**L7** — T2 closed (`f804a64`, 282 lines: 13 tests green, clippy `-D warnings`
+clean, 24 test binaries all passing). Sniffing is by content, not by extension or
+`Content-Type`, because both lie for wrappers in the wild. Three things to carry
+forward:
+
+- **HLS is detected only in the M3U branch.** A PLS that points at an `.m3u8`
+  manifest therefore resolves to the manifest URL. One level of unwrapping is the
+  contract (CLIAMP resolves one level too), so this is accepted rather than
+  chased: **T5 must sniff the resolved URL's body for `#EXT-X-` before handing it
+  to symphonia**, and fail with the HLS reason instead of a decode error.
+- `NumberOfEntries` is parsed for but not required: a `[playlist]` with `File1=`
+  and no count still resolves, which is more lenient than rejecting and matches
+  the files that exist.
+- PLS detection wants `[playlist]` as the first non-blank line. A file that opens
+  with a `;` comment before the header is `NotAPlaylist`; no such file was found
+  in the wild and leniency there was not worth untested code.
+
+**Slice 2** closes with T2 (`f804a64`, 282 lines). **T3 opens slice 3.**
