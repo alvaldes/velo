@@ -102,10 +102,11 @@ fn folder_cover(path: &Path) -> Option<DynamicImage> {
     })
 }
 
-/// Where the art sits beside the header and the body: the rightmost quarter
-/// of the width, spanning the rows above the footer. `None` when the
-/// terminal is below the threshold — then the interface stays exactly as it
-/// is without art, and the track list keeps its full width.
+/// The window-size gate for the cover, with the area the first layout gave
+/// it (the rightmost quarter above the footer). The interface now places the
+/// cover inside the now-playing block and only asks whether this is `Some`:
+/// `None` when the terminal is below the threshold, and then the interface
+/// stays exactly as it is without art.
 #[must_use]
 pub fn pane(area: Rect) -> Option<Rect> {
     if area.width < ART_MIN_COLUMNS || area.height < ART_MIN_ROWS {

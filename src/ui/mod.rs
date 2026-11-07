@@ -706,31 +706,27 @@ impl<'lib> App<'lib> {
         ])
         .areas(inner);
         self.draw_title_bar(frame, title_bar);
-        let mut content = pad(content);
+        let content = pad(content);
         let footer = pad(footer);
         // Cover art (T8): when a protocol was detected, the art is set to draw
         // and the terminal meets the threshold, it takes the rightmost quarter
         // of the content and the rest makes way. Otherwise the window is
         // exactly what it is without art — nothing to fake, nothing to move.
-        let pane = self
-            .picker
-            .filter(|_| self.artwork.is_some())
-            .and_then(|_| artwork::pane(area))
-            .map(|_| {
-                let width = content.width / 4;
-                content.width = content.width.saturating_sub(width + 1);
-                Rect {
-                    x: content.x + content.width + 1,
-                    width,
-                    ..content
-                }
-            });
         let [now, header, body] = Layout::vertical([
             Constraint::Length(now_playing_rows(content.height)),
             Constraint::Length(1),
             Constraint::Min(0),
         ])
         .areas(content);
+        // The cover sits at the left of the now-playing block, the way an
+        // album sleeve sits beside its title, and the block's text moves over.
+        // The window-size threshold is the one `hidden_reason` explains.
+        let slot = self
+            .picker
+            .filter(|_| self.artwork.is_some())
+            .and_then(|_| artwork::pane(area))
+            .and_then(|_| cover_slot(now));
+        let (pane, now) = slot.map_or((None, now), |(art, rest)| (Some(art), rest));
         self.draw_now_playing(frame, now);
         self.draw_header(frame, header);
         self.draw_body(frame, body);
@@ -741,7 +737,7 @@ impl<'lib> App<'lib> {
         }
     }
 
-    /// Renders the cover beside the header, fitting the source image into the
+    /// Renders the cover at the left of the now-playing block, fitting the source image into the
     /// pane. The protocol re-encodes only when its area changes, so a redraw
     /// costs it nothing.
     fn draw_artwork(&self, frame: &mut Frame, pane: Option<Rect>) {
@@ -2047,6 +2043,38 @@ const fn now_playing_rows(height: u16) -> u16 {
     }
 }
 
+/// How many columns the now-playing text keeps beside a cover; narrower
+/// than this, the cover gives way.
+const COVER_MIN_TEXT: u16 = 48;
+
+/// Where the cover goes inside the now-playing `block`, and what is left for
+/// the block's text: at the left, as tall as the block less its trailing gap
+/// row, twice as wide as tall — terminal cells are about twice as tall as
+/// wide, so that is close to square — with two columns of air after it.
+/// `None` for a compact block, or when the text would be left too narrow.
+fn cover_slot(block: Rect) -> Option<(Rect, Rect)> {
+    if block.height < 7 {
+        return None;
+    }
+    let height = block.height - 1;
+    let width = height * 2;
+    let text = block.width.checked_sub(width + 2)?;
+    if text < COVER_MIN_TEXT {
+        return None;
+    }
+    let art = Rect {
+        width,
+        height,
+        ..block
+    };
+    let rest = Rect {
+        x: block.x + width + 2,
+        width: text,
+        ..block
+    };
+    Some((art, rest))
+}
+
 /// How tall the spectrum is, in rows; each row resolves eight steps.
 const SPECTRUM_ROWS: u16 = 4;
 
@@ -2266,6 +2294,28 @@ mod tests {
         assert_eq!(filled(Some(1.0), 10), 10);
         assert_eq!(filled(Some(0.5), 10), 5);
         assert_eq!(filled(None, 10), 0);
+    }
+
+    #[test]
+    fn the_cover_sits_at_the_left_of_the_now_playing_block() {
+        use ratatui::layout::Rect;
+
+        // The 11-row block with the spectrum: a cover two columns per row
+        // (terminal cells are about twice as tall as wide), the block's
+        // height less its trailing gap, and two columns of air after it.
+        let block = Rect::new(2, 2, 96, 11);
+        let (art, rest) = super::cover_slot(block).expect("room for a cover");
+        assert_eq!(art, Rect::new(2, 2, 20, 10));
+        assert_eq!(rest, Rect::new(24, 2, 74, 11));
+
+        // The seven-row block: a smaller cover, same rule.
+        let (art, rest) = super::cover_slot(Rect::new(2, 2, 96, 7)).expect("a cover");
+        assert_eq!((art.width, art.height, rest.x), (12, 6, 16));
+
+        // A compact block, or one too narrow to keep the rest readable, has
+        // no cover at all.
+        assert_eq!(super::cover_slot(Rect::new(2, 2, 96, 3)), None);
+        assert_eq!(super::cover_slot(Rect::new(2, 2, 50, 11)), None);
     }
 
     #[test]
