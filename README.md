@@ -1,104 +1,146 @@
 # velo
 
-A fast, single-binary music player for your terminal. Rust, no external daemon,
-no server to keep running.
-
-> **Status: early.** The audio engine, the library index, the terminal
-> interface, search, the queue, cover art and the command line all work and
-> are tested; ReplayGain and Subsonic/Navidrome are later versions. See
-> [Roadmap](#roadmap).
-
-## What works today
-
-- Decoding and playback of FLAC, MP3, M4A/AAC, OGG Vorbis and WAV through
-  [symphonia](https://github.com/pdeljanov/symphonia).
-- Gapless sequencing: the next track is pre-decoded and joined with no inserted
-  silence and no padding.
-- Encoder delay and padding trimmed where the container declares them, so an MP3
-  does not carry its LAME priming frames into the next track.
-- Lock-free output through a ring buffer: the device callback only copies memory,
-  never decodes or allocates.
-- A minimal terminal interface (`T3`): a three-band layout — header with the
-  wordmark and playback state, a track list with a full-width accent selection
-  and a `▸` play marker, a footer with state and key hints — plus a help
-  overlay on `?`. The keymap is a pure, tested function of the key.
-- A library index (SQLite): scan a root folder once, incrementally after that,
-  and browse by artist, album and track.
-- Fuzzy search over the whole library on `/`, tolerant of misspellings and
-  separations (`lofi` finds `Lo-Fi Scientists`).
-- A play queue you can edit: `Tab` to the queue view, append, remove, reorder.
-- Cover art rendered through the kitty, sixel or iTerm2 protocols.
-- A real command line ([clap](https://docs.rs/clap)) and an optional config
-  file, so the library root is not hardcoded.
-- A clear error instead of a gap when two tracks cannot be joined without
-  resampling (resampling landed in T2).
-
-Not yet: ReplayGain, Subsonic/Navidrome, bit-perfect device mode (T17), Opus.
-
-## Build and run
-
-Rust 1.99 is pinned in `.mise.toml`:
-
-```bash
-mise install          # or any Rust 1.88+ toolchain
-cargo build --release
-
-velo                                 # browse the library in the interface
-velo --index                         # (re)scan the library root into the index
-velo --info song.flac song.mp3       # format, frame count and length
-velo song.flac song.mp3              # open the terminal interface over them
-velo --play song.flac song.mp3       # play them as one continuous stream and exit
-```
-
-Interface keys: `j`/`k` move, `g`/`G` first/last, `enter` play from the
-selection, `Tab` queue view (`a` append, `d` remove, `J`/`K` move), `/` search,
-`space` pause/resume, `←`/`→` or `,`/`.` seek ±5 s, `+`/`-` volume, `?` help,
-`q` quit.
-
-Exit codes: `0` on success and `--help`; `1` for a missing file, a missing
-library root or a non-interactive terminal; `2` for a usage error.
-
-### Configuration
-
-Read once at startup, before the command line is applied:
+A single-binary music player for your terminal: point it at your music folder,
+and it indexes your library from your files' own tags, browses by artist and
+album, plays gaplessly, and renders cover art — all from one Rust binary, with
+no daemon and no server. A fuzzy search and an editable queue make it a player
+you actually drive, not a playlist viewer.
 
 ```
-$XDG_CONFIG_HOME/velo/config.toml        # else ~/.config/velo/config.toml
+velo                                        artists   16        stopped
+▸ Lo-Fi Scientists         2 albums · 7 tracks
+  Poldoore                 3 albums · 14 tracks
+
+j/k move  enter play  space pause  ←/→ seek  / search  tab queue  ? help  q quit
 ```
 
-```toml
-library = "/Users/you/Music/Library"   # library root to index and browse
-volume = 85                            # start level, 0..=100 (default 100)
-bit_perfect = false                    # opt-in for T17; nothing reads it yet
+## Keys
+
+Every key below is what the code does today.
+
+| Key | Action |
+|:--|:--|
+| `j` / `↓`, `k` / `↑` | Move down / up |
+| `g` / `G` | First / last row |
+| `enter` | Descend into an artist or album; play from the selected track |
+| `esc` / `backspace` | Back one level (browse), close the help overlay |
+| `/` | Fuzzy search the whole library (`lofi` finds `Lo-Fi Scientists`) |
+| `space` | Pause / resume |
+| `←` / `→` (or `,` / `.`) | Seek 5 s back / forward |
+| `+` / `-` | Volume up / down, 5% at a time |
+| `tab` | Switch between the library browser and the queue |
+| `a` | Append the selection to the queue — a track, or every track of an album |
+| `d` | Remove the selected entry from the queue (queue view) |
+| `J` / `K` | Move the selected entry down / up (queue view) |
+| `enter` (queue view) | Play the queue from the selected entry |
+| `?` | Help overlay |
+| `q` | Quit |
+
+While a search is open, every printable key types into the query,
+`backspace` deletes, `enter` plays from the selected result, and `esc`
+cancels — leaving the browser exactly where it was. The queue only lets you
+edit entries after the one playing: the playing entry cannot be removed and
+nothing moves across it, and each refusal explains itself in the status line.
+
+## Install
+
+**Prebuilt release binary** — download `velo-<tag>-<target>.tar.gz` for your
+platform from the repository's
+[Releases](https://github.com/alvaldes/velo/releases) page, unpack it, and put
+the `velo` binary on your `PATH`.
+
+**From a clone, with cargo:**
+
+```sh
+git clone https://github.com/alvaldes/velo
+cd velo
+cargo install --path .
 ```
 
-All keys are optional and a missing file is normal and silent. Precedence is
-fixed: `--library` beats the config file, the config file beats the default.
-An unknown key is an error naming the key; a bad value names the file and
-the line.
+**From crates.io, once published:**
 
-## Design
-
-The audio path is split so nothing slow runs where the clock matters:
-
-```
-TrackSource (symphonia)  →  producer thread  →  ring buffer  →  device callback
-   decode + trim              fill ahead          lock-free        copy only
+```sh
+cargo install velo
 ```
 
-The first track decides the device format. A later track that disagrees is
-rejected rather than silently resampled, because joining two rates without
-resampling shifts pitch and inserts the very gap this player exists to avoid.
+Building from source needs Rust 1.88 or newer; the release binaries are built
+by CI for `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`,
+`x86_64-apple-darwin` and `aarch64-apple-darwin`.
 
-## Roadmap
+## Quick start
 
-Tracked in [`odd/tasks/velo-player.md`](odd/tasks/velo-player.md): audio
-foundation (T1, done), resampling (T2), interface (T3, done), library (T4,
-done), queue (T5, done), transport (T6, done), search (T7, done), cover art
-(T8, done), CLI and config (T9, done), release (T10), ReplayGain (T11, T13),
-Subsonic/Navidrome (T12), Opus (T14), symphonia 0.6 (T15), AAC priming trim
-(T16), bit-perfect mode (T17).
+```sh
+velo --library /path/to/your/music --index   # point velo at your music, index it
+velo --library /path/to/your/music           # open the browser
+```
+
+Then, inside the interface: `enter` into an artist, into an album, `enter`
+again to play; `/` to search; `←`/`→` to seek; `tab`, `a` to queue something
+else without stopping playback. Files given on the command line play as one
+gapless stream instead:
+
+```sh
+velo --info song.flac          # format, frame count, length
+velo song.flac song.mp3        # open the interface over them
+velo --play song.flac song.mp3 # play and exit when finished
+```
+
+## Configuration
+
+An optional TOML file, read once at startup:
+
+```
+$XDG_CONFIG_HOME/velo/config.toml      # else ~/.config/velo/config.toml
+```
+
+| Key | Meaning | Default |
+|:--|:--|:--|
+| `library` | The root folder to index and browse | `--library` flag, else the config file, else the built-in default — which is the author's own `~/Music/Library`, so set your own |
+| `volume` | Start level, `0..=100` | `100` |
+| `bit_perfect` | Accepted and stored; nothing reads it yet | `false` |
+
+Precedence: `--library` beats the config file, the config file beats the
+default. A missing file is normal and silent. An unknown key is an error
+naming the key; a bad value names the file and the line.
+
+## Requirements
+
+- Linux or macOS. Windows is untested.
+- To build from source on Linux, the ALSA development headers
+  (`libasound2-dev` on Debian/Ubuntu); the audio output goes through cpal.
+- A terminal. The interface needs an interactive terminal and refuses to run
+  otherwise.
+- Cover art is drawn when the terminal speaks the kitty, sixel or iTerm2
+  protocol and the window is at least 100×28. Without one of those protocols
+  there is no art pane at all — the layout is unchanged, and the status line
+  says why a cover is hidden rather than faking one with half-blocks.
+
+## Exit codes
+
+| Code | Meaning |
+|:--|:--|
+| `0` | Success, including `--help` |
+| `1` | A missing file, a missing library root, a non-interactive terminal, or a playback error |
+| `2` | A usage error, or a config file that cannot be read or parsed |
+
+## Not yet
+
+Honest list; none of these exist behind a flag:
+
+- ReplayGain.
+- Subsonic/Navidrome (streaming from a server).
+- Opus — symphonia has no Opus decoder yet, so `.opus` files are rejected at
+  probe time.
+- Playlists.
+- Bit-perfect playback — the `bit_perfect` config key exists and nothing
+  reads it.
+
+MP3, FLAC, M4A/AAC, OGG Vorbis and WAV are what plays today. Sample rates are
+converted to your output device; channel layouts are not converted, except
+mono, which plays through every output channel — a layout that would need a
+real downmix (5.1 into stereo, say) is skipped with an announcement instead of
+being silently averaged away.
 
 ## License
 
-MIT.
+MIT — see [LICENSE](LICENSE).
