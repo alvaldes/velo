@@ -19,6 +19,11 @@ Stage 1 changes `src/ui/` (and its tests) only. Stage 2 (the spectrum) taps the 
 
 **S4 — Small terminals.** *Assumption*: the new layout degrades instead of breaking at the sizes the existing tests draw (80×24, 90×12): the now-playing block shrinks before the list disappears.
 
+**S5 — Terminal colors.** The interface takes the terminal's colors.
+> "cambia el tema y usa los colores de la terminal o los que tengo en nvim"
+
+Chosen: the terminal (see L17).
+
 ## Tasks
 
 | ID | Task | Specs | Route | Commit |
@@ -32,6 +37,7 @@ Stage 1 changes `src/ui/` (and its tests) only. Stage 2 (the spectrum) taps the 
 | T5c | Spectrum in the now-playing block (4 rows of eighth-block bars with a vertical gradient, baseline when silent) on windows tall enough; ~30 fps redraw while playing | S1, S2, S4 | inline | `a5d712a` |
 | T6 | Cover art from the folder (`cover`/`folder`/`front` `.jpg`/`.png`) when the file embeds none | S1, S3 | inline | `2053d98` |
 | T7 | The volume number takes three columns so the right-aligned slider stops jumping | S1 | inline | `d47ce9a` |
+| T8 | Theme from the terminal: its own background and text, roles mapped to the ANSI palette | S5 | inline | `cefaa2a` |
 
 ## Log
 
@@ -64,3 +70,9 @@ Stage 1 changes `src/ui/` (and its tests) only. Stage 2 (the spectrum) taps the 
 **L14** T5b (`6f8483a`): RED observed (compile). Hand-written radix-2 FFT, Hann window, 40 Hz–16 kHz log bands, −60…−6 dB mapped to 0…1, rise at once, fall 0.06 per update; a 1 kHz tone lights its band and not 100 Hz or 8 kHz.
 
 **L15** T5c: RED observed for the bar geometry (compile); the window and cadence tests were written with it. 11-row block at ≥22 content rows (80×24 unchanged), baseline `▁` in BORDER when silent, gradient BAR_LOW→BAR_HIGH, 33 ms redraw while playing or while bars still fall. Process slip: a `git checkout` used to drop a throwaway dump test also reverted the uncommitted T5c render tests; they were re-added verbatim and pass.
+
+**L16** (2026-11-07, user): "cambia el tema y usa los colores de la terminal o los que tengo en nvim"
+
+**L17** Native review of the T5 slice (lineage `review-f074c30bd173b3e0`, lenses resilience + reliability, user granted): approved and acknowledged; four non-blocking advisories (R3-001/R4 at `src/ui/mod.rs` `frame_interval`: the 33 ms cadence ignores whether the spectrum is visible; R3-002 `listen`; R3-003 `drain_tap`) left as later work. T8 decision: the terminal over nvim — nvim runs everforest while Ghostty runs the gentleman theme at 0.8 opacity, so they disagree; reading a colorscheme at runtime is fragile; and a published player should follow each user's terminal. Roles: background and text `Reset` (keeps transparency), accent magenta (5), secondary blue (4), dim and border bright black (8), selection and the primary button accent background with black (0) text — the gentleman palette's 0 equals its background, so no ANSI color can be a raised surface; the title bar, pills and secondary buttons lose their band.
+
+**L18** T8 (`cefaa2a`): RED observed (2 tests: the selection test re-asserted for the new design, and a new palette test — no fixed RGB role, the terminal's own background). All suites, clippy and fmt green; the 80×24 golden text is unchanged. README says velo wears the terminal's colors and mentions the spectrum.
