@@ -2,3 +2,4 @@
 //! directory.
 
 pub mod icy;
+pub mod lists;
