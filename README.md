@@ -7,12 +7,29 @@ no daemon and no server. A fuzzy search and an editable queue make it a player
 you actually drive, not a playlist viewer.
 
 ```
-velo                                        artists   16        stopped
-▸ Lo-Fi Scientists         2 albums · 7 tracks
-  Poldoore                 3 albums · 14 tracks
-
-j/k move  enter play  space pause  ←/→ seek  / search  tab queue  ? help  q quit
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ library  queue                                                       V E L O │
+│ ♫ nothing playing                                                            │
+│ enter plays the selection                                                    │
+│                                                                              │
+│ --:--   ■ stopped                                                            │
+│ ──────────────────────────────────────────────────────────────────────────── │
+│  ◂◂   ▶ play   ▸▸                                       VOL ━━━━━━━━━━━● 100 │
+│                                                                              │
+│ ▸─ Artists  [3 artists]                                                      │
+│ ▸ 1. Lo-Fi Scientists                                    2 albums · 3 tracks │
+│ ▸ 2. Nujabes                                               1 album · 1 track │
+│ ▸ 3. Poldoore                                             1 album · 2 tracks │
+│                                                                              │
+│ j/k move  enter play  space pause  ←/→ seek  / search  ? help  q quit        │
+╰──────────────────────────────────────────────────────────────────────────────╯
 ```
+
+While a track plays, the block on top names it — by its library tags, or by
+its file name when it was given on the command line — counts the
+clock against its length, fills the progress bar, and the primary button
+turns into `❚❚ pause`. On a short terminal the block shrinks to three rows,
+then to one, before the list gives up any of its own.
 
 ## Keys
 
