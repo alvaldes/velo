@@ -37,6 +37,7 @@ Chosen: the terminal (see L17).
 | T5c | Spectrum in the now-playing block (4 rows of eighth-block bars with a vertical gradient, baseline when silent) on windows tall enough; ~30 fps redraw while playing | S1, S2, S4 | inline | `a5d712a` |
 | T6 | Cover art from the folder (`cover`/`folder`/`front` `.jpg`/`.png`) when the file embeds none | S1, S3 | inline | `2053d98` |
 | T7 | The volume number takes three columns so the right-aligned slider stops jumping | S1 | inline | `d47ce9a` |
+| T9 | Redraw at ~30 fps only while the spectrum is on screen and moving (review advisory R4) | S2, S4 | inline | `496bdbf` |
 | T8 | Theme from the terminal: its own background and text, roles mapped to the ANSI palette | S5 | inline | `cefaa2a` |
 
 ## Log
@@ -76,3 +77,5 @@ Chosen: the terminal (see L17).
 **L17** Native review of the T5 slice (lineage `review-f074c30bd173b3e0`, lenses resilience + reliability, user granted): approved and acknowledged; four non-blocking advisories (R3-001/R4 at `src/ui/mod.rs` `frame_interval`: the 33 ms cadence ignores whether the spectrum is visible; R3-002 `listen`; R3-003 `drain_tap`) left as later work. T8 decision: the terminal over nvim — nvim runs everforest while Ghostty runs the gentleman theme at 0.8 opacity, so they disagree; reading a colorscheme at runtime is fragile; and a published player should follow each user's terminal. Roles: background and text `Reset` (keeps transparency), accent magenta (5), secondary blue (4), dim and border bright black (8), selection and the primary button accent background with black (0) text — the gentleman palette's 0 equals its background, so no ANSI color can be a raised surface; the title bar, pills and secondary buttons lose their band.
 
 **L18** T8 (`cefaa2a`): RED observed (2 tests: the selection test re-asserted for the new design, and a new palette test — no fixed RGB role, the terminal's own background). All suites, clippy and fmt green; the 80×24 golden text is unchanged. README says velo wears the terminal's colors and mentions the spectrum.
+
+**L19** (2026-11-07, user): "arregla lo de los 30 fps cuando no se ve el espectro". T9 (`496bdbf`): RED observed (compile: `cadence` missing). `draw` zeroes the band count each frame and `draw_spectrum` sets it only when the block has room, so `frame_interval` knows whether bars are on screen; the rule is the pure `cadence(visible, playing, falling)`, tested over its five cases. The tap is still drained every tick (L13). All suites, clippy and fmt green.
