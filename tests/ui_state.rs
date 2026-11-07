@@ -4,6 +4,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use clap::Parser as _;
 use lofty::config::WriteOptions;
 use lofty::prelude::*;
 use lofty::tag::{Tag, TagType};
@@ -1651,6 +1652,363 @@ fn u_says_the_index_could_not_be_opened_instead_of_asking_for_a_library() {
     assert_eq!(app.take_library_root(), None);
 }
 
+// ---- what velo saves as it goes, and what it restores at launch (S2, S3) ----
+
+/// A throwaway directory for a config file, outside the worktree.
+fn config_dir(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("velo-ui-config-{name}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// An app over three tracks, wired to a config file holding exactly the
+/// default text.
+fn app_with_default_config(config: &Path) -> App<'static> {
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    fs::write(config, velo::config::default_config_text()).unwrap();
+    let mut app = app_with_three_tracks();
+    app.set_config_file(Some(config.to_path_buf()));
+    app
+}
+
+/// The 80×24 screen velo draws for `app`.
+fn screen_of(app: &App<'_>) -> String {
+    let mut terminal =
+        velo::ui::ratatui::Terminal::new(velo::ui::ratatui::backend::TestBackend::new(80, 24))
+            .unwrap();
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    let buffer = terminal.backend().buffer();
+    (0..24)
+        .map(|y| {
+            (0..80)
+                .map(move |x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Builds an app the way the launch paths do: config file attached, the
+/// volume from the file set, then the session restored from the file.
+fn launched_from<'lib>(
+    temp: &'lib TempLibrary,
+    dir: &Path,
+    state: &str,
+) -> (PathBuf, String, App<'lib>) {
+    let config = dir.join("config.toml");
+    fs::write(
+        &config,
+        format!("bit_perfect = false\nreplay_gain = \"track\"\n\n[state]\n{state}"),
+    )
+    .unwrap();
+    let before = fs::read_to_string(&config).unwrap();
+    let mut app = App::browse(Some(&temp.library));
+    app.set_config_file(Some(config.clone()));
+    let cli = velo::config::Cli::try_parse_from(["velo"]).unwrap();
+    let settings = velo::config::Config::load_from(&config)
+        .unwrap()
+        .merged(&cli);
+    app.set_volume(settings.volume);
+    app.set_session(settings.session);
+    (config, before, app)
+}
+
+#[test]
+fn volume_is_written_only_when_it_leaves_what_the_file_says() {
+    let dir = config_dir("volume-save");
+    let config = dir.join("config.toml");
+    let mut app = app_with_default_config(&config);
+    let default = velo::config::default_config_text();
+
+    // `+` at 100, the volume the file already holds: nothing is written.
+    press(&mut app, KeyCode::Char('+'));
+    assert_eq!(fs::read_to_string(&config).unwrap(), default);
+
+    // A real change is written per key, under [state], in place.
+    press(&mut app, KeyCode::Char('-'));
+    assert_eq!(
+        fs::read_to_string(&config).unwrap(),
+        default.replace("volume = 100", "volume = 95"),
+        "one key changed in place"
+    );
+
+    // A launch value (`set_volume`, then `set_session`, as the launch paths
+    // do) is remembered as what the file says, never written back.
+    app.set_volume(100);
+    app.set_session(velo::config::Session::default());
+    assert_eq!(
+        fs::read_to_string(&config).unwrap(),
+        default.replace("volume = 100", "volume = 95"),
+        "the launch value is not written"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn repeat_and_shuffle_are_written_when_they_change() {
+    let dir = config_dir("repeat-shuffle");
+    let config = dir.join("config.toml");
+    let mut app = app_with_default_config(&config);
+    let default = velo::config::default_config_text();
+
+    press(&mut app, KeyCode::Char('r'));
+    assert_eq!(
+        fs::read_to_string(&config).unwrap(),
+        default.replace("repeat = \"off\"", "repeat = \"all\"")
+    );
+    press(&mut app, KeyCode::Char('s'));
+    assert_eq!(
+        fs::read_to_string(&config).unwrap(),
+        default
+            .replace("repeat = \"off\"", "repeat = \"all\"")
+            .replace("shuffle = false", "shuffle = true")
+    );
+
+    // Off again: `off` and `false` are values too, and they are written.
+    press(&mut app, KeyCode::Char('r'));
+    press(&mut app, KeyCode::Char('r'));
+    press(&mut app, KeyCode::Char('s'));
+    assert_eq!(fs::read_to_string(&config).unwrap(), default);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_tab_the_library_view_and_the_open_node_are_written_as_you_move() {
+    let temp = library_for_views("persist-move");
+    let dir = config_dir("persist-move");
+    let config = dir.join("config.toml");
+    fs::write(&config, velo::config::default_config_text()).unwrap();
+    let mut app = App::browse(Some(&temp.library));
+    app.set_config_file(Some(config.clone()));
+    let default = velo::config::default_config_text();
+    // New node keys are appended at the end of the `[state]` table, right
+    // before the next header — after the comment block that stands there —
+    // which is where the writer puts an appended key (T4). Everything else
+    // is replaced in place.
+    let expected = |browse_by: &str, keys: &str| {
+        default
+            .replace(
+                "browse_by = \"artists\"",
+                &format!("browse_by = \"{browse_by}\""),
+            )
+            .replace(
+                "# the default for background and text only.\n[theme]",
+                &format!("# the default for background and text only.\n{keys}[theme]"),
+            )
+    };
+    let file = || fs::read_to_string(&config).unwrap();
+
+    // The tab: to the queue, and the file follows.
+    press(&mut app, KeyCode::Tab);
+    assert_eq!(
+        file(),
+        default.replace("view = \"library\"", "view = \"queue\"")
+    );
+
+    // A number key from the queue brings the library tab back, with the new
+    // view saved beside it.
+    act(&mut app, KeyCode::Char('2'));
+    assert_eq!(file(), expected("albums", ""));
+
+    // Opening an album from the albums view writes both of its keys.
+    assert_eq!(act(&mut app, KeyCode::Enter), Action::Descend);
+    assert_eq!(
+        file(),
+        expected("albums", "artist = \"Tide\"\nalbum = \"Harbor\"\n")
+    );
+
+    // Walking back up removes the keys of the levels left behind.
+    assert_eq!(act(&mut app, KeyCode::Esc), Action::Ascend);
+    assert_eq!(file(), expected("albums", ""));
+
+    // The artists view drills down one key at a time.
+    act(&mut app, KeyCode::Char('1'));
+    assert_eq!(file(), expected("artists", ""), "no node, nothing extra");
+    act(&mut app, KeyCode::Char('j')); // onto Tide
+    assert_eq!(act(&mut app, KeyCode::Enter), Action::Descend);
+    assert_eq!(file(), expected("artists", "artist = \"Tide\"\n"));
+    assert_eq!(act(&mut app, KeyCode::Enter), Action::Descend);
+    assert_eq!(
+        file(),
+        expected("artists", "artist = \"Tide\"\nalbum = \"Harbor\"\n")
+    );
+    assert_eq!(act(&mut app, KeyCode::Esc), Action::Ascend);
+    assert_eq!(file(), expected("artists", "artist = \"Tide\"\n"));
+    assert_eq!(act(&mut app, KeyCode::Esc), Action::Ascend);
+    assert_eq!(
+        file(),
+        expected("artists", ""),
+        "back at the top, no node keys"
+    );
+
+    // A genre node is its own key.
+    act(&mut app, KeyCode::Char('4'));
+    assert_eq!(act(&mut app, KeyCode::Enter), Action::Descend);
+    assert_eq!(file(), expected("genres", "genre = \"Jazz\"\n"));
+    assert_eq!(act(&mut app, KeyCode::Esc), Action::Ascend);
+    assert_eq!(file(), expected("genres", ""));
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_first_volume_save_moves_a_legacy_top_level_volume_under_state() {
+    let dir = config_dir("legacy-volume");
+    let config = dir.join("config.toml");
+    fs::write(
+        &config,
+        "# kept comment\nvolume = 80\n\n[state]\nshuffle = false\n",
+    )
+    .unwrap();
+    let mut app = app_with_three_tracks();
+    app.set_config_file(Some(config.clone()));
+
+    press(&mut app, KeyCode::Char('-'));
+
+    let text = fs::read_to_string(&config).unwrap();
+    let volume_lines: Vec<&str> = text
+        .lines()
+        .filter(|line| line.starts_with("volume"))
+        .collect();
+    assert_eq!(
+        volume_lines,
+        ["volume = 95"],
+        "exactly one volume line: {text}"
+    );
+    let state = text.find("[state]").unwrap();
+    let volume = text.find("volume = 95").unwrap();
+    assert!(volume > state, "the volume lives under [state]: {text}");
+    assert!(
+        text.contains("# kept comment"),
+        "the user's file survives: {text}"
+    );
+
+    let file = velo::config::Config::load_from(&config).unwrap();
+    assert_eq!(file.state.volume, Some(95));
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_failed_write_says_velo_and_keeps_the_app_running() {
+    let dir = config_dir("unwritable");
+    let config = dir.join("config.toml");
+    // The config path is a directory: every write fails.
+    fs::create_dir_all(&config).unwrap();
+    let mut app = app_with_three_tracks();
+    app.set_config_file(Some(config));
+    assert_eq!(app.status(), "");
+
+    press(&mut app, KeyCode::Char('-'));
+    assert!(app.status().starts_with("velo: "), "{}", app.status());
+
+    // The app keeps running: the next key still does its work.
+    press(&mut app, KeyCode::Char('j'));
+    assert_eq!(app.selected(), 1);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_launch_comes_back_to_what_the_file_says_and_writes_nothing() {
+    let temp = library_for_views("persist-launch");
+    let dir = config_dir("persist-launch");
+    let (config, before, mut app) = launched_from(
+        &temp,
+        &dir,
+        "volume = 60\nshuffle = true\nrepeat = \"all\"\nview = \"queue\"\nbrowse_by = \"albums\"\nartist = \"Tide\"\nalbum = \"Harbor\"\n",
+    );
+
+    assert_eq!(app.volume(), 60);
+    assert_eq!(app.view(), View::Queue);
+    assert_eq!(app.browse_by(), BrowseBy::Albums);
+    assert_eq!(
+        app.level(),
+        Some(Level::Tracks {
+            artist: "Tide".to_owned(),
+            album: "Harbor".to_owned()
+        })
+    );
+    assert_eq!(app.tracks().len(), 2, "the album's tracks are on screen");
+    assert_eq!(app.status(), "", "the restore is silent");
+    // The screen carries the restored repeat and the restored volume.
+    let screen = screen_of(&app);
+    assert!(
+        screen.contains("repeat all"),
+        "the transport names it: {screen}"
+    );
+    assert!(screen.contains(" 60"), "the slider shows it: {screen}");
+
+    // And the launch itself wrote nothing.
+    assert_eq!(fs::read_to_string(&config).unwrap(), before);
+
+    // The restored values are the live ones: the next change moves on from
+    // them instead of rewriting them.
+    press(&mut app, KeyCode::Char('s'));
+    assert!(
+        fs::read_to_string(&config)
+            .unwrap()
+            .contains("shuffle = false")
+    );
+    press(&mut app, KeyCode::Char('r'));
+    assert!(
+        fs::read_to_string(&config)
+            .unwrap()
+            .contains("repeat = \"one\"")
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_node_the_index_no_longer_has_falls_back_silently_to_the_level_above() {
+    let temp = library_for_views("persist-gone");
+    let dir = config_dir("persist-gone");
+
+    // The artist is gone: the artists list stays, silently.
+    let (config, before, app) =
+        launched_from(&temp, &dir, "browse_by = \"artists\"\nartist = \"Ghost\"\n");
+    assert_eq!(app.level(), Some(Level::Artists));
+    assert_eq!(app.status(), "");
+    assert_eq!(fs::read_to_string(&config).unwrap(), before);
+
+    // The album is gone but the artist is not: the artist's albums stay.
+    let (config, before, app) = launched_from(
+        &temp,
+        &dir,
+        "browse_by = \"artists\"\nartist = \"Tide\"\nalbum = \"Missing\"\n",
+    );
+    assert_eq!(
+        app.level(),
+        Some(Level::Albums {
+            artist: "Tide".to_owned()
+        })
+    );
+    assert_eq!(app.status(), "");
+    assert_eq!(fs::read_to_string(&config).unwrap(), before);
+
+    // A genre that is gone: the genres list stays.
+    let (config, before, app) = launched_from(
+        &temp,
+        &dir,
+        "browse_by = \"genres\"\ngenre = \"Chiptune\"\n",
+    );
+    assert_eq!(app.level(), Some(Level::Genres));
+    assert_eq!(app.status(), "");
+    assert_eq!(fs::read_to_string(&config).unwrap(), before);
+
+    // A flat view with no node: the flat list.
+    let (config, before, app) = launched_from(&temp, &dir, "browse_by = \"tracks\"\n");
+    assert_eq!(app.level(), Some(Level::AllTracks));
+    assert_eq!(app.status(), "");
+    assert_eq!(fs::read_to_string(&config).unwrap(), before);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn u_after_choosing_a_library_without_an_open_index_says_why_nothing_happens() {
     let home = std::env::temp_dir().join(format!("velo-ui-no-index-{}", std::process::id()));
@@ -1676,4 +2034,209 @@ fn u_after_choosing_a_library_without_an_open_index_says_why_nothing_happens() {
         }
     }
     let _ = fs::remove_dir_all(&home);
+}
+
+// ---- the settings card (S6, S7) ---------------------------------------------
+
+#[test]
+fn o_opens_the_settings_card_and_esc_closes_it() {
+    let mut app = app_with_three_tracks();
+    assert!(!app.settings_open());
+
+    assert_eq!(app.on_key(key(KeyCode::Char('o'))), Action::None);
+    assert!(app.settings_open(), "o opens the settings card");
+
+    press(&mut app, KeyCode::Esc);
+    assert!(!app.settings_open(), "esc closes the settings card");
+
+    // Closed again, the keys mean what they meant before.
+    press(&mut app, KeyCode::Char('j'));
+    assert_eq!(app.selected(), 1);
+}
+
+#[test]
+fn the_settings_cursor_moves_between_settings_only_and_stops_at_the_ends() {
+    let mut app = app_with_three_tracks();
+    press(&mut app, KeyCode::Char('o'));
+    assert_eq!(
+        app.settings_focused(),
+        "replay gain",
+        "the card opens on the first setting; the volume is not a row"
+    );
+
+    press(&mut app, KeyCode::Char('j'));
+    assert_eq!(app.settings_focused(), "repeat");
+    press(&mut app, KeyCode::Char('j'));
+    assert_eq!(app.settings_focused(), "shuffle");
+    press(&mut app, KeyCode::Char('j'));
+    assert_eq!(
+        app.settings_focused(),
+        "accent",
+        "the theme header is skipped, never focused"
+    );
+
+    press(&mut app, KeyCode::Char('G'));
+    assert_eq!(
+        app.settings_focused(),
+        "folder",
+        "G jumps to the last setting"
+    );
+    press(&mut app, KeyCode::Char('j'));
+    assert_eq!(
+        app.settings_focused(),
+        "folder",
+        "j stops at the last setting"
+    );
+
+    press(&mut app, KeyCode::Char('g'));
+    assert_eq!(
+        app.settings_focused(),
+        "replay gain",
+        "g jumps to the first setting"
+    );
+    press(&mut app, KeyCode::Char('k'));
+    assert_eq!(
+        app.settings_focused(),
+        "replay gain",
+        "k stops at the first setting"
+    );
+}
+
+#[test]
+fn an_open_settings_card_holds_back_q_and_space_until_it_closes() {
+    let mut app = app_with_three_tracks();
+    press(&mut app, KeyCode::Char('o'));
+    assert!(app.settings_open());
+
+    for code in [KeyCode::Char('q'), KeyCode::Char(' ')] {
+        assert_eq!(
+            app.on_key(key(code)),
+            Action::None,
+            "{code:?} reached the interface under the card"
+        );
+        assert!(app.settings_open(), "the card stays open");
+    }
+    assert_eq!(app.selected(), 0, "the library selection never moved");
+
+    press(&mut app, KeyCode::Esc);
+    assert!(!app.settings_open());
+    assert_eq!(app.on_key(key(KeyCode::Char('q'))), Action::Quit);
+    assert_eq!(app.on_key(key(KeyCode::Char(' '))), Action::TogglePause);
+}
+
+#[test]
+fn enter_on_a_visibility_row_flips_it_and_writes_cover_art_to_the_file() {
+    let dir = config_dir("settings-cover-art");
+    let config = dir.join("config.toml");
+    let mut app = app_with_default_config(&config);
+    let default = velo::config::default_config_text();
+
+    press(&mut app, KeyCode::Char('o'));
+    for _ in 0..10 {
+        press(&mut app, KeyCode::Char('j'));
+    }
+    assert_eq!(app.settings_focused(), "cover art");
+    press(&mut app, KeyCode::Enter);
+
+    assert_eq!(
+        fs::read_to_string(&config).unwrap(),
+        default.replace("cover_art = true", "cover_art = false"),
+        "the switch is written per key, in place"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn right_on_a_colour_row_changes_the_palette_and_writes_the_theme_accent() {
+    let dir = config_dir("settings-accent");
+    let config = dir.join("config.toml");
+    let mut app = app_with_default_config(&config);
+    let default = velo::config::default_config_text();
+
+    press(&mut app, KeyCode::Char('o'));
+    for _ in 0..3 {
+        press(&mut app, KeyCode::Char('j'));
+    }
+    assert_eq!(app.settings_focused(), "accent");
+    press(&mut app, KeyCode::Right);
+
+    assert_eq!(
+        fs::read_to_string(&config).unwrap(),
+        default.replace("accent = \"#af00af\"", "accent = \"#5f87d7\""),
+        "the colour is written per key under [theme]"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn enter_on_the_folder_row_opens_the_library_prompt() {
+    let dir = config_dir("settings-folder");
+    let config = dir.join("config.toml");
+    let mut app = app_with_default_config(&config);
+
+    press(&mut app, KeyCode::Char('o'));
+    press(&mut app, KeyCode::Char('G'));
+    assert_eq!(app.settings_focused(), "folder");
+    press(&mut app, KeyCode::Enter);
+
+    assert!(
+        app.library_prompt_open(),
+        "the existing library prompt opened"
+    );
+    assert!(!app.settings_open(), "the card gave the keys to the prompt");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn enter_on_the_advisories_row_writes_it_to_the_file() {
+    let dir = config_dir("settings-advisories");
+    let config = dir.join("config.toml");
+    let mut app = app_with_default_config(&config);
+    let default = velo::config::default_config_text();
+
+    press(&mut app, KeyCode::Char('o'));
+    for _ in 0..14 {
+        press(&mut app, KeyCode::Char('j'));
+    }
+    assert_eq!(app.settings_focused(), "advisories");
+    press(&mut app, KeyCode::Enter);
+
+    assert_eq!(
+        fs::read_to_string(&config).unwrap(),
+        default.replace("advisories = true", "advisories = false"),
+        "the switch is written per key, under [ui]"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn enter_on_the_view_numbers_row_writes_it_to_the_file() {
+    let dir = config_dir("settings-view-numbers");
+    let config = dir.join("config.toml");
+    let mut app = app_with_default_config(&config);
+    let default = velo::config::default_config_text();
+
+    press(&mut app, KeyCode::Char('o'));
+    for _ in 0..15 {
+        press(&mut app, KeyCode::Char('j'));
+    }
+    assert_eq!(app.settings_focused(), "view numbers");
+    press(&mut app, KeyCode::Enter);
+
+    assert_eq!(
+        fs::read_to_string(&config).unwrap(),
+        default.replace("view_numbers = true", "view_numbers = false"),
+        "the switch is written per key, under [ui]"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_question_mark_inside_the_settings_card_does_nothing() {
+    let mut app = app_with_three_tracks();
+    press(&mut app, KeyCode::Char('o'));
+
+    assert_eq!(app.on_key(key(KeyCode::Char('?'))), Action::None);
+    assert!(app.settings_open(), "the card stays open");
+    assert!(!app.help_open(), "? does not open the help over the card");
 }

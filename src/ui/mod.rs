@@ -39,12 +39,12 @@ use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, ListState, Para
 use crate::audio::output::{Repeat, SharedQueue, TrackFailure};
 use crate::audio::spectrum::Spectrum;
 use crate::audio::{Player, seek_target, skip_target};
-use crate::config::ReplayGainMode;
+use crate::config::{OpenNode, ReplayGainMode, Session, ThemeColor, ThemeColors, UiParts};
 use crate::library::{AlbumEntry, ArtistEntry, GenreEntry, IndexReport, Library, TrackEntry};
 
 use self::artwork::{Artwork, Picker, StatefulImage, StatefulProtocol};
 use self::search::Search;
-use self::theme::{ACCENT, BACKGROUND, BORDER, DIM, INK, SECONDARY, TEXT};
+use self::theme::Theme;
 
 /// What one key press asks the runtime to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -88,9 +88,11 @@ pub enum Action {
 }
 
 /// The four ways to look at the library, on the keys `1` to `4`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum BrowseBy {
     /// Artists, then their albums, then an album's tracks.
+    #[default]
     Artists,
     /// Every album, then its tracks.
     Albums,
@@ -229,9 +231,11 @@ enum Playback {
 }
 
 /// Which list the arrow keys and the editing commands act on.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum View {
     /// The library browser, or the flat command-line list.
+    #[default]
     Library,
     /// The queue, in play order.
     Queue,
@@ -302,6 +306,10 @@ pub struct App<'lib> {
     /// How `ReplayGain` is applied, from the config; the player reads it when a
     /// stream is built, so a seek keeps honouring it (T11).
     replay_gain: ReplayGainMode,
+    /// The palette the interface draws with, from the config's `[theme]` (S4).
+    theme: Theme,
+    /// Which parts of the interface are drawn, from the config's `[ui]` (S5).
+    ui: UiParts,
     /// Whether what is left of the queue plays in a mixed order.
     shuffle: bool,
     /// The queue as it was before it was shuffled, to put it back.
@@ -336,11 +344,22 @@ pub struct App<'lib> {
     protocol: RefCell<Option<Box<dyn StatefulProtocol>>>,
     /// The help card while it is open: its scroll and its filter (S1).
     help: Option<Help>,
+    /// The settings card while it is open: its cursor and its scroll (S6).
+    settings: Option<SettingsCard>,
+    /// The palette as the `[theme]` table wrote it (S4): what the settings
+    /// card rebuilds with one role replaced when a colour is cycled.
+    colors: ThemeColors,
     /// Present while no library root is set (S4): the empty browser then
     /// says how to set one, and while its prompt is open every key edits it.
     library_setup: Option<LibrarySetup>,
-    /// The config file a library chosen with `L` is saved to.
+    /// The config file a library chosen with `L` is saved to, and the file
+    /// every persisted value is written to (S2).
     config_file: Option<PathBuf>,
+    /// What the file already says (S2): the session it launched from and the
+    /// volume it launched at. Every persisted write compares against this,
+    /// so a value the file holds is never written back.
+    saved: Session,
+    saved_volume: u8,
     /// An accepted library root, or the one `u` refreshes, waiting for the
     /// shell to index it.
     library_root: Option<PathBuf>,
@@ -381,6 +400,8 @@ impl<'lib> App<'lib> {
             seen_area: std::cell::Cell::new(Rect::new(0, 0, 0, 0)),
             art_explained: false,
             replay_gain: ReplayGainMode::default(),
+            theme: Theme::default(),
+            ui: UiParts::default(),
             shuffle: false,
             unshuffled: Vec::new(),
             repeat: Repeat::Off,
@@ -394,8 +415,12 @@ impl<'lib> App<'lib> {
             artwork_path: None,
             protocol: RefCell::new(None),
             help: None,
+            settings: None,
+            colors: ThemeColors::default(),
             library_setup: None,
             config_file: None,
+            saved: Session::default(),
+            saved_volume: crate::config::DEFAULT_VOLUME,
             library_root: None,
             refresh: Refresh::default(),
             volume: 100,
@@ -431,6 +456,8 @@ impl<'lib> App<'lib> {
             seen_area: std::cell::Cell::new(Rect::new(0, 0, 0, 0)),
             art_explained: false,
             replay_gain: ReplayGainMode::default(),
+            theme: Theme::default(),
+            ui: UiParts::default(),
             shuffle: false,
             unshuffled: Vec::new(),
             repeat: Repeat::Off,
@@ -444,8 +471,12 @@ impl<'lib> App<'lib> {
             artwork_path: None,
             protocol: RefCell::new(None),
             help: None,
+            settings: None,
+            colors: ThemeColors::default(),
             library_setup: None,
             config_file: None,
+            saved: Session::default(),
+            saved_volume: crate::config::DEFAULT_VOLUME,
             library_root: None,
             refresh: Refresh::default(),
             volume: 100,
@@ -481,6 +512,248 @@ impl<'lib> App<'lib> {
     /// How `ReplayGain` is applied, as the config resolved it.
     pub const fn set_replay_gain(&mut self, mode: ReplayGainMode) {
         self.replay_gain = mode;
+    }
+
+    /// The palette the interface draws with, from the config's `[theme]` (S4):
+    /// `accent_bright` stays derived from the accent. The palette as the file
+    /// wrote it is kept too, so the settings card can rebuild it with one
+    /// role replaced (S7).
+    pub fn set_theme(&mut self, colors: ThemeColors) {
+        self.colors = colors;
+        self.theme = colors.into();
+    }
+
+    /// Which parts of the interface are drawn, from the config's `[ui]` (S5):
+    /// the switches the layout reads, everything on by default.
+    pub fn set_ui(&mut self, ui: UiParts) {
+        self.ui = ui;
+    }
+
+    /// Comes back to where the config file says the last session stood (S3):
+    /// the shuffle and repeat it saved, then — in the browser — the tab, the
+    /// library view and the node that was open. Call it after
+    /// [`App::set_volume`], as the launch paths do: the volume on the app
+    /// then is remembered as what the file says, so restoring never writes.
+    /// A node the index no longer has falls back silently to the level above.
+    pub fn set_session(&mut self, session: Session) {
+        // Every one of these came from the file, and the change hooks below
+        // compare against `saved`: nothing here is ever written back.
+        let Session {
+            shuffle,
+            repeat,
+            view,
+            browse_by,
+            node,
+        } = session;
+        self.saved = Session {
+            shuffle,
+            repeat,
+            view,
+            browse_by,
+            node: node.clone(),
+        };
+        self.saved_volume = self.volume;
+        self.shuffle = shuffle;
+        self.repeat = repeat;
+        // The tab, the library view and the node belong to the browser; a
+        // flat command-line list has none of them to come back to.
+        if matches!(self.position, Position::Files) {
+            return;
+        }
+        self.browse_view(browse_by);
+        if let Some(node) = &node {
+            self.reopen_node(browse_by, node);
+        }
+        self.view = view;
+    }
+
+    /// Re-opens the saved node inside `by`, level by level, reading each
+    /// child list from the index. A level the index no longer has — a gone
+    /// artist, album or genre, or an empty list where one should be — stops
+    /// the descent right there, silently: the level above stays on screen.
+    fn reopen_node(&mut self, by: BrowseBy, node: &OpenNode) {
+        let Some(library) = self.library else {
+            return;
+        };
+        match by {
+            BrowseBy::Artists => {
+                let Some(artist) = node.artist.as_deref() else {
+                    return;
+                };
+                let Ok(albums) = library.albums_of(artist) else {
+                    return;
+                };
+                if albums.is_empty() {
+                    return;
+                }
+                self.position = Position::Albums {
+                    artist: artist.to_owned(),
+                };
+                self.albums = albums;
+                self.selected = 0;
+                let Some(album) = node.album.as_deref() else {
+                    return;
+                };
+                let Ok(tracks) = library.tracks_of(artist, album) else {
+                    return;
+                };
+                if tracks.is_empty() {
+                    return;
+                }
+                self.position = Position::Tracks {
+                    artist: artist.to_owned(),
+                    album: album.to_owned(),
+                };
+                self.tracks = tracks;
+                self.selected = 0;
+            }
+            BrowseBy::Albums | BrowseBy::Tracks => {
+                let (Some(artist), Some(album)) = (node.artist.as_deref(), node.album.as_deref())
+                else {
+                    return;
+                };
+                let Ok(tracks) = library.tracks_of(artist, album) else {
+                    return;
+                };
+                if tracks.is_empty() {
+                    return;
+                }
+                self.position = Position::Tracks {
+                    artist: artist.to_owned(),
+                    album: album.to_owned(),
+                };
+                self.tracks = tracks;
+                self.selected = 0;
+            }
+            BrowseBy::Genres => {
+                let Some(genre) = node.genre.as_deref() else {
+                    return;
+                };
+                let Ok(tracks) = library.tracks_of_genre(genre) else {
+                    return;
+                };
+                if tracks.is_empty() {
+                    return;
+                }
+                self.position = Position::Genre {
+                    genre: genre.to_owned(),
+                };
+                self.tracks = tracks;
+                self.selected = 0;
+            }
+        }
+    }
+
+    /// Writes one key of the user's config file (S2). Renders nothing; a
+    /// failed write becomes the status line and the app keeps running.
+    /// Without a config file there is nothing to write and nothing to say.
+    fn remember(&mut self, section: Option<&str>, key: &str, value: &str) {
+        let Some(path) = &self.config_file else {
+            return;
+        };
+        if let Err(error) = crate::config::set_value(path, section, key, value) {
+            self.status = format!("velo: {error}");
+        }
+    }
+
+    /// Removes one key of the user's config file, with the same silence and
+    /// the same error rule as [`App::remember`].
+    fn forget(&mut self, section: Option<&str>, key: &str) {
+        let Some(path) = &self.config_file else {
+            return;
+        };
+        if let Err(error) = crate::config::remove_value(path, section, key) {
+            self.status = format!("velo: {error}");
+        }
+    }
+
+    /// A string as the TOML literal `set_value` writes after the `=`.
+    fn toml_string(value: &str) -> String {
+        toml::Value::String(value.to_owned()).to_string()
+    }
+
+    /// Saves the tab, but only when it leaves what the file says. Called
+    /// from the two user paths that move it — the tab key and a number key
+    /// from the queue — never from `browse_view` itself, which the launch
+    /// restore and the reload fallback also call and which must write
+    /// nothing.
+    fn remember_view(&mut self) {
+        if self.view == self.saved.view {
+            return;
+        }
+        let label = match self.view {
+            View::Library => "library",
+            View::Queue => "queue",
+        };
+        self.saved.view = self.view;
+        self.remember(Some("state"), "view", &Self::toml_string(label));
+    }
+
+    /// The node the current position names, in the file's terms (S3).
+    fn open_node(&self) -> OpenNode {
+        match &self.position {
+            Position::Albums { artist } => OpenNode {
+                artist: Some(artist.clone()),
+                ..OpenNode::default()
+            },
+            Position::Tracks { artist, album } => OpenNode {
+                artist: Some(artist.clone()),
+                album: Some(album.clone()),
+                ..OpenNode::default()
+            },
+            Position::Genre { genre } => OpenNode {
+                genre: Some(genre.clone()),
+                ..OpenNode::default()
+            },
+            _ => OpenNode::default(),
+        }
+    }
+
+    /// Saves the open node, one key at a time: a key the position still
+    /// names is written when it changed, and a key it left behind is
+    /// removed, so the file never keeps a node the user has walked out of
+    /// (S3).
+    fn remember_node(&mut self) {
+        let node = self.open_node();
+        let saved = if node == OpenNode::default() {
+            None
+        } else {
+            Some(node.clone())
+        };
+        if saved == self.saved.node {
+            return;
+        }
+        let was = self.saved.node.take().unwrap_or_default();
+        self.saved.node = saved;
+        for (key, now, before) in [
+            ("artist", node.artist.clone(), was.artist),
+            ("album", node.album.clone(), was.album),
+            ("genre", node.genre.clone(), was.genre),
+        ] {
+            match now {
+                Some(name) if Some(&name) != before.as_ref() => {
+                    self.remember(Some("state"), key, &Self::toml_string(&name));
+                }
+                None if before.is_some() => self.forget(Some("state"), key),
+                _ => {}
+            }
+        }
+    }
+
+    /// How many rows the now-playing block takes out of a content area this
+    /// tall, with the `[ui]` switches applied (S5). The spectrum belongs to
+    /// the tall block: with the switch off the block never reserves its
+    /// rows — the tall tier is capped at the seven-row block, and the bars'
+    /// rows go to the list instead.
+    fn now_playing_rows(&self, height: u16) -> u16 {
+        // Content tall enough for the spectrum tier starts at 22 rows; any
+        // shorter height keeps the block at its ordinary size.
+        const SPECTRUM_TIER: u16 = 22;
+        now_playing_rows(if self.ui.spectrum {
+            height
+        } else {
+            height.min(SPECTRUM_TIER - 1)
+        })
     }
 
     /// The level the config asks for. Applied to a running player and kept for
@@ -731,6 +1004,21 @@ impl<'lib> App<'lib> {
         self.help.is_some()
     }
 
+    /// Whether the settings card is open (S6).
+    #[must_use]
+    pub const fn settings_open(&self) -> bool {
+        self.settings.is_some()
+    }
+
+    /// What the settings card focuses, as the row's label (S6): the section
+    /// headers are never focused, and a closed card focuses nothing.
+    #[must_use]
+    pub fn settings_focused(&self) -> &'static str {
+        self.settings
+            .as_ref()
+            .map_or("replay gain", SettingsCard::focused_label)
+    }
+
     /// The volume, in percent.
     #[must_use]
     pub const fn volume(&self) -> u8 {
@@ -782,6 +1070,16 @@ impl<'lib> App<'lib> {
     /// leaves the interface exactly as it draws without art (T8).
     pub fn show_artwork(&mut self, picker: Option<Picker>) {
         self.picker = picker;
+    }
+
+    /// Installs a decoded cover without a stream, the way [`App::show_artwork`]
+    /// installs the capability: the integration tests' hook for the decoded-art
+    /// leg of the cover gates, which no fixture can reach while a track plays.
+    /// Production never calls this, which is why it is hidden from the docs.
+    #[doc(hidden)]
+    pub fn show_decoded_artwork(&mut self, artwork: Option<artwork::Artwork>) {
+        self.artwork = artwork;
+        self.artwork_path = None;
     }
 
     /// Runs once per turn of the event loop — the same cadence as key
@@ -847,9 +1145,17 @@ impl<'lib> App<'lib> {
     }
 
     /// Tells the user once why a cover they own is not on screen, instead of
-    /// leaving them staring at a panel that never appears (T8).
+    /// leaving them staring at a panel that never appears (T8). The
+    /// `[ui] advisories` switch silences exactly this explanation (S5.4); it
+    /// never silences errors or ordinary messages.
     fn explain_hidden_art(&mut self) {
-        if self.art_explained || !self.status.is_empty() {
+        // A cover the user switched off is hidden on purpose (S5): that is a
+        // decision, not a malfunction, and nothing explains it.
+        if !self.ui.cover_art
+            || !self.ui.advisories
+            || self.art_explained
+            || !self.status.is_empty()
+        {
             return;
         }
         let area = self.seen_area.get();
@@ -953,7 +1259,9 @@ impl<'lib> App<'lib> {
     }
 
     /// Stands at the top of `by` and reads its list; the library tab comes
-    /// to the front.
+    /// to the front. The view is saved here (S3), but only when it changed:
+    /// the launch restore and the reload fallback call this with the view
+    /// the file already holds, and must write nothing.
     fn browse_view(&mut self, by: BrowseBy) {
         self.view = View::Library;
         self.browse_by = by;
@@ -965,6 +1273,10 @@ impl<'lib> App<'lib> {
         };
         self.selected = 0;
         self.load_top();
+        if by != self.saved.browse_by {
+            self.saved.browse_by = by;
+            self.remember(Some("state"), "browse_by", &Self::toml_string(by.label()));
+        }
     }
 
     /// Reads the list of the view's top level from the index.
@@ -986,6 +1298,10 @@ impl<'lib> App<'lib> {
 
     /// Applies one key press. Pure with respect to the terminal and the
     /// library: it only moves state and answers with an [`Action`].
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the keymap is one match read top to bottom; the overlays' keys live in their own handlers"
+    )]
     pub fn on_key(&mut self, event: ratatui::crossterm::event::KeyEvent) -> Action {
         use ratatui::crossterm::event::KeyCode;
 
@@ -997,6 +1313,11 @@ impl<'lib> App<'lib> {
         }
         if self.library_prompt_open() {
             return self.on_prompt_key(event.code);
+        }
+        // An open settings card owns every key too (S6): nothing reaches the
+        // lists or the transport while it is up, `q` and `space` included.
+        if self.settings.is_some() {
+            return self.on_settings_key(event.code);
         }
         // An open help owns every key too, so `j`/`k` scroll it and never
         // the list underneath.
@@ -1079,6 +1400,10 @@ impl<'lib> App<'lib> {
                 self.help = Some(Help::default());
                 Action::None
             }
+            KeyCode::Char('o') => {
+                self.settings = Some(SettingsCard::default());
+                Action::None
+            }
             KeyCode::Char('/') if self.library.is_some() => {
                 self.open_search();
                 Action::None
@@ -1106,6 +1431,16 @@ impl<'lib> App<'lib> {
                 if let Some(player) = &self.player {
                     player.set_volume(percent);
                 }
+                // Saved when it leaves what the file says (S2): `+` at the
+                // launch volume writes nothing.
+                if percent != self.saved_volume {
+                    self.saved_volume = percent;
+                    self.remember(Some("state"), "volume", &percent.to_string());
+                    // The first `[state] volume` moves the legacy top-level
+                    // line out of the file (S2.5); afterwards this removes
+                    // nothing and writes nothing.
+                    self.forget(None, "volume");
+                }
             }
             Action::Quit => self.shutdown(),
             Action::Play { from } if self.search.is_some() => self.play_search_from(from),
@@ -1122,10 +1457,21 @@ impl<'lib> App<'lib> {
                 if let Some(player) = &self.player {
                     player.set_repeat(mode);
                 }
+                if mode != self.saved.repeat {
+                    self.saved.repeat = mode;
+                    self.remember(Some("state"), "repeat", &Self::toml_string(mode.label()));
+                }
             }
             Action::SetLibrary => self.accept_library(),
             Action::CompleteLibraryPath => self.complete_library_path(),
-            Action::Browse(by) => self.browse_view(by),
+            Action::Browse(by) => {
+                self.browse_view(by);
+                // A number key from the queue tab brings the library tab
+                // back with the view; `browse_view` itself stays hook-free,
+                // because the launch restore and the reload fallback also
+                // call it and must write nothing.
+                self.remember_view();
+            }
             // Handed to the shell, which owns the thread.
             Action::Reindex => self.library_root.clone_from(&self.refresh.root),
         }
@@ -1229,6 +1575,205 @@ impl<'lib> App<'lib> {
         Action::None
     }
 
+    /// The keys while the settings card is open (S6): `j`/`k`/`↓`/`↑` move
+    /// between the settings, the section headers skipped; `g`/`G` jump to
+    /// the ends; `enter` and `→` step the focused setting forward, `←` back;
+    /// `esc` closes it. Everything else — `q` and `space` included — is
+    /// inert here, and `?` is not a settings key.
+    fn on_settings_key(&mut self, code: ratatui::crossterm::event::KeyCode) -> Action {
+        use ratatui::crossterm::event::KeyCode;
+
+        let area = self.seen_area.get();
+        let Some(card) = self.settings.as_mut() else {
+            return Action::None;
+        };
+        match code {
+            KeyCode::Esc => self.settings = None,
+            KeyCode::Char('j') | KeyCode::Down => {
+                card.move_down();
+                card.keep_visible(SettingsCard::card_rows(area));
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                card.move_up();
+                card.keep_visible(SettingsCard::card_rows(area));
+            }
+            KeyCode::Char('g') => {
+                card.cursor = 0;
+                card.top = 0;
+            }
+            KeyCode::Char('G') => {
+                card.cursor = SettingsCard::setting_count() - 1;
+                card.keep_visible(SettingsCard::card_rows(area));
+            }
+            KeyCode::Enter | KeyCode::Right => {
+                let key = card.focused();
+                self.change_setting(key, true);
+            }
+            KeyCode::Left => {
+                let key = card.focused();
+                self.change_setting(key, false);
+            }
+            _ => {}
+        }
+        Action::None
+    }
+
+    /// Steps the focused setting one step forward or back (S7.1): every
+    /// change applies at once through the same hooks the keys use, and is
+    /// written to the file by those hooks, never from here. A step always
+    /// changes the value — a toggle flips it and a cycle moves along the
+    /// presets — so each write is a real change.
+    fn change_setting(&mut self, key: SettingsKey, forward: bool) {
+        match key {
+            SettingsKey::ReplayGain => {
+                let next = match (self.replay_gain, forward) {
+                    (ReplayGainMode::Track, true) | (ReplayGainMode::Off, false) => {
+                        ReplayGainMode::Album
+                    }
+                    (ReplayGainMode::Album, true) | (ReplayGainMode::Track, false) => {
+                        ReplayGainMode::Off
+                    }
+                    (ReplayGainMode::Off, true) | (ReplayGainMode::Album, false) => {
+                        ReplayGainMode::Track
+                    }
+                };
+                self.set_replay_gain(next);
+                self.remember(
+                    None,
+                    "replay_gain",
+                    &Self::toml_string(replay_gain_label(next)),
+                );
+            }
+            SettingsKey::Repeat => {
+                let next = match (self.repeat, forward) {
+                    (Repeat::Off, true) | (Repeat::One, false) => Repeat::All,
+                    (Repeat::All, true) | (Repeat::Off, false) => Repeat::One,
+                    (Repeat::One, true) | (Repeat::All, false) => Repeat::Off,
+                };
+                self.repeat = next;
+                self.apply(Action::SetRepeat(next));
+            }
+            SettingsKey::Shuffle => self.apply(Action::ToggleShuffle),
+            SettingsKey::Accent => self.change_color(ColorRole::Accent, forward),
+            SettingsKey::Text => self.change_color(ColorRole::Text, forward),
+            SettingsKey::Dim => self.change_color(ColorRole::Dim, forward),
+            SettingsKey::Secondary => self.change_color(ColorRole::Secondary, forward),
+            SettingsKey::Border => self.change_color(ColorRole::Border, forward),
+            SettingsKey::Ink => self.change_color(ColorRole::Ink, forward),
+            SettingsKey::Background => self.change_color(ColorRole::Background, forward),
+            SettingsKey::CoverArt => self.toggle_ui("cover_art", |ui| &mut ui.cover_art),
+            SettingsKey::Spectrum => self.toggle_ui("spectrum", |ui| &mut ui.spectrum),
+            SettingsKey::Hints => self.toggle_ui("hints", |ui| &mut ui.hints),
+            SettingsKey::TopBar => self.toggle_ui("top_bar", |ui| &mut ui.top_bar),
+            SettingsKey::Advisories => self.toggle_ui("advisories", |ui| &mut ui.advisories),
+            SettingsKey::ViewNumbers => {
+                self.toggle_ui("view_numbers", |ui| &mut ui.view_numbers);
+            }
+            SettingsKey::Folder => {
+                // The prompt owns the keys from here (S7.2): its typing, its
+                // completion and its saving stay exactly as they are.
+                self.settings = None;
+                self.ask_for_library(self.config_file.clone());
+            }
+        }
+    }
+
+    /// Cycles one colour role through [`COLOR_PRESETS`] (S7): forward or
+    /// back, wrapping; a colour that is not a preset — the user's own hex —
+    /// steps to the first preset going forward and to the last going back.
+    /// The palette is rebuilt from the current one with the one role
+    /// replaced, applied through [`App::set_theme`], and written to the file
+    /// under `[theme]`.
+    fn change_color(&mut self, role: ColorRole, forward: bool) {
+        let current = role.get(self.colors).to_key();
+        let next = Self::next_color(&current, role.allows_reset(), forward);
+        let Some(colour) = parse_color(next) else {
+            return;
+        };
+        let mut colors = self.colors;
+        role.set(&mut colors, colour);
+        self.set_theme(colors);
+        self.remember(Some("theme"), role.key(), &Self::toml_string(next));
+    }
+
+    /// The colour `forward` cycles to from `current` (S7): the next preset
+    /// forward, the previous back, both wrapping; a colour that is no preset
+    /// steps to the first one forward and to the last one back. The two
+    /// roles that may be `reset` cycle it ahead of the presets.
+    fn next_color(current: &str, allows_reset: bool, forward: bool) -> &'static str {
+        let reset = ["reset"];
+        let head: &[&str] = if allows_reset { &reset } else { &[] };
+        let mut list = Vec::with_capacity(head.len() + COLOR_PRESETS.len());
+        list.extend_from_slice(head);
+        list.extend_from_slice(&COLOR_PRESETS);
+        match list.iter().position(|&colour| colour == current) {
+            Some(index) if forward => list[(index + 1) % list.len()],
+            Some(index) => list[(index + list.len() - 1) % list.len()],
+            None if forward => list[0],
+            None => list[list.len() - 1],
+        }
+    }
+
+    /// Flips one `[ui]` switch (S7): the parts the layout read change at
+    /// once through [`App::set_ui`], and the file gets the switch's new
+    /// value. A flip only ever happens from the card, so it is always a
+    /// change worth writing.
+    fn toggle_ui(&mut self, key: &str, part: fn(&mut UiParts) -> &mut bool) {
+        let mut ui = self.ui;
+        *part(&mut ui) = !*part(&mut ui);
+        self.set_ui(ui);
+        let shown = *part(&mut self.ui);
+        self.remember(Some("ui"), key, if shown { "true" } else { "false" });
+    }
+
+    /// The value each setting shows, in the order of the settings (S6.2).
+    fn settings_values(&self) -> Vec<String> {
+        SETTINGS_ROWS
+            .iter()
+            .filter_map(|row| match row {
+                SettingsRow::Header(_) => None,
+                SettingsRow::Setting(key) => Some(self.setting_value(*key)),
+            })
+            .collect()
+    }
+
+    /// What one setting shows on its row's right (S6.2).
+    fn setting_value(&self, key: SettingsKey) -> String {
+        match key {
+            SettingsKey::ReplayGain => replay_gain_label(self.replay_gain).to_owned(),
+            SettingsKey::Repeat => self.repeat.label().to_owned(),
+            SettingsKey::Shuffle => if self.shuffle { "on" } else { "off" }.to_owned(),
+            SettingsKey::Accent => self.colors.accent.to_key(),
+            SettingsKey::Text => self.colors.text.to_key(),
+            SettingsKey::Dim => self.colors.dim.to_key(),
+            SettingsKey::Secondary => self.colors.secondary.to_key(),
+            SettingsKey::Border => self.colors.border.to_key(),
+            SettingsKey::Ink => self.colors.ink.to_key(),
+            SettingsKey::Background => self.colors.background.to_key(),
+            SettingsKey::CoverArt
+            | SettingsKey::Spectrum
+            | SettingsKey::Hints
+            | SettingsKey::TopBar
+            | SettingsKey::Advisories
+            | SettingsKey::ViewNumbers => {
+                let drawn = match key {
+                    SettingsKey::CoverArt => self.ui.cover_art,
+                    SettingsKey::Spectrum => self.ui.spectrum,
+                    SettingsKey::Hints => self.ui.hints,
+                    SettingsKey::Advisories => self.ui.advisories,
+                    SettingsKey::ViewNumbers => self.ui.view_numbers,
+                    _ => self.ui.top_bar,
+                };
+                if drawn { "shown" } else { "hidden" }.to_owned()
+            }
+            SettingsKey::Folder => self
+                .refresh
+                .root
+                .as_ref()
+                .map_or_else(|| "not set".to_owned(), |root| root.display().to_string()),
+        }
+    }
+
     /// Accepts the typed library path when it names a directory: saves it to
     /// the config file as typed, closes the prompt and hands the expanded
     /// root to the shell. Otherwise the prompt stays open and says why.
@@ -1275,25 +1820,36 @@ impl<'lib> App<'lib> {
         self.seen_area.set(area);
         // Set again by `draw_spectrum` only when this frame has room for it.
         self.spectrum_bands.set(0);
-        frame.render_widget(Block::new().style(Style::new().bg(BACKGROUND)), area);
+        frame.render_widget(
+            Block::new().style(Style::new().bg(self.theme.background)),
+            area,
+        );
 
-        // The window: a rounded frame around a title bar, the content and
-        // the footer. The art threshold below is still measured on the whole
-        // terminal, so `artwork::hidden_reason` keeps telling the truth.
+        // The window: a rounded frame around the title bar, the content and
+        // the footer. The top bar hidden gives its row to the content (S5);
+        // the hints hidden leave the footer the status row alone. The art
+        // threshold below is still measured on the whole terminal, so
+        // `artwork::hidden_reason` keeps telling the truth.
         let window = Block::bordered()
             .border_type(BorderType::Rounded)
-            .border_style(Style::new().fg(BORDER))
-            .style(Style::new().bg(BACKGROUND));
+            .border_style(Style::new().fg(self.theme.border))
+            .style(Style::new().bg(self.theme.background));
         let inner = window.inner(area);
         frame.render_widget(window, area);
 
-        let [title_bar, content, footer] = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Min(0),
-            Constraint::Length(2),
-        ])
-        .areas(inner);
-        self.draw_title_bar(frame, title_bar);
+        let footer_rows = if self.ui.hints { 2 } else { 1 };
+        let [content, footer] = if self.ui.top_bar {
+            let [title_bar, content, footer] = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Min(0),
+                Constraint::Length(footer_rows),
+            ])
+            .areas(inner);
+            self.draw_title_bar(frame, title_bar);
+            [content, footer]
+        } else {
+            Layout::vertical([Constraint::Min(0), Constraint::Length(footer_rows)]).areas(inner)
+        };
         let content = pad(content);
         let footer = pad(footer);
         // Cover art (T8): when a protocol was detected, the art is set to draw
@@ -1301,16 +1857,19 @@ impl<'lib> App<'lib> {
         // of the content and the rest makes way. Otherwise the window is
         // exactly what it is without art — nothing to fake, nothing to move.
         let [now, header, body] = Layout::vertical([
-            Constraint::Length(now_playing_rows(content.height)),
+            Constraint::Length(self.now_playing_rows(content.height)),
             Constraint::Length(1),
             Constraint::Min(0),
         ])
         .areas(content);
         // The cover sits at the left of the now-playing block, the way an
         // album sleeve sits beside its title, and the block's text moves over.
-        // The window-size threshold is the one `hidden_reason` explains.
+        // The window-size threshold is the one `hidden_reason` explains. The
+        // switch decides first (S5): a cover hidden on purpose takes no slot
+        // even when the terminal could draw one.
         let slot = self
             .picker
+            .filter(|_| self.ui.cover_art)
             .filter(|_| self.artwork.is_some())
             .and_then(|_| artwork::pane(area))
             .and_then(|_| cover_slot(now));
@@ -1321,10 +1880,13 @@ impl<'lib> App<'lib> {
         self.draw_footer(frame, footer);
         self.draw_artwork(frame, pane);
         if let Some(help) = &self.help {
-            Self::draw_help(frame, area, help);
+            Self::draw_help(frame, area, help, &self.theme);
+        }
+        if let Some(card) = &self.settings {
+            self.draw_settings_card(frame, area, card);
         }
         if let Some(prompt) = self.library_prompt() {
-            Self::draw_library_prompt(frame, area, prompt);
+            Self::draw_library_prompt(frame, area, prompt, &self.theme);
         }
     }
 
@@ -1350,12 +1912,15 @@ impl<'lib> App<'lib> {
     /// The title bar: the two views as tabs on the left, the one `tab`
     /// switches between, and the letter-spaced wordmark on the right.
     fn draw_title_bar(&self, frame: &mut Frame, area: Rect) {
-        frame.render_widget(Block::new().style(Style::new().bg(BACKGROUND)), area);
+        frame.render_widget(
+            Block::new().style(Style::new().bg(self.theme.background)),
+            area,
+        );
         let tab = |label: &'static str, view: View| {
             if self.view == view {
-                Span::styled(label, Style::new().fg(ACCENT).bold())
+                Span::styled(label, Style::new().fg(self.theme.accent).bold())
             } else {
-                Span::styled(label, Style::new().fg(DIM))
+                Span::styled(label, Style::new().fg(self.theme.dim))
             }
         };
         let mut tabs = Line::from(vec![
@@ -1368,13 +1933,18 @@ impl<'lib> App<'lib> {
         // goes away when it ends (library-refresh T3).
         if self.refresh.running.is_some() {
             tabs.spans.push(Span::raw("   "));
-            tabs.spans
-                .push(Span::styled("⟳ indexing…", Style::new().fg(ACCENT)));
+            tabs.spans.push(Span::styled(
+                "⟳ indexing…",
+                Style::new().fg(self.theme.accent),
+            ));
         }
         frame.render_widget(Paragraph::new(tabs), area);
         frame.render_widget(
-            Paragraph::new(Span::styled(WORDMARK, Style::new().fg(ACCENT).bold()))
-                .alignment(Alignment::Right),
+            Paragraph::new(Span::styled(
+                WORDMARK,
+                Style::new().fg(self.theme.accent).bold(),
+            ))
+            .alignment(Alignment::Right),
             area,
         );
     }
@@ -1393,8 +1963,8 @@ impl<'lib> App<'lib> {
             |path| describe(path, self.known_tracks()),
         );
         let title = Line::from(vec![
-            Span::styled("♫ ", Style::new().fg(ACCENT)),
-            Span::styled(title, Style::new().fg(TEXT).bold()),
+            Span::styled("♫ ", Style::new().fg(self.theme.accent)),
+            Span::styled(title, Style::new().fg(self.theme.text).bold()),
         ]);
         let volume = self.player.as_ref().map_or(self.volume, Player::volume);
 
@@ -1404,16 +1974,17 @@ impl<'lib> App<'lib> {
                 let pill = self.state_pill();
                 let right = vec![pill, Span::raw("  ")]
                     .into_iter()
-                    .chain(volume_slider(volume, 0))
+                    .chain(volume_slider(volume, 0, &self.theme))
                     .collect::<Vec<_>>();
                 split_row(frame, area, title, Line::from(right));
             }
             2..=6 => {
                 let [top, middle, bottom] = rows3(area);
                 let mut title = title;
-                title
-                    .spans
-                    .push(Span::styled(format!("  {subtitle}"), Style::new().fg(DIM)));
+                title.spans.push(Span::styled(
+                    format!("  {subtitle}"),
+                    Style::new().fg(self.theme.dim),
+                ));
                 split_row(frame, top, title, Line::from(self.state_pill()));
                 self.draw_clock_and_progress(frame, middle);
                 self.draw_transport(frame, bottom, volume);
@@ -1445,7 +2016,7 @@ impl<'lib> App<'lib> {
                 self.draw_spectrum(frame, spectrum_area);
                 frame.render_widget(Paragraph::new(title), title_row);
                 frame.render_widget(
-                    Paragraph::new(Line::styled(subtitle, Style::new().fg(DIM))),
+                    Paragraph::new(Line::styled(subtitle, Style::new().fg(self.theme.dim))),
                     subtitle_row,
                 );
                 let mut clock = self.clock_spans();
@@ -1462,12 +2033,16 @@ impl<'lib> App<'lib> {
                     frame,
                     clock_row,
                     Line::from(clock),
-                    Line::styled(position.unwrap_or_default(), Style::new().fg(DIM)),
+                    Line::styled(
+                        position.unwrap_or_default(),
+                        Style::new().fg(self.theme.dim),
+                    ),
                 );
                 frame.render_widget(
                     Paragraph::new(Line::from(progress_bar(
                         self.progress(),
                         progress_row.width,
+                        &self.theme,
                     ))),
                     progress_row,
                 );
@@ -1485,13 +2060,21 @@ impl<'lib> App<'lib> {
         spans.extend(progress_bar(
             self.progress(),
             u16::try_from(room).unwrap_or(0),
+            &self.theme,
         ));
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 
     /// The buttons on the left, the volume slider on the right.
     fn draw_transport(&self, frame: &mut Frame, area: Rect, volume: u8) {
-        let button = Style::new().fg(SECONDARY);
+        let button = Style::new().fg(self.theme.secondary);
+        let lit = |on: bool| {
+            if on {
+                self.theme.accent
+            } else {
+                self.theme.dim
+            }
+        };
         let primary = if self.state == PlayState::Playing {
             " ❚❚ pause "
         } else {
@@ -1500,13 +2083,16 @@ impl<'lib> App<'lib> {
         let buttons = Line::from(vec![
             Span::styled(" ◂◂ ", button),
             Span::raw(" "),
-            Span::styled(primary, Style::new().bg(ACCENT).fg(INK).bold()),
+            Span::styled(
+                primary,
+                Style::new().bg(self.theme.accent).fg(self.theme.ink).bold(),
+            ),
             Span::raw(" "),
             Span::styled(" ▸▸ ", button),
             // Shuffle and repeat: dim while off, the accent while on.
             Span::raw("   "),
             Span::styled("shuffle", Style::new().fg(lit(self.shuffle))),
-            Span::styled("  repeat ", Style::new().fg(DIM)),
+            Span::styled("  repeat ", Style::new().fg(self.theme.dim)),
             Span::styled(
                 self.repeat.label(),
                 Style::new().fg(lit(self.repeat != Repeat::Off)),
@@ -1520,11 +2106,11 @@ impl<'lib> App<'lib> {
             ReplayGainMode::Off => "off",
         };
         let mut right = vec![
-            Span::styled("RG ", Style::new().fg(DIM)),
-            Span::styled(format!("{mode:<5}"), Style::new().fg(SECONDARY)),
+            Span::styled("RG ", Style::new().fg(self.theme.dim)),
+            Span::styled(format!("{mode:<5}"), Style::new().fg(self.theme.secondary)),
             Span::raw("   "),
         ];
-        right.extend(volume_slider(volume, VOLUME_CELLS));
+        right.extend(volume_slider(volume, VOLUME_CELLS, &self.theme));
         split_row(frame, area, buttons, Line::from(right));
     }
 
@@ -1532,14 +2118,14 @@ impl<'lib> App<'lib> {
     /// when nothing plays.
     fn clock_spans(&self) -> Vec<Span<'static>> {
         let Some(player) = &self.player else {
-            return vec![Span::styled("--:--", Style::new().fg(DIM))];
+            return vec![Span::styled("--:--", Style::new().fg(self.theme.dim))];
         };
         let mut clock = mmss(player.position());
         if let Some(total) = self.current_track_duration() {
             clock.push_str(" / ");
             clock.push_str(&mmss(total));
         }
-        vec![Span::styled(clock, Style::new().fg(ACCENT))]
+        vec![Span::styled(clock, Style::new().fg(self.theme.accent))]
     }
 
     /// How far into the track playback is, `0.0..=1.0`; `None` when nothing
@@ -1563,15 +2149,18 @@ impl<'lib> App<'lib> {
         self.spectrum_bands.set(bands);
         let mut levels = self.spectrum.levels().to_vec();
         levels.resize(bands, 0.0);
-        frame.render_widget(Paragraph::new(spectrum_lines(&levels, area.height)), area);
+        frame.render_widget(
+            Paragraph::new(spectrum_lines(&levels, area.height, &self.theme)),
+            area,
+        );
     }
 
     /// The play state as a pill: `▶ playing` in the accent, the others dim.
     fn state_pill(&self) -> Span<'static> {
         let (glyph, color) = match self.state {
-            PlayState::Playing => ("▶", ACCENT),
-            PlayState::Paused => ("❚❚", SECONDARY),
-            PlayState::Stopped => ("■", DIM),
+            PlayState::Playing => ("▶", self.theme.accent),
+            PlayState::Paused => ("❚❚", self.theme.secondary),
+            PlayState::Stopped => ("■", self.theme.dim),
         };
         Span::styled(
             format!(" {glyph} {} ", self.state.label()),
@@ -1608,29 +2197,35 @@ impl<'lib> App<'lib> {
             )
         };
         let line = Line::from(vec![
-            Span::styled("▸─ ", Style::new().fg(BORDER)),
-            Span::styled(label, Style::new().fg(TEXT).bold()),
-            Span::styled(format!("  [{count}]"), Style::new().fg(DIM)),
+            Span::styled("▸─ ", Style::new().fg(self.theme.border)),
+            Span::styled(label, Style::new().fg(self.theme.text).bold()),
+            Span::styled(format!("  [{count}]"), Style::new().fg(self.theme.dim)),
         ]);
         frame.render_widget(Paragraph::new(line), area);
     }
 
-    /// The library's header line: the four views, the active one in the
-    /// accent and the others dim, then where inside the view the list
-    /// stands, then how many rows it has. On a row too narrow for all of
-    /// it the count goes first, then the place is cut at the edge; the views
-    /// stay.
+    /// The library's header line: the four views, each numbered when
+    /// `[ui] view_numbers` is on (S5.5), the active one in the accent and
+    /// the others dim, then where inside the view the list stands, then how
+    /// many rows it has. On a row too narrow for all of it the count goes
+    /// first, then the place is cut at the edge; the views stay.
     fn views_header(&self, width: u16) -> Line<'static> {
-        let mut spans = vec![Span::styled("▸─ ", Style::new().fg(BORDER))];
+        let mut spans = vec![Span::styled("▸─ ", Style::new().fg(self.theme.border))];
         for (index, by) in BrowseBy::ALL.into_iter().enumerate() {
             if index > 0 {
                 spans.push(Span::raw("  "));
             }
             let style = if by == self.browse_by {
-                Style::new().fg(ACCENT).bold()
+                Style::new().fg(self.theme.accent).bold()
             } else {
-                Style::new().fg(DIM)
+                Style::new().fg(self.theme.dim)
             };
+            // The number is the key that switches to the view (S5.5); it
+            // takes part in the width fitting like every other span, so a
+            // narrow header still drops the count rather than the views.
+            if self.ui.view_numbers {
+                spans.push(Span::styled(format!("{} ", index + 1), style));
+            }
             spans.push(Span::styled(by.label(), style));
         }
         let place = match &self.position {
@@ -1642,7 +2237,7 @@ impl<'lib> App<'lib> {
         if !place.is_empty() {
             spans.push(Span::styled(
                 format!("   {place}"),
-                Style::new().fg(TEXT).bold(),
+                Style::new().fg(self.theme.text).bold(),
             ));
         }
         let count = Span::styled(
@@ -1651,7 +2246,7 @@ impl<'lib> App<'lib> {
                 if place.is_empty() { "   " } else { "  " },
                 self.level_count()
             ),
-            Style::new().fg(DIM),
+            Style::new().fg(self.theme.dim),
         );
         if Line::from(spans.clone()).width() + count.width() <= usize::from(width) {
             spans.push(count);
@@ -1679,19 +2274,24 @@ impl<'lib> App<'lib> {
         let width = area.width;
         let (rows, selected) = if self.search.is_some() {
             if self.search_results.is_empty() {
-                draw_empty(frame, area, "no tracks match");
+                draw_empty(frame, area, "no tracks match", self.theme.dim);
                 return;
             }
             (self.search_rows(width), self.search_selected)
         } else if self.view == View::Queue {
             if self.queue.is_empty() {
-                draw_empty(frame, area, "nothing queued — press a on a track to add it");
+                draw_empty(
+                    frame,
+                    area,
+                    "nothing queued — press a on a track to add it",
+                    self.theme.dim,
+                );
                 return;
             }
             (self.queue_rows(width), self.queue_selected)
         } else {
             if let Some(message) = self.empty_message() {
-                draw_empty(frame, area, message);
+                draw_empty(frame, area, message, self.theme.dim);
                 return;
             }
             (self.rows(width), self.selected)
@@ -1699,8 +2299,8 @@ impl<'lib> App<'lib> {
         // Only the background changes on the selected row, so its dim notes
         // stay dim and the playing row keeps its accent.
         let list = List::new(rows)
-            .style(Style::new().bg(BACKGROUND))
-            .highlight_style(Style::new().bg(ACCENT).fg(INK));
+            .style(Style::new().bg(self.theme.background))
+            .highlight_style(Style::new().bg(self.theme.accent).fg(self.theme.ink));
         let mut state = ListState::default().with_selected(Some(selected));
         frame.render_stateful_widget(list, area, &mut state);
     }
@@ -1722,6 +2322,7 @@ impl<'lib> App<'lib> {
                         fact,
                     },
                     width,
+                    &self.theme,
                 ))
             })
             .collect()
@@ -1802,6 +2403,7 @@ impl<'lib> App<'lib> {
                         fact: String::new(),
                     },
                     width,
+                    &self.theme,
                 ))
             })
             .collect()
@@ -1827,6 +2429,7 @@ impl<'lib> App<'lib> {
                         fact: Self::duration(entry.duration_ms),
                     },
                     width,
+                    &self.theme,
                 ))
             })
             .collect()
@@ -1842,18 +2445,26 @@ impl<'lib> App<'lib> {
     }
 
     fn draw_footer(&self, frame: &mut Frame, area: Rect) {
-        let [status_row, hints_row] =
-            Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area);
+        let [status_row, hints_row] = Layout::vertical([
+            Constraint::Length(1),
+            // Without the hints the footer is the status row alone (S5): no
+            // empty line is left where they were.
+            Constraint::Length(u16::from(self.ui.hints)),
+        ])
+        .areas(area);
 
         let status = if self.search.is_some() {
             // The query itself, over the transport line, so the user sees what
             // they are typing while the body lists the results.
-            Line::styled(format!("/{}", self.search_query()), Style::new().fg(ACCENT))
+            Line::styled(
+                format!("/{}", self.search_query()),
+                Style::new().fg(self.theme.accent),
+            )
         } else if self.status.is_empty() {
             // The clock and the volume live in the now-playing block.
             Line::default()
         } else {
-            Line::styled(self.status.clone(), Style::new().fg(ACCENT))
+            Line::styled(self.status.clone(), Style::new().fg(self.theme.accent))
         };
         if !status.spans.is_empty() {
             frame.render_widget(Paragraph::new(status), status_row);
@@ -1898,7 +2509,12 @@ impl<'lib> App<'lib> {
                 ("q", "quit"),
             ]
         };
-        frame.render_widget(Paragraph::new(hint_line(hints, hints_row.width)), hints_row);
+        if self.ui.hints {
+            frame.render_widget(
+                Paragraph::new(hint_line(hints, hints_row.width, &self.theme)),
+                hints_row,
+            );
+        }
     }
 
     /// Every library row the interface holds that may name a playing file:
@@ -1940,7 +2556,7 @@ impl<'lib> App<'lib> {
     /// shorter, scrolled to `help.top`, with the filter under the title while
     /// there is one and where it is (`12–20 of 26`) on its bottom edge when it
     /// does not fit.
-    fn draw_help(frame: &mut Frame, area: Rect, help: &Help) {
+    fn draw_help(frame: &mut Frame, area: Rect, help: &Help, theme: &Theme) {
         let key_width = HELP_ROWS
             .iter()
             .map(|(key, _)| key.chars().count())
@@ -1965,47 +2581,127 @@ impl<'lib> App<'lib> {
         let mut text: Vec<Line> = Vec::new();
         if help.filtering() {
             let mut filter = vec![
-                Span::styled("/ ", Style::new().fg(SECONDARY)),
-                Span::styled(help.filter.clone(), Style::new().fg(ACCENT)),
+                Span::styled("/ ", Style::new().fg(theme.secondary)),
+                Span::styled(help.filter.clone(), Style::new().fg(theme.accent)),
             ];
             if help.typing {
-                filter.push(Span::styled("▏", Style::new().fg(SECONDARY)));
+                filter.push(Span::styled("▏", Style::new().fg(theme.secondary)));
             }
             text.push(Line::from(filter));
         }
         if rows.is_empty() {
             text.push(Line::styled(
                 format!("no key matches “{}”", help.filter),
-                Style::new().fg(DIM),
+                Style::new().fg(theme.dim),
             ));
         }
         text.extend(rows.iter().skip(top).take(shown).map(|(key, label)| {
             Line::from(vec![
-                Span::styled(format!("{key:<key_width$}   "), Style::new().fg(SECONDARY)),
-                Span::styled((*label).to_owned(), Style::new().fg(TEXT)),
+                Span::styled(
+                    format!("{key:<key_width$}   "),
+                    Style::new().fg(theme.secondary),
+                ),
+                Span::styled((*label).to_owned(), Style::new().fg(theme.text)),
             ])
         }));
 
         let mut card = Block::bordered()
             .border_type(BorderType::Rounded)
-            .border_style(Style::new().fg(ACCENT))
-            .title(Span::styled(" keys ", Style::new().fg(ACCENT).bold()))
+            .border_style(Style::new().fg(theme.accent))
+            .title(Span::styled(" keys ", Style::new().fg(theme.accent).bold()))
             .padding(ratatui::widgets::Padding::horizontal(1))
-            .style(Style::new().bg(BACKGROUND));
+            .style(Style::new().bg(theme.background));
         if !help.filtering() {
-            card = card.title_bottom(Line::styled(" / filter ", Style::new().fg(DIM)));
+            card = card.title_bottom(Line::styled(" / filter ", Style::new().fg(theme.dim)));
         }
         if shown < rows.len() {
             let position = format!(" {}–{} of {} ", top + 1, top + shown, rows.len());
-            card = card.title_bottom(Line::styled(position, Style::new().fg(DIM)).right_aligned());
+            card = card
+                .title_bottom(Line::styled(position, Style::new().fg(theme.dim)).right_aligned());
         }
         frame.render_widget(Clear, box_area);
         frame.render_widget(Paragraph::new(text).block(card), box_area);
     }
 
+    /// The settings card (S6): a rounded, accent-bordered, centred block
+    /// titled ` settings `, every setting with its value on the right, the
+    /// section headers dim and the focused row in the accent. Its size comes
+    /// from the whole table, so it never changes as the cursor moves, and it
+    /// scrolls only as far as the focused row needs.
+    fn draw_settings_card(&self, frame: &mut Frame, area: Rect, card: &SettingsCard) {
+        let values = self.settings_values();
+        let label_width = SETTINGS_ROWS
+            .iter()
+            .map(|row| match row {
+                SettingsRow::Header(name) => name.chars().count(),
+                SettingsRow::Setting(key) => key.label().chars().count(),
+            })
+            .max()
+            .unwrap_or(0);
+        let value_width = values
+            .iter()
+            .map(|value| value.chars().count())
+            .max()
+            .unwrap_or(0);
+        // Two border columns, one of air per side, two between the columns.
+        let width = u16::try_from(label_width + 2 + value_width + 4).unwrap_or(area.width);
+        let shown = SettingsCard::card_rows(area);
+        let top = card.top.min(SettingsCard::last_top(shown));
+        let height = u16::try_from(shown + 2).unwrap_or(area.height);
+        let box_area = centered(area, width, height);
+
+        let mut setting = 0;
+        let lines: Vec<Line> = SETTINGS_ROWS
+            .iter()
+            .map(|row| match row {
+                SettingsRow::Header(name) => {
+                    Line::styled((*name).to_owned(), Style::new().fg(self.theme.dim))
+                }
+                SettingsRow::Setting(key) => {
+                    let focused = setting == card.cursor;
+                    let value = values.get(setting).map(String::as_str).unwrap_or_default();
+                    setting += 1;
+                    let label = if focused {
+                        Style::new().fg(self.theme.accent)
+                    } else {
+                        Style::new().fg(self.theme.text)
+                    };
+                    let value_style = if focused {
+                        Style::new().fg(self.theme.accent)
+                    } else {
+                        Style::new().fg(self.theme.secondary)
+                    };
+                    Line::from(vec![
+                        Span::styled(
+                            format!("{key_label:<label_width$}  ", key_label = key.label()),
+                            label,
+                        ),
+                        Span::styled(value.to_owned(), value_style),
+                    ])
+                }
+            })
+            .collect();
+
+        frame.render_widget(Clear, box_area);
+        frame.render_widget(
+            Paragraph::new(lines.into_iter().skip(top).take(shown).collect::<Vec<_>>()).block(
+                Block::bordered()
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::new().fg(self.theme.accent))
+                    .title(Span::styled(
+                        " settings ",
+                        Style::new().fg(self.theme.accent).bold(),
+                    ))
+                    .padding(ratatui::widgets::Padding::horizontal(1))
+                    .style(Style::new().bg(self.theme.background)),
+            ),
+            box_area,
+        );
+    }
+
     /// The library prompt: a rounded card, centred like the help, with the
     /// path being typed and, under it, why the last one was refused.
-    fn draw_library_prompt(frame: &mut Frame, area: Rect, prompt: &LibraryPrompt) {
+    fn draw_library_prompt(frame: &mut Frame, area: Rect, prompt: &LibraryPrompt, theme: &Theme) {
         let width = area.width.saturating_sub(8).clamp(20, 72);
         let box_area = centered(area, width, 9);
         let field_width = usize::from(width.saturating_sub(6));
@@ -2016,20 +2712,23 @@ impl<'lib> App<'lib> {
             chars[skip..].iter().collect()
         };
         let text = vec![
-            Line::styled("Where is your music?", Style::new().fg(TEXT)),
+            Line::styled("Where is your music?", Style::new().fg(theme.text)),
             Line::styled(
                 "a folder in your home — tab completes it",
-                Style::new().fg(DIM),
+                Style::new().fg(theme.dim),
             ),
             Line::from(vec![
-                Span::styled(shown, Style::new().fg(ACCENT)),
-                Span::styled("▏", Style::new().fg(SECONDARY)),
+                Span::styled(shown, Style::new().fg(theme.accent)),
+                Span::styled("▏", Style::new().fg(theme.secondary)),
             ]),
             // The folders the last tab could not choose between.
-            Line::styled(prompt.candidates.join("  "), Style::new().fg(SECONDARY)),
+            Line::styled(
+                prompt.candidates.join("  "),
+                Style::new().fg(theme.secondary),
+            ),
             prompt.error.as_ref().map_or_else(
-                || Line::styled("enter save · esc skip", Style::new().fg(DIM)),
-                |error| Line::styled(error.clone(), Style::new().fg(SECONDARY)),
+                || Line::styled("enter save · esc skip", Style::new().fg(theme.dim)),
+                |error| Line::styled(error.clone(), Style::new().fg(theme.secondary)),
             ),
         ];
         frame.render_widget(Clear, box_area);
@@ -2037,10 +2736,13 @@ impl<'lib> App<'lib> {
             Paragraph::new(text).block(
                 Block::bordered()
                     .border_type(BorderType::Rounded)
-                    .border_style(Style::new().fg(ACCENT))
-                    .title(Span::styled(" library ", Style::new().fg(ACCENT).bold()))
+                    .border_style(Style::new().fg(theme.accent))
+                    .title(Span::styled(
+                        " library ",
+                        Style::new().fg(theme.accent).bold(),
+                    ))
                     .padding(ratatui::widgets::Padding::new(1, 1, 1, 0))
-                    .style(Style::new().bg(BACKGROUND)),
+                    .style(Style::new().bg(theme.background)),
             ),
             box_area,
         );
@@ -2315,6 +3017,8 @@ impl<'lib> App<'lib> {
             }
             View::Library => self.status.clear(),
         }
+        // The tab is persisted (S3), but only when it changed.
+        self.remember_view();
     }
 
     /// The queue index that is playing, when anything is: the player counts
@@ -2560,6 +3264,8 @@ impl<'lib> App<'lib> {
             | Position::AllTracks
             | Position::Genre { .. } => {}
         }
+        // The open node is persisted (S3), but only when it changed.
+        self.remember_node();
     }
 
     /// Goes one level up. The parent's row snapshot is kept as it was when
@@ -2593,6 +3299,9 @@ impl<'lib> App<'lib> {
                 self.selected = 0;
             }
         }
+        // The open node is persisted (S3): walking out of a level removes
+        // its keys, so the file never keeps a node the user has left.
+        self.remember_node();
     }
 
     /// Starts a gapless stream of [`App::playlist_from`]: on a track list
@@ -2696,6 +3405,15 @@ impl<'lib> App<'lib> {
             let original = std::mem::take(&mut self.unshuffled);
             self.edit_queue(|queue| shuffle::restore_order(queue, keep, &original));
         }
+        // The shuffle state is persisted (S2), but only when it changed.
+        if self.shuffle != self.saved.shuffle {
+            self.saved.shuffle = self.shuffle;
+            self.remember(
+                Some("state"),
+                "shuffle",
+                if self.shuffle { "true" } else { "false" },
+            );
+        }
     }
 
     /// Moves to the next track, or back one (see [`skip_target`]), by
@@ -2788,7 +3506,7 @@ impl Default for App<'_> {
 /// row is too narrow, pairs are dropped from the middle: the first ones say
 /// how to move and the last two how to get help and leave, and those last
 /// two are never the ones that go.
-fn hint_line(hints: &[(&str, &str)], width: u16) -> Line<'static> {
+fn hint_line(hints: &[(&str, &str)], width: u16, theme: &Theme) -> Line<'static> {
     let fits = |pairs: &[&(&str, &str)]| {
         let used: usize = pairs
             .iter()
@@ -2806,8 +3524,14 @@ fn hint_line(hints: &[(&str, &str)], width: u16) -> Line<'static> {
         if index > 0 {
             spans.push(Span::raw("  "));
         }
-        spans.push(Span::styled((*key).to_owned(), Style::new().fg(SECONDARY)));
-        spans.push(Span::styled(format!(" {label}"), Style::new().fg(DIM)));
+        spans.push(Span::styled(
+            (*key).to_owned(),
+            Style::new().fg(theme.secondary),
+        ));
+        spans.push(Span::styled(
+            format!(" {label}"),
+            Style::new().fg(theme.dim),
+        ));
     }
     Line::from(spans)
 }
@@ -2828,18 +3552,18 @@ struct ListRow {
 /// the row that plays), the number, the name, the note, and the fact against
 /// the right edge when it fits beside the rest; a fact that does not fit is
 /// the part left out, never the name.
-fn list_row(row: ListRow, width: u16) -> Line<'static> {
+fn list_row(row: ListRow, width: u16, theme: &Theme) -> Line<'static> {
     let (marker, number, name) = if row.playing {
         (
-            Style::new().fg(ACCENT),
-            Style::new().fg(ACCENT),
-            Style::new().fg(ACCENT).bold(),
+            Style::new().fg(theme.accent),
+            Style::new().fg(theme.accent),
+            Style::new().fg(theme.accent).bold(),
         )
     } else {
         (
-            Style::new().fg(BORDER),
-            Style::new().fg(DIM),
-            Style::new().fg(TEXT),
+            Style::new().fg(theme.border),
+            Style::new().fg(theme.dim),
+            Style::new().fg(theme.text),
         )
     };
     let digits = row.digits;
@@ -2851,7 +3575,7 @@ fn list_row(row: ListRow, width: u16) -> Line<'static> {
     if !row.note.is_empty() {
         spans.push(Span::styled(
             format!("  {}", row.note),
-            Style::new().fg(DIM),
+            Style::new().fg(theme.dim),
         ));
     }
     let used = Line::from(spans.clone()).width();
@@ -2859,7 +3583,7 @@ fn list_row(row: ListRow, width: u16) -> Line<'static> {
     let width = usize::from(width);
     if fact > 0 && used + 2 + fact <= width {
         spans.push(Span::raw(" ".repeat(width - used - fact)));
-        spans.push(Span::styled(row.fact, Style::new().fg(DIM)));
+        spans.push(Span::styled(row.fact, Style::new().fg(theme.dim)));
     }
     Line::from(spans)
 }
@@ -2870,9 +3594,9 @@ fn digits(count: usize) -> usize {
 }
 
 /// The sentence an empty list says about itself, dimmed.
-fn draw_empty(frame: &mut Frame, area: Rect, message: &str) {
+fn draw_empty(frame: &mut Frame, area: Rect, message: &str, dim: ratatui::style::Color) {
     frame.render_widget(
-        Paragraph::new(Line::styled(message.to_owned(), Style::new().fg(DIM))),
+        Paragraph::new(Line::styled(message.to_owned(), Style::new().fg(dim))),
         area,
     );
 }
@@ -2943,13 +3667,13 @@ const EIGHTHS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇'
 /// air after it, each bar filling from the bottom in eighths of a row and
 /// colored by height. A silent band keeps a baseline in the frame's color,
 /// so the analyzer reads as there and quiet rather than missing.
-fn spectrum_lines(levels: &[f32], rows: u16) -> Vec<Line<'static>> {
+fn spectrum_lines(levels: &[f32], rows: u16, theme: &Theme) -> Vec<Line<'static>> {
     let rows = usize::from(rows);
     let steps = rows * 8;
     (0..rows)
         .map(|row| {
             let from_bottom = rows - 1 - row;
-            let color = bar_color(from_bottom, rows);
+            let color = bar_color(from_bottom, rows, theme);
             let spans: Vec<Span<'static>> = levels
                 .iter()
                 .flat_map(|&level| {
@@ -2962,7 +3686,7 @@ fn spectrum_lines(levels: &[f32], rows: u16) -> Vec<Line<'static>> {
                     let filled = (level.clamp(0.0, 1.0) * steps as f32).round() as usize;
                     let here = filled.saturating_sub(from_bottom * 8).min(8);
                     let cell = if here == 0 && from_bottom == 0 {
-                        Span::styled("▁", Style::new().fg(BORDER))
+                        Span::styled("▁", Style::new().fg(theme.border))
                     } else {
                         Span::styled(EIGHTHS[here].to_string(), Style::new().fg(color))
                     };
@@ -2977,11 +3701,11 @@ fn spectrum_lines(levels: &[f32], rows: u16) -> Vec<Line<'static>> {
 /// The bar color `from_bottom` rows up out of `rows`: the accent in the
 /// lower half, its bright twin above — the two-step gradient the terminal's
 /// own palette can give.
-const fn bar_color(from_bottom: usize, rows: usize) -> ratatui::style::Color {
+fn bar_color(from_bottom: usize, rows: usize, theme: &Theme) -> ratatui::style::Color {
     if from_bottom * 2 >= rows {
-        theme::ACCENT_BRIGHT
+        theme.accent_bright
     } else {
-        ACCENT
+        theme.accent
     }
 }
 
@@ -3011,28 +3735,34 @@ const VOLUME_CELLS: u16 = 12;
 
 /// `VOL ━━━━━━●───── 90`: the filled part in the accent, the knob, the rest
 /// in the border color, then the number. With no cells it is `VOL 90`.
-fn volume_slider(volume: u8, cells: u16) -> Vec<Span<'static>> {
-    let mut spans = vec![Span::styled("VOL ", Style::new().fg(DIM))];
+fn volume_slider(volume: u8, cells: u16, theme: &Theme) -> Vec<Span<'static>> {
+    let mut spans = vec![Span::styled("VOL ", Style::new().fg(theme.dim))];
     if cells > 0 {
         let cells = usize::from(cells);
         let knob = usize::from(volume.min(100)) * (cells - 1) / 100;
-        spans.push(Span::styled("━".repeat(knob), Style::new().fg(ACCENT)));
-        spans.push(Span::styled("●", Style::new().fg(TEXT)));
+        spans.push(Span::styled(
+            "━".repeat(knob),
+            Style::new().fg(theme.accent),
+        ));
+        spans.push(Span::styled("●", Style::new().fg(theme.text)));
         spans.push(Span::styled(
             "─".repeat(cells - 1 - knob),
-            Style::new().fg(BORDER),
+            Style::new().fg(theme.border),
         ));
         spans.push(Span::raw(" "));
     }
     // Three columns whatever the number, so a slider set against the right
     // edge does not jump when 100 becomes 95 (T7).
-    spans.push(Span::styled(format!("{volume:>3}"), Style::new().fg(TEXT)));
+    spans.push(Span::styled(
+        format!("{volume:>3}"),
+        Style::new().fg(theme.text),
+    ));
     spans
 }
 
 /// A bar `width` cells wide, filled to `ratio` in the accent; with no ratio
 /// (nothing plays, or the length is unknown) the whole bar is unfilled.
-fn progress_bar(ratio: Option<f64>, width: u16) -> Vec<Span<'static>> {
+fn progress_bar(ratio: Option<f64>, width: u16, theme: &Theme) -> Vec<Span<'static>> {
     let width = usize::from(width);
     // Rounded down, so a bar is never shown full before the track ends.
     #[allow(
@@ -3044,8 +3774,8 @@ fn progress_bar(ratio: Option<f64>, width: u16) -> Vec<Span<'static>> {
         .map_or(0, |ratio| (ratio * width as f64) as usize)
         .min(width);
     vec![
-        Span::styled("━".repeat(filled), Style::new().fg(ACCENT)),
-        Span::styled("─".repeat(width - filled), Style::new().fg(BORDER)),
+        Span::styled("━".repeat(filled), Style::new().fg(theme.accent)),
+        Span::styled("─".repeat(width - filled), Style::new().fg(theme.border)),
     ]
 }
 
@@ -3062,11 +3792,6 @@ fn split_row(frame: &mut Frame, area: Rect, left: Line<'static>, right: Line<'st
 /// Three one-row areas from the top of `area`.
 fn rows3(area: Rect) -> [Rect; 3] {
     Layout::vertical([Constraint::Length(1); 3]).areas(area)
-}
-
-/// The color of a mode's word: the accent while it is on, dim while off.
-const fn lit(on: bool) -> ratatui::style::Color {
-    if on { ACCENT } else { DIM }
 }
 
 /// The name in the title bar, spaced out the way a wordmark is set.
@@ -3087,7 +3812,7 @@ fn mmss(duration: Duration) -> String {
 }
 
 /// Every row of the help card: the key, then what it does.
-const HELP_ROWS: [(&str, &str); 24] = [
+const HELP_ROWS: [(&str, &str); 25] = [
     ("j / Down", "move down"),
     ("k / Up", "move up"),
     ("g", "first track"),
@@ -3103,6 +3828,7 @@ const HELP_ROWS: [(&str, &str); 24] = [
     ("r", "repeat: off, all, one"),
     ("+ / -", "volume up / down"),
     ("?", "toggle this help"),
+    ("o", "settings"),
     ("tab", "library / queue"),
     ("1 2 3 4", "artists, albums, tracks, genres"),
     ("L", "set the library folder"),
@@ -3176,6 +3902,271 @@ impl Help {
     }
 }
 
+/// The colour presets the settings card cycles a role through (S7): short,
+/// distinct, readable on a dark terminal, with the defaults the file ships
+/// with first so a cycled role can always be cycled back. `background` and
+/// `text`, whose default is the terminal's own colour, also cycle `reset`
+/// ahead of these.
+const COLOR_PRESETS: [&str; 8] = [
+    "#af00af", // the default accent — ANSI magenta
+    "#5f87d7", // the default secondary — ANSI blue
+    "#767676", // the default dim and border — bright black
+    "#000000", // the default ink
+    "#d70000", // red
+    "#00af5f", // green
+    "#d78700", // orange
+    "#00d7d7", // cyan
+];
+
+/// One setting the card can change (S7).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SettingsKey {
+    ReplayGain,
+    Repeat,
+    Shuffle,
+    Accent,
+    Text,
+    Dim,
+    Secondary,
+    Border,
+    Ink,
+    Background,
+    CoverArt,
+    Spectrum,
+    Hints,
+    TopBar,
+    Advisories,
+    ViewNumbers,
+    Folder,
+}
+
+impl SettingsKey {
+    /// The setting's label on the card's left.
+    fn label(self) -> &'static str {
+        match self {
+            Self::ReplayGain => "replay gain",
+            Self::Repeat => "repeat",
+            Self::Shuffle => "shuffle",
+            Self::Accent => "accent",
+            Self::Text => "text",
+            Self::Dim => "dim",
+            Self::Secondary => "secondary",
+            Self::Border => "border",
+            Self::Ink => "ink",
+            Self::Background => "background",
+            Self::CoverArt => "cover art",
+            Self::Spectrum => "spectrum",
+            Self::Hints => "hints",
+            Self::TopBar => "top bar",
+            Self::Advisories => "advisories",
+            Self::ViewNumbers => "view numbers",
+            Self::Folder => "folder",
+        }
+    }
+}
+
+/// One row of the settings card: a section header, or a setting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SettingsRow {
+    Header(&'static str),
+    Setting(SettingsKey),
+}
+
+/// The card's rows, in order (S7): the headers are never focused. The volume
+/// is not a row (S7.3): it lives in `[state]` and on `+`/`-`, where it has
+/// always been changed from the keyboard.
+const SETTINGS_ROWS: [SettingsRow; 21] = [
+    SettingsRow::Header("sound"),
+    SettingsRow::Setting(SettingsKey::ReplayGain),
+    SettingsRow::Setting(SettingsKey::Repeat),
+    SettingsRow::Setting(SettingsKey::Shuffle),
+    SettingsRow::Header("theme"),
+    SettingsRow::Setting(SettingsKey::Accent),
+    SettingsRow::Setting(SettingsKey::Text),
+    SettingsRow::Setting(SettingsKey::Dim),
+    SettingsRow::Setting(SettingsKey::Secondary),
+    SettingsRow::Setting(SettingsKey::Border),
+    SettingsRow::Setting(SettingsKey::Ink),
+    SettingsRow::Setting(SettingsKey::Background),
+    SettingsRow::Header("screen"),
+    SettingsRow::Setting(SettingsKey::CoverArt),
+    SettingsRow::Setting(SettingsKey::Spectrum),
+    SettingsRow::Setting(SettingsKey::Hints),
+    SettingsRow::Setting(SettingsKey::TopBar),
+    SettingsRow::Setting(SettingsKey::Advisories),
+    SettingsRow::Setting(SettingsKey::ViewNumbers),
+    SettingsRow::Header("library"),
+    SettingsRow::Setting(SettingsKey::Folder),
+];
+
+/// The open settings card (S6): which setting the cursor is on, as its index
+/// among the focusable rows, and the first row of the table in view. The
+/// card's size comes from the whole table, so it never changes as the cursor
+/// moves. Nothing here touches the filesystem.
+#[derive(Debug, Default)]
+struct SettingsCard {
+    /// The focused setting, counted over the settings only.
+    cursor: usize,
+    /// The first row of the table in view.
+    top: usize,
+}
+
+impl SettingsCard {
+    /// The settings the cursor moves between, as their table rows.
+    fn settings() -> impl Iterator<Item = usize> {
+        SETTINGS_ROWS
+            .iter()
+            .enumerate()
+            .filter_map(|(row, entry)| match entry {
+                SettingsRow::Setting(_) => Some(row),
+                SettingsRow::Header(_) => None,
+            })
+    }
+
+    /// How many settings the card has.
+    fn setting_count() -> usize {
+        Self::settings().count()
+    }
+
+    /// The table row the cursor-th setting sits on.
+    fn row_of(cursor: usize) -> usize {
+        Self::settings().nth(cursor).unwrap_or(0)
+    }
+
+    fn move_down(&mut self) {
+        self.cursor = (self.cursor + 1).min(Self::setting_count() - 1);
+    }
+
+    fn move_up(&mut self) {
+        self.cursor = self.cursor.saturating_sub(1);
+    }
+
+    /// The focused setting, counted over the settings only.
+    fn focused(&self) -> SettingsKey {
+        SETTINGS_ROWS
+            .get(Self::row_of(self.cursor))
+            .copied()
+            .map_or(SettingsKey::ReplayGain, |row| match row {
+                SettingsRow::Setting(key) => key,
+                SettingsRow::Header(_) => SettingsKey::ReplayGain,
+            })
+    }
+
+    /// What the card focuses, as the row's label.
+    fn focused_label(&self) -> &'static str {
+        self.focused().label()
+    }
+
+    /// Slides `top` so the focused row stays in view of `shown` rows.
+    fn keep_visible(&mut self, shown: usize) {
+        let row = Self::row_of(self.cursor);
+        if row < self.top {
+            self.top = row;
+        } else if row >= self.top + shown {
+            self.top = row + 1 - shown;
+        }
+    }
+
+    /// The body rows the card keeps: every row, or as many as fit. The whole
+    /// table decides, so the card never resizes as the cursor moves.
+    fn card_rows(area: Rect) -> usize {
+        if area.height == 0 {
+            return SETTINGS_ROWS.len();
+        }
+        let room = usize::from(area.height).saturating_sub(2);
+        SETTINGS_ROWS.len().min(room)
+    }
+
+    /// The last value `top` may take with `shown` rows on the card.
+    const fn last_top(shown: usize) -> usize {
+        SETTINGS_ROWS.len().saturating_sub(shown)
+    }
+}
+
+/// One colour role of the `[theme]` table the card can cycle (S7).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ColorRole {
+    Accent,
+    Text,
+    Dim,
+    Secondary,
+    Border,
+    Ink,
+    Background,
+}
+
+impl ColorRole {
+    /// The key the `[theme]` table writes the role under.
+    fn key(self) -> &'static str {
+        match self {
+            Self::Accent => "accent",
+            Self::Text => "text",
+            Self::Dim => "dim",
+            Self::Secondary => "secondary",
+            Self::Border => "border",
+            Self::Ink => "ink",
+            Self::Background => "background",
+        }
+    }
+
+    /// Whether the role may be `reset`, the terminal's own colour (S4):
+    /// only the screen behind everything and the body text may.
+    fn allows_reset(self) -> bool {
+        matches!(self, Self::Background | Self::Text)
+    }
+
+    /// The role's colour in the palette the app draws with.
+    fn get(self, colors: ThemeColors) -> ThemeColor {
+        match self {
+            Self::Accent => colors.accent,
+            Self::Text => colors.text,
+            Self::Dim => colors.dim,
+            Self::Secondary => colors.secondary,
+            Self::Border => colors.border,
+            Self::Ink => colors.ink,
+            Self::Background => colors.background,
+        }
+    }
+
+    /// Replaces the role's colour in a palette.
+    fn set(self, colors: &mut ThemeColors, colour: ThemeColor) {
+        match self {
+            Self::Accent => colors.accent = colour,
+            Self::Text => colors.text = colour,
+            Self::Dim => colors.dim = colour,
+            Self::Secondary => colors.secondary = colour,
+            Self::Border => colors.border = colour,
+            Self::Ink => colors.ink = colour,
+            Self::Background => colors.background = colour,
+        }
+    }
+}
+
+/// A colour as the `[theme]` table writes it (S4): `reset` or `#rrggbb`.
+fn parse_color(text: &str) -> Option<ThemeColor> {
+    if text == "reset" {
+        return Some(ThemeColor::Terminal);
+    }
+    let hex = text.strip_prefix('#')?;
+    if hex.len() != 6 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(ThemeColor::Rgb {
+        red: u8::from_str_radix(&hex[0..2], 16).ok()?,
+        green: u8::from_str_radix(&hex[2..4], 16).ok()?,
+        blue: u8::from_str_radix(&hex[4..6], 16).ok()?,
+    })
+}
+
+/// The `ReplayGain` mode in the config's own words.
+fn replay_gain_label(mode: ReplayGainMode) -> &'static str {
+    match mode {
+        ReplayGainMode::Track => "track",
+        ReplayGainMode::Album => "album",
+        ReplayGainMode::Off => "off",
+    }
+}
+
 /// A `width` × `height` rectangle centred in `area`, clamped to fit.
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
     let width = width.min(area.width);
@@ -3226,11 +4217,72 @@ mod tests {
 
     #[test]
     fn the_progress_bar_is_never_full_before_the_end_and_empty_without_a_length() {
-        let filled = |ratio, width| super::progress_bar(ratio, width)[0].content.chars().count();
+        let filled = |ratio, width| {
+            super::progress_bar(ratio, width, &super::Theme::default())[0]
+                .content
+                .chars()
+                .count()
+        };
         assert_eq!(filled(Some(0.999), 10), 9);
         assert_eq!(filled(Some(1.0), 10), 10);
         assert_eq!(filled(Some(0.5), 10), 5);
         assert_eq!(filled(None, 10), 0);
+    }
+
+    /// The cover switch decides before the terminal's capability and the
+    /// track's art do (S5): with it off a decoded cover takes no columns and
+    /// is never explained; with it on, a cover that cannot be drawn is
+    /// explained once. The integration tests cannot hand the interface a
+    /// decoded cover without a live stream, so this differential lives here.
+    #[test]
+    fn the_cover_switch_decides_before_the_capability_and_the_art_do() {
+        let mut app = super::App::new(Vec::new());
+        app.picker = Some(super::Picker::new((8, 12)));
+        app.artwork = Some(super::Artwork::for_test());
+
+        // On: a decoded cover on a window below the art threshold is
+        // explained once, in the config's own words.
+        app.seen_area.set(ratatui::layout::Rect::new(0, 0, 96, 24));
+        app.explain_hidden_art();
+        assert!(
+            app.status.contains("cover art hidden"),
+            "got: {:?}",
+            app.status
+        );
+
+        // Off: a decision, not a malfunction — no apology, and above the
+        // threshold no columns either: the block's text stays at the left
+        // edge where a cover would have pushed it right.
+        app.status.clear();
+        app.art_explained = false;
+        app.ui.cover_art = false;
+        app.explain_hidden_art();
+        assert!(app.status.is_empty(), "got: {:?}", app.status);
+
+        // Advisories off (S5.4): the same window is never explained — the
+        // switch silences exactly this line, nothing else.
+        app.status.clear();
+        app.art_explained = false;
+        app.ui.cover_art = true;
+        app.ui.advisories = false;
+        app.explain_hidden_art();
+        assert!(app.status.is_empty(), "got: {:?}", app.status);
+
+        // The draw leg below needs the cover deliberately hidden again.
+        app.ui.cover_art = false;
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let title: String = (0..120)
+            .map(|x| buffer[(x, 2)].symbol().to_owned())
+            .collect();
+        assert_eq!(
+            title.chars().position(|character| character == '♫'),
+            Some(2),
+            "the block's text starts at the left edge, got: {title}"
+        );
     }
 
     #[test]
@@ -3286,7 +4338,7 @@ mod tests {
     #[test]
     fn spectrum_bars_fill_from_the_bottom_in_eighths_with_a_gap_between() {
         let rows = |levels: &[f32]| -> Vec<String> {
-            super::spectrum_lines(levels, 4)
+            super::spectrum_lines(levels, 4, &super::Theme::default())
                 .iter()
                 .map(ToString::to_string)
                 .collect()
@@ -3308,7 +4360,7 @@ mod tests {
             ("?", "help"),
             ("q", "quit"),
         ];
-        let text = |width| super::hint_line(&hints, width).to_string();
+        let text = |width| super::hint_line(&hints, width, &super::Theme::default()).to_string();
 
         assert_eq!(text(80), "j/k move  enter play  ? help  q quit");
         assert_eq!(text(28), "j/k move  ? help  q quit");

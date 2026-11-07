@@ -154,17 +154,19 @@ fn the_window_is_framed_and_its_title_bar_names_the_views_and_the_app() {
 
 #[test]
 fn the_title_bar_lights_the_view_that_tab_switches_to() {
-    use velo::ui::theme::{ACCENT, DIM};
+    use velo::ui::theme::Theme;
+
+    let theme = Theme::default();
 
     let mut app = App::new(tracks(&["one.flac"]));
     let library_x = 3; // "│ library  queue": the `l` of library
     let queue_x = 12; // the `q` of queue
-    assert_eq!(cell_at(&app, library_x, 1).fg, ACCENT);
-    assert_eq!(cell_at(&app, queue_x, 1).fg, DIM);
+    assert_eq!(cell_at(&app, library_x, 1).fg, theme.accent);
+    assert_eq!(cell_at(&app, queue_x, 1).fg, theme.dim);
 
     press(&mut app, KeyCode::Tab);
-    assert_eq!(cell_at(&app, library_x, 1).fg, DIM);
-    assert_eq!(cell_at(&app, queue_x, 1).fg, ACCENT);
+    assert_eq!(cell_at(&app, library_x, 1).fg, theme.dim);
+    assert_eq!(cell_at(&app, queue_x, 1).fg, theme.accent);
 }
 
 // ---- the now-playing block (ui-redesign T2, S1, S4) ------------------------
@@ -213,7 +215,9 @@ fn the_volume_slider_follows_the_volume_keys() {
 /// buttons, dim while off and in the accent while on.
 #[test]
 fn the_transport_row_shows_shuffle_and_repeat_and_lights_them_when_on() {
-    use velo::ui::theme::{ACCENT, DIM};
+    use velo::ui::theme::Theme;
+
+    let theme = Theme::default();
 
     let mut app = App::new(tracks(&["one.flac"]));
     let row_of = |app: &App| {
@@ -240,14 +244,14 @@ fn the_transport_row_shows_shuffle_and_repeat_and_lights_them_when_on() {
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(cell_at(&app, column(&row, "shuffle"), y).fg, DIM);
+    assert_eq!(cell_at(&app, column(&row, "shuffle"), y).fg, theme.dim);
 
     press(&mut app, KeyCode::Char('r'));
     press(&mut app, KeyCode::Char('s'));
     let row = row_of(&app);
     assert!(row.contains("repeat all"), "{row}");
-    assert_eq!(cell_at(&app, column(&row, "shuffle"), y).fg, ACCENT);
-    assert_eq!(cell_at(&app, column(&row, "all"), y).fg, ACCENT);
+    assert_eq!(cell_at(&app, column(&row, "shuffle"), y).fg, theme.accent);
+    assert_eq!(cell_at(&app, column(&row, "all"), y).fg, theme.accent);
 }
 
 /// ui-redesign T10: `ReplayGain` arrived from `main` (T11 there) as a config
@@ -345,7 +349,9 @@ fn lines_at(app: &App, width: u16, height: u16) -> Vec<String> {
 
 #[test]
 fn a_tall_window_draws_the_spectrum_as_a_quiet_baseline_when_nothing_plays() {
-    use velo::ui::theme::BORDER;
+    use velo::ui::theme::Theme;
+
+    let theme = Theme::default();
 
     let app = App::new(tracks(&["one.flac"]));
     let tall = lines_at(&app, 100, 32);
@@ -368,7 +374,7 @@ fn a_tall_window_draws_the_spectrum_as_a_quiet_baseline_when_nothing_plays() {
     let x = tall[baseline].chars().position(|c| c == '▁').unwrap();
     assert_eq!(
         cell_at_size(&app, 100, 32, x, baseline).fg,
-        BORDER,
+        theme.border,
         "silence is drawn as quietly as the frame"
     );
 
@@ -395,7 +401,9 @@ fn cell_at_size(app: &App, width: u16, height: u16, x: usize, y: usize) -> Cell 
 
 #[test]
 fn the_help_is_a_rounded_card_titled_keys_with_the_keys_in_their_own_color() {
-    use velo::ui::theme::SECONDARY;
+    use velo::ui::theme::Theme;
+
+    let theme = Theme::default();
 
     let mut app = App::new(tracks(&["one.flac"]));
     press(&mut app, KeyCode::Char('?'));
@@ -436,7 +444,10 @@ fn the_help_is_a_rounded_card_titled_keys_with_the_keys_in_their_own_color() {
         u16::try_from(key_x).unwrap(),
         u16::try_from(row).unwrap(),
     );
-    assert_eq!(cell.fg, SECONDARY, "keys stand apart from what they do");
+    assert_eq!(
+        cell.fg, theme.secondary,
+        "keys stand apart from what they do"
+    );
 }
 
 // ---- browsing the library (T5) ------------------------------------------
@@ -510,8 +521,6 @@ fn press(app: &mut App<'_>, code: KeyCode) {
 
 #[test]
 fn a_list_has_a_header_line_and_numbered_rows_on_an_accent_selection() {
-    use velo::ui::ratatui::style::Color;
-
     let app = App::new(tracks(&["one.flac", "two.flac", "three.flac"]));
     let screen = screen_at(&app, 80, 24);
 
@@ -527,29 +536,157 @@ fn a_list_has_a_header_line_and_numbered_rows_on_an_accent_selection() {
         .expect("the first row");
     let selected = cell_at(&app, 10, u16::try_from(row).unwrap());
     // ui-redesign T8: no ANSI color is a raised surface on every theme, so
-    // the selection is the terminal's accent with its darkest color on top.
-    assert_eq!(selected.bg, Color::Magenta, "the selection is the accent");
-    assert_eq!(selected.fg, Color::Black, "and its text the darkest color");
+    // the selection is the accent with the ink (its darkest color) on top.
+    let theme = velo::ui::theme::Theme::default();
+    assert_eq!(selected.bg, theme.accent, "the selection is the accent");
+    assert_eq!(selected.fg, theme.ink, "and its text the darkest color");
 }
 
-/// ui-redesign T8 (S5): the interface wears the terminal's own colors. It
-/// paints no background of its own, so a translucent terminal stays
-/// translucent, and every role is an ANSI palette entry the theme defines.
+/// The interface wears the resolved `[theme]` palette. The defaults
+/// reproduce the ANSI look velo has always drawn with — the terminal's own
+/// background and text, the ANSI magenta accent, the ANSI gray dim — and the
+/// help card's border and title show the accent at work.
 #[test]
 fn the_interface_takes_its_colors_from_the_terminal_palette() {
     use velo::ui::ratatui::style::Color;
-    use velo::ui::theme::{ACCENT, BORDER, DIM, SECONDARY, TEXT};
 
-    let app = App::new(tracks(&["one.flac"]));
+    let app = App::new(tracks(&["one.flac", "two.flac"]));
     let empty = cell_at(&app, 40, 15);
     assert_eq!(empty.bg, Color::Reset, "the terminal's own background");
 
-    let palette = [ACCENT, SECONDARY, DIM, BORDER, TEXT];
-    assert!(
-        palette.iter().all(|color| !matches!(color, Color::Rgb(..))),
-        "no role is a fixed RGB color: {palette:?}"
+    // The body's ordinary text stays the terminal's own foreground (a row
+    // that is not the selection, whose cells wear the accent).
+    let screen = screen_at(&app, 80, 24);
+    let row = screen
+        .lines()
+        .find(|line| line.contains("2. two.flac"))
+        .expect("a list row");
+    let x = u16::try_from(row.find("two.flac").unwrap()).unwrap();
+    let y = u16::try_from(
+        screen
+            .lines()
+            .position(|line| line.contains("2. two.flac"))
+            .unwrap(),
+    )
+    .unwrap();
+    let name = cell_at(&app, x, y);
+    assert_eq!(name.fg, Color::Reset, "the terminal's own text");
+    assert_eq!(name.bg, Color::Reset);
+
+    // A dim hint recedes in the default dim gray.
+    let hints = screen
+        .lines()
+        .find(|line| line.contains("q quit"))
+        .expect("the key hints");
+    let hint_x = u16::try_from(hints[..hints.find("quit").unwrap()].chars().count()).unwrap();
+    let hint_y = u16::try_from(
+        screen
+            .lines()
+            .position(|line| line.contains("q quit"))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        cell_at(&app, hint_x, hint_y).fg,
+        Color::Rgb(0x76, 0x76, 0x76),
+        "the dim hint is the default dim gray"
     );
-    assert_eq!(cell_at(&app, 0, 0).fg, BORDER, "the frame");
+
+    // The help card's border and title wear the accent, ANSI magenta as RGB.
+    let mut app = App::new(tracks(&["one.flac"]));
+    press(&mut app, KeyCode::Char('?'));
+    let screen = screen_at(&app, 80, 24);
+    let lines: Vec<&str> = screen.lines().collect();
+    let top = lines
+        .iter()
+        .position(|line| line.contains("╭ keys "))
+        .expect("the help card is open");
+    let title_at = lines[top].find(" keys ").unwrap();
+    let corner_x = u16::try_from(title_at - 1).unwrap();
+    let title_x = u16::try_from(title_at + 1).unwrap();
+    let top = u16::try_from(top).unwrap();
+    assert_eq!(
+        cell_at(&app, corner_x, top).fg,
+        Color::Rgb(0xaf, 0x00, 0xaf),
+        "the card's border is the default accent"
+    );
+    assert_eq!(
+        cell_at(&app, title_x, top).fg,
+        Color::Rgb(0xaf, 0x00, 0xaf),
+        "the card's title is the default accent"
+    );
+}
+
+/// A configured `[theme]` reaches every cell: the accent on the card's
+/// border and the text color on a list row, and not a trace of the old ANSI
+/// magenta anywhere on the screen.
+#[test]
+fn a_configured_palette_reaches_the_cells() {
+    use velo::config::{ThemeColor, ThemeColors};
+    use velo::ui::ratatui::style::Color;
+
+    let mut app = App::new(tracks(&["one.flac", "two.flac"]));
+    app.set_theme(ThemeColors {
+        accent: ThemeColor::Rgb {
+            red: 0x12,
+            green: 0x34,
+            blue: 0x56,
+        },
+        text: ThemeColor::Rgb {
+            red: 0xe0,
+            green: 0xe0,
+            blue: 0xe0,
+        },
+        ..ThemeColors::default()
+    });
+
+    // A list row wears the configured text color (not the selected row,
+    // whose cells wear the accent and the ink).
+    let screen = screen_at(&app, 80, 24);
+    let row = screen
+        .lines()
+        .find(|line| line.contains("2. two.flac"))
+        .expect("a list row");
+    let x = u16::try_from(row.find("two.flac").unwrap()).unwrap();
+    let y = u16::try_from(
+        screen
+            .lines()
+            .position(|line| line.contains("2. two.flac"))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        cell_at(&app, x, y).fg,
+        Color::Rgb(0xe0, 0xe0, 0xe0),
+        "the list row is the configured text"
+    );
+
+    // The card's border wears the configured accent.
+    press(&mut app, KeyCode::Char('?'));
+    let lines = lines_at(&app, 80, 24);
+    let top = lines
+        .iter()
+        .position(|line| line.contains("╭ keys "))
+        .expect("the help card is open");
+    let corner_x = u16::try_from(lines[top].find(" keys ").unwrap() - 1).unwrap();
+    let top = u16::try_from(top).unwrap();
+    assert_eq!(
+        cell_at(&app, corner_x, top).fg,
+        Color::Rgb(0x12, 0x34, 0x56),
+        "the card's border is the configured accent"
+    );
+
+    // And not a trace of the old ANSI magenta is left on the screen.
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("a test terminal");
+    terminal
+        .draw(|frame| app.draw(frame))
+        .expect("the frame draws");
+    for cell in terminal.backend().buffer().content() {
+        assert!(
+            !matches!(cell.fg, Color::Magenta) && !matches!(cell.bg, Color::Magenta),
+            "no ANSI magenta is left, got: {cell:?}"
+        );
+    }
 }
 
 #[test]
@@ -561,7 +698,7 @@ fn library_rows_put_their_facts_against_the_right_edge() {
 
     let artists = screen_at(&app, 80, 24);
     assert!(
-        artists.contains("▸─ artists  albums  tracks  genres   [1 artist]"),
+        artists.contains("▸─ 1 artists  2 albums  3 tracks  4 genres   [1 artist]"),
         "got:\n{artists}"
     );
     assert!(
@@ -575,7 +712,7 @@ fn library_rows_put_their_facts_against_the_right_edge() {
     press(&mut app, KeyCode::Enter); // Harbor
     let tracks = screen_at(&app, 80, 24);
     assert!(
-        tracks.contains("▸─ artists  albums  tracks  genres   Tide › Harbor  [1 track]"),
+        tracks.contains("▸─ 1 artists  2 albums  3 tracks  4 genres   Tide › Harbor  [1 track]"),
         "got:\n{tracks}"
     );
     assert!(
@@ -798,7 +935,9 @@ fn after_esc_the_empty_browser_says_how_to_set_the_library() {
 
 #[test]
 fn the_header_names_the_four_views_and_lights_the_active_one() {
-    use velo::ui::theme::{ACCENT, DIM};
+    use velo::ui::theme::Theme;
+
+    let theme = Theme::default();
 
     let temp = TempLibrary::new("views-header");
     temp.write_wav("Tide/2019 - Harbor/01 - Dawn.wav");
@@ -809,7 +948,7 @@ fn the_header_names_the_four_views_and_lights_the_active_one() {
 
     let screen = screen_at(&app, 80, 24);
     assert!(
-        screen.contains("▸─ artists  albums  tracks  genres   [2 albums]"),
+        screen.contains("▸─ 1 artists  2 albums  3 tracks  4 genres   [2 albums]"),
         "got:\n{screen}"
     );
     // Every album says whose it is and its year at the right edge.
@@ -822,7 +961,7 @@ fn the_header_names_the_four_views_and_lights_the_active_one() {
     let row = u16::try_from(
         screen
             .lines()
-            .position(|line| line.contains("▸─ artists"))
+            .position(|line| line.contains("▸─ 1 artists"))
             .unwrap(),
     )
     .unwrap();
@@ -831,17 +970,21 @@ fn the_header_names_the_four_views_and_lights_the_active_one() {
         |word: &str| u16::try_from(line[..line.find(word).unwrap()].chars().count()).unwrap();
     assert_eq!(
         cell_at(&app, column("albums"), row).fg,
-        ACCENT,
+        theme.accent,
         "the active view"
     );
-    assert_eq!(cell_at(&app, column("artists"), row).fg, DIM, "the others");
-    assert_eq!(cell_at(&app, column("genres"), row).fg, DIM);
+    assert_eq!(
+        cell_at(&app, column("artists"), row).fg,
+        theme.dim,
+        "the others"
+    );
+    assert_eq!(cell_at(&app, column("genres"), row).fg, theme.dim);
 
     // Every track names its artist and album beside its title.
     press(&mut app, KeyCode::Char('3'));
     let screen = screen_at(&app, 80, 24);
     assert!(
-        screen.contains("▸─ artists  albums  tracks  genres   [2 tracks]"),
+        screen.contains("▸─ 1 artists  2 albums  3 tracks  4 genres   [2 tracks]"),
         "got:\n{screen}"
     );
     assert!(screen.contains("1. Dawn  Tide · Harbor"), "got:\n{screen}");
@@ -853,8 +996,92 @@ fn the_header_names_the_four_views_and_lights_the_active_one() {
     press(&mut app, KeyCode::Enter);
     let screen = screen_at(&app, 80, 24);
     assert!(
-        screen.contains("▸─ artists  albums  tracks  genres   (no genre)  [2 tracks]"),
+        screen.contains("▸─ 1 artists  2 albums  3 tracks  4 genres   (no genre)  [2 tracks]"),
         "got:\n{screen}"
+    );
+}
+
+/// The numbers in the header are the `1`–`4` keys' own row (S5.5): they show
+/// by default and `[ui] view_numbers = false` leaves the bare names.
+#[test]
+fn the_header_numbers_the_views_and_view_numbers_false_hides_the_numbers() {
+    let temp = TempLibrary::new("view-numbers");
+    temp.write_wav("Tide/2019 - Harbor/01 - Dawn.wav");
+    temp.index();
+    let mut app = App::browse(Some(&temp.library));
+
+    let screen = screen_at(&app, 80, 24);
+    assert!(
+        screen.contains("▸─ 1 artists  2 albums  3 tracks  4 genres   [1 artist]"),
+        "the numbers are the keys, got:\n{screen}"
+    );
+
+    app.set_ui(UiParts {
+        view_numbers: false,
+        ..UiParts::default()
+    });
+    let screen = screen_at(&app, 80, 24);
+    assert!(
+        screen.contains("▸─ artists  albums  tracks  genres   [1 artist]"),
+        "the bare names as before, got:\n{screen}"
+    );
+    assert!(!screen.contains("1 artists"), "no numbers:\n{screen}");
+}
+
+/// The cover advisory is a `[ui]` switch like any other (S5.4): on a window
+/// too small for art the status line explains the hidden cover, and with
+/// `advisories = false` it stays quiet — while an ordinary status message
+/// still shows.
+#[test]
+fn the_cover_advisory_appears_on_a_small_window_and_advisories_false_silences_it() {
+    let temp = TempLibrary::new("cover-advisory");
+    let wav = temp.write_wav("Tide/01 - Dawn.wav");
+    // Any decoded image will do for the advisory: the gate never looks at
+    // the pixels.
+    image::DynamicImage::new_rgba8(1, 1)
+        .save(temp.root.join("Tide/cover.png"))
+        .expect("a cover to decode");
+    let art = velo::ui::artwork::Artwork::from_path(&wav).expect("the cover decodes");
+
+    let mut app = App::new(tracks(&["one.flac"]));
+    app.show_artwork(Some(velo::ui::artwork::Picker::new((8, 12))));
+    app.show_decoded_artwork(Some(art));
+    // The first frame records the window; the tick then explains the cover.
+    let _ = screen_at(&app, 80, 40);
+    app.tick();
+    assert!(
+        app.status().contains("cover art hidden"),
+        "the advisory is the status, got: {:?}",
+        app.status()
+    );
+    let screen = screen_at(&app, 80, 40);
+    assert!(
+        screen.contains("cover art hidden — the window is 80x40 and cover art needs 100x28"),
+        "the advisory is drawn, got:\n{screen}"
+    );
+
+    // Advisories off: the same window is never explained, and ordinary
+    // messages still show.
+    let art = velo::ui::artwork::Artwork::from_path(&wav).expect("the cover decodes");
+    let mut app = App::new(tracks(&["one.flac"]));
+    app.show_artwork(Some(velo::ui::artwork::Picker::new((8, 12))));
+    app.show_decoded_artwork(Some(art));
+    app.set_ui(UiParts {
+        advisories: false,
+        ..UiParts::default()
+    });
+    let _ = screen_at(&app, 80, 40);
+    app.tick();
+    assert!(
+        !app.status().contains("cover art hidden"),
+        "the advisory is silenced, got: {:?}",
+        app.status()
+    );
+    app.note("velo: indexing finished");
+    let screen = screen_at(&app, 80, 40);
+    assert!(
+        screen.contains("velo: indexing finished"),
+        "an ordinary message still shows, got:\n{screen}"
     );
 }
 
@@ -870,7 +1097,7 @@ fn a_narrow_header_drops_the_count_before_the_view_names() {
     let screen = screen_at(&app, 80, 24);
     let header = screen
         .lines()
-        .find(|line| line.contains("▸─ artists  albums  tracks  genres"))
+        .find(|line| line.contains("▸─ 1 artists  2 albums  3 tracks  4 genres"))
         .expect("the views stay at 80 columns");
     assert!(
         !header.contains("[1 track]"),
@@ -883,8 +1110,6 @@ fn a_narrow_header_drops_the_count_before_the_view_names() {
 
 #[test]
 fn the_title_bar_says_indexing_while_an_index_runs_and_not_after() {
-    use velo::ui::ratatui::style::Color;
-
     let temp = TempLibrary::new("indexing-title");
     let mut app = App::browse(Some(&temp.library));
     app.index_started(&temp.root);
@@ -895,7 +1120,11 @@ fn the_title_bar_says_indexing_while_an_index_runs_and_not_after() {
         .position(|character| character == '⟳')
         .unwrap();
     let cell = cell_at_size(&app, 80, 24, column, 1);
-    assert_eq!(cell.fg, Color::Magenta, "the indicator is the accent");
+    assert_eq!(
+        cell.fg,
+        velo::ui::theme::Theme::default().accent,
+        "the indicator is the accent"
+    );
     assert!(
         lines[1].contains("V E L O"),
         "the wordmark stays: {}",
@@ -1001,7 +1230,7 @@ fn the_help_scrolls_with_j_k_and_jumps_with_g_and_shift_g() {
     press(&mut app, KeyCode::Char('?'));
     let screen = help_at_80x14(&app);
     assert!(
-        screen.contains("1–12 of 24"),
+        screen.contains("1–12 of 25"),
         "where the card is:\n{screen}"
     );
     assert!(screen.contains("j / Down"), "{screen}");
@@ -1009,34 +1238,34 @@ fn the_help_scrolls_with_j_k_and_jumps_with_g_and_shift_g() {
 
     press(&mut app, KeyCode::Char('j'));
     let screen = help_at_80x14(&app);
-    assert!(screen.contains("2–13 of 24"), "{screen}");
+    assert!(screen.contains("2–13 of 25"), "{screen}");
     assert!(
         !screen.contains("j / Down"),
         "the first row scrolled off:\n{screen}"
     );
 
     press(&mut app, KeyCode::Down);
-    assert!(help_at_80x14(&app).contains("3–14 of 24"));
+    assert!(help_at_80x14(&app).contains("3–14 of 25"));
     press(&mut app, KeyCode::Char('k'));
     press(&mut app, KeyCode::Up);
     press(&mut app, KeyCode::Up);
     assert!(
-        help_at_80x14(&app).contains("1–12 of 24"),
+        help_at_80x14(&app).contains("1–12 of 25"),
         "k stops at the top"
     );
 
     press(&mut app, KeyCode::Char('G'));
     let screen = help_at_80x14(&app);
-    assert!(screen.contains("13–24 of 24"), "{screen}");
+    assert!(screen.contains("14–25 of 25"), "{screen}");
     assert!(screen.contains("quit"), "{screen}");
     press(&mut app, KeyCode::Char('j'));
     assert!(
-        help_at_80x14(&app).contains("13–24 of 24"),
+        help_at_80x14(&app).contains("14–25 of 25"),
         "j stops at the end"
     );
 
     press(&mut app, KeyCode::Char('g'));
-    assert!(help_at_80x14(&app).contains("1–12 of 24"));
+    assert!(help_at_80x14(&app).contains("1–12 of 25"));
 }
 
 #[test]
@@ -1048,7 +1277,7 @@ fn a_help_that_fits_shows_no_position() {
         screen.contains("quit") && screen.contains("j / Down"),
         "{screen}"
     );
-    assert!(!screen.contains(" of 24"), "{screen}");
+    assert!(!screen.contains(" of 25"), "{screen}");
 }
 
 #[test]
@@ -1129,5 +1358,329 @@ fn the_help_brings_back_the_library_rows() {
     assert!(
         !screen.contains("L / u"),
         "the merged row is gone:\n{screen}"
+    );
+}
+
+// ---- showing and hiding the interface's parts (S5) --------------------------
+
+use velo::config::UiParts;
+
+fn app_with_ui(ui: UiParts) -> App<'static> {
+    let mut app = App::new(tracks(&["one.flac", "two.flac", "three.flac"]));
+    app.set_ui(ui);
+    app
+}
+
+/// The top bar hidden gives its row to the content: the frame still closes
+/// and the now-playing block starts on the first row inside it.
+#[test]
+fn hiding_the_top_bar_gives_its_row_to_the_content() {
+    let app = app_with_ui(UiParts {
+        top_bar: false,
+        ..UiParts::default()
+    });
+    let screen = screen_at(&app, 80, 24);
+    let lines: Vec<&str> = screen.lines().collect();
+
+    assert!(lines[0].starts_with('╭') && lines[0].ends_with('╮'));
+    assert!(lines[23].starts_with('╰') && lines[23].ends_with('╯'));
+    assert!(
+        !screen.contains("V E L O") && !screen.contains("library  queue"),
+        "the tabs and the wordmark are gone, got:\n{screen}"
+    );
+    assert!(
+        lines[1].contains("♫ nothing playing"),
+        "the content takes the bar's row, got: {}",
+        lines[1]
+    );
+}
+
+/// The hints hidden keep the status row, and no empty line is left where the
+/// hints were: the status is the last row inside the frame.
+#[test]
+fn hiding_the_hints_keeps_the_status_row_and_no_empty_line() {
+    let mut app = app_with_ui(UiParts {
+        hints: false,
+        ..UiParts::default()
+    });
+    app.note("velo: indexing finished");
+    let screen = screen_at(&app, 80, 24);
+    let lines: Vec<&str> = screen.lines().collect();
+
+    assert!(
+        !screen.contains("j/k move"),
+        "the hints are gone, got:\n{screen}"
+    );
+    assert!(
+        lines[22].contains("velo: indexing finished"),
+        "the status is the last row inside the frame, no empty line after it, got:\n{screen}"
+    );
+    assert!(lines[23].starts_with('╰') && lines[23].ends_with('╯'));
+}
+
+/// The spectrum hidden never reserves its rows: the list starts where the
+/// bars were, four rows higher than with the bars drawn.
+#[test]
+fn hiding_the_spectrum_gives_its_rows_to_the_list() {
+    let shown = lines_at(&app_with_ui(UiParts::default()), 80, 30);
+    let header_row = shown
+        .iter()
+        .position(|line| line.contains("▸─ Files"))
+        .expect("the list header");
+    assert!(
+        shown.iter().any(|line| line.contains("▁")),
+        "with the switch on the bars are drawn, got:\n{}",
+        shown.join("\n")
+    );
+
+    let hidden = app_with_ui(UiParts {
+        spectrum: false,
+        ..UiParts::default()
+    });
+    let screen = screen_at(&hidden, 80, 30);
+    let lines: Vec<&str> = screen.lines().collect();
+
+    assert!(!screen.contains("▁"), "no bars are drawn:\n{screen}");
+    let new_header_row = lines
+        .iter()
+        .position(|line| line.contains("▸─ Files"))
+        .expect("the list header");
+    assert_eq!(
+        new_header_row,
+        header_row - 4,
+        "the list starts where the bars were, got:\n{screen}"
+    );
+}
+
+/// The cover hidden leaves no cover columns even with a picker installed on
+/// a window above the art threshold — and a deliberately hidden cover is a
+/// decision, so nothing explains it.
+///
+/// No fixture can hand the interface a decoded cover without a live stream
+/// (the cover follows the track that plays), so the decoded-art leg of the
+/// gate is pinned by a unit test beside the layout code it gates.
+#[test]
+fn hiding_the_cover_art_leaves_no_cover_columns_and_no_explanation() {
+    let mut app = App::new(tracks(&["one.flac", "two.flac", "three.flac"]));
+    app.show_artwork(Some(velo::ui::artwork::Picker::new((8, 12))));
+    app.set_ui(UiParts {
+        cover_art: false,
+        ..UiParts::default()
+    });
+    let screen = screen_at(&app, 120, 30);
+
+    let title = screen
+        .lines()
+        .find(|line| line.contains("♫ nothing playing"))
+        .expect("the now-playing block");
+    let column = title
+        .chars()
+        .position(|c| c == '♫')
+        .expect("the block's title");
+    assert_eq!(
+        column, 2,
+        "the block's text starts at the left edge: no cover columns, got: {title}"
+    );
+
+    app.tick();
+    assert!(
+        app.status().is_empty(),
+        "a deliberately hidden cover is never explained, got: {:?}",
+        app.status()
+    );
+}
+
+/// Every part hidden at once still draws a window that closes, with the
+/// lists and the block where the freed rows and columns went.
+#[test]
+fn hiding_every_part_at_once_still_draws_a_coherent_window() {
+    let app = app_with_ui(UiParts {
+        cover_art: false,
+        spectrum: false,
+        hints: false,
+        top_bar: false,
+        advisories: true,
+        view_numbers: true,
+    });
+    let screen = screen_at(&app, 80, 24);
+    let lines: Vec<&str> = screen.lines().collect();
+
+    assert!(lines[0].starts_with('╭') && lines[0].ends_with('╮'));
+    assert!(lines[23].starts_with('╰') && lines[23].ends_with('╯'));
+    for expected in [
+        "♫ nothing playing",
+        "■ stopped",
+        "1. one.flac",
+        "3. three.flac",
+    ] {
+        assert!(
+            screen.contains(expected),
+            "the screen keeps {expected:?}, got:\n{screen}"
+        );
+    }
+    for gone in ["V E L O", "j/k move", "▁"] {
+        assert!(!screen.contains(gone), "{gone:?} is gone, got:\n{screen}");
+    }
+}
+
+/// The defaults draw exactly the screen the golden test pins: a `[ui]` table
+/// absent from the file changes nothing.
+#[test]
+fn the_default_ui_parts_draw_the_golden_screen() {
+    let app = app_with_ui(UiParts::default());
+    assert_eq!(
+        screen_at(&app, 80, 24),
+        SCREEN_WITHOUT_COVER_ART,
+        "UiParts::default() must draw today's screen byte for byte"
+    );
+}
+
+// ---- the settings card (S6, S7) ---------------------------------------------
+
+/// The rows the card titled `settings` covers on `screen`: its two borders,
+/// the lines between them and nothing else.
+fn settings_card_height(screen: &str) -> usize {
+    const TITLE: [char; 8] = [' ', 's', 'e', 't', 't', 'i', 'n', 'g'];
+    let lines: Vec<Vec<char>> = screen.lines().map(|line| line.chars().collect()).collect();
+    let top = lines
+        .iter()
+        .position(|line| {
+            line.windows(TITLE.len() + 1)
+                .any(|window| window[1..] == TITLE)
+        })
+        .expect("the settings card is on screen");
+    let edge = lines[top]
+        .iter()
+        .position(|&cell| cell == '╭')
+        .expect("the border opens the card");
+    let sides = lines[top + 1..]
+        .iter()
+        .take_while(|line| line.get(edge) == Some(&'│'))
+        .count();
+    sides + 2
+}
+
+#[test]
+fn the_settings_card_draws_its_title_sections_and_focused_row_in_the_accent() {
+    use velo::ui::theme::Theme;
+
+    let mut app = App::new(tracks(&["one.flac"]));
+    press(&mut app, KeyCode::Char('o'));
+    let screen = screen_at(&app, 80, 24);
+
+    assert!(screen.contains(" settings "), "{screen}");
+    for header in ["sound", "theme", "screen", "library"] {
+        assert!(
+            screen.contains(header),
+            "the {header} section on:\n{screen}"
+        );
+    }
+    for (label, value) in [
+        ("replay gain", "track"),
+        ("repeat", "off"),
+        ("shuffle", "off"),
+        ("accent", "#af00af"),
+        ("background", "reset"),
+        ("cover art", "shown"),
+        ("hints", "shown"),
+        ("advisories", "shown"),
+        ("view numbers", "shown"),
+        ("folder", "not set"),
+    ] {
+        assert!(
+            screen.contains(label) && screen.contains(value),
+            "{label} {value} on:\n{screen}"
+        );
+    }
+
+    // The focused row is drawn in the accent colour, the headers dim. `find`
+    // answers a byte offset; the buffer is indexed by columns.
+    let theme = Theme::default();
+    let column_of = |needle: &str| {
+        screen.lines().find_map(|line| {
+            let byte = line.find(needle)?;
+            u16::try_from(line[..byte].chars().count()).ok()
+        })
+    };
+    let y = u16::try_from(
+        screen
+            .lines()
+            .position(|line| line.contains("replay gain"))
+            .expect("the focused row"),
+    )
+    .unwrap();
+    assert_eq!(
+        cell_at(&app, column_of("replay gain").expect("the focused row"), y).fg,
+        theme.accent,
+        "the focused row is drawn in the accent:\n{screen}"
+    );
+    let header_y = u16::try_from(
+        screen
+            .lines()
+            .position(|line| line.contains("sound"))
+            .expect("the sound header"),
+    )
+    .unwrap();
+    let header_cell = cell_at(
+        &app,
+        column_of("sound").expect("the sound header"),
+        header_y,
+    );
+    assert_eq!(
+        header_cell.fg, theme.dim,
+        "the section headers are drawn dim:\n{screen}"
+    );
+}
+
+#[test]
+fn the_settings_card_keeps_its_height_while_the_cursor_walks_it() {
+    let mut app = App::new(tracks(&["one.flac"]));
+    press(&mut app, KeyCode::Char('o'));
+    let height = settings_card_height(&screen_at(&app, 80, 14));
+
+    for step in 0..20 {
+        let screen = screen_at(&app, 80, 14);
+        assert_eq!(
+            settings_card_height(&screen),
+            height,
+            "the card resized at step {step}:\n{screen}"
+        );
+        press(&mut app, KeyCode::Char('j'));
+    }
+    assert!(
+        screen_at(&app, 80, 14).contains("folder"),
+        "the walk reached the last row"
+    );
+}
+
+/// No fixture can hand the interface a decoded cover without a live stream
+/// (the cover follows the track that plays), so this pins the columns leg of
+/// the gate the same way `hiding_the_cover_art_leaves_no_cover_columns_and_no_explanation`
+/// does — the switch flipped from inside the card, not from the file.
+#[test]
+fn hiding_the_cover_from_the_card_removes_its_columns_on_the_next_frame() {
+    let mut app = App::new(tracks(&["one.flac", "two.flac", "three.flac"]));
+    app.show_artwork(Some(velo::ui::artwork::Picker::new((8, 12))));
+
+    press(&mut app, KeyCode::Char('o'));
+    for _ in 0..10 {
+        press(&mut app, KeyCode::Char('j'));
+    }
+    assert_eq!(app.settings_focused(), "cover art");
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Esc);
+
+    let screen = screen_at(&app, 120, 30);
+    let title = screen
+        .lines()
+        .find(|line| line.contains("♫ nothing playing"))
+        .expect("the now-playing block");
+    let column = title
+        .chars()
+        .position(|c| c == '♫')
+        .expect("the block's title");
+    assert_eq!(
+        column, 2,
+        "the block's text starts at the left edge: no cover columns, got: {title}"
     );
 }

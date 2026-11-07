@@ -12,10 +12,13 @@ use std::path::{Path, PathBuf};
 use std::ffi::OsStr;
 
 use clap::Parser as _;
+use velo::audio::output::Repeat;
 use velo::config::{
-    Cli, Config, DEFAULT_VOLUME, ReplayGainMode, config_path, default_config_text, expand_path,
-    library_to_save, set_library, write_default_config,
+    Cli, Config, DEFAULT_VOLUME, OpenNode, ReplayGainMode, ThemeColor, ThemeColors, UiParts,
+    config_path, default_config_text, expand_path, library_to_save, remove_value, set_library,
+    set_value, write_default_config,
 };
+use velo::ui::{BrowseBy, View};
 
 /// Makes `<temp>/<name>`, verifies the directory can be removed, and returns
 /// the path. Each test gets its own directory, so tests cannot see each other.
@@ -108,6 +111,260 @@ fn an_empty_config_file_is_all_defaults() {
     let settings = config.merged(&cli_with_no_flags());
     assert_eq!(settings.library, None);
     assert!(!settings.bit_perfect);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// ------------------------------------------------ state, theme and ui tables
+
+#[test]
+fn a_full_file_carries_the_state_the_theme_and_the_ui() {
+    let dir = temp_dir("every-table");
+    let path = write_config(
+        &dir,
+        r##"library = "/music/root"
+
+[state]
+volume = 72
+shuffle = true
+repeat = "all"
+view = "queue"
+browse_by = "albums"
+artist = "Lo-Fi Scientists"
+album = "Drift"
+
+[theme]
+background = "reset"
+text = "#e0e0e0"
+dim = "#767676"
+accent = "#FF00AA"
+secondary = "#5f87d7"
+border = "#303030"
+ink = "#101010"
+
+[ui]
+cover_art = false
+spectrum = false
+hints = false
+top_bar = false
+advisories = false
+view_numbers = false
+"##,
+    );
+
+    let config = Config::load_from(&path).unwrap_or_else(|error| panic!("load failed: {error}"));
+    let settings = config.merged(&cli_with_no_flags());
+
+    assert_eq!(settings.volume, 72);
+    assert!(settings.session.shuffle);
+    assert_eq!(settings.session.repeat, Repeat::All);
+    assert_eq!(settings.session.view, View::Queue);
+    assert_eq!(settings.session.browse_by, BrowseBy::Albums);
+    assert_eq!(
+        settings.session.node,
+        Some(OpenNode {
+            artist: Some("Lo-Fi Scientists".to_owned()),
+            album: Some("Drift".to_owned()),
+            genre: None,
+        })
+    );
+    assert_eq!(
+        settings.theme.accent,
+        ThemeColor::Rgb {
+            red: 0xff,
+            green: 0x00,
+            blue: 0xaa,
+        },
+        "hex is read case-insensitively"
+    );
+    assert_eq!(settings.theme.background, ThemeColor::Terminal);
+    assert_eq!(
+        settings.theme.text,
+        ThemeColor::Rgb {
+            red: 0xe0,
+            green: 0xe0,
+            blue: 0xe0
+        }
+    );
+    assert_eq!(
+        settings.theme.border,
+        ThemeColor::Rgb {
+            red: 0x30,
+            green: 0x30,
+            blue: 0x30,
+        }
+    );
+    assert_eq!(
+        settings.ui,
+        UiParts {
+            cover_art: false,
+            spectrum: false,
+            hints: false,
+            top_bar: false,
+            advisories: false,
+            view_numbers: false,
+        }
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn every_new_table_is_optional_and_defaults_to_what_velo_did_before() {
+    let settings = Config::default().merged(&cli_with_no_flags());
+
+    assert!(!settings.session.shuffle);
+    assert_eq!(settings.session.repeat, Repeat::Off);
+    assert_eq!(settings.session.view, View::Library);
+    assert_eq!(settings.session.browse_by, BrowseBy::Artists);
+    assert_eq!(settings.session.node, None);
+    assert_eq!(settings.theme, ThemeColors::default());
+    assert_eq!(settings.ui, UiParts::default());
+    assert!(
+        settings.ui.cover_art,
+        "the cover is drawn unless told not to"
+    );
+    assert!(settings.ui.spectrum);
+    assert!(settings.ui.hints);
+    assert!(settings.ui.top_bar);
+    // A file written before the two switches existed draws what it drew: the
+    // explanation of a hidden cover and the view numbers come back.
+    assert!(settings.ui.advisories, "advisories default to on");
+    assert!(settings.ui.view_numbers, "view numbers default to on");
+}
+
+#[test]
+fn the_state_volume_is_the_one_that_counts_and_the_old_flat_key_still_reads() {
+    let dir = temp_dir("state-volume-wins");
+    let path = write_config(&dir, "volume = 40\n\n[state]\nvolume = 72\n");
+    let settings = Config::load_from(&path)
+        .unwrap_or_else(|error| panic!("load failed: {error}"))
+        .merged(&cli_with_no_flags());
+    assert_eq!(settings.volume, 72, "[state] is where volume lives now");
+    let _ = fs::remove_dir_all(&dir);
+
+    let dir = temp_dir("state-volume-legacy");
+    let path = write_config(&dir, "volume = 40\n");
+    let settings = Config::load_from(&path)
+        .unwrap_or_else(|error| panic!("load failed: {error}"))
+        .merged(&cli_with_no_flags());
+    assert_eq!(
+        settings.volume, 40,
+        "a file written before [state] still reads"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_state_volume_out_of_range_names_the_file_and_the_line() {
+    let dir = temp_dir("state-volume-bounds");
+    let path = write_config(&dir, "[state]\nvolume = 101\n");
+    let error = Config::load_from(&path).expect_err("101 is not a volume");
+    let message = error.to_string();
+    assert!(message.contains("config.toml"), "{message}");
+    assert!(message.contains("line 2"), "{message}");
+    assert!(message.contains("between 0 and 100"), "{message}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_theme_colour_is_hex_or_reset_in_the_two_places_reset_makes_sense() {
+    for (name, body, line, expected) in [
+        (
+            "theme-reset-accent",
+            "[theme]\naccent = \"reset\"\n",
+            2,
+            "background and text only",
+        ),
+        (
+            "theme-no-hash",
+            "[theme]\naccent = \"ff00aa\"\n",
+            2,
+            "is not a colour",
+        ),
+        (
+            "theme-short",
+            "[theme]\naccent = \"#f0a\"\n",
+            2,
+            "is not a colour",
+        ),
+        (
+            "theme-not-hex",
+            "[theme]\naccent = \"#gg00aa\"\n",
+            2,
+            "is not a colour",
+        ),
+        (
+            "theme-unknown-key",
+            "[theme]\naccent = \"#ff00aa\"\naccent_bright = \"#ff00aa\"\n",
+            3,
+            "unknown field",
+        ),
+    ] {
+        let dir = temp_dir(name);
+        let path = write_config(&dir, body);
+        let error = Config::load_from(&path).expect_err(name);
+        let message = error.to_string();
+        assert!(message.contains(expected), "{name}: {message}");
+        assert!(
+            message.contains(&format!("line {line}")),
+            "{name}: {message}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[test]
+fn the_state_names_are_checked_by_name_and_an_empty_node_is_no_node() {
+    for (name, body) in [
+        ("state-repeat", "[state]\nrepeat = \"sometimes\"\n"),
+        ("state-view", "[state]\nview = \"mixer\"\n"),
+        ("state-browse-by", "[state]\nbrowse_by = \"playlists\"\n"),
+    ] {
+        let dir = temp_dir(name);
+        let path = write_config(&dir, body);
+        let error = Config::load_from(&path).expect_err(name);
+        let message = error.to_string();
+        assert!(message.contains("unknown variant"), "{name}: {message}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    let dir = temp_dir("state-empty-node");
+    let path = write_config(
+        &dir,
+        "[state]\nbrowse_by = \"albums\"\nartist = \"\"\nalbum = \"   \"\ngenre = \"\"\n",
+    );
+    let settings = Config::load_from(&path)
+        .unwrap_or_else(|error| panic!("load failed: {error}"))
+        .merged(&cli_with_no_flags());
+    assert_eq!(settings.session.node, None, "a blank name is no node");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_default_file_names_every_table_and_reads_back_as_the_defaults() {
+    let text = default_config_text();
+    for table in ["[state]", "[theme]", "[ui]"] {
+        assert!(text.contains(table), "{table} is missing from:\n{text}");
+    }
+    assert!(
+        text.contains("[state]\nvolume = "),
+        "volume lives under [state] now:\n{text}"
+    );
+
+    let dir = temp_dir("default-round-trip");
+    let path = write_config(&dir, &text);
+    let settings = Config::load_from(&path)
+        .unwrap_or_else(|error| panic!("the default file must load: {error}"))
+        .merged(&cli_with_no_flags());
+    assert_eq!(settings.volume, DEFAULT_VOLUME);
+    assert_eq!(settings.theme, ThemeColors::default());
+    assert_eq!(settings.ui, UiParts::default());
+    assert_eq!(settings.session.repeat, Repeat::Off);
+    assert_eq!(settings.session.view, View::Library);
+    assert_eq!(settings.session.browse_by, BrowseBy::Artists);
+    // The two switches the first delivery did not have are written too, so
+    // the default file names every key the parser reads.
+    assert!(text.contains("advisories = true"), "{text}");
+    assert!(text.contains("view_numbers = true"), "{text}");
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -356,9 +613,33 @@ fn a_missing_config_file_is_written_with_every_key_and_its_default() {
     let text = fs::read_to_string(&path).unwrap();
     assert_eq!(text, default_config_text());
 
-    // Every key is there, each with a comment right above it.
+    // Every key is there, each with a comment right above it — or right above
+    // the table it opens, which is where the first key of a table sits.
     let lines: Vec<&str> = text.lines().collect();
-    for key in ["library", "volume", "bit_perfect", "replay_gain"] {
+    let keys = [
+        "library",
+        "bit_perfect",
+        "replay_gain",
+        "volume",
+        "shuffle",
+        "repeat",
+        "view",
+        "browse_by",
+        "background",
+        "text",
+        "dim",
+        "accent",
+        "secondary",
+        "border",
+        "ink",
+        "cover_art",
+        "spectrum",
+        "hints",
+        "top_bar",
+        "advisories",
+        "view_numbers",
+    ];
+    for key in keys {
         let at = lines
             .iter()
             .position(|line| {
@@ -366,9 +647,14 @@ fn a_missing_config_file_is_written_with_every_key_and_its_default() {
                 line.starts_with(&format!("{key} ="))
             })
             .unwrap_or_else(|| panic!("{key} missing from\n{text}"));
+        let commented = at > 0 && lines[at - 1].starts_with('#');
+        let under_its_table = lines[..at]
+            .iter()
+            .rposition(|line| line.starts_with('['))
+            .is_some_and(|header| header > 0 && lines[header - 1].starts_with('#'));
         assert!(
-            at > 0 && lines[at - 1].starts_with('#'),
-            "{key} needs a comment above it\n{text}"
+            commented || under_its_table,
+            "{key} needs a comment above it or above its table\n{text}"
         );
     }
     // `library` has no universal default, so it is written commented out.
@@ -501,6 +787,218 @@ fn setting_the_library_adds_the_key_when_the_file_has_none() {
     assert_eq!(
         fs::read_to_string(&path).unwrap(),
         "library = \"/music\"\nvolume = 3\n"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// ------------------------------------------- writing and removing values (T4, S2)
+
+#[test]
+fn a_key_is_inserted_into_an_existing_table_between_its_neighbours() {
+    let dir = temp_dir("set-value-insert");
+    let path = write_config(
+        &dir,
+        "# mine\n\n[state]\nvolume = 72\nrepeat = \"off\"\n\n[theme]\naccent = \"#af00af\"\n",
+    );
+
+    set_value(&path, Some("state"), "shuffle", "false")
+        .unwrap_or_else(|error| panic!("set: {error}"));
+
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        "# mine\n\n[state]\nvolume = 72\nrepeat = \"off\"\nshuffle = false\n\n[theme]\naccent = \"#af00af\"\n"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_active_key_inside_a_table_is_replaced_in_place() {
+    let dir = temp_dir("set-value-replace");
+    let before = "[state]\nvolume = 30\nshuffle = true\nrepeat = \"off\"\n";
+    let path = write_config(&dir, before);
+
+    set_value(&path, Some("state"), "shuffle", "false")
+        .unwrap_or_else(|error| panic!("set: {error}"));
+
+    let after = fs::read_to_string(&path).unwrap();
+    assert_eq!(
+        after,
+        "[state]\nvolume = 30\nshuffle = false\nrepeat = \"off\"\n"
+    );
+    assert_eq!(
+        after.lines().count(),
+        before.lines().count(),
+        "a replacement must not change the line count\n{after}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_commented_key_inside_a_table_is_uncommented_not_duplicated() {
+    let dir = temp_dir("set-value-uncomment");
+    let path = write_config(&dir, "[ui]\n# cover_art = true\nspectrum = true\n");
+
+    set_value(&path, Some("ui"), "cover_art", "false")
+        .unwrap_or_else(|error| panic!("set: {error}"));
+
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        "[ui]\ncover_art = false\nspectrum = true\n"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_key_is_written_into_a_table_that_does_not_exist_yet() {
+    let dir = temp_dir("set-value-new-table");
+    let path = write_config(&dir, "library = \"/music\"\nbit_perfect = false\n");
+
+    set_value(&path, Some("ui"), "top_bar", "true").unwrap_or_else(|error| panic!("set: {error}"));
+
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        "library = \"/music\"\nbit_perfect = false\n[ui]\ntop_bar = true\n"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_top_level_key_is_inserted_above_the_first_table_never_inside_one() {
+    let dir = temp_dir("set-value-top-level");
+    let path = write_config(&dir, "[state]\nvolume = 72\n[ui]\ncover_art = true\n");
+
+    set_value(&path, None, "bit_perfect", "true").unwrap_or_else(|error| panic!("set: {error}"));
+
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        "bit_perfect = true\n[state]\nvolume = 72\n[ui]\ncover_art = true\n"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn writing_to_a_missing_file_starts_from_the_default_text() {
+    let dir = temp_dir("set-value-missing");
+    let path = dir.join("velo").join("config.toml");
+
+    set_value(&path, Some("state"), "volume", "50").unwrap_or_else(|error| panic!("set: {error}"));
+
+    let expected = default_config_text().replace("volume = 100", "volume = 50");
+    assert_eq!(fs::read_to_string(&path).unwrap(), expected);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn remove_value_drops_one_key_and_leaves_everything_else_identical() {
+    let dir = temp_dir("remove-value");
+    let path = write_config(
+        &dir,
+        "[state]\nvolume = 72\n# shuffle = true\nshuffle = false\n\n[theme]\naccent = \"#af00af\"\n",
+    );
+
+    remove_value(&path, Some("state"), "shuffle").unwrap_or_else(|error| panic!("remove: {error}"));
+
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        "[state]\nvolume = 72\n\n[theme]\naccent = \"#af00af\"\n"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn removing_a_missing_key_or_table_or_file_is_a_silent_no_op() {
+    // A missing key and a missing table: the file is not rewritten.
+    let dir = temp_dir("remove-no-op");
+    let path = write_config(&dir, "[state]\nvolume = 72\n");
+    remove_value(&path, Some("state"), "shuffle").unwrap();
+    remove_value(&path, Some("theme"), "accent").unwrap();
+    assert_eq!(fs::read_to_string(&path).unwrap(), "[state]\nvolume = 72\n");
+    let _ = fs::remove_dir_all(&dir);
+
+    // A missing file: no file appears.
+    let dir = temp_dir("remove-no-file");
+    let path = dir.join("velo").join("config.toml");
+    remove_value(&path, Some("state"), "volume").unwrap();
+    assert!(!path.exists());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// The legacy migration (S2.5): the first write of `volume` under `[state]`
+/// appends the table; the stale top-level line stays where it is, so the
+/// write stays a per-key edit. The parser reads `[state]` and ignores the
+/// stale one, and no table ever holds two `volume` keys.
+#[test]
+fn the_first_state_write_puts_volume_under_state_without_touching_the_old_line() {
+    let dir = temp_dir("legacy-volume");
+    let path = write_config(&dir, "volume = 40\n");
+
+    set_value(&path, Some("state"), "volume", "72").unwrap_or_else(|error| panic!("set: {error}"));
+
+    let text = fs::read_to_string(&path).unwrap();
+    assert_eq!(text, "volume = 40\n[state]\nvolume = 72\n");
+    let state_volume_lines = text
+        .lines()
+        .skip_while(|line| *line != "[state]")
+        .filter(|line| line.starts_with("volume"))
+        .count();
+    assert_eq!(
+        state_volume_lines, 1,
+        "one volume line under [state]:\n{text}"
+    );
+    let settings = Config::load_from(&path)
+        .unwrap_or_else(|error| panic!("load: {error}"))
+        .merged(&cli_with_no_flags());
+    assert_eq!(settings.volume, 72, "[state] volume is the one that counts");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_written_value_round_trips_through_the_parser() {
+    let dir = temp_dir("write-round-trip");
+    let path = write_config(&dir, &default_config_text());
+
+    set_value(&path, Some("state"), "repeat", "\"all\"")
+        .unwrap_or_else(|error| panic!("set repeat: {error}"));
+    set_value(&path, Some("theme"), "accent", "\"#123456\"")
+        .unwrap_or_else(|error| panic!("set accent: {error}"));
+    set_value(&path, Some("ui"), "cover_art", "false")
+        .unwrap_or_else(|error| panic!("set cover_art: {error}"));
+
+    let settings = Config::load_from(&path)
+        .unwrap_or_else(|error| panic!("load: {error}"))
+        .merged(&cli_with_no_flags());
+    assert_eq!(settings.session.repeat, Repeat::All);
+    assert_eq!(
+        settings.theme.accent,
+        ThemeColor::Rgb {
+            red: 0x12,
+            green: 0x34,
+            blue: 0x56,
+        }
+    );
+    assert!(!settings.ui.cover_art);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn comments_between_keys_survive_a_write_and_a_removal() {
+    let dir = temp_dir("comments-survive");
+    let path = write_config(
+        &dir,
+        "[state]\n# my volume\nvolume = 72\n# shuffle on?\n# shuffle = true\nrepeat = \"off\"\n",
+    );
+
+    set_value(&path, Some("state"), "shuffle", "false")
+        .unwrap_or_else(|error| panic!("set: {error}"));
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        "[state]\n# my volume\nvolume = 72\n# shuffle on?\nshuffle = false\nrepeat = \"off\"\n"
+    );
+
+    remove_value(&path, Some("state"), "shuffle").unwrap_or_else(|error| panic!("remove: {error}"));
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        "[state]\n# my volume\nvolume = 72\n# shuffle on?\nrepeat = \"off\"\n"
     );
     let _ = fs::remove_dir_all(&dir);
 }

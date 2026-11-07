@@ -16,7 +16,7 @@ queue make it a player you actually drive, not a playlist viewer.
 │ ──────────────────────────────────────────────────────────────────────────── │
 │  ◂◂   ▶ play   ▸▸    shuffle  repeat off     RG track   VOL ━━━━━━━━━━━● 100 │
 │                                                                              │
-│ ▸─ artists  albums  tracks  genres   [3 artists]                             │
+│ ▸─ 1 artists  2 albums  3 tracks  4 genres   [3 artists]                     │
 │ ▸ 1. Lo-Fi Scientists                                    2 albums · 3 tracks │
 │ ▸ 2. Nujabes                                               1 album · 1 track │
 │ ▸ 3. Poldoore                                             1 album · 2 tracks │
@@ -62,6 +62,7 @@ Every key below is what the code does today.
 | `J` / `K` | Move the selected entry down / up (queue view) |
 | `enter` (queue view) | Play the queue from the selected entry |
 | `?` | Help card: `j`/`k` (or `↓`/`↑`) scroll it and `g`/`G` jump to its ends; `/` filters it by key or description (`enter` keeps the filter, `esc` clears it, a second `esc` or `?` closes the help). The card keeps its full size however few rows the filter leaves, and every other key waits until it closes — `q` and `space` included |
+| `o` | Settings card: everything in `config.toml` — replay gain, repeat, shuffle, the seven `[theme]` colours, the six `[ui]` switches and the library folder (the volume is not a row: it stays on `+`/`-`). `j`/`k` (or `↓`/`↑`) move between the settings (the `sound`/`theme`/`screen`/`library` headers are never focused), `g`/`G` jump to the ends, `enter` or `←`/`→` step the focused row (colours cycle a short preset list, the `folder` row opens the library prompt), `esc` closes — and every other key waits until it does, `q` and `space` included |
 | `q` | Quit |
 
 While a search is open, every printable key types into the query,
@@ -122,7 +123,7 @@ velo --play song.flac song.mp3 # play and exit when finished
 
 ## Configuration
 
-One TOML file, read once at startup:
+One TOML file, read once at startup, and the only place velo keeps anything:
 
 ```
 $XDG_CONFIG_HOME/velo/config.toml      # else ~/.config/velo/config.toml
@@ -130,14 +131,66 @@ $XDG_CONFIG_HOME/velo/config.toml      # else ~/.config/velo/config.toml
 
 When the file does not exist, velo writes it with every key at its default
 value and a short comment per key, so everything below can be changed from
-it. An existing file is never overwritten or reformatted.
+it. Everything below can also be changed while velo runs: `o` opens the
+settings card (a smaller card shaped like the help), where the
+ReplayGain mode, the repeat and the shuffle, every `[theme]` colour, the
+six `[ui]` switches and the library folder can be stepped through live —
+each change applies on the next frame and is written to this file key by
+key, just as if the matching key had been pressed. An existing file is
+never overwritten or reformatted: every value velo
+saves itself is written key by key, leaving your comments and your ordering
+alone.
 
 | Key | Meaning | Default |
 |:--|:--|:--|
 | `library` | The root folder to index and browse: an absolute path, `~/...` (your home) or a path relative to the directory velo starts in | none — written commented out (`# library = "~/Music"`) |
-| `volume` | Start level, `0..=100` | `100` |
 | `bit_perfect` | Accepted and stored; nothing reads it yet | `false` |
 | `replay_gain` | ReplayGain mode: `track` (use the track's own gain), `album` (album gain, falling back to the track's), or `off` | `track` |
+
+### `[state]` — where the next launch begins
+
+| Key | Meaning | Default |
+|:--|:--|:--|
+| `volume` | Start level, `0..=100` | `100` |
+| `shuffle` | Whether the queue is shuffled | `false` |
+| `repeat` | What follows the end of a track: `off`, `all` or `one` | `off` |
+| `view` | The tab that was open: `library` or `queue` | `library` |
+| `browse_by` | The library view: `artists`, `albums`, `tracks` or `genres` | `artists` |
+| `artist`, `album`, `genre` | The node that was open inside that view — `album` always belongs to `artist` | absent |
+
+velo keeps this table up to date as you listen: the volume when it changes,
+the tab and the node when you move, the shuffle and the repeat when you toggle
+them. The next launch comes back to it. The queue and the track that was
+playing are not kept. `volume` used to live at the top level of the file; it
+is still read there and moves under `[state]` the first time velo saves one.
+
+### `[theme]` — the colours
+
+Every value is `"#rrggbb"`. `"reset"` means the terminal's own colour and is
+allowed for `background` and `text` only.
+
+| Key | Meaning | Default |
+|:--|:--|:--|
+| `background` | The screen behind everything | `reset` |
+| `text` | Body text and the values in a list | `reset` |
+| `dim` | Hints and everything that should recede | `#767676` |
+| `accent` | Borders, titles, the focused row and the selection | `#af00af` |
+| `secondary` | The keys and labels next to the values | `#5f87d7` |
+| `border` | The panes that are not in focus | `#767676` |
+| `ink` | The text drawn on top of `accent` | `#000000` |
+
+The brighter shade behind the accent is derived from `accent`, not written.
+
+### `[ui]` — what is drawn
+
+| Key | Meaning | Default |
+|:--|:--|:--|
+| `cover_art` | Draw the cover art pane at all | `true` |
+| `spectrum` | Draw the spectrum under the now-playing block | `true` |
+| `hints` | Draw the key hints on the last row | `true` |
+| `top_bar` | Draw the tabs and the `V E L O` name | `true` |
+| `advisories` | Let the status line explain why something is not drawn — today, a cover the window is too small for. Errors and ordinary messages are never silenced | `true` |
+| `view_numbers` | Number the library views in the header (`1 artists  2 albums  3 tracks  4 genres`) | `true` |
 
 Precedence: `--library` (expanded the same way) beats the config file. With no
 library set, `velo` opens the interface with a floating prompt asking for the
@@ -160,7 +213,8 @@ and the line.
 - Cover art is drawn when the terminal speaks the kitty, sixel or iTerm2
   protocol and the window is at least 100×28. Without one of those protocols
   there is no art pane at all — the layout is unchanged, and the status line
-  says why a cover is hidden rather than faking one with half-blocks. The
+  says why a cover is hidden rather than faking one with half-blocks (a line
+  `[ui] advisories = false` silences). The
   cover is the picture embedded in the track or, when it has none, a
   `cover`, `folder` or `front` `.jpg`/`.png` in the track's folder.
 

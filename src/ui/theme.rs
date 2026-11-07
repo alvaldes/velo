@@ -1,10 +1,12 @@
-//! The interface's colors, as roles over the terminal's own palette.
+//! The interface's colors, as roles over the palette the user configured.
 //!
-//! Nothing here is a fixed RGB value: the background and the text are the
-//! terminal's (`Reset`), so a translucent terminal stays translucent, and
-//! every other role is one of the sixteen ANSI colors the user's theme
-//! defines. The same build looks like Gentleman in a Gentleman terminal and
-//! like Everforest in an Everforest one (ui-redesign T8, S5).
+//! Nothing here hard-codes a value: every role comes from the `[theme]`
+//! table of the config file, resolved by [`ThemeColors`], and the defaults
+//! reproduce the ANSI look velo has always drawn with — the background and
+//! the text are the terminal's (`Reset`), so a translucent terminal stays
+//! translucent, and every other role is the fixed color its ANSI entry
+//! stood for. The same build looks like Gentleman in a Gentleman terminal
+//! and like Everforest in an Everforest one (ui-redesign T8, S5).
 //!
 //! No ANSI color can stand for a raised surface — many themes set color 0 to
 //! the background itself — so the interface marks the selection and the
@@ -12,19 +14,68 @@
 
 use ratatui::style::Color;
 
-/// The terminal's own background.
-pub const BACKGROUND: Color = Color::Reset;
-/// The window frame and the unfilled part of every bar (ANSI 8).
-pub const BORDER: Color = Color::DarkGray;
-/// The accent: the wordmark, the playing row, focus, filled bars (ANSI 5).
-pub const ACCENT: Color = Color::Magenta;
-/// The accent's bright twin, for the top of the spectrum (ANSI 13).
-pub const ACCENT_BRIGHT: Color = Color::LightMagenta;
-/// Text set on the accent: the theme's darkest color (ANSI 0).
-pub const INK: Color = Color::Black;
-/// Secondary text: keys, counts, the transport buttons (ANSI 4).
-pub const SECONDARY: Color = Color::Blue;
-/// Dimmed text: folders, notes, hints that can be forgotten (ANSI 8).
-pub const DIM: Color = Color::DarkGray;
-/// Ordinary text: the terminal's own foreground.
-pub const TEXT: Color = Color::Reset;
+use crate::config::{ThemeColor, ThemeColors};
+
+/// The palette the interface draws with (S4): the seven configured roles
+/// plus the accent's bright twin, which is always derived from the accent
+/// and never configured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Theme {
+    /// The screen behind everything.
+    pub background: Color,
+    /// The body text and the values in a list.
+    pub text: Color,
+    /// Hints, section headers and everything that should recede.
+    pub dim: Color,
+    /// Card borders, titles, the focused row and the selection.
+    pub accent: Color,
+    /// The accent's bright twin, for the top of the spectrum: the accent one
+    /// lighter step, derived, never configured.
+    pub accent_bright: Color,
+    /// The keys and labels next to the values.
+    pub secondary: Color,
+    /// The panes that are not the one in focus.
+    pub border: Color,
+    /// The text drawn on top of `accent`.
+    pub ink: Color,
+}
+
+impl From<ThemeColors> for Theme {
+    fn from(colors: ThemeColors) -> Self {
+        let color = |colour: ThemeColor| match colour {
+            ThemeColor::Terminal => Color::Reset,
+            ThemeColor::Rgb { red, green, blue } => Color::Rgb(red, green, blue),
+        };
+        let accent = color(colors.accent);
+        Self {
+            background: color(colors.background),
+            text: color(colors.text),
+            dim: color(colors.dim),
+            accent,
+            accent_bright: brighten(accent),
+            secondary: color(colors.secondary),
+            border: color(colors.border),
+            ink: color(colors.ink),
+        }
+    }
+}
+
+impl Default for Theme {
+    /// The palette velo drew with before colours were configurable.
+    fn default() -> Self {
+        ThemeColors::default().into()
+    }
+}
+
+/// The accent's bright twin: each channel one lighter step, saturating at
+/// full. A terminal's own colour has no lighter step, so it stays as it is.
+fn brighten(color: Color) -> Color {
+    match color {
+        Color::Rgb(red, green, blue) => Color::Rgb(
+            red.saturating_add(0x28),
+            green.saturating_add(0x28),
+            blue.saturating_add(0x28),
+        ),
+        color => color,
+    }
+}

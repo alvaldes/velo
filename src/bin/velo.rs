@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use clap::{CommandFactory as _, Parser};
 
 use velo::audio::{Player, TrackSource};
-use velo::config::{self, Cli, Config, ReplayGainMode, Settings};
+use velo::config::{self, Cli, Config, ReplayGainMode, Session, Settings, ThemeColors, UiParts};
 use velo::library::Library;
 use velo::ui::indexing::Indexer;
 use velo::ui::{Action, App, artwork, crossterm};
@@ -77,7 +77,15 @@ fn main() -> ExitCode {
     if cli.play {
         return play(&cli.files, settings.replay_gain);
     }
-    run_interface(cli.files, settings.replay_gain, settings.volume)
+    run_interface(
+        cli.files,
+        settings.replay_gain,
+        settings.volume,
+        settings.session,
+        settings.theme,
+        settings.ui,
+        config_file,
+    )
 }
 
 /// Resolves the user's settings: the config file at `path` (a missing file is
@@ -172,7 +180,15 @@ fn print_info(paths: &[PathBuf]) -> ExitCode {
 }
 
 /// The terminal interface. Restores the terminal even when the loop errors.
-fn run_interface(paths: Vec<PathBuf>, replay_gain: ReplayGainMode, volume: u8) -> ExitCode {
+fn run_interface(
+    paths: Vec<PathBuf>,
+    replay_gain: ReplayGainMode,
+    volume: u8,
+    session: Session,
+    theme: ThemeColors,
+    ui: UiParts,
+    config_file: Option<PathBuf>,
+) -> ExitCode {
     if !std::io::stdout().is_terminal() {
         eprintln!("velo: the interface needs an interactive terminal");
         return ExitCode::FAILURE;
@@ -185,7 +201,14 @@ fn run_interface(paths: Vec<PathBuf>, replay_gain: ReplayGainMode, volume: u8) -
         let mut app = App::new(paths);
         app.set_replay_gain(replay_gain);
         app.set_volume(volume);
+        app.set_theme(theme);
+        app.set_ui(ui);
         app.show_artwork(picker);
+        app.set_config_file(config_file);
+        // The shuffle and repeat the file saved reach the files interface
+        // too; the tab and the open node belong to the browser (S3), and
+        // `set_session` remembers the volume above as what the file says.
+        app.set_session(session);
         event_loop(&mut app, None, terminal)
     });
     report_outcome(outcome)
@@ -214,8 +237,13 @@ fn browse_interface(
         let mut app = App::browse(opened.as_ref().ok());
         app.set_replay_gain(settings.replay_gain);
         app.set_volume(settings.volume);
+        app.set_theme(settings.theme);
+        app.set_ui(settings.ui);
         app.show_artwork(picker);
         app.set_config_file(config_file.clone());
+        // The session comes back before anything else can move (S3), and
+        // remembers the volume above as what the file says.
+        app.set_session(settings.session.clone());
         match (&opened, root) {
             (Err(error), _) => app.index_unavailable(error.to_string()),
             (Ok(_), Some(root)) => {

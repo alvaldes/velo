@@ -54,6 +54,15 @@ impl Artwork {
             .map(|image| Artwork { image })
     }
 
+    /// A decoded cover for the interface's own tests: the layout and the
+    /// `[ui]` switches never look at the pixels, so any image will do.
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        Self {
+            image: DynamicImage::new_rgba8(8, 8),
+        }
+    }
+
     /// The decoded cover at its own resolution.
     #[must_use]
     pub const fn image(&self) -> &DynamicImage {
