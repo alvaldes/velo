@@ -1276,3 +1276,175 @@ fn the_help_brings_back_the_library_rows() {
         "the merged row is gone:\n{screen}"
     );
 }
+
+// ---- showing and hiding the interface's parts (S5) --------------------------
+
+use velo::config::UiParts;
+
+fn app_with_ui(ui: UiParts) -> App<'static> {
+    let mut app = App::new(tracks(&["one.flac", "two.flac", "three.flac"]));
+    app.set_ui(ui);
+    app
+}
+
+/// The top bar hidden gives its row to the content: the frame still closes
+/// and the now-playing block starts on the first row inside it.
+#[test]
+fn hiding_the_top_bar_gives_its_row_to_the_content() {
+    let app = app_with_ui(UiParts {
+        top_bar: false,
+        ..UiParts::default()
+    });
+    let screen = screen_at(&app, 80, 24);
+    let lines: Vec<&str> = screen.lines().collect();
+
+    assert!(lines[0].starts_with('╭') && lines[0].ends_with('╮'));
+    assert!(lines[23].starts_with('╰') && lines[23].ends_with('╯'));
+    assert!(
+        !screen.contains("V E L O") && !screen.contains("library  queue"),
+        "the tabs and the wordmark are gone, got:\n{screen}"
+    );
+    assert!(
+        lines[1].contains("♫ nothing playing"),
+        "the content takes the bar's row, got: {}",
+        lines[1]
+    );
+}
+
+/// The hints hidden keep the status row, and no empty line is left where the
+/// hints were: the status is the last row inside the frame.
+#[test]
+fn hiding_the_hints_keeps_the_status_row_and_no_empty_line() {
+    let mut app = app_with_ui(UiParts {
+        hints: false,
+        ..UiParts::default()
+    });
+    app.note("velo: indexing finished");
+    let screen = screen_at(&app, 80, 24);
+    let lines: Vec<&str> = screen.lines().collect();
+
+    assert!(
+        !screen.contains("j/k move"),
+        "the hints are gone, got:\n{screen}"
+    );
+    assert!(
+        lines[22].contains("velo: indexing finished"),
+        "the status is the last row inside the frame, no empty line after it, got:\n{screen}"
+    );
+    assert!(lines[23].starts_with('╰') && lines[23].ends_with('╯'));
+}
+
+/// The spectrum hidden never reserves its rows: the list starts where the
+/// bars were, four rows higher than with the bars drawn.
+#[test]
+fn hiding_the_spectrum_gives_its_rows_to_the_list() {
+    let shown = lines_at(&app_with_ui(UiParts::default()), 80, 30);
+    let header_row = shown
+        .iter()
+        .position(|line| line.contains("▸─ Files"))
+        .expect("the list header");
+    assert!(
+        shown.iter().any(|line| line.contains("▁")),
+        "with the switch on the bars are drawn, got:\n{}",
+        shown.join("\n")
+    );
+
+    let hidden = app_with_ui(UiParts {
+        spectrum: false,
+        ..UiParts::default()
+    });
+    let screen = screen_at(&hidden, 80, 30);
+    let lines: Vec<&str> = screen.lines().collect();
+
+    assert!(!screen.contains("▁"), "no bars are drawn:\n{screen}");
+    let new_header_row = lines
+        .iter()
+        .position(|line| line.contains("▸─ Files"))
+        .expect("the list header");
+    assert_eq!(
+        new_header_row,
+        header_row - 4,
+        "the list starts where the bars were, got:\n{screen}"
+    );
+}
+
+/// The cover hidden leaves no cover columns even with a picker installed on
+/// a window above the art threshold — and a deliberately hidden cover is a
+/// decision, so nothing explains it.
+///
+/// No fixture can hand the interface a decoded cover without a live stream
+/// (the cover follows the track that plays), so the decoded-art leg of the
+/// gate is pinned by a unit test beside the layout code it gates.
+#[test]
+fn hiding_the_cover_art_leaves_no_cover_columns_and_no_explanation() {
+    let mut app = App::new(tracks(&["one.flac", "two.flac", "three.flac"]));
+    app.show_artwork(Some(velo::ui::artwork::Picker::new((8, 12))));
+    app.set_ui(UiParts {
+        cover_art: false,
+        ..UiParts::default()
+    });
+    let screen = screen_at(&app, 120, 30);
+
+    let title = screen
+        .lines()
+        .find(|line| line.contains("♫ nothing playing"))
+        .expect("the now-playing block");
+    let column = title
+        .chars()
+        .position(|c| c == '♫')
+        .expect("the block's title");
+    assert_eq!(
+        column, 2,
+        "the block's text starts at the left edge: no cover columns, got: {title}"
+    );
+
+    app.tick();
+    assert!(
+        app.status().is_empty(),
+        "a deliberately hidden cover is never explained, got: {:?}",
+        app.status()
+    );
+}
+
+/// Every part hidden at once still draws a window that closes, with the
+/// lists and the block where the freed rows and columns went.
+#[test]
+fn hiding_every_part_at_once_still_draws_a_coherent_window() {
+    let app = app_with_ui(UiParts {
+        cover_art: false,
+        spectrum: false,
+        hints: false,
+        top_bar: false,
+    });
+    let screen = screen_at(&app, 80, 24);
+    let lines: Vec<&str> = screen.lines().collect();
+
+    assert!(lines[0].starts_with('╭') && lines[0].ends_with('╮'));
+    assert!(lines[23].starts_with('╰') && lines[23].ends_with('╯'));
+    for expected in [
+        "♫ nothing playing",
+        "■ stopped",
+        "1. one.flac",
+        "3. three.flac",
+    ] {
+        assert!(
+            screen.contains(expected),
+            "the screen keeps {expected:?}, got:\n{screen}"
+        );
+    }
+    for gone in ["V E L O", "j/k move", "▁"] {
+        assert!(!screen.contains(gone), "{gone:?} is gone, got:\n{screen}");
+    }
+}
+
+/// The defaults draw exactly the screen the golden test pins: a `[ui]` table
+/// absent from the file changes nothing.
+#[test]
+fn the_default_ui_parts_draw_the_golden_screen() {
+    let app = app_with_ui(UiParts::default());
+    assert_eq!(
+        screen_at(&app, 80, 24),
+        SCREEN_WITHOUT_COVER_ART,
+        "UiParts::default() must draw today's screen byte for byte"
+    );
+}

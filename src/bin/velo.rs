@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use clap::{CommandFactory as _, Parser};
 
 use velo::audio::{Player, TrackSource};
-use velo::config::{self, Cli, Config, ReplayGainMode, Settings, ThemeColors};
+use velo::config::{self, Cli, Config, ReplayGainMode, Settings, ThemeColors, UiParts};
 use velo::library::Library;
 use velo::ui::indexing::Indexer;
 use velo::ui::{Action, App, artwork, crossterm};
@@ -82,6 +82,7 @@ fn main() -> ExitCode {
         settings.replay_gain,
         settings.volume,
         settings.theme,
+        settings.ui,
     )
 }
 
@@ -182,6 +183,7 @@ fn run_interface(
     replay_gain: ReplayGainMode,
     volume: u8,
     theme: ThemeColors,
+    ui: UiParts,
 ) -> ExitCode {
     if !std::io::stdout().is_terminal() {
         eprintln!("velo: the interface needs an interactive terminal");
@@ -196,6 +198,7 @@ fn run_interface(
         app.set_replay_gain(replay_gain);
         app.set_volume(volume);
         app.set_theme(theme);
+        app.set_ui(ui);
         app.show_artwork(picker);
         event_loop(&mut app, None, terminal)
     });
@@ -226,6 +229,7 @@ fn browse_interface(
         app.set_replay_gain(settings.replay_gain);
         app.set_volume(settings.volume);
         app.set_theme(settings.theme);
+        app.set_ui(settings.ui);
         app.show_artwork(picker);
         app.set_config_file(config_file.clone());
         match (&opened, root) {

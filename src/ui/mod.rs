@@ -39,7 +39,7 @@ use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, ListState, Para
 use crate::audio::output::{Repeat, SharedQueue, TrackFailure};
 use crate::audio::spectrum::Spectrum;
 use crate::audio::{Player, seek_target, skip_target};
-use crate::config::{ReplayGainMode, ThemeColors};
+use crate::config::{ReplayGainMode, ThemeColors, UiParts};
 use crate::library::{AlbumEntry, ArtistEntry, GenreEntry, IndexReport, Library, TrackEntry};
 
 use self::artwork::{Artwork, Picker, StatefulImage, StatefulProtocol};
@@ -308,6 +308,8 @@ pub struct App<'lib> {
     replay_gain: ReplayGainMode,
     /// The palette the interface draws with, from the config's `[theme]` (S4).
     theme: Theme,
+    /// Which parts of the interface are drawn, from the config's `[ui]` (S5).
+    ui: UiParts,
     /// Whether what is left of the queue plays in a mixed order.
     shuffle: bool,
     /// The queue as it was before it was shuffled, to put it back.
@@ -388,6 +390,7 @@ impl<'lib> App<'lib> {
             art_explained: false,
             replay_gain: ReplayGainMode::default(),
             theme: Theme::default(),
+            ui: UiParts::default(),
             shuffle: false,
             unshuffled: Vec::new(),
             repeat: Repeat::Off,
@@ -439,6 +442,7 @@ impl<'lib> App<'lib> {
             art_explained: false,
             replay_gain: ReplayGainMode::default(),
             theme: Theme::default(),
+            ui: UiParts::default(),
             shuffle: false,
             unshuffled: Vec::new(),
             repeat: Repeat::Off,
@@ -495,6 +499,28 @@ impl<'lib> App<'lib> {
     /// `accent_bright` stays derived from the accent.
     pub fn set_theme(&mut self, colors: ThemeColors) {
         self.theme = colors.into();
+    }
+
+    /// Which parts of the interface are drawn, from the config's `[ui]` (S5):
+    /// the four switches the layout reads, everything on by default.
+    pub fn set_ui(&mut self, ui: UiParts) {
+        self.ui = ui;
+    }
+
+    /// How many rows the now-playing block takes out of a content area this
+    /// tall, with the `[ui]` switches applied (S5). The spectrum belongs to
+    /// the tall block: with the switch off the block never reserves its
+    /// rows — the tall tier is capped at the seven-row block, and the bars'
+    /// rows go to the list instead.
+    fn now_playing_rows(&self, height: u16) -> u16 {
+        // Content tall enough for the spectrum tier starts at 22 rows; any
+        // shorter height keeps the block at its ordinary size.
+        const SPECTRUM_TIER: u16 = 22;
+        now_playing_rows(if self.ui.spectrum {
+            height
+        } else {
+            height.min(SPECTRUM_TIER - 1)
+        })
     }
 
     /// The level the config asks for. Applied to a running player and kept for
@@ -863,7 +889,9 @@ impl<'lib> App<'lib> {
     /// Tells the user once why a cover they own is not on screen, instead of
     /// leaving them staring at a panel that never appears (T8).
     fn explain_hidden_art(&mut self) {
-        if self.art_explained || !self.status.is_empty() {
+        // A cover the user switched off is hidden on purpose (S5): that is a
+        // decision, not a malfunction, and nothing explains it.
+        if !self.ui.cover_art || self.art_explained || !self.status.is_empty() {
             return;
         }
         let area = self.seen_area.get();
@@ -1294,9 +1322,11 @@ impl<'lib> App<'lib> {
             area,
         );
 
-        // The window: a rounded frame around a title bar, the content and
-        // the footer. The art threshold below is still measured on the whole
-        // terminal, so `artwork::hidden_reason` keeps telling the truth.
+        // The window: a rounded frame around the title bar, the content and
+        // the footer. The top bar hidden gives its row to the content (S5);
+        // the hints hidden leave the footer the status row alone. The art
+        // threshold below is still measured on the whole terminal, so
+        // `artwork::hidden_reason` keeps telling the truth.
         let window = Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(Style::new().fg(self.theme.border))
@@ -1304,13 +1334,19 @@ impl<'lib> App<'lib> {
         let inner = window.inner(area);
         frame.render_widget(window, area);
 
-        let [title_bar, content, footer] = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Min(0),
-            Constraint::Length(2),
-        ])
-        .areas(inner);
-        self.draw_title_bar(frame, title_bar);
+        let footer_rows = if self.ui.hints { 2 } else { 1 };
+        let [content, footer] = if self.ui.top_bar {
+            let [title_bar, content, footer] = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Min(0),
+                Constraint::Length(footer_rows),
+            ])
+            .areas(inner);
+            self.draw_title_bar(frame, title_bar);
+            [content, footer]
+        } else {
+            Layout::vertical([Constraint::Min(0), Constraint::Length(footer_rows)]).areas(inner)
+        };
         let content = pad(content);
         let footer = pad(footer);
         // Cover art (T8): when a protocol was detected, the art is set to draw
@@ -1318,16 +1354,19 @@ impl<'lib> App<'lib> {
         // of the content and the rest makes way. Otherwise the window is
         // exactly what it is without art — nothing to fake, nothing to move.
         let [now, header, body] = Layout::vertical([
-            Constraint::Length(now_playing_rows(content.height)),
+            Constraint::Length(self.now_playing_rows(content.height)),
             Constraint::Length(1),
             Constraint::Min(0),
         ])
         .areas(content);
         // The cover sits at the left of the now-playing block, the way an
         // album sleeve sits beside its title, and the block's text moves over.
-        // The window-size threshold is the one `hidden_reason` explains.
+        // The window-size threshold is the one `hidden_reason` explains. The
+        // switch decides first (S5): a cover hidden on purpose takes no slot
+        // even when the terminal could draw one.
         let slot = self
             .picker
+            .filter(|_| self.ui.cover_art)
             .filter(|_| self.artwork.is_some())
             .and_then(|_| artwork::pane(area))
             .and_then(|_| cover_slot(now));
@@ -1894,8 +1933,13 @@ impl<'lib> App<'lib> {
     }
 
     fn draw_footer(&self, frame: &mut Frame, area: Rect) {
-        let [status_row, hints_row] =
-            Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area);
+        let [status_row, hints_row] = Layout::vertical([
+            Constraint::Length(1),
+            // Without the hints the footer is the status row alone (S5): no
+            // empty line is left where they were.
+            Constraint::Length(u16::from(self.ui.hints)),
+        ])
+        .areas(area);
 
         let status = if self.search.is_some() {
             // The query itself, over the transport line, so the user sees what
@@ -1953,10 +1997,12 @@ impl<'lib> App<'lib> {
                 ("q", "quit"),
             ]
         };
-        frame.render_widget(
-            Paragraph::new(hint_line(hints, hints_row.width, &self.theme)),
-            hints_row,
-        );
+        if self.ui.hints {
+            frame.render_widget(
+                Paragraph::new(hint_line(hints, hints_row.width, &self.theme)),
+                hints_row,
+            );
+        }
     }
 
     /// Every library row the interface holds that may name a playing file:
@@ -3311,6 +3357,50 @@ mod tests {
         assert_eq!(filled(Some(1.0), 10), 10);
         assert_eq!(filled(Some(0.5), 10), 5);
         assert_eq!(filled(None, 10), 0);
+    }
+
+    /// The cover switch decides before the terminal's capability and the
+    /// track's art do (S5): with it off a decoded cover takes no columns and
+    /// is never explained; with it on, a cover that cannot be drawn is
+    /// explained once. The integration tests cannot hand the interface a
+    /// decoded cover without a live stream, so this differential lives here.
+    #[test]
+    fn the_cover_switch_decides_before_the_capability_and_the_art_do() {
+        let mut app = super::App::new(Vec::new());
+        app.picker = Some(super::Picker::new((8, 12)));
+        app.artwork = Some(super::Artwork::for_test());
+
+        // On: a decoded cover on a window below the art threshold is
+        // explained once, in the config's own words.
+        app.seen_area.set(ratatui::layout::Rect::new(0, 0, 96, 24));
+        app.explain_hidden_art();
+        assert!(
+            app.status.contains("cover art hidden"),
+            "got: {:?}",
+            app.status
+        );
+
+        // Off: a decision, not a malfunction — no apology, and above the
+        // threshold no columns either: the block's text stays at the left
+        // edge where a cover would have pushed it right.
+        app.status.clear();
+        app.art_explained = false;
+        app.ui.cover_art = false;
+        app.explain_hidden_art();
+        assert!(app.status.is_empty(), "got: {:?}", app.status);
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let title: String = (0..120)
+            .map(|x| buffer[(x, 2)].symbol().to_owned())
+            .collect();
+        assert_eq!(
+            title.chars().position(|character| character == '♫'),
+            Some(2),
+            "the block's text starts at the left edge, got: {title}"
+        );
     }
 
     #[test]
