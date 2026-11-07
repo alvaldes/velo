@@ -22,7 +22,7 @@ Decision: `u` refreshes; launch refreshes by itself; both run in the background 
 
 | ID | Task | Specs | Route | Commit |
 |----|------|-------|-------|--------|
-| T1 | `L` opens the library prompt at any time | S1 | inline | — |
+| T1 | `L` opens the library prompt at any time | S1 | inline | `51415bd` |
 | T2 | A version-0 index that cannot be written opens without the migration (genres unknown) instead of failing | S2 | delegated writer (parallel with T3, disjoint surfaces) | — |
 | T3 | Background indexing on launch and on `u`, title-bar indicator, reload on completion. Risk: item 4 | S3 | delegated writer (parallel with T2) + independent verifier | — |
 
@@ -31,3 +31,5 @@ Decision: `u` refreshes; launch refreshes by itself; both run in the background 
 **L1** (2026-11-07, user): "trabajemos en esto: - Si cerrás la ventana con Esc, no hay tecla para volver a abrirla. - Un índice viejo en un archivo de solo lectura ya no abre. La actualización del índice necesita escribir en él. y es importante que se pueda refrescar el indice con una key ademas de que siempre que se abara la app haga reload solo y un indicador en la interfaz que esta reaload"
 
 **L2** Today the launch index runs synchronously inside the terminal session (`index_root` in `src/bin/velo.rs`): the interface shows "indexing …" and is frozen until it ends. S3 needs it on a thread with its own `Library` connection, reporting back to the interface.
+
+**L3** T1 (`51415bd`): RED observed (compile). `App` keeps the config file (`set_config_file`, set by `browse_interface`), and `L` opens the prompt with it whenever the search and the prompt are closed and the list is not command-line files. The help card is full at 80×24, so the `L` row replaced the passive "no library set" row instead of adding one. 17 suites, clippy, fmt green.
