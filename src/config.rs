@@ -89,7 +89,7 @@ Configuration: $XDG_CONFIG_HOME/velo/config.toml, or
     ~/.config/velo/config.toml — keys: library, bit_perfect, replay_gain, and
     the tables [state] (volume, shuffle, repeat, the tab and the open node),
     [theme] (every colour, as \"#rrggbb\") and [ui] (cover_art, spectrum, hints,
-    top_bar). When the file is missing, velo writes it with every key at its
+    top_bar, advisories, view_numbers). When the file is missing, velo writes it with every key at its
     default and a comment per key; an unknown key is an error. library (and --library)
     takes an absolute path, ~/... or a path relative to the current directory.
     With no library set, the interface asks for it in a floating prompt that
@@ -417,7 +417,7 @@ impl ThemeKeys {
 /// Which parts of the interface are drawn (S5).
 #[expect(
     clippy::struct_excessive_bools,
-    reason = "four independent switches, one per key the file writes"
+    reason = "six independent switches, one per key the file writes"
 )]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UiParts {
@@ -429,6 +429,13 @@ pub struct UiParts {
     pub hints: bool,
     /// The tabs and the `V E L O` name on the first row.
     pub top_bar: bool,
+    /// The status line that explains why something is not drawn (S5.4):
+    /// today, a cover the window is too small for. Errors and ordinary
+    /// messages are never silenced by it.
+    pub advisories: bool,
+    /// The numbers of the four library views in the header (S5.5):
+    /// `1 artists  2 albums  3 tracks  4 genres`.
+    pub view_numbers: bool,
 }
 
 impl Default for UiParts {
@@ -439,6 +446,8 @@ impl Default for UiParts {
             spectrum: true,
             hints: true,
             top_bar: true,
+            advisories: true,
+            view_numbers: true,
         }
     }
 }
@@ -455,6 +464,12 @@ pub struct UiKeys {
     pub hints: Option<bool>,
     /// `top_bar` — whether the tabs and the player name are drawn.
     pub top_bar: Option<bool>,
+    /// `advisories` — whether the status line explains why something is not
+    /// drawn (S5.4); never silences errors or ordinary messages.
+    pub advisories: Option<bool>,
+    /// `view_numbers` — whether the library header numbers its views 1–4
+    /// (S5.5).
+    pub view_numbers: Option<bool>,
 }
 
 impl UiKeys {
@@ -467,6 +482,8 @@ impl UiKeys {
             spectrum: self.spectrum.unwrap_or(default.spectrum),
             hints: self.hints.unwrap_or(default.hints),
             top_bar: self.top_bar.unwrap_or(default.top_bar),
+            advisories: self.advisories.unwrap_or(default.advisories),
+            view_numbers: self.view_numbers.unwrap_or(default.view_numbers),
         }
     }
 }
@@ -540,6 +557,12 @@ cover_art = true
 spectrum = true
 hints = true
 top_bar = true
+
+# The status line that explains why something is not drawn (a cover the
+# window is too small for). Errors and messages are never silenced.
+advisories = true
+# The numbers 1–4 before the library view names in the header.
+view_numbers = true
 ",
         theme.background.to_key(),
         theme.text.to_key(),

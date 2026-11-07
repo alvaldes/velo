@@ -524,7 +524,7 @@ impl<'lib> App<'lib> {
     }
 
     /// Which parts of the interface are drawn, from the config's `[ui]` (S5):
-    /// the four switches the layout reads, everything on by default.
+    /// the switches the layout reads, everything on by default.
     pub fn set_ui(&mut self, ui: UiParts) {
         self.ui = ui;
     }
@@ -1016,7 +1016,7 @@ impl<'lib> App<'lib> {
     pub fn settings_focused(&self) -> &'static str {
         self.settings
             .as_ref()
-            .map_or("volume", SettingsCard::focused_label)
+            .map_or("replay gain", SettingsCard::focused_label)
     }
 
     /// The volume, in percent.
@@ -1070,6 +1070,16 @@ impl<'lib> App<'lib> {
     /// leaves the interface exactly as it draws without art (T8).
     pub fn show_artwork(&mut self, picker: Option<Picker>) {
         self.picker = picker;
+    }
+
+    /// Installs a decoded cover without a stream, the way [`App::show_artwork`]
+    /// installs the capability: the integration tests' hook for the decoded-art
+    /// leg of the cover gates, which no fixture can reach while a track plays.
+    /// Production never calls this, which is why it is hidden from the docs.
+    #[doc(hidden)]
+    pub fn show_decoded_artwork(&mut self, artwork: Option<artwork::Artwork>) {
+        self.artwork = artwork;
+        self.artwork_path = None;
     }
 
     /// Runs once per turn of the event loop — the same cadence as key
@@ -1135,11 +1145,17 @@ impl<'lib> App<'lib> {
     }
 
     /// Tells the user once why a cover they own is not on screen, instead of
-    /// leaving them staring at a panel that never appears (T8).
+    /// leaving them staring at a panel that never appears (T8). The
+    /// `[ui] advisories` switch silences exactly this explanation (S5.4); it
+    /// never silences errors or ordinary messages.
     fn explain_hidden_art(&mut self) {
         // A cover the user switched off is hidden on purpose (S5): that is a
         // decision, not a malfunction, and nothing explains it.
-        if !self.ui.cover_art || self.art_explained || !self.status.is_empty() {
+        if !self.ui.cover_art
+            || !self.ui.advisories
+            || self.art_explained
+            || !self.status.is_empty()
+        {
             return;
         }
         let area = self.seen_area.get();
@@ -1609,10 +1625,6 @@ impl<'lib> App<'lib> {
     /// presets — so each write is a real change.
     fn change_setting(&mut self, key: SettingsKey, forward: bool) {
         match key {
-            SettingsKey::Volume => {
-                let next = self.change_volume(if forward { 5 } else { -5 });
-                self.apply(Action::SetVolume(next));
-            }
             SettingsKey::ReplayGain => {
                 let next = match (self.replay_gain, forward) {
                     (ReplayGainMode::Track, true) | (ReplayGainMode::Off, false) => {
@@ -1653,6 +1665,10 @@ impl<'lib> App<'lib> {
             SettingsKey::Spectrum => self.toggle_ui("spectrum", |ui| &mut ui.spectrum),
             SettingsKey::Hints => self.toggle_ui("hints", |ui| &mut ui.hints),
             SettingsKey::TopBar => self.toggle_ui("top_bar", |ui| &mut ui.top_bar),
+            SettingsKey::Advisories => self.toggle_ui("advisories", |ui| &mut ui.advisories),
+            SettingsKey::ViewNumbers => {
+                self.toggle_ui("view_numbers", |ui| &mut ui.view_numbers);
+            }
             SettingsKey::Folder => {
                 // The prompt owns the keys from here (S7.2): its typing, its
                 // completion and its saving stay exactly as they are.
@@ -1724,7 +1740,6 @@ impl<'lib> App<'lib> {
     /// What one setting shows on its row's right (S6.2).
     fn setting_value(&self, key: SettingsKey) -> String {
         match key {
-            SettingsKey::Volume => self.volume.to_string(),
             SettingsKey::ReplayGain => replay_gain_label(self.replay_gain).to_owned(),
             SettingsKey::Repeat => self.repeat.label().to_owned(),
             SettingsKey::Shuffle => if self.shuffle { "on" } else { "off" }.to_owned(),
@@ -1738,11 +1753,15 @@ impl<'lib> App<'lib> {
             SettingsKey::CoverArt
             | SettingsKey::Spectrum
             | SettingsKey::Hints
-            | SettingsKey::TopBar => {
+            | SettingsKey::TopBar
+            | SettingsKey::Advisories
+            | SettingsKey::ViewNumbers => {
                 let drawn = match key {
                     SettingsKey::CoverArt => self.ui.cover_art,
                     SettingsKey::Spectrum => self.ui.spectrum,
                     SettingsKey::Hints => self.ui.hints,
+                    SettingsKey::Advisories => self.ui.advisories,
+                    SettingsKey::ViewNumbers => self.ui.view_numbers,
                     _ => self.ui.top_bar,
                 };
                 if drawn { "shown" } else { "hidden" }.to_owned()
@@ -2185,11 +2204,11 @@ impl<'lib> App<'lib> {
         frame.render_widget(Paragraph::new(line), area);
     }
 
-    /// The library's header line: the four views, the active one in the
-    /// accent and the others dim, then where inside the view the list
-    /// stands, then how many rows it has. On a row too narrow for all of
-    /// it the count goes first, then the place is cut at the edge; the views
-    /// stay.
+    /// The library's header line: the four views, each numbered when
+    /// `[ui] view_numbers` is on (S5.5), the active one in the accent and
+    /// the others dim, then where inside the view the list stands, then how
+    /// many rows it has. On a row too narrow for all of it the count goes
+    /// first, then the place is cut at the edge; the views stay.
     fn views_header(&self, width: u16) -> Line<'static> {
         let mut spans = vec![Span::styled("▸─ ", Style::new().fg(self.theme.border))];
         for (index, by) in BrowseBy::ALL.into_iter().enumerate() {
@@ -2201,6 +2220,12 @@ impl<'lib> App<'lib> {
             } else {
                 Style::new().fg(self.theme.dim)
             };
+            // The number is the key that switches to the view (S5.5); it
+            // takes part in the width fitting like every other span, so a
+            // narrow header still drops the count rather than the views.
+            if self.ui.view_numbers {
+                spans.push(Span::styled(format!("{} ", index + 1), style));
+            }
             spans.push(Span::styled(by.label(), style));
         }
         let place = match &self.position {
@@ -3896,7 +3921,6 @@ const COLOR_PRESETS: [&str; 8] = [
 /// One setting the card can change (S7).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SettingsKey {
-    Volume,
     ReplayGain,
     Repeat,
     Shuffle,
@@ -3911,6 +3935,8 @@ enum SettingsKey {
     Spectrum,
     Hints,
     TopBar,
+    Advisories,
+    ViewNumbers,
     Folder,
 }
 
@@ -3918,7 +3944,6 @@ impl SettingsKey {
     /// The setting's label on the card's left.
     fn label(self) -> &'static str {
         match self {
-            Self::Volume => "volume",
             Self::ReplayGain => "replay gain",
             Self::Repeat => "repeat",
             Self::Shuffle => "shuffle",
@@ -3933,6 +3958,8 @@ impl SettingsKey {
             Self::Spectrum => "spectrum",
             Self::Hints => "hints",
             Self::TopBar => "top bar",
+            Self::Advisories => "advisories",
+            Self::ViewNumbers => "view numbers",
             Self::Folder => "folder",
         }
     }
@@ -3945,14 +3972,15 @@ enum SettingsRow {
     Setting(SettingsKey),
 }
 
-/// The card's rows, in order (S7): the headers are never focused.
-const SETTINGS_ROWS: [SettingsRow; 19] = [
+/// The card's rows, in order (S7): the headers are never focused. The volume
+/// is not a row (S7.3): it lives in `[state]` and on `+`/`-`, where it has
+/// always been changed from the keyboard.
+const SETTINGS_ROWS: [SettingsRow; 21] = [
     SettingsRow::Header("sound"),
-    SettingsRow::Setting(SettingsKey::Volume),
     SettingsRow::Setting(SettingsKey::ReplayGain),
     SettingsRow::Setting(SettingsKey::Repeat),
     SettingsRow::Setting(SettingsKey::Shuffle),
-    SettingsRow::Header("screen"),
+    SettingsRow::Header("theme"),
     SettingsRow::Setting(SettingsKey::Accent),
     SettingsRow::Setting(SettingsKey::Text),
     SettingsRow::Setting(SettingsKey::Dim),
@@ -3960,10 +3988,13 @@ const SETTINGS_ROWS: [SettingsRow; 19] = [
     SettingsRow::Setting(SettingsKey::Border),
     SettingsRow::Setting(SettingsKey::Ink),
     SettingsRow::Setting(SettingsKey::Background),
+    SettingsRow::Header("screen"),
     SettingsRow::Setting(SettingsKey::CoverArt),
     SettingsRow::Setting(SettingsKey::Spectrum),
     SettingsRow::Setting(SettingsKey::Hints),
     SettingsRow::Setting(SettingsKey::TopBar),
+    SettingsRow::Setting(SettingsKey::Advisories),
+    SettingsRow::Setting(SettingsKey::ViewNumbers),
     SettingsRow::Header("library"),
     SettingsRow::Setting(SettingsKey::Folder),
 ];
@@ -4015,9 +4046,9 @@ impl SettingsCard {
         SETTINGS_ROWS
             .get(Self::row_of(self.cursor))
             .copied()
-            .map_or(SettingsKey::Volume, |row| match row {
+            .map_or(SettingsKey::ReplayGain, |row| match row {
                 SettingsRow::Setting(key) => key,
-                SettingsRow::Header(_) => SettingsKey::Volume,
+                SettingsRow::Header(_) => SettingsKey::ReplayGain,
             })
     }
 
@@ -4227,6 +4258,18 @@ mod tests {
         app.ui.cover_art = false;
         app.explain_hidden_art();
         assert!(app.status.is_empty(), "got: {:?}", app.status);
+
+        // Advisories off (S5.4): the same window is never explained — the
+        // switch silences exactly this line, nothing else.
+        app.status.clear();
+        app.art_explained = false;
+        app.ui.cover_art = true;
+        app.ui.advisories = false;
+        app.explain_hidden_art();
+        assert!(app.status.is_empty(), "got: {:?}", app.status);
+
+        // The draw leg below needs the cover deliberately hidden again.
+        app.ui.cover_art = false;
 
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).unwrap();

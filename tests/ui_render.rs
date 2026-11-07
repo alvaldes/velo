@@ -698,7 +698,7 @@ fn library_rows_put_their_facts_against_the_right_edge() {
 
     let artists = screen_at(&app, 80, 24);
     assert!(
-        artists.contains("▸─ artists  albums  tracks  genres   [1 artist]"),
+        artists.contains("▸─ 1 artists  2 albums  3 tracks  4 genres   [1 artist]"),
         "got:\n{artists}"
     );
     assert!(
@@ -712,7 +712,7 @@ fn library_rows_put_their_facts_against_the_right_edge() {
     press(&mut app, KeyCode::Enter); // Harbor
     let tracks = screen_at(&app, 80, 24);
     assert!(
-        tracks.contains("▸─ artists  albums  tracks  genres   Tide › Harbor  [1 track]"),
+        tracks.contains("▸─ 1 artists  2 albums  3 tracks  4 genres   Tide › Harbor  [1 track]"),
         "got:\n{tracks}"
     );
     assert!(
@@ -948,7 +948,7 @@ fn the_header_names_the_four_views_and_lights_the_active_one() {
 
     let screen = screen_at(&app, 80, 24);
     assert!(
-        screen.contains("▸─ artists  albums  tracks  genres   [2 albums]"),
+        screen.contains("▸─ 1 artists  2 albums  3 tracks  4 genres   [2 albums]"),
         "got:\n{screen}"
     );
     // Every album says whose it is and its year at the right edge.
@@ -961,7 +961,7 @@ fn the_header_names_the_four_views_and_lights_the_active_one() {
     let row = u16::try_from(
         screen
             .lines()
-            .position(|line| line.contains("▸─ artists"))
+            .position(|line| line.contains("▸─ 1 artists"))
             .unwrap(),
     )
     .unwrap();
@@ -984,7 +984,7 @@ fn the_header_names_the_four_views_and_lights_the_active_one() {
     press(&mut app, KeyCode::Char('3'));
     let screen = screen_at(&app, 80, 24);
     assert!(
-        screen.contains("▸─ artists  albums  tracks  genres   [2 tracks]"),
+        screen.contains("▸─ 1 artists  2 albums  3 tracks  4 genres   [2 tracks]"),
         "got:\n{screen}"
     );
     assert!(screen.contains("1. Dawn  Tide · Harbor"), "got:\n{screen}");
@@ -996,8 +996,92 @@ fn the_header_names_the_four_views_and_lights_the_active_one() {
     press(&mut app, KeyCode::Enter);
     let screen = screen_at(&app, 80, 24);
     assert!(
-        screen.contains("▸─ artists  albums  tracks  genres   (no genre)  [2 tracks]"),
+        screen.contains("▸─ 1 artists  2 albums  3 tracks  4 genres   (no genre)  [2 tracks]"),
         "got:\n{screen}"
+    );
+}
+
+/// The numbers in the header are the `1`–`4` keys' own row (S5.5): they show
+/// by default and `[ui] view_numbers = false` leaves the bare names.
+#[test]
+fn the_header_numbers_the_views_and_view_numbers_false_hides_the_numbers() {
+    let temp = TempLibrary::new("view-numbers");
+    temp.write_wav("Tide/2019 - Harbor/01 - Dawn.wav");
+    temp.index();
+    let mut app = App::browse(Some(&temp.library));
+
+    let screen = screen_at(&app, 80, 24);
+    assert!(
+        screen.contains("▸─ 1 artists  2 albums  3 tracks  4 genres   [1 artist]"),
+        "the numbers are the keys, got:\n{screen}"
+    );
+
+    app.set_ui(UiParts {
+        view_numbers: false,
+        ..UiParts::default()
+    });
+    let screen = screen_at(&app, 80, 24);
+    assert!(
+        screen.contains("▸─ artists  albums  tracks  genres   [1 artist]"),
+        "the bare names as before, got:\n{screen}"
+    );
+    assert!(!screen.contains("1 artists"), "no numbers:\n{screen}");
+}
+
+/// The cover advisory is a `[ui]` switch like any other (S5.4): on a window
+/// too small for art the status line explains the hidden cover, and with
+/// `advisories = false` it stays quiet — while an ordinary status message
+/// still shows.
+#[test]
+fn the_cover_advisory_appears_on_a_small_window_and_advisories_false_silences_it() {
+    let temp = TempLibrary::new("cover-advisory");
+    let wav = temp.write_wav("Tide/01 - Dawn.wav");
+    // Any decoded image will do for the advisory: the gate never looks at
+    // the pixels.
+    image::DynamicImage::new_rgba8(1, 1)
+        .save(temp.root.join("Tide/cover.png"))
+        .expect("a cover to decode");
+    let art = velo::ui::artwork::Artwork::from_path(&wav).expect("the cover decodes");
+
+    let mut app = App::new(tracks(&["one.flac"]));
+    app.show_artwork(Some(velo::ui::artwork::Picker::new((8, 12))));
+    app.show_decoded_artwork(Some(art));
+    // The first frame records the window; the tick then explains the cover.
+    let _ = screen_at(&app, 80, 40);
+    app.tick();
+    assert!(
+        app.status().contains("cover art hidden"),
+        "the advisory is the status, got: {:?}",
+        app.status()
+    );
+    let screen = screen_at(&app, 80, 40);
+    assert!(
+        screen.contains("cover art hidden — the window is 80x40 and cover art needs 100x28"),
+        "the advisory is drawn, got:\n{screen}"
+    );
+
+    // Advisories off: the same window is never explained, and ordinary
+    // messages still show.
+    let art = velo::ui::artwork::Artwork::from_path(&wav).expect("the cover decodes");
+    let mut app = App::new(tracks(&["one.flac"]));
+    app.show_artwork(Some(velo::ui::artwork::Picker::new((8, 12))));
+    app.show_decoded_artwork(Some(art));
+    app.set_ui(UiParts {
+        advisories: false,
+        ..UiParts::default()
+    });
+    let _ = screen_at(&app, 80, 40);
+    app.tick();
+    assert!(
+        !app.status().contains("cover art hidden"),
+        "the advisory is silenced, got: {:?}",
+        app.status()
+    );
+    app.note("velo: indexing finished");
+    let screen = screen_at(&app, 80, 40);
+    assert!(
+        screen.contains("velo: indexing finished"),
+        "an ordinary message still shows, got:\n{screen}"
     );
 }
 
@@ -1013,7 +1097,7 @@ fn a_narrow_header_drops_the_count_before_the_view_names() {
     let screen = screen_at(&app, 80, 24);
     let header = screen
         .lines()
-        .find(|line| line.contains("▸─ artists  albums  tracks  genres"))
+        .find(|line| line.contains("▸─ 1 artists  2 albums  3 tracks  4 genres"))
         .expect("the views stay at 80 columns");
     assert!(
         !header.contains("[1 track]"),
@@ -1415,6 +1499,8 @@ fn hiding_every_part_at_once_still_draws_a_coherent_window() {
         spectrum: false,
         hints: false,
         top_bar: false,
+        advisories: true,
+        view_numbers: true,
     });
     let screen = screen_at(&app, 80, 24);
     let lines: Vec<&str> = screen.lines().collect();
@@ -1483,14 +1569,13 @@ fn the_settings_card_draws_its_title_sections_and_focused_row_in_the_accent() {
     let screen = screen_at(&app, 80, 24);
 
     assert!(screen.contains(" settings "), "{screen}");
-    for header in ["sound", "screen", "library"] {
+    for header in ["sound", "theme", "screen", "library"] {
         assert!(
             screen.contains(header),
             "the {header} section on:\n{screen}"
         );
     }
     for (label, value) in [
-        ("volume", "100"),
         ("replay gain", "track"),
         ("repeat", "off"),
         ("shuffle", "off"),
@@ -1498,6 +1583,8 @@ fn the_settings_card_draws_its_title_sections_and_focused_row_in_the_accent() {
         ("background", "reset"),
         ("cover art", "shown"),
         ("hints", "shown"),
+        ("advisories", "shown"),
+        ("view numbers", "shown"),
         ("folder", "not set"),
     ] {
         assert!(
@@ -1518,12 +1605,12 @@ fn the_settings_card_draws_its_title_sections_and_focused_row_in_the_accent() {
     let y = u16::try_from(
         screen
             .lines()
-            .position(|line| line.contains("volume"))
+            .position(|line| line.contains("replay gain"))
             .expect("the focused row"),
     )
     .unwrap();
     assert_eq!(
-        cell_at(&app, column_of("volume").expect("the focused row"), y).fg,
+        cell_at(&app, column_of("replay gain").expect("the focused row"), y).fg,
         theme.accent,
         "the focused row is drawn in the accent:\n{screen}"
     );
@@ -1576,7 +1663,7 @@ fn hiding_the_cover_from_the_card_removes_its_columns_on_the_next_frame() {
     app.show_artwork(Some(velo::ui::artwork::Picker::new((8, 12))));
 
     press(&mut app, KeyCode::Char('o'));
-    for _ in 0..11 {
+    for _ in 0..10 {
         press(&mut app, KeyCode::Char('j'));
     }
     assert_eq!(app.settings_focused(), "cover art");

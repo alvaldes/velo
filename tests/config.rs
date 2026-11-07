@@ -146,6 +146,8 @@ cover_art = false
 spectrum = false
 hints = false
 top_bar = false
+advisories = false
+view_numbers = false
 "##,
     );
 
@@ -198,6 +200,8 @@ top_bar = false
             spectrum: false,
             hints: false,
             top_bar: false,
+            advisories: false,
+            view_numbers: false,
         }
     );
     let _ = fs::remove_dir_all(&dir);
@@ -221,6 +225,10 @@ fn every_new_table_is_optional_and_defaults_to_what_velo_did_before() {
     assert!(settings.ui.spectrum);
     assert!(settings.ui.hints);
     assert!(settings.ui.top_bar);
+    // A file written before the two switches existed draws what it drew: the
+    // explanation of a hidden cover and the view numbers come back.
+    assert!(settings.ui.advisories, "advisories default to on");
+    assert!(settings.ui.view_numbers, "view numbers default to on");
 }
 
 #[test]
@@ -353,6 +361,10 @@ fn the_default_file_names_every_table_and_reads_back_as_the_defaults() {
     assert_eq!(settings.session.repeat, Repeat::Off);
     assert_eq!(settings.session.view, View::Library);
     assert_eq!(settings.session.browse_by, BrowseBy::Artists);
+    // The two switches the first delivery did not have are written too, so
+    // the default file names every key the parser reads.
+    assert!(text.contains("advisories = true"), "{text}");
+    assert!(text.contains("view_numbers = true"), "{text}");
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -624,6 +636,8 @@ fn a_missing_config_file_is_written_with_every_key_and_its_default() {
         "spectrum",
         "hints",
         "top_bar",
+        "advisories",
+        "view_numbers",
     ];
     for key in keys {
         let at = lines

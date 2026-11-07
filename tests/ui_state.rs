@@ -2060,20 +2060,19 @@ fn the_settings_cursor_moves_between_settings_only_and_stops_at_the_ends() {
     press(&mut app, KeyCode::Char('o'));
     assert_eq!(
         app.settings_focused(),
-        "volume",
-        "the card opens on the first setting"
+        "replay gain",
+        "the card opens on the first setting; the volume is not a row"
     );
 
     press(&mut app, KeyCode::Char('j'));
-    assert_eq!(app.settings_focused(), "replay gain");
-    press(&mut app, KeyCode::Char('j'));
+    assert_eq!(app.settings_focused(), "repeat");
     press(&mut app, KeyCode::Char('j'));
     assert_eq!(app.settings_focused(), "shuffle");
     press(&mut app, KeyCode::Char('j'));
     assert_eq!(
         app.settings_focused(),
         "accent",
-        "the screen header is skipped, never focused"
+        "the theme header is skipped, never focused"
     );
 
     press(&mut app, KeyCode::Char('G'));
@@ -2092,13 +2091,13 @@ fn the_settings_cursor_moves_between_settings_only_and_stops_at_the_ends() {
     press(&mut app, KeyCode::Char('g'));
     assert_eq!(
         app.settings_focused(),
-        "volume",
+        "replay gain",
         "g jumps to the first setting"
     );
     press(&mut app, KeyCode::Char('k'));
     assert_eq!(
         app.settings_focused(),
-        "volume",
+        "replay gain",
         "k stops at the first setting"
     );
 }
@@ -2133,7 +2132,7 @@ fn enter_on_a_visibility_row_flips_it_and_writes_cover_art_to_the_file() {
     let default = velo::config::default_config_text();
 
     press(&mut app, KeyCode::Char('o'));
-    for _ in 0..11 {
+    for _ in 0..10 {
         press(&mut app, KeyCode::Char('j'));
     }
     assert_eq!(app.settings_focused(), "cover art");
@@ -2155,7 +2154,7 @@ fn right_on_a_colour_row_changes_the_palette_and_writes_the_theme_accent() {
     let default = velo::config::default_config_text();
 
     press(&mut app, KeyCode::Char('o'));
-    for _ in 0..4 {
+    for _ in 0..3 {
         press(&mut app, KeyCode::Char('j'));
     }
     assert_eq!(app.settings_focused(), "accent");
@@ -2185,6 +2184,50 @@ fn enter_on_the_folder_row_opens_the_library_prompt() {
         "the existing library prompt opened"
     );
     assert!(!app.settings_open(), "the card gave the keys to the prompt");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn enter_on_the_advisories_row_writes_it_to_the_file() {
+    let dir = config_dir("settings-advisories");
+    let config = dir.join("config.toml");
+    let mut app = app_with_default_config(&config);
+    let default = velo::config::default_config_text();
+
+    press(&mut app, KeyCode::Char('o'));
+    for _ in 0..14 {
+        press(&mut app, KeyCode::Char('j'));
+    }
+    assert_eq!(app.settings_focused(), "advisories");
+    press(&mut app, KeyCode::Enter);
+
+    assert_eq!(
+        fs::read_to_string(&config).unwrap(),
+        default.replace("advisories = true", "advisories = false"),
+        "the switch is written per key, under [ui]"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn enter_on_the_view_numbers_row_writes_it_to_the_file() {
+    let dir = config_dir("settings-view-numbers");
+    let config = dir.join("config.toml");
+    let mut app = app_with_default_config(&config);
+    let default = velo::config::default_config_text();
+
+    press(&mut app, KeyCode::Char('o'));
+    for _ in 0..15 {
+        press(&mut app, KeyCode::Char('j'));
+    }
+    assert_eq!(app.settings_focused(), "view numbers");
+    press(&mut app, KeyCode::Enter);
+
+    assert_eq!(
+        fs::read_to_string(&config).unwrap(),
+        default.replace("view_numbers = true", "view_numbers = false"),
+        "the switch is written per key, under [ui]"
+    );
     let _ = fs::remove_dir_all(&dir);
 }
 
