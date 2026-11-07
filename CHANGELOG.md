@@ -1,6 +1,10 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.3.0] - 2026-11-07
+
+### Features
+- **ui:** N and p skip to the next and the previous track
 ## [0.2.0] - 2026-11-07
 
 ### Features
