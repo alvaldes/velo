@@ -537,3 +537,30 @@ fn a_queue_that_shrinks_to_nothing_ends_cleanly() {
     // The track that was already playing finishes; there is nothing after it.
     assert_eq!(samples.len(), 400 * 2);
 }
+
+// ---- next and previous (S8) -------------------------------------------------
+
+use velo::audio::skip_target;
+
+#[test]
+fn next_moves_one_track_on_and_refuses_past_the_last() {
+    let at = Duration::from_secs(40);
+    assert_eq!(skip_target(0, 3, at, true), Some(1));
+    assert_eq!(skip_target(1, 3, at, true), Some(2));
+    assert_eq!(skip_target(2, 3, at, true), None, "nothing after the last");
+}
+
+#[test]
+fn previous_restarts_a_track_already_under_way_and_otherwise_goes_back() {
+    // Three seconds in or more: back to the start of this track, the way
+    // every player's previous button works.
+    assert_eq!(skip_target(2, 3, Duration::from_secs(3), false), Some(2));
+    assert_eq!(skip_target(2, 3, Duration::from_secs(90), false), Some(2));
+    // Just started: the track before it.
+    assert_eq!(
+        skip_target(2, 3, Duration::from_millis(2_999), false),
+        Some(1)
+    );
+    // The first track has nothing before it, so it starts over.
+    assert_eq!(skip_target(0, 3, Duration::ZERO, false), Some(0));
+}

@@ -116,6 +116,12 @@ fn the_volume_slider_shows_the_volume_and_the_help_lists_the_seek_keys() {
         helped.contains("seek 5 s"),
         "the help lists the seek keys, got: {helped}"
     );
+    // The card is taller than a 12-row window; at 80×24 it fits whole.
+    let whole = screen_at(&app, 80, 24);
+    assert!(
+        whole.contains("n / p") && whole.contains("next / previous track"),
+        "the help lists the skip keys, got:\n{whole}"
+    );
 }
 
 // ---- the window (ui-redesign T1, S1) ---------------------------------------

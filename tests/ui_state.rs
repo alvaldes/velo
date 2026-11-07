@@ -161,6 +161,26 @@ fn enter_returns_play_from_the_selection() {
 // ---- transport keys (T6) ------------------------------------------------
 
 #[test]
+fn n_and_p_ask_for_the_next_and_the_previous_track() {
+    let mut app = app_with_three_tracks();
+
+    assert_eq!(app.on_key(key(KeyCode::Char('n'))), Action::Next);
+    assert_eq!(app.on_key(key(KeyCode::Char('p'))), Action::Previous);
+}
+
+#[test]
+fn next_and_previous_with_nothing_playing_change_nothing() {
+    let mut app = app_with_three_tracks();
+
+    // Like a seek, a skip moves what plays; with nothing playing there is
+    // nothing to move, and nothing starts behind the user's back.
+    app.apply(Action::Next);
+    app.apply(Action::Previous);
+    assert!(app.queue().is_empty(), "no stream was started");
+    assert_eq!(app.status(), "");
+}
+
+#[test]
 fn left_and_right_and_comma_and_dot_seek_five_seconds() {
     let mut app = app_with_three_tracks();
 
@@ -648,6 +668,19 @@ fn ascending_from_the_artist_level_stays_at_the_artists() {
 }
 
 // ---- the library search (T7, S9) -----------------------------------------
+
+#[test]
+fn n_and_p_type_into_an_open_search_instead_of_skipping() {
+    let temp = TempLibrary::new("search-np");
+    temp.write_wav("Tide/2019 - Harbor/01 - Nightfall.wav");
+    temp.index();
+    let mut app = App::browse(Some(&temp.library));
+
+    app.on_key(key(KeyCode::Char('/')));
+    assert_eq!(app.on_key(key(KeyCode::Char('n'))), Action::None);
+    assert_eq!(app.on_key(key(KeyCode::Char('p'))), Action::None);
+    assert_eq!(app.search_query(), "np");
+}
 
 #[test]
 fn slash_opens_a_search_and_typing_narrows_the_results() {

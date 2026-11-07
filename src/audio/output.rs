@@ -115,6 +115,26 @@ pub fn seek_target(position: Duration, delta_secs: i64, duration: Option<Duratio
     duration.map_or(moved, |duration| moved.min(duration))
 }
 
+/// How far into a track "previous" restarts it instead of going back one.
+const RESTART_AFTER: Duration = Duration::from_secs(3);
+
+/// The queue index a skip lands on, from track `current` of `len` at
+/// `position` into it. Forward is the next track, or `None` past the last.
+/// Back restarts the current track once it is [`RESTART_AFTER`] in — the way
+/// every player's previous button works — and otherwise goes to the track
+/// before; the first track has none, so it starts over.
+#[must_use]
+pub fn skip_target(current: usize, len: usize, position: Duration, forward: bool) -> Option<usize> {
+    if forward {
+        let next = current + 1;
+        return (next < len).then_some(next);
+    }
+    if position >= RESTART_AFTER {
+        return Some(current);
+    }
+    Some(current.saturating_sub(1))
+}
+
 /// A running output stream. Dropping it stops the device.
 pub struct Player {
     stream: cpal::Stream,

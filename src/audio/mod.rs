@@ -16,7 +16,7 @@ pub mod replay_gain;
 pub mod resample;
 pub mod spectrum;
 
-pub use output::{GainRamp, Player, seek_target};
+pub use output::{GainRamp, Player, seek_target, skip_target};
 
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{CodecParameters, Decoder, DecoderOptions};

@@ -33,7 +33,7 @@ use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, ListState, Para
 
 use crate::audio::output::{SharedQueue, TrackFailure};
 use crate::audio::spectrum::Spectrum;
-use crate::audio::{Player, seek_target};
+use crate::audio::{Player, seek_target, skip_target};
 use crate::config::ReplayGainMode;
 use crate::library::{AlbumEntry, ArtistEntry, Library, TrackEntry};
 
@@ -62,6 +62,10 @@ pub enum Action {
     SetVolume(u8),
     /// Move the position by this many seconds; negative is back.
     Seek { delta_secs: i64 },
+    /// Play the next track of the stream.
+    Next,
+    /// Restart the track, or play the one before it when it just began.
+    Previous,
 }
 
 /// Where in the library the interface stands while browsing.
@@ -602,6 +606,8 @@ impl<'lib> App<'lib> {
             KeyCode::Char('-') => Action::SetVolume(self.change_volume(-5)),
             KeyCode::Left | KeyCode::Char(',') => Action::Seek { delta_secs: -5 },
             KeyCode::Right | KeyCode::Char('.') => Action::Seek { delta_secs: 5 },
+            KeyCode::Char('n') => Action::Next,
+            KeyCode::Char('p') => Action::Previous,
             KeyCode::Char('?') => {
                 self.help = !self.help;
                 Action::None
@@ -644,6 +650,8 @@ impl<'lib> App<'lib> {
             Action::Ascend => self.ascend(),
             Action::TogglePause => self.toggle_pause(),
             Action::Seek { delta_secs } => self.seek_by(delta_secs),
+            Action::Next => self.skip(true),
+            Action::Previous => self.skip(false),
         }
     }
 
@@ -1180,6 +1188,9 @@ impl<'lib> App<'lib> {
                 ("space", "pause"),
                 ("←/→", "seek"),
                 ("/", "search"),
+                // Dropped first on a narrow row: the transport buttons and
+                // the help already show how to skip and to see the queue.
+                ("n/p", "next/prev"),
                 ("tab", "queue"),
                 ("?", "help"),
                 ("q", "quit"),
@@ -1226,6 +1237,7 @@ impl<'lib> App<'lib> {
             ("space", "pause / resume"),
             ("← / →", "seek 5 s back / forward"),
             (", / .", "seek 5 s back / forward"),
+            ("n / p", "next / previous track"),
             ("+ / -", "volume up / down"),
             ("?", "toggle this help"),
             ("tab", "library / queue"),
@@ -1789,13 +1801,36 @@ impl<'lib> App<'lib> {
         self.start_at(target);
     }
 
+    /// Moves to the next track, or back one (see [`skip_target`]), by
+    /// rebuilding the player at that track the way a seek rebuilds it at an
+    /// offset. Past the last track it says so instead of stopping the music.
+    fn skip(&mut self, forward: bool) {
+        let Some(player) = &self.player else {
+            return;
+        };
+        let current = player.current_index();
+        match skip_target(current, self.queue.len(), player.position(), forward) {
+            Some(track) => self.start_track_at(track, Duration::ZERO),
+            None => self.note("velo: this is the last track"),
+        }
+    }
+
     /// Closes the player and starts it again at the same track, `offset` into
     /// it. The queue and the marker stay as they were.
     fn start_at(&mut self, offset: Duration) {
+        let Some(track) = self.player.as_ref().map(Player::current_index) else {
+            return;
+        };
+        self.start_track_at(track, offset);
+    }
+
+    /// Closes the player and starts the same queue at `track`, `offset` into
+    /// it: the one rebuild behind a seek and a skip, so both keep the volume
+    /// and the `ReplayGain` mode.
+    fn start_track_at(&mut self, track: usize, offset: Duration) {
         let Some(player) = self.player.take() else {
             return;
         };
-        let track = player.current_index();
         player.stop();
 
         if self.queue.is_empty() || track >= self.queue.len() {

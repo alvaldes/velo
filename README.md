@@ -49,6 +49,7 @@ Every key below is what the code does today.
 | `/` | Fuzzy search the whole library (`lofi` finds `Lo-Fi Scientists`) |
 | `space` | Pause / resume |
 | `←` / `→` (or `,` / `.`) | Seek 5 s back / forward |
+| `n` / `p` | Next track / previous track — `p` restarts a track already 3 s in |
 | `+` / `-` | Volume up / down, 5% at a time |
 | `tab` | Switch between the library browser and the queue |
 | `a` | Append the selection to the queue — a track, or every track of an album |
