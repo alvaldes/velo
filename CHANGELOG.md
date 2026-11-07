@@ -1,6 +1,14 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.4.0] - 2026-11-07
+
+### Features
+- **audio:** Repeat the queue or the track at the producer's boundary
+- **ui:** S shuffles what is left of the queue and r cycles repeat
+
+### Fixes
+- **audio:** A repeated track with no audio no longer spins the producer
 ## [0.3.0] - 2026-11-07
 
 ### Features
