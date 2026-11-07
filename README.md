@@ -129,7 +129,7 @@ it. An existing file is never overwritten or reformatted.
 |:--|:--|:--|
 | `library` | The root folder to index and browse: an absolute path, `~/...` (your home) or a path relative to the directory velo starts in | none — written commented out (`# library = "~/Music"`) |
 | `volume` | Start level, `0..=100` | `100` |
-| `bit_perfect` | Accepted and stored; nothing reads it yet | `false` |
+| `bit_perfect` | Decoder samples reach the device unmodified: no resampling, no ReplayGain, and the volume is pinned to 100%. A track at another rate reopens the device at its own rate (a small gap at that boundary); channel layouts still map; when the device has no such output, velo falls back to converting and says so once | `false` |
 | `replay_gain` | ReplayGain mode: `track` (use the track's own gain), `album` (album gain, falling back to the track's), or `off` | `track` |
 
 Precedence: `--library` (expanded the same way) beats the config file. With no
@@ -181,14 +181,22 @@ Honest list; none of these exist behind a flag:
 - Opus — symphonia has no Opus decoder yet, so `.opus` files are rejected at
   probe time.
 - Playlists.
-- Bit-perfect playback — the `bit_perfect` config key exists and nothing
-  reads it.
 
 MP3, FLAC, M4A/AAC, OGG Vorbis and WAV are what plays today. Sample rates are
 converted to your output device; channel layouts are not converted, except
 mono, which plays through every output channel — a layout that would need a
 real downmix (5.1 into stereo, say) is skipped with an announcement instead of
 being silently averaged away.
+
+With `bit_perfect = true` in the config, sample rates are not converted
+either: the device is reopened at each track's own rate, so the decoder's
+samples reach it unmodified. ReplayGain is skipped and the volume is pinned
+to 100%, because both would scale the samples; `+`/`-` cannot move it, and
+one status line explains that. The reopen costs a small gap between tracks of
+different rates; consecutive tracks that share a rate stay one continuous
+stream, and channel layouts still map the way they do without the setting.
+When the device has no output at a track's rate, velo falls back to
+converting and says so once — a track is never lost to bit-perfect mode.
 
 ## License
 

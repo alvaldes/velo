@@ -250,6 +250,10 @@ pub fn plural(count: usize, one: &str, many: &str) -> String {
 }
 
 /// The whole interface state, minus the terminal.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the flags are independent UI facts: whether art was explained,\n    whether shuffle is on, whether help is open, and — since bit-perfect\n    (T17) — whether playback is bit-perfect and whether its volume rule\n    was explained once; bundling them would obscure each"
+)]
 pub struct App<'lib> {
     position: Position,
     /// The files given on the command line, in [`Position::Files`].
@@ -324,6 +328,12 @@ pub struct App<'lib> {
     library_setup: Option<LibrarySetup>,
     /// An accepted library root, waiting for the shell to index it.
     library_root: Option<PathBuf>,
+    /// Whether playback is bit-perfect (T17): the volume is pinned to 100%
+    /// and `ReplayGain` is skipped, both explained once in the status line.
+    bit_perfect: bool,
+    /// Whether the bit-perfect volume pinning has been explained already, so
+    /// the status line says it once, not once per volume key press.
+    bit_perfect_volume_said: bool,
     volume: u8,
     state: PlayState,
     player: Option<Player>,
@@ -375,6 +385,8 @@ impl<'lib> App<'lib> {
             help: false,
             library_setup: None,
             library_root: None,
+            bit_perfect: false,
+            bit_perfect_volume_said: false,
             volume: 100,
             state: PlayState::Stopped,
             player: None,
@@ -423,6 +435,8 @@ impl<'lib> App<'lib> {
             help: false,
             library_setup: None,
             library_root: None,
+            bit_perfect: false,
+            bit_perfect_volume_said: false,
             volume: 100,
             state: PlayState::Stopped,
             player: None,
@@ -453,14 +467,52 @@ impl<'lib> App<'lib> {
         self.queue_selected
     }
 
-    /// How `ReplayGain` is applied, as the config resolved it.
-    pub const fn set_replay_gain(&mut self, mode: ReplayGainMode) {
-        self.replay_gain = mode;
+    /// How `ReplayGain` is applied, as the config resolved it. Bit-perfect
+    /// playback forces `off`: the gain scales samples, which is what the mode
+    /// refuses (T17), so the interface must not claim it either.
+    pub fn set_replay_gain(&mut self, mode: ReplayGainMode) {
+        self.replay_gain = if self.bit_perfect {
+            ReplayGainMode::Off
+        } else {
+            mode
+        };
+    }
+
+    /// The `ReplayGain` mode in force, as the transport row shows it.
+    #[must_use]
+    pub const fn replay_gain(&self) -> ReplayGainMode {
+        self.replay_gain
+    }
+
+    /// Turns bit-perfect playback on or off (T17). On, it pins the volume to
+    /// 100% — a setting of `70` is refused, and the status line says why once
+    /// — and skips `ReplayGain`.
+    pub fn set_bit_perfect(&mut self, bit_perfect: bool) {
+        self.bit_perfect = bit_perfect;
+        if bit_perfect {
+            self.set_replay_gain(self.replay_gain);
+            self.set_volume(100);
+        }
     }
 
     /// The level the config asks for. Applied to a running player and kept for
-    /// the next one, so a stream built after a seek keeps it (T11).
+    /// the next one, so a stream built after a seek keeps it (T11). Under
+    /// bit-perfect the level is pinned to 100% whatever is asked — the
+    /// callback must not scale samples — and one status line explains why.
     pub fn set_volume(&mut self, percent: u8) {
+        if self.bit_perfect {
+            self.volume = 100;
+            if percent != 100 && !self.bit_perfect_volume_said {
+                self.bit_perfect_volume_said = true;
+                self.status = String::from(
+                    "velo: bit-perfect playback pins the volume to 100% and skips ReplayGain",
+                );
+            }
+            if let Some(player) = &self.player {
+                player.set_volume(100);
+            }
+            return;
+        }
         self.volume = percent;
         if let Some(player) = &self.player {
             player.set_volume(percent);
@@ -691,10 +743,14 @@ impl<'lib> App<'lib> {
         let Some(player) = &self.player else {
             return;
         };
-        let Some(failure) = player.take_failure() else {
+        if let Some(failure) = player.take_failure() {
+            self.announce_failure(&failure);
             return;
-        };
-        self.announce_failure(&failure);
+        }
+        // A bit-perfect fallback and its kin: one line, said once (T17).
+        if let Some(notice) = player.take_notice() {
+            self.status = format!("velo: {notice}");
+        }
     }
 
     /// Puts a skipped track into the status line: `velo: skipped <file name>:
@@ -927,12 +983,7 @@ impl<'lib> App<'lib> {
     pub fn apply(&mut self, action: Action) {
         match action {
             Action::None => {}
-            Action::SetVolume(percent) => {
-                self.volume = percent;
-                if let Some(player) = &self.player {
-                    player.set_volume(percent);
-                }
-            }
+            Action::SetVolume(percent) => self.set_volume(percent),
             Action::Quit => self.shutdown(),
             Action::Play { from } if self.search.is_some() => self.play_search_from(from),
             Action::Play { from } => self.play_from(from),
@@ -2381,12 +2432,13 @@ impl<'lib> App<'lib> {
         // The player reads the queue it is given, so the interface keeps the
         // handle and edits it in place (T18).
         let queue = Arc::new(Mutex::new(paths.clone()));
-        match Player::play_gapless_at_with(
+        match Player::play_gapless_at_full(
             Arc::clone(&queue),
             0,
             Duration::ZERO,
             self.replay_gain,
             self.repeat,
+            self.bit_perfect,
         ) {
             Ok(player) => {
                 player.set_volume(self.volume);
@@ -2476,7 +2528,14 @@ impl<'lib> App<'lib> {
         }
         let queue = Arc::new(Mutex::new(self.queue.clone()));
         self.shared = Some(Arc::clone(&queue));
-        match Player::play_gapless_at_with(queue, track, offset, self.replay_gain, self.repeat) {
+        match Player::play_gapless_at_full(
+            queue,
+            track,
+            offset,
+            self.replay_gain,
+            self.repeat,
+            self.bit_perfect,
+        ) {
             Ok(player) => {
                 // A rebuilt player starts at its own default level; without this
                 // a seek would silently jump the volume back to it.
