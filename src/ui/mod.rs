@@ -29,7 +29,7 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, ListState, Paragraph};
 
 use crate::audio::output::{SharedQueue, TrackFailure};
 use crate::audio::{Player, seek_target};
@@ -37,7 +37,7 @@ use crate::library::{AlbumEntry, ArtistEntry, Library, TrackEntry};
 
 use self::artwork::{Artwork, Picker, StatefulImage, StatefulProtocol};
 use self::search::Search;
-use self::theme::{ACCENT, BACKGROUND, DIM, SECONDARY, TEXT};
+use self::theme::{ACCENT, BACKGROUND, BORDER, DIM, SECONDARY, SURFACE, TEXT};
 
 /// What one key press asks the runtime to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -589,26 +589,44 @@ impl<'lib> App<'lib> {
         self.seen_area.set(area);
         frame.render_widget(Block::new().style(Style::new().bg(BACKGROUND)), area);
 
-        let [header, body, footer] = Layout::vertical([
+        // The window: a rounded frame around a title bar, the content and
+        // the footer. The art threshold below is still measured on the whole
+        // terminal, so `artwork::hidden_reason` keeps telling the truth.
+        let window = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(Style::new().fg(BORDER))
+            .style(Style::new().bg(BACKGROUND));
+        let inner = window.inner(area);
+        frame.render_widget(window, area);
+
+        let [title_bar, content, footer] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Min(0),
             Constraint::Length(2),
         ])
-        .areas(area);
+        .areas(inner);
+        self.draw_title_bar(frame, title_bar);
+        let mut content = pad(content);
+        let footer = pad(footer);
         // Cover art (T8): when a protocol was detected, the art is set to draw
-        // and the terminal meets the threshold, it takes the rightmost columns
-        // of the header and the body, and those make way. Otherwise the frame
-        // is exactly what it is without art — nothing to fake, nothing to move.
+        // and the terminal meets the threshold, it takes the rightmost quarter
+        // of the content and the rest makes way. Otherwise the window is
+        // exactly what it is without art — nothing to fake, nothing to move.
         let pane = self
             .picker
             .filter(|_| self.artwork.is_some())
-            .and_then(|_| artwork::pane(area));
-        let mut header = header;
-        let mut body = body;
-        if let Some(art) = pane {
-            header.width = header.width.saturating_sub(art.width);
-            body.width = body.width.saturating_sub(art.width);
-        }
+            .and_then(|_| artwork::pane(area))
+            .map(|_| {
+                let width = content.width / 4;
+                content.width = content.width.saturating_sub(width + 1);
+                Rect {
+                    x: content.x + content.width + 1,
+                    width,
+                    ..content
+                }
+            });
+        let [header, body] =
+            Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(content);
         self.draw_header(frame, header);
         self.draw_body(frame, body);
         self.draw_footer(frame, footer);
@@ -635,6 +653,31 @@ impl<'lib> App<'lib> {
             return;
         };
         frame.render_stateful_widget(StatefulImage::new(None), pane, state);
+    }
+
+    /// The title bar: the two views as tabs on the left, the one `tab`
+    /// switches between, and the letter-spaced wordmark on the right.
+    fn draw_title_bar(&self, frame: &mut Frame, area: Rect) {
+        frame.render_widget(Block::new().style(Style::new().bg(SURFACE)), area);
+        let tab = |label: &'static str, view: View| {
+            if self.view == view {
+                Span::styled(label, Style::new().fg(ACCENT).bold())
+            } else {
+                Span::styled(label, Style::new().fg(DIM))
+            }
+        };
+        let tabs = Line::from(vec![
+            Span::raw(" "),
+            tab("library", View::Library),
+            Span::raw("  "),
+            tab("queue", View::Queue),
+        ]);
+        frame.render_widget(Paragraph::new(tabs), area);
+        frame.render_widget(
+            Paragraph::new(Span::styled(WORDMARK, Style::new().fg(ACCENT).bold()))
+                .alignment(Alignment::Right),
+            area,
+        );
     }
 
     fn draw_header(&self, frame: &mut Frame, area: Rect) {
@@ -871,15 +914,27 @@ impl<'lib> App<'lib> {
             frame.render_widget(Paragraph::new(status), status_row);
         }
 
-        let hints = if self.search.is_some() {
-            "type to search  j/k move  enter play  backspace delete  esc cancel"
+        let hints: &[(&str, &str)] = if self.search.is_some() {
+            &[
+                ("type", "to search"),
+                ("j/k", "move"),
+                ("enter", "play"),
+                ("backspace", "delete"),
+                ("esc", "cancel"),
+            ]
         } else {
-            "j/k move  enter play  space pause  ←/→ seek  / search  tab queue  ? help  q quit"
+            &[
+                ("j/k", "move"),
+                ("enter", "play"),
+                ("space", "pause"),
+                ("←/→", "seek"),
+                ("/", "search"),
+                ("tab", "queue"),
+                ("?", "help"),
+                ("q", "quit"),
+            ]
         };
-        frame.render_widget(
-            Paragraph::new(Line::styled(hints, Style::new().fg(DIM))),
-            hints_row,
-        );
+        frame.render_widget(Paragraph::new(hint_line(hints, hints_row.width)), hints_row);
     }
 
     /// The search results: a track title with its artist and album dimmed,
@@ -1590,6 +1645,46 @@ impl Default for App<'_> {
 }
 
 /// A duration as `mm:ss`.
+/// Key hints as `key label` pairs, the key bright and the label dim. When the
+/// row is too narrow, pairs are dropped from the middle: the first ones say
+/// how to move and the last two how to get help and leave, and those last
+/// two are never the ones that go.
+fn hint_line(hints: &[(&str, &str)], width: u16) -> Line<'static> {
+    let fits = |pairs: &[&(&str, &str)]| {
+        let used: usize = pairs
+            .iter()
+            .map(|(key, label)| key.chars().count() + 1 + label.chars().count())
+            .sum::<usize>()
+            + 2 * pairs.len().saturating_sub(1);
+        used <= usize::from(width)
+    };
+    let mut kept: Vec<&(&str, &str)> = hints.iter().collect();
+    while !fits(&kept) && kept.len() > 2 {
+        kept.remove(kept.len() - 3);
+    }
+    let mut spans = Vec::new();
+    for (index, (key, label)) in kept.into_iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::raw("  "));
+        }
+        spans.push(Span::styled((*key).to_owned(), Style::new().fg(SECONDARY)));
+        spans.push(Span::styled(format!(" {label}"), Style::new().fg(DIM)));
+    }
+    Line::from(spans)
+}
+
+/// The name in the title bar, spaced out the way a wordmark is set.
+const WORDMARK: &str = "V E L O ";
+
+/// The area inside the window less one column of breathing room per side.
+fn pad(area: Rect) -> Rect {
+    Rect {
+        x: area.x.saturating_add(1),
+        width: area.width.saturating_sub(2),
+        ..area
+    }
+}
+
 fn mmss(duration: Duration) -> String {
     let seconds = duration.as_secs();
     format!("{:02}:{:02}", seconds / 60, seconds % 60)
@@ -1617,6 +1712,21 @@ mod tests {
     // `move_in_queue` both read, so it is pinned here, and the wiring from
     // `on_key` into `App::status` is pinned headlessly in `tests/ui_state.rs`
     // through the empty-queue refusal, which walks the same code path.
+
+    #[test]
+    fn hints_that_do_not_fit_lose_the_middle_and_keep_help_and_quit() {
+        let hints = [
+            ("j/k", "move"),
+            ("enter", "play"),
+            ("?", "help"),
+            ("q", "quit"),
+        ];
+        let text = |width| super::hint_line(&hints, width).to_string();
+
+        assert_eq!(text(80), "j/k move  enter play  ? help  q quit");
+        assert_eq!(text(28), "j/k move  ? help  q quit");
+        assert_eq!(text(5), "? help  q quit", "the last two always stay");
+    }
 
     #[test]
     fn an_edit_refuses_the_entry_that_is_playing() {

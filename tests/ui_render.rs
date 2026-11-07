@@ -118,6 +118,49 @@ fn the_footer_shows_the_volume_and_the_help_lists_the_seek_keys() {
     );
 }
 
+// ---- the window (ui-redesign T1, S1) ---------------------------------------
+
+/// The cell at `(x, y)` of an 80×24 frame of `app`.
+fn cell_at(app: &App, x: u16, y: u16) -> Cell {
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("a test terminal");
+    terminal
+        .draw(|frame| app.draw(frame))
+        .expect("the frame draws");
+    terminal.backend().buffer()[(x, y)].clone()
+}
+
+#[test]
+fn the_window_is_framed_and_its_title_bar_names_the_views_and_the_app() {
+    let app = App::new(tracks(&["one.flac"]));
+    let screen = screen_at(&app, 80, 24);
+    let lines: Vec<&str> = screen.lines().collect();
+
+    assert!(lines[0].starts_with('╭') && lines[0].ends_with('╮'));
+    assert!(lines[23].starts_with('╰') && lines[23].ends_with('╯'));
+    for expected in ["library", "queue", "V E L O"] {
+        assert!(
+            lines[1].contains(expected),
+            "the title bar shows {expected:?}, got: {}",
+            lines[1]
+        );
+    }
+}
+
+#[test]
+fn the_title_bar_lights_the_view_that_tab_switches_to() {
+    use velo::ui::theme::{ACCENT, DIM};
+
+    let mut app = App::new(tracks(&["one.flac"]));
+    let library_x = 3; // "│ library  queue": the `l` of library
+    let queue_x = 12; // the `q` of queue
+    assert_eq!(cell_at(&app, library_x, 1).fg, ACCENT);
+    assert_eq!(cell_at(&app, queue_x, 1).fg, DIM);
+
+    press(&mut app, KeyCode::Tab);
+    assert_eq!(cell_at(&app, library_x, 1).fg, DIM);
+    assert_eq!(cell_at(&app, queue_x, 1).fg, ACCENT);
+}
+
 // ---- browsing the library (T5) ------------------------------------------
 
 /// A temp library with its own index, self-removing on drop. The index is
@@ -274,34 +317,35 @@ fn the_queue_view_draws_the_queued_file_names_and_empty_state() {
 
 // ---- cover art (T8, S10) ---------------------------------------------------
 
-/// The interface's 80×24 screen exactly as it was the commit before cover art
-/// touched [`App::draw`]. The artwork change may not move a single cell at
-/// this size: no protocol is ever attached to a [`TestBackend`]-backed app.
-const SCREEN_BEFORE_COVER_ART: &str = concat!(
-    "velo  3 tracks                                                           stopped\n",
-    "  one.flac  /music                                                              \n",
-    "  two.flac  /music                                                              \n",
-    "  three.flac  /music                                                            \n",
-    "                                                                                \n",
-    "                                                                                \n",
-    "                                                                                \n",
-    "                                                                                \n",
-    "                                                                                \n",
-    "                                                                                \n",
-    "                                                                                \n",
-    "                                                                                \n",
-    "                                                                                \n",
-    "                                                                                \n",
-    "                                                                                \n",
-    "                                                                                \n",
-    "                                                                                \n",
-    "                                                                                \n",
-    "                                                                                \n",
-    "                                                                                \n",
-    "                                                                                \n",
-    "                                                                                \n",
-    "vol 100%                                                                        \n",
-    "j/k move  enter play  space pause  ←/→ seek  / search  tab queue  ? help  q quit",
+/// The interface's whole 80×24 screen with no image protocol. Cover art may
+/// not move a single cell of it: no protocol is ever attached to a
+/// [`TestBackend`]-backed app. Re-recorded on purpose whenever the design
+/// changes (ui-redesign T1: the window frame, the title bar, the key hints).
+const SCREEN_WITHOUT_COVER_ART: &str = concat!(
+    "╭──────────────────────────────────────────────────────────────────────────────╮\n",
+    "│ library  queue                                                       V E L O │\n",
+    "│ velo  3 tracks                                                       stopped │\n",
+    "│   one.flac  /music                                                           │\n",
+    "│   two.flac  /music                                                           │\n",
+    "│   three.flac  /music                                                         │\n",
+    "│                                                                              │\n",
+    "│                                                                              │\n",
+    "│                                                                              │\n",
+    "│                                                                              │\n",
+    "│                                                                              │\n",
+    "│                                                                              │\n",
+    "│                                                                              │\n",
+    "│                                                                              │\n",
+    "│                                                                              │\n",
+    "│                                                                              │\n",
+    "│                                                                              │\n",
+    "│                                                                              │\n",
+    "│                                                                              │\n",
+    "│                                                                              │\n",
+    "│                                                                              │\n",
+    "│ vol 100%                                                                     │\n",
+    "│ j/k move  enter play  space pause  ←/→ seek  / search  ? help  q quit        │\n",
+    "╰──────────────────────────────────────────────────────────────────────────────╯",
 );
 
 fn screen_at(app: &App, width: u16, height: u16) -> String {
@@ -320,12 +364,12 @@ fn screen_at(app: &App, width: u16, height: u16) -> String {
 }
 
 #[test]
-fn no_protocol_and_an_80x24_terminal_draw_exactly_the_screen_before_cover_art() {
+fn no_protocol_and_an_80x24_terminal_draw_exactly_the_screen_without_cover_art() {
     let app = App::new(tracks(&["one.flac", "two.flac", "three.flac"]));
     let screen = screen_at(&app, 80, 24);
 
     assert_eq!(
-        screen, SCREEN_BEFORE_COVER_ART,
+        screen, SCREEN_WITHOUT_COVER_ART,
         "cover art must leave the 80×24 interface unchanged"
     );
 }
