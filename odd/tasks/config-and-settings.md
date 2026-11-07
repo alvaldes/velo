@@ -76,9 +76,9 @@ Rows, in order: `sound` — replay gain, repeat, shuffle; `theme` — accent, te
 | T4 | The writer: `config::set_value` and `config::remove_value`, per key and per table, preserving the user's file | S2 | delegated writer | `9136a18` |
 | T5 | Restore and save: `App::set_session` at launch, and every persisted value written when it changes | S2, S3 | delegated writer | `ac83383` |
 | T6 | The settings card: `o`, rows, navigation, live apply, `HELP_ROWS`, README keys | S6, S7 | delegated writer | `9b832d8` |
-| T7 | The card's rows: no volume, and `theme` split from `screen` | S7, S7.3 | delegated writer | pending |
-| T8 | `[ui] advisories`: the cover-advisory status line can be silenced | S5.4 | delegated writer | pending |
-| T9 | `[ui] view_numbers`: `1`–`4` before the library views, and its switch | S5.5 | delegated writer | pending |
+| T7 | The card's rows: no volume, and `theme` split from `screen` | S7, S7.3 | delegated writer | `a4811cf` |
+| T8 | `[ui] advisories`: the cover-advisory status line can be silenced | S5.4 | delegated writer | `a4811cf` |
+| T9 | `[ui] view_numbers`: `1`–`4` before the library views, and its switch | S5.5 | delegated writer | `a4811cf` |
 
 ## Log
 
@@ -113,3 +113,7 @@ Rows, in order: `sound` — replay gain, repeat, shuffle; `theme` — accent, te
 > - en la parte donde esta artist|albums| tracks|genres estaria bien mostrar el numero porque no se sabe cual es cual 1,2,3,4 y en settings poder mostrar o ocultar estos numeros
 
 Parent note: the volume row *was* editable (`enter`/`←`/`→` in 5% steps), but the card opens at the volume already in effect — 100 by default — so `enter` could only move it down and the row read as broken. The user's disposition stands: no row, and the key stays in `[state]` with `+`/`-`. Specs S5 and S7 gained the two extra switches and lost the volume row; tasks T7–T9 reopen the work.
+
+**L10** (2026-11-07, writer, T7–T9). `SETTINGS_ROWS` is 21 rows now — `sound` (replay gain, repeat, shuffle), `theme` (accent, text, dim, secondary, border, ink, background), `screen` (cover art, spectrum, hints, top bar, advisories, view numbers), `library` (folder) — and `SettingsKey::Volume` is gone with its two arms; the `[state]` key, `+`/`-` and their save hook are untouched. `UiParts`/`UiKeys` gained `advisories` and `view_numbers` (both `true`), `default_config_text` writes them under `[ui]`, `explain_hidden_art` returns early when `advisories` is false (nothing else that writes `self.status` is affected), and `views_header` prefixes each view with its key number, numbers styled with their view and taking part in the width fitting so the count is still what drops first on a narrow row. RED: the two new `UiParts` fields did not exist (`E0560`/`E0609`, and `E0599` for the test hook below), and `the_settings_cursor_moves_between_settings_only_and_stops_at_the_ends` failed with `left: "volume", right: "replay gain"`. GREEN: 17 suites, 314 tests, clippy and fmt clean. Two parent corrections on review: the new `App::show_decoded_artwork` (the only way an integration test can install a decoded cover without a stream) is now `#[doc(hidden)]` so it does not read as API, and the card was rendered at 90×24 to confirm 23 rows fit and scroll correctly. Slice: 272 changed lines, inside the guide.
+
+**L11** (2026-11-07, parent, close of the corrections). `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` (17 suites, **314 tests, 0 failed**) green, the 80×24 golden screen still byte-identical, and `cargo test --test tmp_peek` used to eyeball the card at 90×24 with the cursor at the top and at the end (removed afterwards). Still open, unchanged: no real-terminal pass. Delivery stays the branch.
