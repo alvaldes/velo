@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use lofty::config::WriteOptions;
 use lofty::prelude::*;
 use lofty::tag::{Tag, TagType};
-use velo::library::{Counts, Library};
+use velo::library::{Counts, Library, NO_GENRE};
 
 // helpers ---------------------------------------------------------------
 
@@ -558,5 +558,185 @@ fn an_index_built_without_genres_keeps_its_rows_and_the_next_scan_fills_them_in(
     let again = library.index(&scratch.root).unwrap();
     assert_eq!(again.unchanged, 1);
     drop(scratch);
+    let _ = fs::remove_dir_all(&root);
+}
+
+// read-only indexes (S2) ---------------------------------------------------
+
+/// Builds a velo 0.5.0 index (no `genre` column, schema version 0, WAL
+/// journal as 0.5.0 left it) holding two untagged tracks of one album.
+fn old_index(database: &Path) {
+    let old = rusqlite::Connection::open(database).unwrap();
+    old.pragma_update(None, "journal_mode", "WAL").unwrap();
+    old.execute_batch(OLD_SCHEMA).unwrap();
+    for (number, title) in [(1, "Dawn"), (2, "Dusk")] {
+        old.execute(
+            "INSERT INTO tracks (path, title, artist, album, track_no, format, mtime, size)
+             VALUES (?1, ?2, 'Tide', 'Harbor', ?3, 'wav', 1, 1)",
+            rusqlite::params![format!("/music/Tide/Harbor/{title}.wav"), title, number],
+        )
+        .unwrap();
+    }
+}
+
+#[cfg(unix)]
+fn set_mode(path: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+}
+
+/// The `user_version` and whether `tracks` has a `genre` column, read
+/// directly from the file.
+fn schema_state(database: &Path) -> (i64, bool) {
+    let conn = rusqlite::Connection::open(database).unwrap();
+    let version = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    let has_genre = conn
+        .prepare("SELECT 1 FROM pragma_table_info('tracks') WHERE name = 'genre'")
+        .unwrap()
+        .exists([])
+        .unwrap();
+    (version, has_genre)
+}
+
+fn temp_root(name: &str) -> PathBuf {
+    let root = std::env::temp_dir().join(format!("velo-library-{name}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    root
+}
+
+#[cfg(unix)]
+#[test]
+fn a_read_only_index_built_without_genres_opens_and_browses_with_genres_unknown() {
+    // `#`, `?` and `%` in the folder name must stay part of the path.
+    let root = temp_root("readonly-old #?%");
+    let database = root.join("index.db");
+    old_index(&database);
+    // As on a read-only mount: neither the file nor its folder is writable.
+    set_mode(&database, 0o444);
+    set_mode(&root, 0o555);
+
+    let opened = Library::open_at(&database);
+    let library = match opened {
+        Ok(library) => library,
+        Err(error) => {
+            set_mode(&root, 0o755);
+            set_mode(&database, 0o644);
+            let _ = fs::remove_dir_all(&root);
+            panic!("a read-only old index must open: {error}");
+        }
+    };
+
+    assert_eq!(
+        library.counts().unwrap(),
+        Counts {
+            tracks: 2,
+            albums: 1,
+            artists: 1
+        }
+    );
+    assert_eq!(library.artists().unwrap()[0].name, "Tide");
+    assert_eq!(library.albums_of("Tide").unwrap()[0].title, "Harbor");
+    assert_eq!(library.all_albums().unwrap().len(), 1);
+    let titles = |tracks: Vec<velo::library::TrackEntry>| -> Vec<String> {
+        tracks.into_iter().map(|track| track.title).collect()
+    };
+    assert_eq!(
+        titles(library.tracks_of("Tide", "Harbor").unwrap()),
+        ["Dawn", "Dusk"]
+    );
+    assert_eq!(titles(library.all_tracks().unwrap()), ["Dawn", "Dusk"]);
+    // Genres are unknown: every track sits under `(no genre)`.
+    let genres: Vec<(String, u64)> = library
+        .genres()
+        .unwrap()
+        .into_iter()
+        .map(|genre| (genre.name, genre.tracks))
+        .collect();
+    assert_eq!(genres, [(NO_GENRE.to_owned(), 2)]);
+    assert_eq!(
+        titles(library.tracks_of_genre(NO_GENRE).unwrap()),
+        ["Dawn", "Dusk"]
+    );
+    assert_eq!(titles(library.tracks_of_genre("Lo-Fi").unwrap()), [""; 0]);
+    // Indexing needs to write, so it fails as it did in 0.5.0, and the rows
+    // stay as they were.
+    assert!(library.index(&root).is_err());
+    assert_eq!(library.counts().unwrap().tracks, 2);
+    drop(library);
+
+    set_mode(&root, 0o755);
+    set_mode(&database, 0o644);
+    // The read-only open wrote nothing.
+    assert_eq!(schema_state(&database), (0, false));
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_read_only_old_index_migrates_on_the_first_open_after_it_becomes_writable() {
+    let root = temp_root("readonly-then-writable");
+    let database = root.join("index.db");
+    old_index(&database);
+    set_mode(&database, 0o444);
+    let read_only = Library::open_at(&database);
+    set_mode(&database, 0o644);
+    drop(read_only.expect("a read-only old index must open"));
+    // Reading left no `-wal`/`-shm` behind: they would keep the read-only
+    // mode and block the migration below.
+    let left: Vec<_> = fs::read_dir(&root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(left, ["index.db"]);
+    assert_eq!(schema_state(&database), (0, false));
+
+    let library = Library::open_at(&database).unwrap();
+    assert_eq!(library.counts().unwrap().tracks, 2, "the old rows survive");
+    drop(library);
+    assert_eq!(schema_state(&database), (1, true));
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_read_only_current_index_still_opens_with_its_genres() {
+    let root = temp_root("readonly-current");
+    let database = root.join("index.db");
+    {
+        let scratch = TempLibrary {
+            root: root.join("music"),
+            library: Library::open_at(&database).unwrap(),
+        };
+        tagged_wav(&scratch, "Tide", "Harbor", "Dawn", Some("Lo-Fi"));
+        scratch.library.index(&scratch.root).unwrap();
+    }
+    set_mode(&database, 0o444);
+    let opened = Library::open_at(&database);
+    set_mode(&database, 0o644);
+    let library = opened.expect("a read-only current index must open");
+    let genres: Vec<String> = library
+        .genres()
+        .unwrap()
+        .into_iter()
+        .map(|genre| genre.name)
+        .collect();
+    assert_eq!(genres, ["Lo-Fi"]);
+    drop(library);
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_file_that_is_not_a_database_still_fails_to_open() {
+    let root = temp_root("not-a-database");
+    let database = root.join("index.db");
+    fs::write(
+        &database,
+        b"this is not an SQLite database, just some text bytes!",
+    )
+    .unwrap();
+    assert!(Library::open_at(&database).is_err());
     let _ = fs::remove_dir_all(&root);
 }

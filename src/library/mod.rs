@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 
 pub use scan::AUDIO_EXTENSIONS;
 use scan::scan;
@@ -18,6 +18,10 @@ use scan::scan;
 /// The index: a SQLite connection holding the `tracks` table.
 pub struct Library {
     conn: Connection,
+    /// Whether `tracks` has the `genre` column. Only a version-0 index in a
+    /// file that cannot be written lacks it: it is never migrated, its
+    /// genres are unknown and every track reads as [`NO_GENRE`].
+    has_genre: bool,
 }
 
 /// Everything `--index` needs to report after a scan.
@@ -138,17 +142,48 @@ impl Library {
     /// # Errors
     ///
     /// Fails when the parent directory cannot be created or the database
-    /// cannot be opened or its schema written.
+    /// cannot be opened or its schema written. A file that cannot be written
+    /// opens read-only and is not migrated: an index built by an older velo
+    /// then browses with its genres unknown, and the first open once the
+    /// file is writable migrates it.
     pub fn open_at(path: &Path) -> Result<Self, LibraryError> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let conn = Connection::open(path)?;
+        if conn.is_readonly(rusqlite::MAIN_DB)?
+            && let Some(uri) = immutable_uri(path)
+        {
+            drop(conn);
+            return Self::open_read_only(&uri);
+        }
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.execute_batch(SCHEMA)?;
         migrate(&conn)?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            has_genre: true,
+        })
+    }
+
+    /// Opens a file that cannot be written as `immutable`, so reading it
+    /// leaves no `-wal`/`-shm` files behind. Such files would keep the
+    /// file's read-only mode and block every write after it becomes
+    /// writable again.
+    fn open_read_only(uri: &str) -> Result<Self, LibraryError> {
+        let conn = Connection::open_with_flags(
+            uri,
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_URI
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        // A no-op on a complete index; fails as before on one without tables.
+        conn.execute_batch(SCHEMA)?;
+        let has_genre = conn
+            .prepare("SELECT 1 FROM pragma_table_info('tracks') WHERE name = 'genre'")?
+            .exists([])?;
+        Ok(Self { conn, has_genre })
     }
 
     /// Builds or refreshes the index for one root folder.
@@ -162,6 +197,11 @@ impl Library {
     /// Fails when the tree cannot be walked or the database cannot be
     /// written; the index is left as it was before the call.
     pub fn index(&self, root: &Path) -> Result<IndexReport, LibraryError> {
+        if !self.has_genre {
+            // Only a read-only file lacks the column: migrating reports the
+            // same read-only error the writes below would hit.
+            migrate(&self.conn)?;
+        }
         let mut known: HashMap<String, (i64, i64)> = HashMap::new();
         {
             let mut statement = self.conn.prepare("SELECT path, mtime, size FROM tracks")?;
@@ -421,11 +461,12 @@ impl Library {
 
     /// Every track with its raw genre tag, in [`Library::all_tracks`] order.
     fn tracks_with_genre(&self) -> Result<Vec<(TrackEntry, Option<String>)>, LibraryError> {
-        let mut statement = self.conn.prepare(
-            "SELECT title, track_no, disc_no, duration_ms, path, artist, album, genre
+        let genre = if self.has_genre { "genre" } else { "NULL" };
+        let mut statement = self.conn.prepare(&format!(
+            "SELECT title, track_no, disc_no, duration_ms, path, artist, album, {genre}
              FROM tracks
-             ORDER BY artist, album, COALESCE(disc_no, 0), COALESCE(track_no, 1000000), title",
-        )?;
+             ORDER BY artist, album, COALESCE(disc_no, 0), COALESCE(track_no, 1000000), title"
+        ))?;
         let rows = statement.query_map([], |row| {
             Ok((
                 TrackEntry {
@@ -482,6 +523,23 @@ fn migrate(conn: &Connection) -> Result<(), LibraryError> {
     transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     transaction.commit()?;
     Ok(())
+}
+
+/// The `file:` URI that opens `path` read-only and `immutable`, or `None`
+/// when the path is not UTF-8. Bytes outside the unreserved set and `/` are
+/// percent-encoded, so `?`, `#` and `%` in a folder name stay part of it.
+fn immutable_uri(path: &Path) -> Option<String> {
+    use std::fmt::Write as _;
+    let mut uri = String::from("file:");
+    for byte in path.to_str()?.bytes() {
+        if byte.is_ascii_alphanumeric() || b"/-._~".contains(&byte) {
+            uri.push(char::from(byte));
+        } else {
+            let _ = write!(uri, "%{byte:02X}");
+        }
+    }
+    uri.push_str("?mode=ro&immutable=1");
+    Some(uri)
 }
 
 /// `artist`/`album`/`title` are declared `COLLATE NOCASE`, so grouping and
