@@ -12,6 +12,7 @@ categories = ["multimedia::audio", "command-line-utilities"]
 
 [dependencies]
 cpal = "0.18.2"
+ratatui = "0.29"
 rtrb = "0.4.1"
 rubato = "5.0.1"
 symphonia = { version = "0.5", features = ["mp3", "aac", "flac", "vorbis", "ogg", "wav", "isomp4"] }
