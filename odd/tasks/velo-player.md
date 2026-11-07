@@ -75,7 +75,7 @@ Root folder: `/Users/alvaldes/Music/Library` (L15). Metadata comes from tags fir
 | T19 | Report a track that fails mid-queue instead of playing silence to the end | S7, S8 | worker `gentle-ai-worker` | `207dc0f` |
 | T20 | Remap the channel layout instead of refusing it: a mono track could not be played at all, and in a queue it took the album down with it (found while verifying T19) | S5, S7 | inline | `0bd1e9d` |
 | T21 | Expose the current track's duration so the clock clamps and the footer shows `/ total` when the queue came from the command line (found while proving T20) | S8 | inline | `de97f97` |
-| T17 | Bit-perfect mode: opt in to reopening the device per track when the rate changes instead of resampling (waits for the config system in T9) | S7, S12 | inline | — |
+| T17 | Bit-perfect mode: opt in to reopening the device per track when the rate changes instead of resampling (waits for the config system in T9) | S7, S12 | inline | `6771fcc` (in clone, not merged) |
 
 ### Slice boundaries
 
@@ -269,3 +269,12 @@ So the check that closes a feature is not "does it parse" but **"does the value 
 
 **Environment facts a fresh session must not rediscover:** Rust only through `mise exec -- cargo` (1.99.1 pinned); no remote is configured, so nothing is pushed and CI has never run; `.mise.toml` is the human's uncommitted work; commit style is the repo's Conventional Commits, one work unit each, docs entries recorded per task in this file.
 
+**L35** (T17 done in the clone, not yet merged): bit-perfect means what the key says — the decoder's samples reach the device unmodified, and when a track's rate differs the stream is closed and reopened rather than resampled. The producer owns the stream, so the swap lives there; counters, progress and queue handles carry over, so the clock and the markers never notice the gap. Layout differences still map (mono into stereo is a device constraint, not a DSP choice — L25), and a device with no output at the track's rate converts instead and **says so once** rather than failing the track. Volume pins to 100% and `ReplayGain` is skipped, each announced once, because software volume scales samples and that is exactly what this mode promises not to do.
+
+The proof that matters is equality: a 48 kHz fixture drained with the stream open at 44.1 kHz is `assert_eq!`-identical to the decoder's own output, and the same fixture carrying `REPLAYGAIN_TRACK_GAIN` stays identical — which demonstrates the skipped gain instead of asserting it. The audio callback is byte-identical to the previous commit, checked by extracting the regions and diffing them.
+
+**Slice boundary, recorded rather than hidden.** This landed as one commit of 1128 authored lines, past the ~400-line review slice. It is not laziness about slicing: the mechanism (sink, stream swap, settings threading) and the four behaviours it must not break (no resample, no gain, volume pinned, layout mapped) are one unit, and any split leaves a commit whose own tests cannot run. A reviewer should read it in this order — `needs_stream_reopen` (the whole decision is one line), then `StreamOut::swap_stream`, then the two equality tests, then the settings threading.
+
+**Two things owed before this is real**: the merge into `main`, blocked because the main checkout currently has uncommitted work in `src/ui/mod.rs` — the same file T17 touches — so merging over it would either lose that work or entangle two changes; and the audible check of the rate-boundary gap and the first buffer's fade-in, which no test can hear.
+
+**Tooling note for a future session**: this session could not delegate into a Git worktree — `subagent_run` and `session_worktree_register` both refuse one ("select an existing worktree in the same Git clone") for a nested path and for a sibling path alike. An **independent clone** is the supported route (`repository_root`, with consent), and it is also the cleanest: `git fetch ../velo-clone work/next` merges it back without pretending to be a worktree.
