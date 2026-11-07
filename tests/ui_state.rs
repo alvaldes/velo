@@ -1249,3 +1249,23 @@ fn number_keys_do_nothing_over_files_given_on_the_command_line() {
     }
     assert_eq!(app.level(), None);
 }
+
+/// Reported by reading, confirmed by the user: Enter on the third file given
+/// on the command line started the stream at the first one. The stream now
+/// starts at the file Enter was pressed on, as an album's does.
+#[test]
+fn enter_on_a_command_line_file_plays_from_that_file_onwards() {
+    let app = app_with_three_tracks();
+
+    assert_eq!(
+        app.playlist_from(2),
+        [PathBuf::from("/library/artist/three.flac")]
+    );
+    assert_eq!(
+        app.playlist_from(1),
+        [
+            PathBuf::from("/library/artist/two.flac"),
+            PathBuf::from("/library/artist/three.flac"),
+        ]
+    );
+}

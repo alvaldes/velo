@@ -496,8 +496,10 @@ impl<'lib> App<'lib> {
     #[must_use]
     pub fn playlist_from(&self, from: usize) -> Vec<PathBuf> {
         match &self.position {
-            // The command-line list is handed over whole, as it always was.
-            Position::Files if from < self.argv.len() => self.argv.clone(),
+            // From the file Enter was pressed on, as an album plays from its
+            // selected track: handing the whole list over started the stream
+            // at the first file whichever one was chosen.
+            Position::Files if from < self.argv.len() => self.argv[from..].to_vec(),
             Position::Tracks { .. } | Position::AllTracks | Position::Genre { .. } => self
                 .tracks
                 .get(from..)
