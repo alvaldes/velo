@@ -561,7 +561,7 @@ fn library_rows_put_their_facts_against_the_right_edge() {
 
     let artists = screen_at(&app, 80, 24);
     assert!(
-        artists.contains("▸─ Artists  [1 artist]"),
+        artists.contains("▸─ artists  albums  tracks  genres   [1 artist]"),
         "got:\n{artists}"
     );
     assert!(
@@ -575,7 +575,7 @@ fn library_rows_put_their_facts_against_the_right_edge() {
     press(&mut app, KeyCode::Enter); // Harbor
     let tracks = screen_at(&app, 80, 24);
     assert!(
-        tracks.contains("▸─ Tide › Harbor  [1 track]"),
+        tracks.contains("▸─ artists  albums  tracks  genres   Tide › Harbor  [1 track]"),
         "got:\n{tracks}"
     );
     assert!(
@@ -789,4 +789,89 @@ fn after_esc_the_empty_browser_says_how_to_set_the_library() {
     assert!(screen.contains("no library set"), "{screen}");
     assert!(screen.contains("--library"), "{screen}");
     assert!(screen.contains("config.toml"), "{screen}");
+}
+
+// ---- the library views (S3) -------------------------------------------------
+
+#[test]
+fn the_header_names_the_four_views_and_lights_the_active_one() {
+    use velo::ui::theme::{ACCENT, DIM};
+
+    let temp = TempLibrary::new("views-header");
+    temp.write_wav("Tide/2019 - Harbor/01 - Dawn.wav");
+    temp.write_wav("Tide/2021 - Lantern/01 - Far.wav");
+    temp.index();
+    let mut app = App::browse(Some(&temp.library));
+    press(&mut app, KeyCode::Char('2'));
+
+    let screen = screen_at(&app, 80, 24);
+    assert!(
+        screen.contains("▸─ artists  albums  tracks  genres   [2 albums]"),
+        "got:\n{screen}"
+    );
+    // Every album says whose it is and its year at the right edge.
+    assert!(
+        screen
+            .lines()
+            .any(|line| line.contains("2. Lantern") && line.ends_with("Tide · 2021 │")),
+        "got:\n{screen}"
+    );
+    let row = u16::try_from(
+        screen
+            .lines()
+            .position(|line| line.contains("▸─ artists"))
+            .unwrap(),
+    )
+    .unwrap();
+    let line = screen.lines().nth(usize::from(row)).unwrap();
+    let column =
+        |word: &str| u16::try_from(line[..line.find(word).unwrap()].chars().count()).unwrap();
+    assert_eq!(
+        cell_at(&app, column("albums"), row).fg,
+        ACCENT,
+        "the active view"
+    );
+    assert_eq!(cell_at(&app, column("artists"), row).fg, DIM, "the others");
+    assert_eq!(cell_at(&app, column("genres"), row).fg, DIM);
+
+    // Every track names its artist and album beside its title.
+    press(&mut app, KeyCode::Char('3'));
+    let screen = screen_at(&app, 80, 24);
+    assert!(
+        screen.contains("▸─ artists  albums  tracks  genres   [2 tracks]"),
+        "got:\n{screen}"
+    );
+    assert!(screen.contains("1. Dawn  Tide · Harbor"), "got:\n{screen}");
+
+    // Inside a genre the header says which one.
+    press(&mut app, KeyCode::Char('4'));
+    let screen = screen_at(&app, 80, 24);
+    assert!(screen.contains("1. (no genre)"), "got:\n{screen}");
+    press(&mut app, KeyCode::Enter);
+    let screen = screen_at(&app, 80, 24);
+    assert!(
+        screen.contains("▸─ artists  albums  tracks  genres   (no genre)  [2 tracks]"),
+        "got:\n{screen}"
+    );
+}
+
+#[test]
+fn a_narrow_header_drops_the_count_before_the_view_names() {
+    let temp = TempLibrary::new("views-narrow");
+    temp.write_wav("A Rather Long Artist Name/2019 - An Even Longer Album Title/01 - Dawn.wav");
+    temp.index();
+    let mut app = App::browse(Some(&temp.library));
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Enter);
+
+    let screen = screen_at(&app, 80, 24);
+    let header = screen
+        .lines()
+        .find(|line| line.contains("▸─ artists  albums  tracks  genres"))
+        .expect("the views stay at 80 columns");
+    assert!(
+        !header.contains("[1 track]"),
+        "the count went first: {header}"
+    );
+    assert!(header.contains("A Rather Long Artist Name ›"), "{header}");
 }

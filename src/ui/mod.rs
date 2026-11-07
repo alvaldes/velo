@@ -7,10 +7,12 @@
 //!
 //! `App` knows two ways to stand over a list of rows. `App::new` keeps the
 //! flat list of files given on the command line. `App::browse` stands over the
-//! library index instead: artists, then the albums of the selected artist,
-//! then the tracks of the selected album. In browse mode the rows on screen
-//! come from an in-memory snapshot that is refreshed when the position
-//! changes, never once per frame.
+//! library index instead, in one of four views ([`BrowseBy`], keys `1`–`4`):
+//! artists, then the albums of the selected artist, then the tracks of the
+//! selected album; every album, then its tracks; every track; every genre,
+//! then its tracks. In browse mode the rows on screen come from an in-memory
+//! snapshot that is refreshed when the position changes, never once per
+//! frame.
 
 pub mod artwork;
 pub mod search;
@@ -36,7 +38,7 @@ use crate::audio::output::{Repeat, SharedQueue, TrackFailure};
 use crate::audio::spectrum::Spectrum;
 use crate::audio::{Player, seek_target, skip_target};
 use crate::config::ReplayGainMode;
-use crate::library::{AlbumEntry, ArtistEntry, Library, TrackEntry};
+use crate::library::{AlbumEntry, ArtistEntry, GenreEntry, Library, TrackEntry};
 
 use self::artwork::{Artwork, Picker, StatefulImage, StatefulProtocol};
 use self::search::Search;
@@ -74,6 +76,47 @@ pub enum Action {
     /// Check the path typed into the library prompt; save and index it when
     /// it is a directory, otherwise say why in the prompt.
     SetLibrary,
+    /// Show the library in this view, from its top level.
+    Browse(BrowseBy),
+}
+
+/// The four ways to look at the library, on the keys `1` to `4`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BrowseBy {
+    /// Artists, then their albums, then an album's tracks.
+    Artists,
+    /// Every album, then its tracks.
+    Albums,
+    /// Every track in one list.
+    Tracks,
+    /// Every genre, then its tracks.
+    Genres,
+}
+
+impl BrowseBy {
+    /// Every view, in the order of its key.
+    const ALL: [Self; 4] = [Self::Artists, Self::Albums, Self::Tracks, Self::Genres];
+
+    /// The view a number key asks for.
+    const fn from_key(key: char) -> Option<Self> {
+        match key {
+            '1' => Some(Self::Artists),
+            '2' => Some(Self::Albums),
+            '3' => Some(Self::Tracks),
+            '4' => Some(Self::Genres),
+            _ => None,
+        }
+    }
+
+    /// The view's name in the list header.
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Artists => "artists",
+            Self::Albums => "albums",
+            Self::Tracks => "tracks",
+            Self::Genres => "genres",
+        }
+    }
 }
 
 /// The floating prompt that asks for the library root when none is set.
@@ -104,6 +147,14 @@ pub enum Level {
     Albums { artist: String },
     /// The tracks of one album of one artist.
     Tracks { artist: String, album: String },
+    /// Every album in the index.
+    AllAlbums,
+    /// Every track in the index.
+    AllTracks,
+    /// Every genre in the index.
+    Genres,
+    /// The tracks of one genre.
+    Genre { genre: String },
 }
 
 /// Where the interface stands, including the flat command-line list.
@@ -119,6 +170,12 @@ enum Position {
         artist: String,
         album: String,
     },
+    AllAlbums,
+    AllTracks,
+    Genres,
+    Genre {
+        genre: String,
+    },
 }
 
 /// Where the stream that is playing came from. The row it plays is found by
@@ -132,6 +189,9 @@ enum Playback {
     Queue,
     /// An album, from the selected track onwards.
     Album,
+    /// A library list — every track, or one genre — from the selected track
+    /// onwards.
+    List,
 }
 
 /// Which list the arrow keys and the editing commands act on.
@@ -177,9 +237,17 @@ pub struct App<'lib> {
     /// The files given on the command line, in [`Position::Files`].
     argv: Vec<PathBuf>,
     library: Option<&'lib Library>,
+    /// Which of the four library views the browser shows.
+    browse_by: BrowseBy,
     artists: Vec<ArtistEntry>,
+    /// The albums of one artist, or every album in [`Position::AllAlbums`].
     albums: Vec<AlbumEntry>,
+    genres: Vec<GenreEntry>,
+    /// The tracks of an album, of a genre, or every track.
     tracks: Vec<TrackEntry>,
+    /// The rows the running stream was started from, so the now-playing
+    /// block still names its track after the browser moved elsewhere.
+    played: Vec<TrackEntry>,
     selected: usize,
     /// The paths of the running stream, in queue order, so a seek can rebuild
     /// the player from the current track at an offset.
@@ -259,9 +327,12 @@ impl<'lib> App<'lib> {
             position: Position::Files,
             argv: tracks,
             library: None,
+            browse_by: BrowseBy::Artists,
             artists: Vec::new(),
             albums: Vec::new(),
+            genres: Vec::new(),
             tracks: Vec::new(),
+            played: Vec::new(),
             selected: 0,
             queue: Vec::new(),
             playing: None,
@@ -304,9 +375,12 @@ impl<'lib> App<'lib> {
             position: Position::Artists,
             argv: Vec::new(),
             library,
+            browse_by: BrowseBy::Artists,
             artists: Vec::new(),
             albums: Vec::new(),
+            genres: Vec::new(),
             tracks: Vec::new(),
+            played: Vec::new(),
             selected: 0,
             queue: Vec::new(),
             playing: None,
@@ -395,6 +469,43 @@ impl<'lib> App<'lib> {
                 artist: artist.clone(),
                 album: album.clone(),
             }),
+            Position::AllAlbums => Some(Level::AllAlbums),
+            Position::AllTracks => Some(Level::AllTracks),
+            Position::Genres => Some(Level::Genres),
+            Position::Genre { genre } => Some(Level::Genre {
+                genre: genre.clone(),
+            }),
+        }
+    }
+
+    /// Which of the four library views the browser shows.
+    #[must_use]
+    pub const fn browse_by(&self) -> BrowseBy {
+        self.browse_by
+    }
+
+    /// The genres snapshot, empty outside the genres view.
+    #[must_use]
+    pub fn genres(&self) -> &[GenreEntry] {
+        &self.genres
+    }
+
+    /// The files `Enter` on row `from` plays, in play order: the rest of the
+    /// list the row belongs to — its album, its genre, or every track. Empty
+    /// on a level whose rows are not tracks.
+    #[must_use]
+    pub fn playlist_from(&self, from: usize) -> Vec<PathBuf> {
+        match &self.position {
+            // The command-line list is handed over whole, as it always was.
+            Position::Files if from < self.argv.len() => self.argv.clone(),
+            Position::Tracks { .. } | Position::AllTracks | Position::Genre { .. } => self
+                .tracks
+                .get(from..)
+                .unwrap_or_default()
+                .iter()
+                .map(|entry| entry.path.clone())
+                .collect(),
+            _ => Vec::new(),
         }
     }
 
@@ -404,13 +515,15 @@ impl<'lib> App<'lib> {
         &self.artists
     }
 
-    /// The albums of the artist being browsed, empty when not inside one.
+    /// The albums of the artist being browsed, or every album in the albums
+    /// view; empty elsewhere.
     #[must_use]
     pub fn albums(&self) -> &[AlbumEntry] {
         &self.albums
     }
 
-    /// The tracks of the album being browsed, empty when not inside one.
+    /// The tracks of the album or genre being browsed, or every track in the
+    /// tracks view; empty elsewhere.
     #[must_use]
     pub fn tracks(&self) -> &[TrackEntry] {
         &self.tracks
@@ -606,7 +719,8 @@ impl<'lib> App<'lib> {
     }
 
     /// Re-reads the artists snapshot from the index, e.g. right after
-    /// indexing. Keeps the selection inside the (possibly shorter) list.
+    /// indexing, and the list of the view's top level when it stands there.
+    /// Keeps the selection inside the (possibly shorter) list.
     pub fn reload(&mut self) {
         let Some(library) = self.library else {
             return;
@@ -615,7 +729,45 @@ impl<'lib> App<'lib> {
             Ok(artists) => self.artists = artists,
             Err(error) => self.status = format!("velo: {error}"),
         }
+        if matches!(
+            self.position,
+            Position::AllAlbums | Position::AllTracks | Position::Genres
+        ) {
+            self.load_top();
+        }
         self.selected = self.selected.min(self.row_count().saturating_sub(1));
+    }
+
+    /// Stands at the top of `by` and reads its list; the library tab comes
+    /// to the front.
+    fn browse_view(&mut self, by: BrowseBy) {
+        self.view = View::Library;
+        self.browse_by = by;
+        self.position = match by {
+            BrowseBy::Artists => Position::Artists,
+            BrowseBy::Albums => Position::AllAlbums,
+            BrowseBy::Tracks => Position::AllTracks,
+            BrowseBy::Genres => Position::Genres,
+        };
+        self.selected = 0;
+        self.load_top();
+    }
+
+    /// Reads the list of the view's top level from the index.
+    fn load_top(&mut self) {
+        let Some(library) = self.library else {
+            return;
+        };
+        let loaded = match self.position {
+            Position::Artists => library.artists().map(|rows| self.artists = rows),
+            Position::AllAlbums => library.all_albums().map(|rows| self.albums = rows),
+            Position::AllTracks => library.all_tracks().map(|rows| self.tracks = rows),
+            Position::Genres => library.genres().map(|rows| self.genres = rows),
+            _ => Ok(()),
+        };
+        if let Err(error) = loaded {
+            self.status = format!("velo: {error}");
+        }
     }
 
     /// Applies one key press. Pure with respect to the terminal and the
@@ -679,17 +831,10 @@ impl<'lib> App<'lib> {
                     }
                 }
             }
-            KeyCode::Enter => match &self.position {
-                Position::Files if !self.argv.is_empty() => Action::Play {
-                    from: self.selected,
-                },
-                Position::Tracks { .. } if !self.tracks.is_empty() => Action::Play {
-                    from: self.selected,
-                },
-                Position::Artists if !self.artists.is_empty() => Action::Descend,
-                Position::Albums { .. } if !self.albums.is_empty() => Action::Descend,
-                _ => Action::None,
-            },
+            KeyCode::Enter => self.enter(),
+            KeyCode::Char(key @ '1'..='4') if !matches!(self.position, Position::Files) => {
+                BrowseBy::from_key(key).map_or(Action::None, Action::Browse)
+            }
             KeyCode::Char(' ') => Action::TogglePause,
             KeyCode::Char('+' | '=') => Action::SetVolume(self.change_volume(5)),
             KeyCode::Char('-') => Action::SetVolume(self.change_volume(-5)),
@@ -753,6 +898,29 @@ impl<'lib> App<'lib> {
                 }
             }
             Action::SetLibrary => self.accept_library(),
+            Action::Browse(by) => self.browse_view(by),
+        }
+    }
+
+    /// What `Enter` asks for in the library view: play a track list from the
+    /// selection, or open the selected artist, album or genre.
+    fn enter(&self) -> Action {
+        let play = Action::Play {
+            from: self.selected,
+        };
+        match &self.position {
+            Position::Files if !self.argv.is_empty() => play,
+            Position::Tracks { .. } | Position::AllTracks | Position::Genre { .. }
+                if !self.tracks.is_empty() =>
+            {
+                play
+            }
+            Position::Artists if !self.artists.is_empty() => Action::Descend,
+            Position::Albums { .. } | Position::AllAlbums if !self.albums.is_empty() => {
+                Action::Descend
+            }
+            Position::Genres if !self.genres.is_empty() => Action::Descend,
+            _ => Action::None,
         }
     }
 
@@ -941,7 +1109,7 @@ impl<'lib> App<'lib> {
                     "enter plays the selection".to_owned(),
                 )
             },
-            |path| describe(path, self.tracks.iter().chain(&self.search_pool)),
+            |path| describe(path, self.known_tracks()),
         );
         let title = Line::from(vec![
             Span::styled("♫ ", Style::new().fg(ACCENT)),
@@ -1131,8 +1299,17 @@ impl<'lib> App<'lib> {
     }
 
     /// The line over the list: what it lists and how many of them, as in
-    /// `▸─ Tide › Harbor  [12 tracks]`.
+    /// `▸─ Queue  [12 tracks]`. Over the library the four views come first,
+    /// the active one lit, as in
+    /// `▸─ artists  albums  tracks  genres   Tide › Harbor  [12 tracks]`.
     fn draw_header(&self, frame: &mut Frame, area: Rect) {
+        if self.search.is_none()
+            && self.view == View::Library
+            && !matches!(self.position, Position::Files)
+        {
+            frame.render_widget(Paragraph::new(self.views_header(area.width)), area);
+            return;
+        }
         let (label, count) = if let Some(search) = &self.search {
             (
                 format!("Search /{}", search.query()),
@@ -1144,23 +1321,10 @@ impl<'lib> App<'lib> {
                 plural(self.queue.len(), "track", "tracks"),
             )
         } else {
-            match &self.position {
-                Position::Files => (
-                    "Files".to_owned(),
-                    plural(self.argv.len(), "track", "tracks"),
-                ),
-                Position::Artists => (
-                    "Artists".to_owned(),
-                    plural(self.artists.len(), "artist", "artists"),
-                ),
-                Position::Albums { artist } => {
-                    (artist.clone(), plural(self.albums.len(), "album", "albums"))
-                }
-                Position::Tracks { artist, album } => (
-                    format!("{artist} › {album}"),
-                    plural(self.tracks.len(), "track", "tracks"),
-                ),
-            }
+            (
+                "Files".to_owned(),
+                plural(self.argv.len(), "track", "tracks"),
+            )
         };
         let line = Line::from(vec![
             Span::styled("▸─ ", Style::new().fg(BORDER)),
@@ -1168,6 +1332,64 @@ impl<'lib> App<'lib> {
             Span::styled(format!("  [{count}]"), Style::new().fg(DIM)),
         ]);
         frame.render_widget(Paragraph::new(line), area);
+    }
+
+    /// The library's header line: the four views, the active one in the
+    /// accent and the others dim, then where inside the view the list
+    /// stands, then how many rows it has. On a row too narrow for all of
+    /// it the count goes first, then the place is cut at the edge; the views
+    /// stay.
+    fn views_header(&self, width: u16) -> Line<'static> {
+        let mut spans = vec![Span::styled("▸─ ", Style::new().fg(BORDER))];
+        for (index, by) in BrowseBy::ALL.into_iter().enumerate() {
+            if index > 0 {
+                spans.push(Span::raw("  "));
+            }
+            let style = if by == self.browse_by {
+                Style::new().fg(ACCENT).bold()
+            } else {
+                Style::new().fg(DIM)
+            };
+            spans.push(Span::styled(by.label(), style));
+        }
+        let place = match &self.position {
+            Position::Albums { artist } => artist.clone(),
+            Position::Tracks { artist, album } => format!("{artist} › {album}"),
+            Position::Genre { genre } => genre.clone(),
+            _ => String::new(),
+        };
+        if !place.is_empty() {
+            spans.push(Span::styled(
+                format!("   {place}"),
+                Style::new().fg(TEXT).bold(),
+            ));
+        }
+        let count = Span::styled(
+            format!(
+                "{}[{}]",
+                if place.is_empty() { "   " } else { "  " },
+                self.level_count()
+            ),
+            Style::new().fg(DIM),
+        );
+        if Line::from(spans.clone()).width() + count.width() <= usize::from(width) {
+            spans.push(count);
+        }
+        Line::from(spans)
+    }
+
+    /// How many rows the library level holds, in words: `12 albums`.
+    fn level_count(&self) -> String {
+        let (one, many) = match &self.position {
+            Position::Files
+            | Position::Tracks { .. }
+            | Position::AllTracks
+            | Position::Genre { .. } => ("track", "tracks"),
+            Position::Artists => ("artist", "artists"),
+            Position::Albums { .. } | Position::AllAlbums => ("album", "albums"),
+            Position::Genres => ("genre", "genres"),
+        };
+        plural(self.row_count(), one, many)
     }
 
     /// The list the keys act on — the search results, the queue or the
@@ -1206,72 +1428,76 @@ impl<'lib> App<'lib> {
     fn rows(&self, width: u16) -> Vec<ListItem<'static>> {
         let digits = digits(self.row_count());
         let playing = self.playing_row();
-        let row = |index: usize, name: &str, note: String, fact: String| {
-            ListItem::new(list_row(
-                ListRow {
-                    playing: playing == Some(index),
-                    number: index + 1,
-                    digits,
-                    name: name.to_owned(),
-                    note,
-                    fact,
-                },
-                width,
-            ))
+        (0..self.row_count())
+            .map(|index| {
+                let (name, note, fact) = self.row_text(index);
+                ListItem::new(list_row(
+                    ListRow {
+                        playing: playing == Some(index),
+                        number: index + 1,
+                        digits,
+                        name,
+                        note,
+                        fact,
+                    },
+                    width,
+                ))
+            })
+            .collect()
+    }
+
+    /// What row `index` of the current level says: its name, the note
+    /// dimmed after it and the fact against the right edge.
+    fn row_text(&self, index: usize) -> (String, String, String) {
+        let count = |count: u64, one: &str, many: &str| {
+            plural(usize::try_from(count).unwrap_or(usize::MAX), one, many)
         };
         match &self.position {
-            Position::Files => self
-                .argv
-                .iter()
-                .enumerate()
-                .map(|(index, path)| {
-                    let (name, folder) = describe(path, []);
-                    row(index, &name, folder, String::new())
-                })
-                .collect(),
-            Position::Artists => self
-                .artists
-                .iter()
-                .enumerate()
-                .map(|(index, entry)| {
-                    let counts = format!(
-                        "{} · {}",
-                        plural(
-                            usize::try_from(entry.albums).unwrap_or(usize::MAX),
-                            "album",
-                            "albums"
-                        ),
-                        plural(
-                            usize::try_from(entry.tracks).unwrap_or(usize::MAX),
-                            "track",
-                            "tracks"
-                        )
-                    );
-                    row(index, &entry.name, String::new(), counts)
-                })
-                .collect(),
-            Position::Albums { .. } => self
-                .albums
-                .iter()
-                .enumerate()
-                .map(|(index, entry)| {
-                    let year = entry.year.map_or_else(String::new, |year| year.to_string());
-                    row(index, &entry.title, String::new(), year)
-                })
-                .collect(),
-            Position::Tracks { .. } => self
-                .tracks
-                .iter()
-                .enumerate()
-                .map(|(index, entry)| {
-                    row(
-                        index,
-                        &entry.title,
-                        String::new(),
-                        Self::duration(entry.duration_ms),
-                    )
-                })
-                .collect(),
+            Position::Files => {
+                let (name, folder) = describe(&self.argv[index], []);
+                (name, folder, String::new())
+            }
+            Position::Artists => {
+                let entry = &self.artists[index];
+                let counts = format!(
+                    "{} · {}",
+                    count(entry.albums, "album", "albums"),
+                    count(entry.tracks, "track", "tracks")
+                );
+                (entry.name.clone(), String::new(), counts)
+            }
+            Position::Albums { .. } => {
+                let entry = &self.albums[index];
+                let year = entry.year.map_or_else(String::new, |year| year.to_string());
+                (entry.title.clone(), String::new(), year)
+            }
+            // Every album says whose it is beside its year.
+            Position::AllAlbums => {
+                let entry = &self.albums[index];
+                let fact = entry.year.map_or_else(
+                    || entry.artist.clone(),
+                    |year| format!("{} · {year}", entry.artist),
+                );
+                (entry.title.clone(), String::new(), fact)
+            }
+            Position::Tracks { .. } | Position::AllTracks | Position::Genre { .. } => {
+                let entry = &self.tracks[index];
+                // Rows from many albums say whose and which album they are.
+                let note = if matches!(self.position, Position::Tracks { .. }) {
+                    String::new()
+                } else {
+                    format!("{} · {}", entry.artist, entry.album)
+                };
+                (entry.title.clone(), note, Self::duration(entry.duration_ms))
+            }
+            Position::Genres => {
+                let entry = &self.genres[index];
+                (
+                    entry.name.clone(),
+                    String::new(),
+                    count(entry.tracks, "track", "tracks"),
+                )
+            }
         }
     }
 
@@ -1284,7 +1510,7 @@ impl<'lib> App<'lib> {
             .iter()
             .enumerate()
             .map(|(index, path)| {
-                let (name, note) = describe(path, self.tracks.iter().chain(&self.search_pool));
+                let (name, note) = describe(path, self.known_tracks());
                 ListItem::new(list_row(
                     ListRow {
                         playing: playing == Some(index),
@@ -1352,6 +1578,7 @@ impl<'lib> App<'lib> {
             frame.render_widget(Paragraph::new(status), status_row);
         }
 
+        let browsing = !matches!(self.position, Position::Files);
         let hints: &[(&str, &str)] = if self.search.is_some() {
             &[
                 ("type", "to search"),
@@ -1359,6 +1586,21 @@ impl<'lib> App<'lib> {
                 ("enter", "play"),
                 ("backspace", "delete"),
                 ("esc", "cancel"),
+            ]
+        } else if browsing {
+            &[
+                ("j/k", "move"),
+                ("enter", "play"),
+                ("space", "pause"),
+                ("←/→", "seek"),
+                ("/", "search"),
+                // Dropped before search on a narrow row: the header already
+                // names the views and the help says which key is which.
+                ("1-4", "views"),
+                ("n/p", "next/prev"),
+                ("tab", "queue"),
+                ("?", "help"),
+                ("q", "quit"),
             ]
         } else {
             &[
@@ -1376,6 +1618,16 @@ impl<'lib> App<'lib> {
             ]
         };
         frame.render_widget(Paragraph::new(hint_line(hints, hints_row.width)), hints_row);
+    }
+
+    /// Every library row the interface holds that may name a playing file:
+    /// the list on screen, the search pool and the rows the stream started
+    /// from.
+    fn known_tracks(&self) -> impl Iterator<Item = &TrackEntry> {
+        self.tracks
+            .iter()
+            .chain(&self.search_pool)
+            .chain(&self.played)
     }
 
     /// The path of the file whose samples are being produced, if any: the
@@ -1396,11 +1648,7 @@ impl<'lib> App<'lib> {
         // The row is found by the file that plays, so a shuffled queue reads
         // the length of the track that is actually playing.
         let from_row = self.playing_path().and_then(|path| {
-            let entry = self
-                .tracks
-                .iter()
-                .chain(&self.search_pool)
-                .find(|entry| entry.path == path)?;
+            let entry = self.known_tracks().find(|entry| entry.path == path)?;
             let millis = u64::try_from(entry.duration_ms).ok()?;
             (millis > 0).then(|| Duration::from_millis(millis))
         });
@@ -1426,6 +1674,7 @@ impl<'lib> App<'lib> {
             ("+ / -", "volume up / down"),
             ("?", "toggle this help"),
             ("tab", "library / queue"),
+            ("1 2 3 4", "artists, albums, tracks, genres"),
             ("a", "add the selection to the queue"),
             ("d", "remove from the queue"),
             ("J / K", "move it down / up"),
@@ -1515,8 +1764,11 @@ impl<'lib> App<'lib> {
         match &self.position {
             Position::Files => self.argv.len(),
             Position::Artists => self.artists.len(),
-            Position::Albums { .. } => self.albums.len(),
-            Position::Tracks { .. } => self.tracks.len(),
+            Position::Albums { .. } | Position::AllAlbums => self.albums.len(),
+            Position::Tracks { .. } | Position::AllTracks | Position::Genre { .. } => {
+                self.tracks.len()
+            }
+            Position::Genres => self.genres.len(),
         }
     }
 
@@ -1526,13 +1778,22 @@ impl<'lib> App<'lib> {
             Position::Files if self.argv.is_empty() => {
                 Some("no tracks — pass files on the command line")
             }
-            Position::Artists if self.artists.is_empty() && self.library_setup.is_some() => Some(
-                "no library set — add library = \"~/Music\" to ~/.config/velo/config.toml, or run velo --library <PATH>",
-            ),
-            Position::Artists if self.artists.is_empty() => Some("no artists in the index yet"),
-            Position::Albums { .. } if self.albums.is_empty() => Some("no albums for this artist"),
-            Position::Tracks { .. } if self.tracks.is_empty() => Some("no tracks in this album"),
-            _ => None,
+            _ if self.row_count() > 0 => None,
+            Position::Artists | Position::AllAlbums | Position::AllTracks | Position::Genres
+                if self.library_setup.is_some() =>
+            {
+                Some(
+                    "no library set — add library = \"~/Music\" to ~/.config/velo/config.toml, or run velo --library <PATH>",
+                )
+            }
+            Position::Artists => Some("no artists in the index yet"),
+            Position::AllAlbums => Some("no albums in the index yet"),
+            Position::AllTracks => Some("no tracks in the index yet"),
+            Position::Genres => Some("no genres in the index yet"),
+            Position::Albums { .. } => Some("no albums for this artist"),
+            Position::Tracks { .. } => Some("no tracks in this album"),
+            Position::Genre { .. } => Some("no tracks in this genre"),
+            Position::Files => None,
         }
     }
 
@@ -1544,8 +1805,13 @@ impl<'lib> App<'lib> {
         let path = self.playing_path()?;
         match &self.position {
             Position::Files => self.argv.iter().position(|row| row == path),
-            Position::Tracks { .. } => self.tracks.iter().position(|row| row.path == path),
-            Position::Artists | Position::Albums { .. } => None,
+            Position::Tracks { .. } | Position::AllTracks | Position::Genre { .. } => {
+                self.tracks.iter().position(|row| row.path == path)
+            }
+            Position::Artists
+            | Position::Albums { .. }
+            | Position::AllAlbums
+            | Position::Genres => None,
         }
     }
 
@@ -1824,7 +2090,7 @@ impl<'lib> App<'lib> {
     /// playing. A track appends itself; an album appends its tracks.
     fn append_selection(&mut self) {
         let paths: Vec<PathBuf> = match (&self.position, self.view) {
-            (Position::Tracks { .. }, _) => self
+            (Position::Tracks { .. } | Position::AllTracks | Position::Genre { .. }, _) => self
                 .tracks
                 .get(self.selected)
                 .map(|entry| vec![entry.path.clone()])
@@ -1843,6 +2109,29 @@ impl<'lib> App<'lib> {
                     return;
                 };
                 match library.tracks_of(artist, &album.title) {
+                    Ok(tracks) => tracks.into_iter().map(|entry| entry.path).collect(),
+                    Err(error) => {
+                        self.status = format!("velo: {error}");
+                        return;
+                    }
+                }
+            }
+            (Position::AllAlbums | Position::Genres, _) => {
+                let Some(library) = self.library else {
+                    return;
+                };
+                let found = if let Position::AllAlbums = self.position {
+                    let Some(album) = self.albums.get(self.selected) else {
+                        return;
+                    };
+                    library.tracks_of(&album.artist, &album.title)
+                } else {
+                    let Some(genre) = self.genres.get(self.selected) else {
+                        return;
+                    };
+                    library.tracks_of_genre(&genre.name)
+                };
+                match found {
                     Ok(tracks) => tracks.into_iter().map(|entry| entry.path).collect(),
                     Err(error) => {
                         self.status = format!("velo: {error}");
@@ -1915,9 +2204,40 @@ impl<'lib> App<'lib> {
                     Err(error) => self.status = format!("velo: {error}"),
                 }
             }
-            // `Files` does not descend; `Tracks` is the deepest level and
-            // answers with `Action::Play` instead.
-            Position::Files | Position::Tracks { .. } => {}
+            Position::AllAlbums => {
+                let Some(entry) = self.albums.get(self.selected) else {
+                    return;
+                };
+                let (artist, album) = (entry.artist.clone(), entry.title.clone());
+                match library.tracks_of(&artist, &album) {
+                    Ok(tracks) => {
+                        self.position = Position::Tracks { artist, album };
+                        self.tracks = tracks;
+                        self.selected = 0;
+                    }
+                    Err(error) => self.status = format!("velo: {error}"),
+                }
+            }
+            Position::Genres => {
+                let Some(entry) = self.genres.get(self.selected) else {
+                    return;
+                };
+                let genre = entry.name.clone();
+                match library.tracks_of_genre(&genre) {
+                    Ok(tracks) => {
+                        self.position = Position::Genre { genre };
+                        self.tracks = tracks;
+                        self.selected = 0;
+                    }
+                    Err(error) => self.status = format!("velo: {error}"),
+                }
+            }
+            // `Files` does not descend; track lists are the deepest levels
+            // and answer with `Action::Play` instead.
+            Position::Files
+            | Position::Tracks { .. }
+            | Position::AllTracks
+            | Position::Genre { .. } => {}
         }
     }
 
@@ -1925,11 +2245,20 @@ impl<'lib> App<'lib> {
     /// the level was entered — no query runs on ascent.
     fn ascend(&mut self) {
         match &self.position {
-            Position::Files | Position::Artists => {
-                // Already at the top: ascending stays at the artists.
+            Position::Files
+            | Position::Artists
+            | Position::AllAlbums
+            | Position::AllTracks
+            | Position::Genres => {
+                // Already at the top of the view: ascending stays there.
             }
             Position::Albums { .. } => {
                 self.position = Position::Artists;
+                self.selected = 0;
+            }
+            // An album opened from every album goes back to every album.
+            Position::Tracks { .. } if self.browse_by == BrowseBy::Albums => {
+                self.position = Position::AllAlbums;
                 self.selected = 0;
             }
             Position::Tracks { artist, .. } => {
@@ -1938,27 +2267,30 @@ impl<'lib> App<'lib> {
                 };
                 self.selected = 0;
             }
+            Position::Genre { .. } => {
+                self.position = Position::Genres;
+                self.selected = 0;
+            }
         }
     }
 
-    /// Starts a gapless stream. On the tracks level this queues the whole
-    /// album from the selection onwards; a track that cannot play is reported
-    /// in the status line instead of exiting.
+    /// Starts a gapless stream of [`App::playlist_from`]: on a track list
+    /// that is the rest of the album, of the genre or of every track, from the
+    /// selection onwards; a track that cannot play is reported in the status
+    /// line instead of exiting.
     fn play_from(&mut self, from: usize) {
-        let started = match &self.position {
-            Position::Files if from < self.argv.len() => Some((self.argv.clone(), Playback::Files)),
-            Position::Tracks { .. } if from < self.tracks.len() => Some((
-                self.tracks[from..]
-                    .iter()
-                    .map(|entry| entry.path.clone())
-                    .collect(),
-                Playback::Album,
-            )),
-            _ => None,
-        };
-        let Some((paths, playback)) = started else {
+        let paths = self.playlist_from(from);
+        if paths.is_empty() {
             return;
+        }
+        let playback = match self.position {
+            Position::Files => Playback::Files,
+            Position::Tracks { .. } => Playback::Album,
+            _ => Playback::List,
         };
+        if !matches!(self.position, Position::Files) {
+            self.played = self.tracks[from..].to_vec();
+        }
         self.start_stream(paths, playback);
     }
 

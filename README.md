@@ -1,10 +1,10 @@
 # velo
 
 A single-binary music player for your terminal: point it at your music folder,
-and it indexes your library from your files' own tags, browses by artist and
-album, plays gaplessly, and renders cover art — all from one Rust binary, with
-no daemon and no server. A fuzzy search and an editable queue make it a player
-you actually drive, not a playlist viewer.
+and it indexes your library from your files' own tags, browses by artist,
+album, track or genre, plays gaplessly, and renders cover art — all from one
+Rust binary, with no daemon and no server. A fuzzy search and an editable
+queue make it a player you actually drive, not a playlist viewer.
 
 ```
 ╭──────────────────────────────────────────────────────────────────────────────╮
@@ -16,7 +16,7 @@ you actually drive, not a playlist viewer.
 │ ──────────────────────────────────────────────────────────────────────────── │
 │  ◂◂   ▶ play   ▸▸    shuffle  repeat off     RG track   VOL ━━━━━━━━━━━● 100 │
 │                                                                              │
-│ ▸─ Artists  [3 artists]                                                      │
+│ ▸─ artists  albums  tracks  genres   [3 artists]                             │
 │ ▸ 1. Lo-Fi Scientists                                    2 albums · 3 tracks │
 │ ▸ 2. Nujabes                                               1 album · 1 track │
 │ ▸ 3. Poldoore                                             1 album · 2 tracks │
@@ -44,8 +44,9 @@ Every key below is what the code does today.
 |:--|:--|
 | `j` / `↓`, `k` / `↑` | Move down / up |
 | `g` / `G` | First / last row |
-| `enter` | Descend into an artist or album; play from the selected track |
+| `enter` | Open an artist, album or genre; play from the selected track onwards through the list it is in |
 | `esc` / `backspace` | Back one level (browse), close the help overlay |
+| `1` `2` `3` `4` | Library view: artists (artist → album → track), every album, every track, genres |
 | `/` | Fuzzy search the whole library (`lofi` finds `Lo-Fi Scientists`) |
 | `space` | Pause / resume |
 | `←` / `→` (or `,` / `.`) | Seek 5 s back / forward |
@@ -54,7 +55,7 @@ Every key below is what the code does today.
 | `r` | Repeat: off → all (the queue again) → one (the track again) |
 | `+` / `-` | Volume up / down, 5% at a time |
 | `tab` | Switch between the library browser and the queue |
-| `a` | Append the selection to the queue — a track, or every track of an album |
+| `a` | Append the selection to the queue — a track, or every track of an album or genre |
 | `d` | Remove the selected entry from the queue (queue view) |
 | `J` / `K` | Move the selected entry down / up (queue view) |
 | `enter` (queue view) | Play the queue from the selected entry |
@@ -100,7 +101,9 @@ velo --library /path/to/your/music           # open the browser
 ```
 
 Then, inside the interface: `enter` into an artist, into an album, `enter`
-again to play; `/` to search; `←`/`→` to seek; `tab`, `a` to queue something
+again to play — or `2` for every album, `3` for every track, `4` for genres
+(read from the files' genre tags; `Dub / Trip-Hop` counts in both); `/` to
+search; `←`/`→` to seek; `tab`, `a` to queue something
 else without stopping playback. Files given on the command line play as one
 gapless stream instead:
 

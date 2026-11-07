@@ -30,6 +30,8 @@ pub struct TrackRecord {
     pub channels: Option<i64>,
     pub format: String,
     pub has_cover: bool,
+    /// The genre tag as the file stores it, e.g. `Dub / Trip-Hop`.
+    pub genre: Option<String>,
     pub mtime: i64,
     pub size: i64,
 }
@@ -128,6 +130,10 @@ fn read_track(root: &Path, path: &Path, metadata: &Metadata, extension: &str) ->
         channels: tags.as_ref().and_then(|t| t.channels),
         format: extension.to_ascii_lowercase(),
         has_cover: tags.as_ref().is_some_and(|t| t.has_cover),
+        genre: tags
+            .as_ref()
+            .and_then(|t| t.genre.clone())
+            .filter(|g| !g.trim().is_empty()),
         mtime: mtime_nanos(metadata),
         size: metadata_len(metadata),
     }
@@ -145,6 +151,7 @@ struct TagMeta {
     sample_rate: Option<i64>,
     channels: Option<i64>,
     has_cover: bool,
+    genre: Option<String>,
 }
 
 /// Reads tags with lofty. A file that cannot be parsed is not an error: the
@@ -186,6 +193,7 @@ fn read_tags(path: &Path) -> Option<TagMeta> {
         sample_rate: properties.sample_rate().map(i64::from),
         channels: properties.channels().map(i64::from),
         has_cover: tag.is_some_and(|t| !t.pictures().is_empty()),
+        genre: text(ItemKey::Genre),
     })
 }
 

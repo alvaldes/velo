@@ -372,3 +372,191 @@ fn all_tracks_lists_every_indexed_track() {
         ]
     );
 }
+
+// genres and the whole-library views (S3) ---------------------------------
+
+/// Writes a WAV tagged with an artist, an album, a title and, when given, a
+/// genre string exactly as a tagger would store it.
+fn tagged_wav(temp: &TempLibrary, artist: &str, album: &str, title: &str, genre: Option<&str>) {
+    let path = temp.write_wav(&format!("{artist}/{album}/{title}.wav"));
+    tag_file(&path, |tag| {
+        tag.set_artist(artist.to_owned());
+        tag.set_album(album.to_owned());
+        tag.set_title(title.to_owned());
+        if let Some(genre) = genre {
+            tag.set_genre(genre.to_owned());
+        }
+    });
+}
+
+#[test]
+fn a_multi_valued_genre_puts_the_track_in_each_genre_and_untagged_tracks_go_last() {
+    let temp = TempLibrary::new("genres");
+    tagged_wav(
+        &temp,
+        "Aerial",
+        "Haze",
+        "Drift",
+        Some("Dub / Trip-Hop / Lo-Fi"),
+    );
+    tagged_wav(&temp, "Aerial", "Haze", "Swing", Some("jazz"));
+    tagged_wav(
+        &temp,
+        "Boulder",
+        "Stone",
+        "Loop",
+        Some("Lo-Fi; Jazz,ambient"),
+    );
+    tagged_wav(&temp, "Boulder", "Stone", "Bare", None);
+    tagged_wav(&temp, "Boulder", "Stone", "Twice", Some("Jazz;jazz"));
+    temp.library.index(&temp.root).unwrap();
+
+    let genres: Vec<(String, u64)> = temp
+        .library
+        .genres()
+        .unwrap()
+        .into_iter()
+        .map(|genre| (genre.name, genre.tracks))
+        .collect();
+    // Case-insensitive order and grouping; the first spelling met names the
+    // genre; a track counts once per genre; `(no genre)` comes last.
+    assert_eq!(
+        genres,
+        [
+            ("ambient".to_owned(), 1),
+            ("Dub".to_owned(), 1),
+            ("jazz".to_owned(), 3),
+            ("Lo-Fi".to_owned(), 2),
+            ("Trip-Hop".to_owned(), 1),
+            ("(no genre)".to_owned(), 1),
+        ]
+    );
+
+    let titles = |genre: &str| -> Vec<String> {
+        temp.library
+            .tracks_of_genre(genre)
+            .unwrap()
+            .into_iter()
+            .map(|track| track.title)
+            .collect()
+    };
+    assert_eq!(titles("Lo-Fi"), ["Drift", "Loop"]);
+    assert_eq!(titles("JAZZ"), ["Swing", "Loop", "Twice"]);
+    assert_eq!(titles("(no genre)"), ["Bare"]);
+    assert_eq!(titles("Polka"), [] as [String; 0]);
+}
+
+#[test]
+fn every_album_is_listed_once_with_its_artist_year_and_track_count() {
+    let temp = TempLibrary::new("all-albums");
+    temp.write_wav("Tide/2019 - Harbor/01 - Dawn.wav");
+    temp.write_wav("Tide/2019 - Harbor/02 - Tide.wav");
+    temp.write_wav("Baltazar/2001 - Views/01 - Rising.wav");
+    temp.write_wav("Aerial/Anthems/01 - Up.wav");
+    temp.library.index(&temp.root).unwrap();
+
+    let albums: Vec<(String, String, Option<i64>, u64)> = temp
+        .library
+        .all_albums()
+        .unwrap()
+        .into_iter()
+        .map(|album| (album.title, album.artist, album.year, album.tracks))
+        .collect();
+    assert_eq!(
+        albums,
+        [
+            ("Anthems".to_owned(), "Aerial".to_owned(), None, 1),
+            ("Harbor".to_owned(), "Tide".to_owned(), Some(2019), 2),
+            ("Views".to_owned(), "Baltazar".to_owned(), Some(2001), 1),
+        ]
+    );
+    // The artist's own albums carry the artist too.
+    assert_eq!(temp.library.albums_of("Tide").unwrap()[0].artist, "Tide");
+}
+
+/// The `tracks` table as velo 0.5.0 created it: no genre column, no schema
+/// version.
+const OLD_SCHEMA: &str = "
+CREATE TABLE tracks (
+    id           INTEGER PRIMARY KEY,
+    path         TEXT NOT NULL UNIQUE,
+    title        TEXT NOT NULL COLLATE NOCASE,
+    artist       TEXT NOT NULL COLLATE NOCASE,
+    album        TEXT NOT NULL COLLATE NOCASE,
+    album_artist TEXT COLLATE NOCASE,
+    track_no     INTEGER,
+    disc_no      INTEGER,
+    year         INTEGER,
+    duration_ms  INTEGER NOT NULL DEFAULT 0,
+    sample_rate  INTEGER,
+    channels     INTEGER,
+    format       TEXT NOT NULL,
+    has_cover    INTEGER NOT NULL DEFAULT 0,
+    mtime        INTEGER NOT NULL,
+    size         INTEGER NOT NULL
+);
+CREATE INDEX idx_tracks_artist_album ON tracks(artist, album);
+CREATE INDEX idx_tracks_album ON tracks(album);
+";
+
+#[test]
+fn an_index_built_without_genres_keeps_its_rows_and_the_next_scan_fills_them_in() {
+    let root = std::env::temp_dir().join(format!("velo-library-migrate-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let database = root.join("index.db");
+
+    // A tagged file, indexed by the old schema with its current mtime and
+    // size, so the incremental scan would otherwise never read it again.
+    let scratch = TempLibrary {
+        root: root.join("music"),
+        library: Library::open_at(&root.join("scratch.db")).unwrap(),
+    };
+    tagged_wav(&scratch, "Tide", "Harbor", "Dawn", Some("Lo-Fi"));
+    let file = scratch.root.join("Tide/Harbor/Dawn.wav");
+    let metadata = fs::metadata(&file).unwrap();
+    let mtime = i64::try_from(
+        metadata
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+    )
+    .unwrap();
+    let size = i64::try_from(metadata.len()).unwrap();
+    {
+        let old = rusqlite::Connection::open(&database).unwrap();
+        old.execute_batch(OLD_SCHEMA).unwrap();
+        old.execute(
+            "INSERT INTO tracks (path, title, artist, album, format, mtime, size)
+             VALUES (?1, 'Dawn', 'Tide', 'Harbor', 'wav', ?2, ?3)",
+            rusqlite::params![file.to_string_lossy(), mtime, size],
+        )
+        .unwrap();
+    }
+
+    // Opening it with this velo never fails and never drops a row.
+    let library = Library::open_at(&database).unwrap();
+    assert_eq!(library.counts().unwrap().tracks, 1, "the old row survives");
+    assert_eq!(library.all_tracks().unwrap()[0].title, "Dawn");
+
+    // The next index re-reads the file even though it did not change…
+    let report = library.index(&scratch.root).unwrap();
+    assert_eq!((report.added, report.updated, report.removed), (0, 1, 0));
+    let genres: Vec<String> = library
+        .genres()
+        .unwrap()
+        .into_iter()
+        .map(|genre| genre.name)
+        .collect();
+    assert_eq!(genres, ["Lo-Fi"]);
+
+    // …and only that once: reopening does not force another full rescan.
+    drop(library);
+    let library = Library::open_at(&database).unwrap();
+    let again = library.index(&scratch.root).unwrap();
+    assert_eq!(again.unchanged, 1);
+    drop(scratch);
+    let _ = fs::remove_dir_all(&root);
+}

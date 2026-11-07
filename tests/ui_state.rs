@@ -10,7 +10,7 @@ use lofty::tag::{Tag, TagType};
 use velo::audio::output::TrackFailure;
 use velo::library::Library;
 use velo::ui::crossterm::event::{KeyCode, KeyEvent};
-use velo::ui::{Action, App, Level, View};
+use velo::ui::{Action, App, BrowseBy, Level, View};
 
 fn app_with_three_tracks() -> App<'static> {
     App::new(vec![
@@ -979,4 +979,273 @@ fn esc_closes_the_prompt_without_saving_anything() {
     // Back in the browser, `q` quits again.
     assert_eq!(app.on_key(key(KeyCode::Char('q'))), Action::Quit);
     let _ = fs::remove_dir_all(&dir);
+}
+
+// ---- the library views (S3) -----------------------------------------------
+
+/// Two artists, three albums, five tracks; two carry genres, one several.
+fn library_for_views(name: &str) -> TempLibrary {
+    let temp = TempLibrary::new(name);
+    let tag = |relative: &str, genre: Option<&str>| {
+        let path = temp.write_wav(relative);
+        if let Some(genre) = genre {
+            tag_file(&path, |tag| tag.set_genre(genre.to_owned()));
+        }
+    };
+    tag("Tide/2019 - Harbor/01 - Dawn.wav", Some("Lo-Fi / Jazz"));
+    tag("Tide/2019 - Harbor/02 - Noon.wav", None);
+    tag("Tide/2021 - Lantern/01 - Far.wav", Some("jazz"));
+    tag("Baltazar/2001 - Views/01 - Rising.wav", None);
+    tag("Baltazar/2001 - Views/02 - Setting.wav", None);
+    temp.index();
+    temp
+}
+
+/// Presses a key and applies what it asks for, as the event loop does —
+/// except a play, which would open a sound device; that one is returned.
+fn act(app: &mut App<'_>, code: KeyCode) -> Action {
+    let action = app.on_key(key(code));
+    if !matches!(action, Action::Play { .. } | Action::PlayQueue { .. }) {
+        app.apply(action);
+    }
+    action
+}
+
+fn file_names(paths: &[PathBuf]) -> Vec<String> {
+    paths
+        .iter()
+        .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+        .collect()
+}
+
+#[test]
+fn the_number_keys_switch_between_the_four_library_views() {
+    let temp = library_for_views("views-switch");
+    let mut app = App::browse(Some(&temp.library));
+    assert_eq!(app.browse_by(), BrowseBy::Artists);
+
+    assert_eq!(
+        app.on_key(key(KeyCode::Char('2'))),
+        Action::Browse(BrowseBy::Albums)
+    );
+    for (code, by, level) in [
+        ('2', BrowseBy::Albums, Level::AllAlbums),
+        ('3', BrowseBy::Tracks, Level::AllTracks),
+        ('4', BrowseBy::Genres, Level::Genres),
+        ('1', BrowseBy::Artists, Level::Artists),
+    ] {
+        act(&mut app, KeyCode::Char(code));
+        assert_eq!(app.browse_by(), by);
+        assert_eq!(app.level(), Some(level));
+        assert_eq!(app.selected(), 0, "a view opens at its first row");
+    }
+
+    // From the queue view, a number brings the library back in that view.
+    act(&mut app, KeyCode::Tab);
+    act(&mut app, KeyCode::Char('3'));
+    assert_eq!(app.view(), View::Library);
+    assert_eq!(app.level(), Some(Level::AllTracks));
+}
+
+#[test]
+fn the_albums_view_lists_every_album_and_enter_opens_its_tracks() {
+    let temp = library_for_views("views-albums");
+    let mut app = App::browse(Some(&temp.library));
+    act(&mut app, KeyCode::Char('2'));
+
+    let albums: Vec<(&str, &str, Option<i64>)> = app
+        .albums()
+        .iter()
+        .map(|album| (album.title.as_str(), album.artist.as_str(), album.year))
+        .collect();
+    assert_eq!(
+        albums,
+        [
+            ("Harbor", "Tide", Some(2019)),
+            ("Lantern", "Tide", Some(2021)),
+            ("Views", "Baltazar", Some(2001)),
+        ]
+    );
+
+    act(&mut app, KeyCode::Char('G')); // Views
+    assert_eq!(act(&mut app, KeyCode::Enter), Action::Descend);
+    assert_eq!(
+        app.level(),
+        Some(Level::Tracks {
+            artist: "Baltazar".to_owned(),
+            album: "Views".to_owned()
+        })
+    );
+    act(&mut app, KeyCode::Char('j'));
+    assert_eq!(act(&mut app, KeyCode::Enter), Action::Play { from: 1 });
+    assert_eq!(file_names(&app.playlist_from(1)), ["02 - Setting.wav"]);
+    assert_eq!(
+        file_names(&app.playlist_from(0)),
+        ["01 - Rising.wav", "02 - Setting.wav"]
+    );
+
+    // Back one level lands on every album again, not on one artist's.
+    assert_eq!(act(&mut app, KeyCode::Esc), Action::Ascend);
+    assert_eq!(app.level(), Some(Level::AllAlbums));
+    assert_eq!(app.albums().len(), 3);
+}
+
+#[test]
+fn the_tracks_view_lists_every_track_and_enter_plays_from_it_through_the_list() {
+    let temp = library_for_views("views-tracks");
+    let mut app = App::browse(Some(&temp.library));
+    act(&mut app, KeyCode::Char('3'));
+
+    let titles: Vec<&str> = app.tracks().iter().map(|t| t.title.as_str()).collect();
+    assert_eq!(titles, ["Rising", "Setting", "Dawn", "Noon", "Far"]);
+
+    act(&mut app, KeyCode::Char('j'));
+    assert_eq!(act(&mut app, KeyCode::Enter), Action::Play { from: 1 });
+    assert_eq!(
+        file_names(&app.playlist_from(1)),
+        [
+            "02 - Setting.wav",
+            "01 - Dawn.wav",
+            "02 - Noon.wav",
+            "01 - Far.wav"
+        ],
+        "the stream runs on through the whole list, past the album"
+    );
+
+    // The top of a view absorbs `Esc`.
+    act(&mut app, KeyCode::Esc);
+    assert_eq!(app.level(), Some(Level::AllTracks));
+}
+
+#[test]
+fn the_genres_view_lists_genres_and_enter_opens_then_plays_one() {
+    let temp = library_for_views("views-genres");
+    let mut app = App::browse(Some(&temp.library));
+    act(&mut app, KeyCode::Char('4'));
+
+    let genres: Vec<(&str, u64)> = app
+        .genres()
+        .iter()
+        .map(|genre| (genre.name.as_str(), genre.tracks))
+        .collect();
+    assert_eq!(genres, [("Jazz", 2), ("Lo-Fi", 1), ("(no genre)", 3)]);
+
+    assert_eq!(act(&mut app, KeyCode::Enter), Action::Descend);
+    assert_eq!(
+        app.level(),
+        Some(Level::Genre {
+            genre: "Jazz".to_owned()
+        })
+    );
+    let titles: Vec<&str> = app.tracks().iter().map(|t| t.title.as_str()).collect();
+    assert_eq!(titles, ["Dawn", "Far"]);
+    assert_eq!(act(&mut app, KeyCode::Enter), Action::Play { from: 0 });
+    assert_eq!(
+        file_names(&app.playlist_from(0)),
+        ["01 - Dawn.wav", "01 - Far.wav"],
+        "the genre's list, not the album, follows the track"
+    );
+
+    assert_eq!(act(&mut app, KeyCode::Esc), Action::Ascend);
+    assert_eq!(app.level(), Some(Level::Genres));
+    act(&mut app, KeyCode::Char('G')); // (no genre)
+    act(&mut app, KeyCode::Enter);
+    let titles: Vec<&str> = app.tracks().iter().map(|t| t.title.as_str()).collect();
+    assert_eq!(titles, ["Rising", "Setting", "Noon"]);
+}
+
+#[test]
+fn a_appends_from_every_view() {
+    let temp = library_for_views("views-append");
+    let mut app = App::browse(Some(&temp.library));
+
+    act(&mut app, KeyCode::Char('2')); // Harbor first
+    act(&mut app, KeyCode::Char('a'));
+    assert_eq!(
+        file_names(app.queue()),
+        ["01 - Dawn.wav", "02 - Noon.wav"],
+        "an album appends its tracks"
+    );
+
+    act(&mut app, KeyCode::Char('4')); // Jazz first
+    act(&mut app, KeyCode::Char('a'));
+    assert_eq!(app.queue().len(), 4, "a genre appends its tracks");
+
+    act(&mut app, KeyCode::Char('3')); // Rising first
+    act(&mut app, KeyCode::Char('a'));
+    assert_eq!(
+        app.queue().last().unwrap().file_name().unwrap(),
+        "01 - Rising.wav"
+    );
+}
+
+#[test]
+fn the_artists_view_still_drills_down_artist_album_track_as_before() {
+    let temp = library_for_views("views-artists");
+    let mut app = App::browse(Some(&temp.library));
+    // A trip through another view changes nothing about the artists.
+    act(&mut app, KeyCode::Char('4'));
+    act(&mut app, KeyCode::Char('1'));
+
+    let artists: Vec<&str> = app.artists().iter().map(|a| a.name.as_str()).collect();
+    assert_eq!(artists, ["Baltazar", "Tide"]);
+    act(&mut app, KeyCode::Char('j')); // Tide
+    assert_eq!(act(&mut app, KeyCode::Enter), Action::Descend);
+    assert_eq!(
+        app.level(),
+        Some(Level::Albums {
+            artist: "Tide".to_owned()
+        })
+    );
+    assert_eq!(app.selected(), 0);
+    assert_eq!(act(&mut app, KeyCode::Enter), Action::Descend); // Harbor
+    assert_eq!(act(&mut app, KeyCode::Enter), Action::Play { from: 0 });
+    assert_eq!(
+        file_names(&app.playlist_from(0)),
+        ["01 - Dawn.wav", "02 - Noon.wav"],
+        "the album, and only the album, from the selection"
+    );
+    assert_eq!(act(&mut app, KeyCode::Esc), Action::Ascend);
+    assert_eq!(
+        app.level(),
+        Some(Level::Albums {
+            artist: "Tide".to_owned()
+        })
+    );
+    assert_eq!(
+        app.selected(),
+        0,
+        "ascending selects the first row, as before"
+    );
+    act(&mut app, KeyCode::Esc);
+    assert_eq!(app.level(), Some(Level::Artists));
+}
+
+#[test]
+fn number_keys_type_into_an_open_search_and_the_library_prompt() {
+    let temp = library_for_views("views-search");
+    let mut app = App::browse(Some(&temp.library));
+    act(&mut app, KeyCode::Char('/'));
+    for code in ['1', '2', '3', '4'] {
+        assert_eq!(act(&mut app, KeyCode::Char(code)), Action::None);
+    }
+    assert_eq!(app.search_query(), "1234");
+    assert_eq!(app.browse_by(), BrowseBy::Artists, "the view did not move");
+
+    let mut app = App::browse(None);
+    app.ask_for_library(None);
+    for code in ['2', '4'] {
+        assert_eq!(act(&mut app, KeyCode::Char(code)), Action::None);
+    }
+    assert_eq!(app.library_prompt_input(), "24");
+    assert_eq!(app.browse_by(), BrowseBy::Artists);
+}
+
+#[test]
+fn number_keys_do_nothing_over_files_given_on_the_command_line() {
+    let mut app = app_with_three_tracks();
+    for code in ['1', '2', '3', '4'] {
+        assert_eq!(app.on_key(key(KeyCode::Char(code))), Action::None);
+    }
+    assert_eq!(app.level(), None);
 }

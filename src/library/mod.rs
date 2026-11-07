@@ -45,13 +45,28 @@ pub struct ArtistEntry {
     pub albums: u64,
 }
 
-/// One album of one artist, for the album browser.
+/// One album of one artist, for the album browsers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlbumEntry {
+    pub artist: String,
     pub title: String,
     pub year: Option<i64>,
     pub tracks: u64,
 }
+
+/// One genre and how many tracks carry it, for the genre browser.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenreEntry {
+    pub name: String,
+    pub tracks: u64,
+}
+
+/// The genre that holds every track whose file names none, so no track is
+/// missing from the genre browser.
+pub const NO_GENRE: &str = "(no genre)";
+
+/// The schema this build writes: 1 added the `genre` column.
+const SCHEMA_VERSION: i64 = 1;
 
 /// One track of one album, for the track browser.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,6 +147,7 @@ impl Library {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.execute_batch(SCHEMA)?;
+        migrate(&conn)?;
         Ok(Self { conn })
     }
 
@@ -180,6 +196,7 @@ impl Library {
                     i64::from(record.has_cover),
                     record.mtime,
                     record.size,
+                    record.genre,
                 ])?;
             }
         }
@@ -268,6 +285,7 @@ impl Library {
         let rows = statement.query_map([artist], |row| {
             let tracks: i64 = row.get(2)?;
             Ok(AlbumEntry {
+                artist: artist.to_owned(),
                 title: row.get(0)?,
                 year: row.get(1)?,
                 tracks: sign_to_count(tracks),
@@ -311,24 +329,159 @@ impl Library {
     ///
     /// Fails when the query cannot run.
     pub fn all_tracks(&self) -> Result<Vec<TrackEntry>, LibraryError> {
+        Ok(self
+            .tracks_with_genre()?
+            .into_iter()
+            .map(|(track, _)| track)
+            .collect())
+    }
+
+    /// Every album of every artist, one row each, ordered by album title and
+    /// then artist (both case-insensitively).
+    ///
+    /// # Errors
+    ///
+    /// Fails when the query cannot run.
+    pub fn all_albums(&self) -> Result<Vec<AlbumEntry>, LibraryError> {
         let mut statement = self.conn.prepare(
-            "SELECT title, track_no, disc_no, duration_ms, path, artist, album
-             FROM tracks
-             ORDER BY artist, album, COALESCE(disc_no, 0), COALESCE(track_no, 1000000), title",
+            "SELECT artist, album, MAX(year) AS year, COUNT(*) AS tracks
+             FROM tracks GROUP BY artist, album ORDER BY album, artist",
         )?;
         let rows = statement.query_map([], |row| {
-            Ok(TrackEntry {
-                title: row.get(0)?,
-                track_no: row.get(1)?,
-                disc_no: row.get(2)?,
-                duration_ms: row.get(3)?,
-                path: PathBuf::from(row.get::<_, String>(4)?),
-                artist: row.get(5)?,
-                album: row.get(6)?,
+            let tracks: i64 = row.get(3)?;
+            Ok(AlbumEntry {
+                artist: row.get(0)?,
+                title: row.get(1)?,
+                year: row.get(2)?,
+                tracks: sign_to_count(tracks),
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
+
+    /// Every genre with how many tracks carry it. A tag holding several
+    /// (`Dub / Trip-Hop`, `Lo-Fi; Jazz`) counts the track in each; spellings
+    /// that differ only in case are one genre, named as first met in
+    /// [`Library::all_tracks`] order. Genres are ordered case-insensitively and
+    /// [`NO_GENRE`], holding the tracks without one, comes last.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the query cannot run.
+    pub fn genres(&self) -> Result<Vec<GenreEntry>, LibraryError> {
+        let mut genres: Vec<(String, GenreEntry)> = Vec::new();
+        let mut untagged = 0_u64;
+        for (_, genre) in self.tracks_with_genre()? {
+            let pieces = split_genres(genre.as_deref().unwrap_or_default());
+            if pieces.is_empty() {
+                untagged += 1;
+            }
+            for (key, name) in pieces {
+                match genres.iter_mut().find(|(known, _)| *known == key) {
+                    Some((_, entry)) => entry.tracks += 1,
+                    None => genres.push((key, GenreEntry { name, tracks: 1 })),
+                }
+            }
+        }
+        genres.sort_by(|(left, _), (right, _)| left.cmp(right));
+        let mut genres: Vec<GenreEntry> = genres.into_iter().map(|(_, entry)| entry).collect();
+        if untagged > 0 {
+            genres.push(GenreEntry {
+                name: NO_GENRE.to_owned(),
+                tracks: untagged,
+            });
+        }
+        Ok(genres)
+    }
+
+    /// The tracks of one genre (matched case-insensitively), in
+    /// [`Library::all_tracks`] order; [`NO_GENRE`] lists the tracks without
+    /// one.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the query cannot run.
+    pub fn tracks_of_genre(&self, genre: &str) -> Result<Vec<TrackEntry>, LibraryError> {
+        let wanted = genre.trim().to_lowercase();
+        let untagged = genre == NO_GENRE;
+        Ok(self
+            .tracks_with_genre()?
+            .into_iter()
+            .filter(|(_, tag)| {
+                let pieces = split_genres(tag.as_deref().unwrap_or_default());
+                if untagged {
+                    pieces.is_empty()
+                } else {
+                    pieces.iter().any(|(key, _)| *key == wanted)
+                }
+            })
+            .map(|(track, _)| track)
+            .collect())
+    }
+
+    /// Every track with its raw genre tag, in [`Library::all_tracks`] order.
+    fn tracks_with_genre(&self) -> Result<Vec<(TrackEntry, Option<String>)>, LibraryError> {
+        let mut statement = self.conn.prepare(
+            "SELECT title, track_no, disc_no, duration_ms, path, artist, album, genre
+             FROM tracks
+             ORDER BY artist, album, COALESCE(disc_no, 0), COALESCE(track_no, 1000000), title",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                TrackEntry {
+                    title: row.get(0)?,
+                    track_no: row.get(1)?,
+                    disc_no: row.get(2)?,
+                    duration_ms: row.get(3)?,
+                    path: PathBuf::from(row.get::<_, String>(4)?),
+                    artist: row.get(5)?,
+                    album: row.get(6)?,
+                },
+                row.get(7)?,
+            ))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+}
+
+/// The genres one tag names, as `(lowercase key, name as written)`: split on
+/// `/`, `;`, `,` (and the NUL an `ID3v2` multi-value frame uses), trimmed,
+/// empty pieces dropped, and a genre repeated in other case kept once.
+fn split_genres(tag: &str) -> Vec<(String, String)> {
+    let mut genres: Vec<(String, String)> = Vec::new();
+    for piece in tag.split(['/', ';', ',', '\0']) {
+        let name = piece.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let key = name.to_lowercase();
+        if !genres.iter().any(|(known, _)| *known == key) {
+            genres.push((key, name.to_owned()));
+        }
+    }
+    genres
+}
+
+/// Brings an index written by an older velo up to [`SCHEMA_VERSION`] without
+/// losing a row. Version 0 had no `genre` column: it is added, and every
+/// stored mtime is forgotten so the next [`Library::index`] re-reads each
+/// file's tags — the rows themselves stay until that scan replaces them.
+fn migrate(conn: &Connection) -> Result<(), LibraryError> {
+    let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if version >= SCHEMA_VERSION {
+        return Ok(());
+    }
+    let transaction = conn.unchecked_transaction()?;
+    let has_genre = transaction
+        .prepare("SELECT 1 FROM pragma_table_info('tracks') WHERE name = 'genre'")?
+        .exists([])?;
+    if !has_genre {
+        transaction.execute_batch("ALTER TABLE tracks ADD COLUMN genre TEXT")?;
+    }
+    transaction.execute("UPDATE tracks SET mtime = -1", [])?;
+    transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    transaction.commit()?;
+    Ok(())
 }
 
 /// `artist`/`album`/`title` are declared `COLLATE NOCASE`, so grouping and
@@ -351,7 +504,8 @@ CREATE TABLE IF NOT EXISTS tracks (
     format       TEXT NOT NULL,
     has_cover    INTEGER NOT NULL DEFAULT 0,
     mtime        INTEGER NOT NULL,
-    size         INTEGER NOT NULL
+    size         INTEGER NOT NULL,
+    genre        TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tracks_artist_album ON tracks(artist, album);
 CREATE INDEX IF NOT EXISTS idx_tracks_album ON tracks(album);
@@ -360,8 +514,8 @@ CREATE INDEX IF NOT EXISTS idx_tracks_album ON tracks(album);
 const UPSERT: &str = "
 INSERT INTO tracks (path, title, artist, album, album_artist, track_no, disc_no,
                     year, duration_ms, sample_rate, channels, format, has_cover,
-                    mtime, size)
-VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                    mtime, size, genre)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
 ON CONFLICT(path) DO UPDATE SET
     title = excluded.title,
     artist = excluded.artist,
@@ -376,7 +530,8 @@ ON CONFLICT(path) DO UPDATE SET
     format = excluded.format,
     has_cover = excluded.has_cover,
     mtime = excluded.mtime,
-    size = excluded.size
+    size = excluded.size,
+    genre = excluded.genre
 ";
 
 #[expect(
