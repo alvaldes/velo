@@ -2035,3 +2035,165 @@ fn u_after_choosing_a_library_without_an_open_index_says_why_nothing_happens() {
     }
     let _ = fs::remove_dir_all(&home);
 }
+
+// ---- the settings card (S6, S7) ---------------------------------------------
+
+#[test]
+fn o_opens_the_settings_card_and_esc_closes_it() {
+    let mut app = app_with_three_tracks();
+    assert!(!app.settings_open());
+
+    assert_eq!(app.on_key(key(KeyCode::Char('o'))), Action::None);
+    assert!(app.settings_open(), "o opens the settings card");
+
+    press(&mut app, KeyCode::Esc);
+    assert!(!app.settings_open(), "esc closes the settings card");
+
+    // Closed again, the keys mean what they meant before.
+    press(&mut app, KeyCode::Char('j'));
+    assert_eq!(app.selected(), 1);
+}
+
+#[test]
+fn the_settings_cursor_moves_between_settings_only_and_stops_at_the_ends() {
+    let mut app = app_with_three_tracks();
+    press(&mut app, KeyCode::Char('o'));
+    assert_eq!(
+        app.settings_focused(),
+        "volume",
+        "the card opens on the first setting"
+    );
+
+    press(&mut app, KeyCode::Char('j'));
+    assert_eq!(app.settings_focused(), "replay gain");
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Char('j'));
+    assert_eq!(app.settings_focused(), "shuffle");
+    press(&mut app, KeyCode::Char('j'));
+    assert_eq!(
+        app.settings_focused(),
+        "accent",
+        "the screen header is skipped, never focused"
+    );
+
+    press(&mut app, KeyCode::Char('G'));
+    assert_eq!(
+        app.settings_focused(),
+        "folder",
+        "G jumps to the last setting"
+    );
+    press(&mut app, KeyCode::Char('j'));
+    assert_eq!(
+        app.settings_focused(),
+        "folder",
+        "j stops at the last setting"
+    );
+
+    press(&mut app, KeyCode::Char('g'));
+    assert_eq!(
+        app.settings_focused(),
+        "volume",
+        "g jumps to the first setting"
+    );
+    press(&mut app, KeyCode::Char('k'));
+    assert_eq!(
+        app.settings_focused(),
+        "volume",
+        "k stops at the first setting"
+    );
+}
+
+#[test]
+fn an_open_settings_card_holds_back_q_and_space_until_it_closes() {
+    let mut app = app_with_three_tracks();
+    press(&mut app, KeyCode::Char('o'));
+    assert!(app.settings_open());
+
+    for code in [KeyCode::Char('q'), KeyCode::Char(' ')] {
+        assert_eq!(
+            app.on_key(key(code)),
+            Action::None,
+            "{code:?} reached the interface under the card"
+        );
+        assert!(app.settings_open(), "the card stays open");
+    }
+    assert_eq!(app.selected(), 0, "the library selection never moved");
+
+    press(&mut app, KeyCode::Esc);
+    assert!(!app.settings_open());
+    assert_eq!(app.on_key(key(KeyCode::Char('q'))), Action::Quit);
+    assert_eq!(app.on_key(key(KeyCode::Char(' '))), Action::TogglePause);
+}
+
+#[test]
+fn enter_on_a_visibility_row_flips_it_and_writes_cover_art_to_the_file() {
+    let dir = config_dir("settings-cover-art");
+    let config = dir.join("config.toml");
+    let mut app = app_with_default_config(&config);
+    let default = velo::config::default_config_text();
+
+    press(&mut app, KeyCode::Char('o'));
+    for _ in 0..11 {
+        press(&mut app, KeyCode::Char('j'));
+    }
+    assert_eq!(app.settings_focused(), "cover art");
+    press(&mut app, KeyCode::Enter);
+
+    assert_eq!(
+        fs::read_to_string(&config).unwrap(),
+        default.replace("cover_art = true", "cover_art = false"),
+        "the switch is written per key, in place"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn right_on_a_colour_row_changes_the_palette_and_writes_the_theme_accent() {
+    let dir = config_dir("settings-accent");
+    let config = dir.join("config.toml");
+    let mut app = app_with_default_config(&config);
+    let default = velo::config::default_config_text();
+
+    press(&mut app, KeyCode::Char('o'));
+    for _ in 0..4 {
+        press(&mut app, KeyCode::Char('j'));
+    }
+    assert_eq!(app.settings_focused(), "accent");
+    press(&mut app, KeyCode::Right);
+
+    assert_eq!(
+        fs::read_to_string(&config).unwrap(),
+        default.replace("accent = \"#af00af\"", "accent = \"#5f87d7\""),
+        "the colour is written per key under [theme]"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn enter_on_the_folder_row_opens_the_library_prompt() {
+    let dir = config_dir("settings-folder");
+    let config = dir.join("config.toml");
+    let mut app = app_with_default_config(&config);
+
+    press(&mut app, KeyCode::Char('o'));
+    press(&mut app, KeyCode::Char('G'));
+    assert_eq!(app.settings_focused(), "folder");
+    press(&mut app, KeyCode::Enter);
+
+    assert!(
+        app.library_prompt_open(),
+        "the existing library prompt opened"
+    );
+    assert!(!app.settings_open(), "the card gave the keys to the prompt");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_question_mark_inside_the_settings_card_does_nothing() {
+    let mut app = app_with_three_tracks();
+    press(&mut app, KeyCode::Char('o'));
+
+    assert_eq!(app.on_key(key(KeyCode::Char('?'))), Action::None);
+    assert!(app.settings_open(), "the card stays open");
+    assert!(!app.help_open(), "? does not open the help over the card");
+}

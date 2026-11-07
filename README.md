@@ -62,6 +62,7 @@ Every key below is what the code does today.
 | `J` / `K` | Move the selected entry down / up (queue view) |
 | `enter` (queue view) | Play the queue from the selected entry |
 | `?` | Help card: `j`/`k` (or `↓`/`↑`) scroll it and `g`/`G` jump to its ends; `/` filters it by key or description (`enter` keeps the filter, `esc` clears it, a second `esc` or `?` closes the help). The card keeps its full size however few rows the filter leaves, and every other key waits until it closes — `q` and `space` included |
+| `o` | Settings card: everything in `config.toml` — volume, replay gain, repeat, shuffle, the seven `[theme]` colours, the four `[ui]` switches and the library folder. `j`/`k` (or `↓`/`↑`) move between the settings (the `sound`/`screen`/`library` headers are never focused), `g`/`G` jump to the ends, `enter` or `←`/`→` step the focused row (colours cycle a short preset list, the `folder` row opens the library prompt), `esc` closes — and every other key waits until it does, `q` and `space` included |
 | `q` | Quit |
 
 While a search is open, every printable key types into the query,
@@ -130,7 +131,13 @@ $XDG_CONFIG_HOME/velo/config.toml      # else ~/.config/velo/config.toml
 
 When the file does not exist, velo writes it with every key at its default
 value and a short comment per key, so everything below can be changed from
-it. An existing file is never overwritten or reformatted: every value velo
+it. Everything below can also be changed while velo runs: `o` opens the
+settings card (a smaller card shaped like the help), where the volume, the
+ReplayGain mode, the repeat and the shuffle, every `[theme]` colour, the
+four `[ui]` switches and the library folder can be stepped through live —
+each change applies on the next frame and is written to this file key by
+key, just as if the matching key had been pressed. An existing file is
+never overwritten or reformatted: every value velo
 saves itself is written key by key, leaving your comments and your ordering
 alone.
 

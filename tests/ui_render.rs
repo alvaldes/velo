@@ -1146,7 +1146,7 @@ fn the_help_scrolls_with_j_k_and_jumps_with_g_and_shift_g() {
     press(&mut app, KeyCode::Char('?'));
     let screen = help_at_80x14(&app);
     assert!(
-        screen.contains("1–12 of 24"),
+        screen.contains("1–12 of 25"),
         "where the card is:\n{screen}"
     );
     assert!(screen.contains("j / Down"), "{screen}");
@@ -1154,34 +1154,34 @@ fn the_help_scrolls_with_j_k_and_jumps_with_g_and_shift_g() {
 
     press(&mut app, KeyCode::Char('j'));
     let screen = help_at_80x14(&app);
-    assert!(screen.contains("2–13 of 24"), "{screen}");
+    assert!(screen.contains("2–13 of 25"), "{screen}");
     assert!(
         !screen.contains("j / Down"),
         "the first row scrolled off:\n{screen}"
     );
 
     press(&mut app, KeyCode::Down);
-    assert!(help_at_80x14(&app).contains("3–14 of 24"));
+    assert!(help_at_80x14(&app).contains("3–14 of 25"));
     press(&mut app, KeyCode::Char('k'));
     press(&mut app, KeyCode::Up);
     press(&mut app, KeyCode::Up);
     assert!(
-        help_at_80x14(&app).contains("1–12 of 24"),
+        help_at_80x14(&app).contains("1–12 of 25"),
         "k stops at the top"
     );
 
     press(&mut app, KeyCode::Char('G'));
     let screen = help_at_80x14(&app);
-    assert!(screen.contains("13–24 of 24"), "{screen}");
+    assert!(screen.contains("14–25 of 25"), "{screen}");
     assert!(screen.contains("quit"), "{screen}");
     press(&mut app, KeyCode::Char('j'));
     assert!(
-        help_at_80x14(&app).contains("13–24 of 24"),
+        help_at_80x14(&app).contains("14–25 of 25"),
         "j stops at the end"
     );
 
     press(&mut app, KeyCode::Char('g'));
-    assert!(help_at_80x14(&app).contains("1–12 of 24"));
+    assert!(help_at_80x14(&app).contains("1–12 of 25"));
 }
 
 #[test]
@@ -1193,7 +1193,7 @@ fn a_help_that_fits_shows_no_position() {
         screen.contains("quit") && screen.contains("j / Down"),
         "{screen}"
     );
-    assert!(!screen.contains(" of 24"), "{screen}");
+    assert!(!screen.contains(" of 25"), "{screen}");
 }
 
 #[test]
@@ -1446,5 +1446,154 @@ fn the_default_ui_parts_draw_the_golden_screen() {
         screen_at(&app, 80, 24),
         SCREEN_WITHOUT_COVER_ART,
         "UiParts::default() must draw today's screen byte for byte"
+    );
+}
+
+// ---- the settings card (S6, S7) ---------------------------------------------
+
+/// The rows the card titled `settings` covers on `screen`: its two borders,
+/// the lines between them and nothing else.
+fn settings_card_height(screen: &str) -> usize {
+    const TITLE: [char; 8] = [' ', 's', 'e', 't', 't', 'i', 'n', 'g'];
+    let lines: Vec<Vec<char>> = screen.lines().map(|line| line.chars().collect()).collect();
+    let top = lines
+        .iter()
+        .position(|line| {
+            line.windows(TITLE.len() + 1)
+                .any(|window| window[1..] == TITLE)
+        })
+        .expect("the settings card is on screen");
+    let edge = lines[top]
+        .iter()
+        .position(|&cell| cell == '╭')
+        .expect("the border opens the card");
+    let sides = lines[top + 1..]
+        .iter()
+        .take_while(|line| line.get(edge) == Some(&'│'))
+        .count();
+    sides + 2
+}
+
+#[test]
+fn the_settings_card_draws_its_title_sections_and_focused_row_in_the_accent() {
+    use velo::ui::theme::Theme;
+
+    let mut app = App::new(tracks(&["one.flac"]));
+    press(&mut app, KeyCode::Char('o'));
+    let screen = screen_at(&app, 80, 24);
+
+    assert!(screen.contains(" settings "), "{screen}");
+    for header in ["sound", "screen", "library"] {
+        assert!(
+            screen.contains(header),
+            "the {header} section on:\n{screen}"
+        );
+    }
+    for (label, value) in [
+        ("volume", "100"),
+        ("replay gain", "track"),
+        ("repeat", "off"),
+        ("shuffle", "off"),
+        ("accent", "#af00af"),
+        ("background", "reset"),
+        ("cover art", "shown"),
+        ("hints", "shown"),
+        ("folder", "not set"),
+    ] {
+        assert!(
+            screen.contains(label) && screen.contains(value),
+            "{label} {value} on:\n{screen}"
+        );
+    }
+
+    // The focused row is drawn in the accent colour, the headers dim. `find`
+    // answers a byte offset; the buffer is indexed by columns.
+    let theme = Theme::default();
+    let column_of = |needle: &str| {
+        screen.lines().find_map(|line| {
+            let byte = line.find(needle)?;
+            u16::try_from(line[..byte].chars().count()).ok()
+        })
+    };
+    let y = u16::try_from(
+        screen
+            .lines()
+            .position(|line| line.contains("volume"))
+            .expect("the focused row"),
+    )
+    .unwrap();
+    assert_eq!(
+        cell_at(&app, column_of("volume").expect("the focused row"), y).fg,
+        theme.accent,
+        "the focused row is drawn in the accent:\n{screen}"
+    );
+    let header_y = u16::try_from(
+        screen
+            .lines()
+            .position(|line| line.contains("sound"))
+            .expect("the sound header"),
+    )
+    .unwrap();
+    let header_cell = cell_at(
+        &app,
+        column_of("sound").expect("the sound header"),
+        header_y,
+    );
+    assert_eq!(
+        header_cell.fg, theme.dim,
+        "the section headers are drawn dim:\n{screen}"
+    );
+}
+
+#[test]
+fn the_settings_card_keeps_its_height_while_the_cursor_walks_it() {
+    let mut app = App::new(tracks(&["one.flac"]));
+    press(&mut app, KeyCode::Char('o'));
+    let height = settings_card_height(&screen_at(&app, 80, 14));
+
+    for step in 0..20 {
+        let screen = screen_at(&app, 80, 14);
+        assert_eq!(
+            settings_card_height(&screen),
+            height,
+            "the card resized at step {step}:\n{screen}"
+        );
+        press(&mut app, KeyCode::Char('j'));
+    }
+    assert!(
+        screen_at(&app, 80, 14).contains("folder"),
+        "the walk reached the last row"
+    );
+}
+
+/// No fixture can hand the interface a decoded cover without a live stream
+/// (the cover follows the track that plays), so this pins the columns leg of
+/// the gate the same way `hiding_the_cover_art_leaves_no_cover_columns_and_no_explanation`
+/// does — the switch flipped from inside the card, not from the file.
+#[test]
+fn hiding_the_cover_from_the_card_removes_its_columns_on_the_next_frame() {
+    let mut app = App::new(tracks(&["one.flac", "two.flac", "three.flac"]));
+    app.show_artwork(Some(velo::ui::artwork::Picker::new((8, 12))));
+
+    press(&mut app, KeyCode::Char('o'));
+    for _ in 0..11 {
+        press(&mut app, KeyCode::Char('j'));
+    }
+    assert_eq!(app.settings_focused(), "cover art");
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Esc);
+
+    let screen = screen_at(&app, 120, 30);
+    let title = screen
+        .lines()
+        .find(|line| line.contains("♫ nothing playing"))
+        .expect("the now-playing block");
+    let column = title
+        .chars()
+        .position(|c| c == '♫')
+        .expect("the block's title");
+    assert_eq!(
+        column, 2,
+        "the block's text starts at the left edge: no cover columns, got: {title}"
     );
 }

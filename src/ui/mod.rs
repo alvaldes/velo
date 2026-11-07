@@ -39,7 +39,7 @@ use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, ListState, Para
 use crate::audio::output::{Repeat, SharedQueue, TrackFailure};
 use crate::audio::spectrum::Spectrum;
 use crate::audio::{Player, seek_target, skip_target};
-use crate::config::{OpenNode, ReplayGainMode, Session, ThemeColors, UiParts};
+use crate::config::{OpenNode, ReplayGainMode, Session, ThemeColor, ThemeColors, UiParts};
 use crate::library::{AlbumEntry, ArtistEntry, GenreEntry, IndexReport, Library, TrackEntry};
 
 use self::artwork::{Artwork, Picker, StatefulImage, StatefulProtocol};
@@ -344,6 +344,11 @@ pub struct App<'lib> {
     protocol: RefCell<Option<Box<dyn StatefulProtocol>>>,
     /// The help card while it is open: its scroll and its filter (S1).
     help: Option<Help>,
+    /// The settings card while it is open: its cursor and its scroll (S6).
+    settings: Option<SettingsCard>,
+    /// The palette as the `[theme]` table wrote it (S4): what the settings
+    /// card rebuilds with one role replaced when a colour is cycled.
+    colors: ThemeColors,
     /// Present while no library root is set (S4): the empty browser then
     /// says how to set one, and while its prompt is open every key edits it.
     library_setup: Option<LibrarySetup>,
@@ -410,6 +415,8 @@ impl<'lib> App<'lib> {
             artwork_path: None,
             protocol: RefCell::new(None),
             help: None,
+            settings: None,
+            colors: ThemeColors::default(),
             library_setup: None,
             config_file: None,
             saved: Session::default(),
@@ -464,6 +471,8 @@ impl<'lib> App<'lib> {
             artwork_path: None,
             protocol: RefCell::new(None),
             help: None,
+            settings: None,
+            colors: ThemeColors::default(),
             library_setup: None,
             config_file: None,
             saved: Session::default(),
@@ -506,8 +515,11 @@ impl<'lib> App<'lib> {
     }
 
     /// The palette the interface draws with, from the config's `[theme]` (S4):
-    /// `accent_bright` stays derived from the accent.
+    /// `accent_bright` stays derived from the accent. The palette as the file
+    /// wrote it is kept too, so the settings card can rebuild it with one
+    /// role replaced (S7).
     pub fn set_theme(&mut self, colors: ThemeColors) {
+        self.colors = colors;
         self.theme = colors.into();
     }
 
@@ -992,6 +1004,21 @@ impl<'lib> App<'lib> {
         self.help.is_some()
     }
 
+    /// Whether the settings card is open (S6).
+    #[must_use]
+    pub const fn settings_open(&self) -> bool {
+        self.settings.is_some()
+    }
+
+    /// What the settings card focuses, as the row's label (S6): the section
+    /// headers are never focused, and a closed card focuses nothing.
+    #[must_use]
+    pub fn settings_focused(&self) -> &'static str {
+        self.settings
+            .as_ref()
+            .map_or("volume", SettingsCard::focused_label)
+    }
+
     /// The volume, in percent.
     #[must_use]
     pub const fn volume(&self) -> u8 {
@@ -1255,6 +1282,10 @@ impl<'lib> App<'lib> {
 
     /// Applies one key press. Pure with respect to the terminal and the
     /// library: it only moves state and answers with an [`Action`].
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the keymap is one match read top to bottom; the overlays' keys live in their own handlers"
+    )]
     pub fn on_key(&mut self, event: ratatui::crossterm::event::KeyEvent) -> Action {
         use ratatui::crossterm::event::KeyCode;
 
@@ -1266,6 +1297,11 @@ impl<'lib> App<'lib> {
         }
         if self.library_prompt_open() {
             return self.on_prompt_key(event.code);
+        }
+        // An open settings card owns every key too (S6): nothing reaches the
+        // lists or the transport while it is up, `q` and `space` included.
+        if self.settings.is_some() {
+            return self.on_settings_key(event.code);
         }
         // An open help owns every key too, so `j`/`k` scroll it and never
         // the list underneath.
@@ -1346,6 +1382,10 @@ impl<'lib> App<'lib> {
             }
             KeyCode::Char('?') => {
                 self.help = Some(Help::default());
+                Action::None
+            }
+            KeyCode::Char('o') => {
+                self.settings = Some(SettingsCard::default());
                 Action::None
             }
             KeyCode::Char('/') if self.library.is_some() => {
@@ -1519,6 +1559,202 @@ impl<'lib> App<'lib> {
         Action::None
     }
 
+    /// The keys while the settings card is open (S6): `j`/`k`/`↓`/`↑` move
+    /// between the settings, the section headers skipped; `g`/`G` jump to
+    /// the ends; `enter` and `→` step the focused setting forward, `←` back;
+    /// `esc` closes it. Everything else — `q` and `space` included — is
+    /// inert here, and `?` is not a settings key.
+    fn on_settings_key(&mut self, code: ratatui::crossterm::event::KeyCode) -> Action {
+        use ratatui::crossterm::event::KeyCode;
+
+        let area = self.seen_area.get();
+        let Some(card) = self.settings.as_mut() else {
+            return Action::None;
+        };
+        match code {
+            KeyCode::Esc => self.settings = None,
+            KeyCode::Char('j') | KeyCode::Down => {
+                card.move_down();
+                card.keep_visible(SettingsCard::card_rows(area));
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                card.move_up();
+                card.keep_visible(SettingsCard::card_rows(area));
+            }
+            KeyCode::Char('g') => {
+                card.cursor = 0;
+                card.top = 0;
+            }
+            KeyCode::Char('G') => {
+                card.cursor = SettingsCard::setting_count() - 1;
+                card.keep_visible(SettingsCard::card_rows(area));
+            }
+            KeyCode::Enter | KeyCode::Right => {
+                let key = card.focused();
+                self.change_setting(key, true);
+            }
+            KeyCode::Left => {
+                let key = card.focused();
+                self.change_setting(key, false);
+            }
+            _ => {}
+        }
+        Action::None
+    }
+
+    /// Steps the focused setting one step forward or back (S7.1): every
+    /// change applies at once through the same hooks the keys use, and is
+    /// written to the file by those hooks, never from here. A step always
+    /// changes the value — a toggle flips it and a cycle moves along the
+    /// presets — so each write is a real change.
+    fn change_setting(&mut self, key: SettingsKey, forward: bool) {
+        match key {
+            SettingsKey::Volume => {
+                let next = self.change_volume(if forward { 5 } else { -5 });
+                self.apply(Action::SetVolume(next));
+            }
+            SettingsKey::ReplayGain => {
+                let next = match (self.replay_gain, forward) {
+                    (ReplayGainMode::Track, true) | (ReplayGainMode::Off, false) => {
+                        ReplayGainMode::Album
+                    }
+                    (ReplayGainMode::Album, true) | (ReplayGainMode::Track, false) => {
+                        ReplayGainMode::Off
+                    }
+                    (ReplayGainMode::Off, true) | (ReplayGainMode::Album, false) => {
+                        ReplayGainMode::Track
+                    }
+                };
+                self.set_replay_gain(next);
+                self.remember(
+                    None,
+                    "replay_gain",
+                    &Self::toml_string(replay_gain_label(next)),
+                );
+            }
+            SettingsKey::Repeat => {
+                let next = match (self.repeat, forward) {
+                    (Repeat::Off, true) | (Repeat::One, false) => Repeat::All,
+                    (Repeat::All, true) | (Repeat::Off, false) => Repeat::One,
+                    (Repeat::One, true) | (Repeat::All, false) => Repeat::Off,
+                };
+                self.repeat = next;
+                self.apply(Action::SetRepeat(next));
+            }
+            SettingsKey::Shuffle => self.apply(Action::ToggleShuffle),
+            SettingsKey::Accent => self.change_color(ColorRole::Accent, forward),
+            SettingsKey::Text => self.change_color(ColorRole::Text, forward),
+            SettingsKey::Dim => self.change_color(ColorRole::Dim, forward),
+            SettingsKey::Secondary => self.change_color(ColorRole::Secondary, forward),
+            SettingsKey::Border => self.change_color(ColorRole::Border, forward),
+            SettingsKey::Ink => self.change_color(ColorRole::Ink, forward),
+            SettingsKey::Background => self.change_color(ColorRole::Background, forward),
+            SettingsKey::CoverArt => self.toggle_ui("cover_art", |ui| &mut ui.cover_art),
+            SettingsKey::Spectrum => self.toggle_ui("spectrum", |ui| &mut ui.spectrum),
+            SettingsKey::Hints => self.toggle_ui("hints", |ui| &mut ui.hints),
+            SettingsKey::TopBar => self.toggle_ui("top_bar", |ui| &mut ui.top_bar),
+            SettingsKey::Folder => {
+                // The prompt owns the keys from here (S7.2): its typing, its
+                // completion and its saving stay exactly as they are.
+                self.settings = None;
+                self.ask_for_library(self.config_file.clone());
+            }
+        }
+    }
+
+    /// Cycles one colour role through [`COLOR_PRESETS`] (S7): forward or
+    /// back, wrapping; a colour that is not a preset — the user's own hex —
+    /// steps to the first preset going forward and to the last going back.
+    /// The palette is rebuilt from the current one with the one role
+    /// replaced, applied through [`App::set_theme`], and written to the file
+    /// under `[theme]`.
+    fn change_color(&mut self, role: ColorRole, forward: bool) {
+        let current = role.get(self.colors).to_key();
+        let next = Self::next_color(&current, role.allows_reset(), forward);
+        let Some(colour) = parse_color(next) else {
+            return;
+        };
+        let mut colors = self.colors;
+        role.set(&mut colors, colour);
+        self.set_theme(colors);
+        self.remember(Some("theme"), role.key(), &Self::toml_string(next));
+    }
+
+    /// The colour `forward` cycles to from `current` (S7): the next preset
+    /// forward, the previous back, both wrapping; a colour that is no preset
+    /// steps to the first one forward and to the last one back. The two
+    /// roles that may be `reset` cycle it ahead of the presets.
+    fn next_color(current: &str, allows_reset: bool, forward: bool) -> &'static str {
+        let reset = ["reset"];
+        let head: &[&str] = if allows_reset { &reset } else { &[] };
+        let mut list = Vec::with_capacity(head.len() + COLOR_PRESETS.len());
+        list.extend_from_slice(head);
+        list.extend_from_slice(&COLOR_PRESETS);
+        match list.iter().position(|&colour| colour == current) {
+            Some(index) if forward => list[(index + 1) % list.len()],
+            Some(index) => list[(index + list.len() - 1) % list.len()],
+            None if forward => list[0],
+            None => list[list.len() - 1],
+        }
+    }
+
+    /// Flips one `[ui]` switch (S7): the parts the layout read change at
+    /// once through [`App::set_ui`], and the file gets the switch's new
+    /// value. A flip only ever happens from the card, so it is always a
+    /// change worth writing.
+    fn toggle_ui(&mut self, key: &str, part: fn(&mut UiParts) -> &mut bool) {
+        let mut ui = self.ui;
+        *part(&mut ui) = !*part(&mut ui);
+        self.set_ui(ui);
+        let shown = *part(&mut self.ui);
+        self.remember(Some("ui"), key, if shown { "true" } else { "false" });
+    }
+
+    /// The value each setting shows, in the order of the settings (S6.2).
+    fn settings_values(&self) -> Vec<String> {
+        SETTINGS_ROWS
+            .iter()
+            .filter_map(|row| match row {
+                SettingsRow::Header(_) => None,
+                SettingsRow::Setting(key) => Some(self.setting_value(*key)),
+            })
+            .collect()
+    }
+
+    /// What one setting shows on its row's right (S6.2).
+    fn setting_value(&self, key: SettingsKey) -> String {
+        match key {
+            SettingsKey::Volume => self.volume.to_string(),
+            SettingsKey::ReplayGain => replay_gain_label(self.replay_gain).to_owned(),
+            SettingsKey::Repeat => self.repeat.label().to_owned(),
+            SettingsKey::Shuffle => if self.shuffle { "on" } else { "off" }.to_owned(),
+            SettingsKey::Accent => self.colors.accent.to_key(),
+            SettingsKey::Text => self.colors.text.to_key(),
+            SettingsKey::Dim => self.colors.dim.to_key(),
+            SettingsKey::Secondary => self.colors.secondary.to_key(),
+            SettingsKey::Border => self.colors.border.to_key(),
+            SettingsKey::Ink => self.colors.ink.to_key(),
+            SettingsKey::Background => self.colors.background.to_key(),
+            SettingsKey::CoverArt
+            | SettingsKey::Spectrum
+            | SettingsKey::Hints
+            | SettingsKey::TopBar => {
+                let drawn = match key {
+                    SettingsKey::CoverArt => self.ui.cover_art,
+                    SettingsKey::Spectrum => self.ui.spectrum,
+                    SettingsKey::Hints => self.ui.hints,
+                    _ => self.ui.top_bar,
+                };
+                if drawn { "shown" } else { "hidden" }.to_owned()
+            }
+            SettingsKey::Folder => self
+                .refresh
+                .root
+                .as_ref()
+                .map_or_else(|| "not set".to_owned(), |root| root.display().to_string()),
+        }
+    }
+
     /// Accepts the typed library path when it names a directory: saves it to
     /// the config file as typed, closes the prompt and hands the expanded
     /// root to the shell. Otherwise the prompt stays open and says why.
@@ -1626,6 +1862,9 @@ impl<'lib> App<'lib> {
         self.draw_artwork(frame, pane);
         if let Some(help) = &self.help {
             Self::draw_help(frame, area, help, &self.theme);
+        }
+        if let Some(card) = &self.settings {
+            self.draw_settings_card(frame, area, card);
         }
         if let Some(prompt) = self.library_prompt() {
             Self::draw_library_prompt(frame, area, prompt, &self.theme);
@@ -2357,6 +2596,82 @@ impl<'lib> App<'lib> {
         }
         frame.render_widget(Clear, box_area);
         frame.render_widget(Paragraph::new(text).block(card), box_area);
+    }
+
+    /// The settings card (S6): a rounded, accent-bordered, centred block
+    /// titled ` settings `, every setting with its value on the right, the
+    /// section headers dim and the focused row in the accent. Its size comes
+    /// from the whole table, so it never changes as the cursor moves, and it
+    /// scrolls only as far as the focused row needs.
+    fn draw_settings_card(&self, frame: &mut Frame, area: Rect, card: &SettingsCard) {
+        let values = self.settings_values();
+        let label_width = SETTINGS_ROWS
+            .iter()
+            .map(|row| match row {
+                SettingsRow::Header(name) => name.chars().count(),
+                SettingsRow::Setting(key) => key.label().chars().count(),
+            })
+            .max()
+            .unwrap_or(0);
+        let value_width = values
+            .iter()
+            .map(|value| value.chars().count())
+            .max()
+            .unwrap_or(0);
+        // Two border columns, one of air per side, two between the columns.
+        let width = u16::try_from(label_width + 2 + value_width + 4).unwrap_or(area.width);
+        let shown = SettingsCard::card_rows(area);
+        let top = card.top.min(SettingsCard::last_top(shown));
+        let height = u16::try_from(shown + 2).unwrap_or(area.height);
+        let box_area = centered(area, width, height);
+
+        let mut setting = 0;
+        let lines: Vec<Line> = SETTINGS_ROWS
+            .iter()
+            .map(|row| match row {
+                SettingsRow::Header(name) => {
+                    Line::styled((*name).to_owned(), Style::new().fg(self.theme.dim))
+                }
+                SettingsRow::Setting(key) => {
+                    let focused = setting == card.cursor;
+                    let value = values.get(setting).map(String::as_str).unwrap_or_default();
+                    setting += 1;
+                    let label = if focused {
+                        Style::new().fg(self.theme.accent)
+                    } else {
+                        Style::new().fg(self.theme.text)
+                    };
+                    let value_style = if focused {
+                        Style::new().fg(self.theme.accent)
+                    } else {
+                        Style::new().fg(self.theme.secondary)
+                    };
+                    Line::from(vec![
+                        Span::styled(
+                            format!("{key_label:<label_width$}  ", key_label = key.label()),
+                            label,
+                        ),
+                        Span::styled(value.to_owned(), value_style),
+                    ])
+                }
+            })
+            .collect();
+
+        frame.render_widget(Clear, box_area);
+        frame.render_widget(
+            Paragraph::new(lines.into_iter().skip(top).take(shown).collect::<Vec<_>>()).block(
+                Block::bordered()
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::new().fg(self.theme.accent))
+                    .title(Span::styled(
+                        " settings ",
+                        Style::new().fg(self.theme.accent).bold(),
+                    ))
+                    .padding(ratatui::widgets::Padding::horizontal(1))
+                    .style(Style::new().bg(self.theme.background)),
+            ),
+            box_area,
+        );
     }
 
     /// The library prompt: a rounded card, centred like the help, with the
@@ -3472,7 +3787,7 @@ fn mmss(duration: Duration) -> String {
 }
 
 /// Every row of the help card: the key, then what it does.
-const HELP_ROWS: [(&str, &str); 24] = [
+const HELP_ROWS: [(&str, &str); 25] = [
     ("j / Down", "move down"),
     ("k / Up", "move up"),
     ("g", "first track"),
@@ -3488,6 +3803,7 @@ const HELP_ROWS: [(&str, &str); 24] = [
     ("r", "repeat: off, all, one"),
     ("+ / -", "volume up / down"),
     ("?", "toggle this help"),
+    ("o", "settings"),
     ("tab", "library / queue"),
     ("1 2 3 4", "artists, albums, tracks, genres"),
     ("L", "set the library folder"),
@@ -3558,6 +3874,265 @@ impl Help {
     /// The row at the top when the last row is at the bottom.
     fn last_top(&self, area: Rect) -> usize {
         self.rows().len() - self.shown_rows(area)
+    }
+}
+
+/// The colour presets the settings card cycles a role through (S7): short,
+/// distinct, readable on a dark terminal, with the defaults the file ships
+/// with first so a cycled role can always be cycled back. `background` and
+/// `text`, whose default is the terminal's own colour, also cycle `reset`
+/// ahead of these.
+const COLOR_PRESETS: [&str; 8] = [
+    "#af00af", // the default accent — ANSI magenta
+    "#5f87d7", // the default secondary — ANSI blue
+    "#767676", // the default dim and border — bright black
+    "#000000", // the default ink
+    "#d70000", // red
+    "#00af5f", // green
+    "#d78700", // orange
+    "#00d7d7", // cyan
+];
+
+/// One setting the card can change (S7).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SettingsKey {
+    Volume,
+    ReplayGain,
+    Repeat,
+    Shuffle,
+    Accent,
+    Text,
+    Dim,
+    Secondary,
+    Border,
+    Ink,
+    Background,
+    CoverArt,
+    Spectrum,
+    Hints,
+    TopBar,
+    Folder,
+}
+
+impl SettingsKey {
+    /// The setting's label on the card's left.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Volume => "volume",
+            Self::ReplayGain => "replay gain",
+            Self::Repeat => "repeat",
+            Self::Shuffle => "shuffle",
+            Self::Accent => "accent",
+            Self::Text => "text",
+            Self::Dim => "dim",
+            Self::Secondary => "secondary",
+            Self::Border => "border",
+            Self::Ink => "ink",
+            Self::Background => "background",
+            Self::CoverArt => "cover art",
+            Self::Spectrum => "spectrum",
+            Self::Hints => "hints",
+            Self::TopBar => "top bar",
+            Self::Folder => "folder",
+        }
+    }
+}
+
+/// One row of the settings card: a section header, or a setting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SettingsRow {
+    Header(&'static str),
+    Setting(SettingsKey),
+}
+
+/// The card's rows, in order (S7): the headers are never focused.
+const SETTINGS_ROWS: [SettingsRow; 19] = [
+    SettingsRow::Header("sound"),
+    SettingsRow::Setting(SettingsKey::Volume),
+    SettingsRow::Setting(SettingsKey::ReplayGain),
+    SettingsRow::Setting(SettingsKey::Repeat),
+    SettingsRow::Setting(SettingsKey::Shuffle),
+    SettingsRow::Header("screen"),
+    SettingsRow::Setting(SettingsKey::Accent),
+    SettingsRow::Setting(SettingsKey::Text),
+    SettingsRow::Setting(SettingsKey::Dim),
+    SettingsRow::Setting(SettingsKey::Secondary),
+    SettingsRow::Setting(SettingsKey::Border),
+    SettingsRow::Setting(SettingsKey::Ink),
+    SettingsRow::Setting(SettingsKey::Background),
+    SettingsRow::Setting(SettingsKey::CoverArt),
+    SettingsRow::Setting(SettingsKey::Spectrum),
+    SettingsRow::Setting(SettingsKey::Hints),
+    SettingsRow::Setting(SettingsKey::TopBar),
+    SettingsRow::Header("library"),
+    SettingsRow::Setting(SettingsKey::Folder),
+];
+
+/// The open settings card (S6): which setting the cursor is on, as its index
+/// among the focusable rows, and the first row of the table in view. The
+/// card's size comes from the whole table, so it never changes as the cursor
+/// moves. Nothing here touches the filesystem.
+#[derive(Debug, Default)]
+struct SettingsCard {
+    /// The focused setting, counted over the settings only.
+    cursor: usize,
+    /// The first row of the table in view.
+    top: usize,
+}
+
+impl SettingsCard {
+    /// The settings the cursor moves between, as their table rows.
+    fn settings() -> impl Iterator<Item = usize> {
+        SETTINGS_ROWS
+            .iter()
+            .enumerate()
+            .filter_map(|(row, entry)| match entry {
+                SettingsRow::Setting(_) => Some(row),
+                SettingsRow::Header(_) => None,
+            })
+    }
+
+    /// How many settings the card has.
+    fn setting_count() -> usize {
+        Self::settings().count()
+    }
+
+    /// The table row the cursor-th setting sits on.
+    fn row_of(cursor: usize) -> usize {
+        Self::settings().nth(cursor).unwrap_or(0)
+    }
+
+    fn move_down(&mut self) {
+        self.cursor = (self.cursor + 1).min(Self::setting_count() - 1);
+    }
+
+    fn move_up(&mut self) {
+        self.cursor = self.cursor.saturating_sub(1);
+    }
+
+    /// The focused setting, counted over the settings only.
+    fn focused(&self) -> SettingsKey {
+        SETTINGS_ROWS
+            .get(Self::row_of(self.cursor))
+            .copied()
+            .map_or(SettingsKey::Volume, |row| match row {
+                SettingsRow::Setting(key) => key,
+                SettingsRow::Header(_) => SettingsKey::Volume,
+            })
+    }
+
+    /// What the card focuses, as the row's label.
+    fn focused_label(&self) -> &'static str {
+        self.focused().label()
+    }
+
+    /// Slides `top` so the focused row stays in view of `shown` rows.
+    fn keep_visible(&mut self, shown: usize) {
+        let row = Self::row_of(self.cursor);
+        if row < self.top {
+            self.top = row;
+        } else if row >= self.top + shown {
+            self.top = row + 1 - shown;
+        }
+    }
+
+    /// The body rows the card keeps: every row, or as many as fit. The whole
+    /// table decides, so the card never resizes as the cursor moves.
+    fn card_rows(area: Rect) -> usize {
+        if area.height == 0 {
+            return SETTINGS_ROWS.len();
+        }
+        let room = usize::from(area.height).saturating_sub(2);
+        SETTINGS_ROWS.len().min(room)
+    }
+
+    /// The last value `top` may take with `shown` rows on the card.
+    const fn last_top(shown: usize) -> usize {
+        SETTINGS_ROWS.len().saturating_sub(shown)
+    }
+}
+
+/// One colour role of the `[theme]` table the card can cycle (S7).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ColorRole {
+    Accent,
+    Text,
+    Dim,
+    Secondary,
+    Border,
+    Ink,
+    Background,
+}
+
+impl ColorRole {
+    /// The key the `[theme]` table writes the role under.
+    fn key(self) -> &'static str {
+        match self {
+            Self::Accent => "accent",
+            Self::Text => "text",
+            Self::Dim => "dim",
+            Self::Secondary => "secondary",
+            Self::Border => "border",
+            Self::Ink => "ink",
+            Self::Background => "background",
+        }
+    }
+
+    /// Whether the role may be `reset`, the terminal's own colour (S4):
+    /// only the screen behind everything and the body text may.
+    fn allows_reset(self) -> bool {
+        matches!(self, Self::Background | Self::Text)
+    }
+
+    /// The role's colour in the palette the app draws with.
+    fn get(self, colors: ThemeColors) -> ThemeColor {
+        match self {
+            Self::Accent => colors.accent,
+            Self::Text => colors.text,
+            Self::Dim => colors.dim,
+            Self::Secondary => colors.secondary,
+            Self::Border => colors.border,
+            Self::Ink => colors.ink,
+            Self::Background => colors.background,
+        }
+    }
+
+    /// Replaces the role's colour in a palette.
+    fn set(self, colors: &mut ThemeColors, colour: ThemeColor) {
+        match self {
+            Self::Accent => colors.accent = colour,
+            Self::Text => colors.text = colour,
+            Self::Dim => colors.dim = colour,
+            Self::Secondary => colors.secondary = colour,
+            Self::Border => colors.border = colour,
+            Self::Ink => colors.ink = colour,
+            Self::Background => colors.background = colour,
+        }
+    }
+}
+
+/// A colour as the `[theme]` table writes it (S4): `reset` or `#rrggbb`.
+fn parse_color(text: &str) -> Option<ThemeColor> {
+    if text == "reset" {
+        return Some(ThemeColor::Terminal);
+    }
+    let hex = text.strip_prefix('#')?;
+    if hex.len() != 6 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(ThemeColor::Rgb {
+        red: u8::from_str_radix(&hex[0..2], 16).ok()?,
+        green: u8::from_str_radix(&hex[2..4], 16).ok()?,
+        blue: u8::from_str_radix(&hex[4..6], 16).ok()?,
+    })
+}
+
+/// The `ReplayGain` mode in the config's own words.
+fn replay_gain_label(mode: ReplayGainMode) -> &'static str {
+    match mode {
+        ReplayGainMode::Track => "track",
+        ReplayGainMode::Album => "album",
+        ReplayGainMode::Off => "off",
     }
 }
 
