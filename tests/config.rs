@@ -14,7 +14,7 @@ use std::ffi::OsStr;
 use clap::Parser as _;
 use velo::config::{
     Cli, Config, DEFAULT_VOLUME, ReplayGainMode, config_path, default_config_text, expand_path,
-    set_library, write_default_config,
+    library_to_save, set_library, write_default_config,
 };
 
 /// Makes `<temp>/<name>`, verifies the directory can be removed, and returns
@@ -503,4 +503,51 @@ fn setting_the_library_adds_the_key_when_the_file_has_none() {
         "library = \"/music\"\nvolume = 3\n"
     );
     let _ = fs::remove_dir_all(&dir);
+}
+
+/// An empty `library` is no library: before, `""` joined onto the working
+/// directory and indexed wherever velo was launched — the whole home folder,
+/// launched from home. It now means unset, so the prompt asks instead.
+#[test]
+fn an_empty_library_value_is_no_library_at_all() {
+    let dir = temp_dir("empty-library");
+    let path = write_config(&dir, "library = \"\"\n");
+    let settings = Config::load_from(&path)
+        .unwrap_or_else(|error| panic!("load failed: {error}"))
+        .merged(&cli_with_no_flags());
+
+    assert_eq!(settings.library, None);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// What the prompt saves must load from anywhere: an absolute or `~` path is
+/// kept as typed, a path relative to where velo ran is saved expanded.
+#[test]
+fn the_prompt_saves_a_path_that_loads_from_any_directory() {
+    let expanded = Path::new("/home/me/music/My Music");
+
+    assert_eq!(
+        library_to_save("~/music/My Music", expanded),
+        "~/music/My Music"
+    );
+    assert_eq!(
+        library_to_save("/srv/music", Path::new("/srv/music")),
+        "/srv/music"
+    );
+    assert_eq!(
+        library_to_save("My Music", expanded),
+        "/home/me/music/My Music"
+    );
+}
+
+#[test]
+fn an_empty_path_does_not_expand_into_the_working_directory() {
+    assert_eq!(
+        expand_path(
+            Path::new(""),
+            Some(Path::new("/home/me")),
+            Path::new("/cwd")
+        ),
+        PathBuf::new()
+    );
 }

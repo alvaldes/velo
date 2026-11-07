@@ -816,7 +816,8 @@ impl<'lib> App<'lib> {
             .take()
             .and_then(|setup| setup.config_file);
         if let Some(path) = &config_file {
-            match crate::config::set_library(path, &typed) {
+            let saved = crate::config::library_to_save(&typed, &root);
+            match crate::config::set_library(path, &saved) {
                 Ok(()) => self.status = format!("library saved to {}", path.display()),
                 Err(error) => {
                     self.status = format!("velo: cannot save {}: {error}", path.display());

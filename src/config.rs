@@ -162,7 +162,10 @@ impl Config {
     #[must_use]
     pub fn merged(self, cli: &Cli) -> Settings {
         Settings {
-            library: cli.library.clone().or(self.library),
+            // An empty `library` in the file is no library: the prompt asks.
+            library: cli.library.clone().or(self
+                .library
+                .filter(|library| !library.as_os_str().is_empty())),
             volume: self.volume.unwrap_or(DEFAULT_VOLUME),
             bit_perfect: self.bit_perfect.unwrap_or(false),
             replay_gain: self.replay_gain.unwrap_or(ReplayGainMode::Track),
@@ -322,10 +325,26 @@ pub fn expand_path(raw: &Path, home: Option<&Path>, cwd: &Path) -> PathBuf {
             home.join(rest)
         };
     }
-    if raw.is_absolute() {
+    // An empty path stays empty, so it is refused as a root that does not
+    // exist instead of quietly becoming the working directory.
+    if raw.is_absolute() || raw.as_os_str().is_empty() {
         raw.to_path_buf()
     } else {
         cwd.join(raw)
+    }
+}
+
+/// The `library` value the prompt writes for a path typed as `typed` that
+/// expanded to `expanded`: an absolute or `~` path as typed, so the file
+/// reads the way the user wrote it, and a path relative to where velo ran as
+/// its expansion — saved verbatim it would only load from that directory.
+#[must_use]
+pub fn library_to_save(typed: &str, expanded: &Path) -> String {
+    let path = Path::new(typed);
+    if path.is_absolute() || path.starts_with("~") {
+        typed.to_owned()
+    } else {
+        expanded.display().to_string()
     }
 }
 
