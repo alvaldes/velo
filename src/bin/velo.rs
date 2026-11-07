@@ -1,5 +1,5 @@
 use std::io::IsTerminal;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -12,14 +12,29 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
 fn main() -> ExitCode {
+    let mut args = std::env::args().skip(1).peekable();
     let mut info_only = false;
     let mut play_and_exit = false;
+    let mut index_only = false;
+    let mut library_root: Option<PathBuf> = None;
     let mut paths: Vec<PathBuf> = Vec::new();
 
-    for argument in std::env::args().skip(1) {
+    while let Some(argument) = args.next() {
         match argument.as_str() {
             "--info" => info_only = true,
             "--play" => play_and_exit = true,
+            "--index" => index_only = true,
+            "--library" => {
+                if let Some(path) = args.next() {
+                    library_root = Some(PathBuf::from(path));
+                } else {
+                    eprintln!("velo: --library needs a path");
+                    return ExitCode::from(2);
+                }
+            }
+            option if let Some(path) = option.strip_prefix("--library=") => {
+                library_root = Some(PathBuf::from(path));
+            }
             "--help" | "-h" => {
                 print_help();
                 return ExitCode::SUCCESS;
@@ -30,6 +45,14 @@ fn main() -> ExitCode {
             }
             path => paths.push(PathBuf::from(path)),
         }
+    }
+
+    if index_only {
+        return index_library(
+            library_root
+                .as_deref()
+                .unwrap_or(Path::new(DEFAULT_LIBRARY_ROOT)),
+        );
     }
 
     if paths.is_empty() {
@@ -44,6 +67,46 @@ fn main() -> ExitCode {
         return play(&paths);
     }
     run_interface(paths)
+}
+
+/// The library root indexed by `velo --index` until T9 makes it configurable.
+const DEFAULT_LIBRARY_ROOT: &str = "/Users/alvaldes/Music/Library";
+
+/// Builds or refreshes the library index and reports its counts.
+fn index_library(root: &Path) -> ExitCode {
+    if !root.is_dir() {
+        eprintln!(
+            "velo: library root {} does not exist or is not a directory",
+            root.display()
+        );
+        return ExitCode::FAILURE;
+    }
+
+    let library = match velo::library::Library::open() {
+        Ok(library) => library,
+        Err(error) => {
+            eprintln!("velo: cannot open the index: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if let Err(error) = library.index(root) {
+        eprintln!("velo: indexing failed: {error}");
+        return ExitCode::FAILURE;
+    }
+
+    match library.counts() {
+        Ok(counts) => {
+            println!("tracks: {}", counts.tracks);
+            println!("albums: {}", counts.albums);
+            println!("artists: {}", counts.artists);
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("velo: {error}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// Decodes every file and reports its format and length without opening a device.
@@ -159,14 +222,18 @@ fn print_help() {
 
 USAGE:
     velo [--info | --play] <file>...
+    velo [--library <PATH>] --index
 
 ARGS:
-    <file>...    Tracks to play as one continuous, gapless stream
+    <file>...       Tracks to play as one continuous, gapless stream
 
 OPTIONS:
-    --info       Report format, frame count and length without playing
-    --play       Play the list and exit, without the terminal interface
-    -h, --help   Show this help
+    --info          Report format, frame count and length without playing
+    --play          Play the list and exit, without the terminal interface
+    --index         Build or refresh the library index, print track, album
+                        and artist counts, then exit
+    --library <PATH>  Library root to index (default /Users/alvaldes/Music/Library)
+    -h, --help      Show this help
 
 Interface keys: j/k move, enter play, space pause, +/- volume, ? help, q quit.
 
