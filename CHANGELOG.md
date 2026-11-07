@@ -1,6 +1,17 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.6.0] - 2026-11-07
+
+### Features
+- **library:** Browse by artist, album, track or genre with the keys 1 to 4
+- **ui:** The library prompt starts at ~/ and tab completes folders
+
+### Fixes
+- **ui:** Enter on a command-line file plays from that file onwards
+
+### Maintenance
+- Keep session worktrees out of the tree
 ## [0.5.0] - 2026-11-07
 
 ### Features
