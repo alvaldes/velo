@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use clap::{CommandFactory as _, Parser};
 
 use velo::audio::{Player, TrackSource};
-use velo::config::{self, Cli, Config, ReplayGainMode, Session, Settings, ThemeColors, UiParts};
+use velo::config::{self, Cli, Config, Settings};
 use velo::library::Library;
 use velo::ui::indexing::Indexer;
 use velo::ui::{Action, App, artwork, crossterm};
@@ -46,7 +46,8 @@ fn main() -> ExitCode {
         .as_deref()
         .map(|raw| config::expand_path(raw, home.as_deref().map(Path::new), &cwd));
 
-    // `bit_perfect` is resolved and carried in `settings`; T17 reads it.
+    // `bit_perfect` is resolved and carried in `settings`; the audio path
+    // and the interface read it (T17).
     if cli.index {
         let Some(root) = library else {
             let file = config_file.as_deref().map_or_else(
@@ -75,17 +76,9 @@ fn main() -> ExitCode {
         return print_info(&cli.files);
     }
     if cli.play {
-        return play(&cli.files, settings.replay_gain);
+        return play(&cli.files, &settings);
     }
-    run_interface(
-        cli.files,
-        settings.replay_gain,
-        settings.volume,
-        settings.session,
-        settings.theme,
-        settings.ui,
-        config_file,
-    )
+    run_interface(cli.files, &settings, config_file)
 }
 
 /// Resolves the user's settings: the config file at `path` (a missing file is
@@ -179,14 +172,11 @@ fn print_info(paths: &[PathBuf]) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// The terminal interface. Restores the terminal even when the loop errors.
+/// The terminal interface over files. Restores the terminal even when the
+/// loop errors.
 fn run_interface(
     paths: Vec<PathBuf>,
-    replay_gain: ReplayGainMode,
-    volume: u8,
-    session: Session,
-    theme: ThemeColors,
-    ui: UiParts,
+    settings: &Settings,
     config_file: Option<PathBuf>,
 ) -> ExitCode {
     if !std::io::stdout().is_terminal() {
@@ -199,16 +189,19 @@ fn run_interface(
     let picker = artwork::detect();
     let outcome = with_terminal(|terminal| {
         let mut app = App::new(paths);
-        app.set_replay_gain(replay_gain);
-        app.set_volume(volume);
-        app.set_theme(theme);
-        app.set_ui(ui);
+        // Bit-perfect first: it pins the volume and forces ReplayGain off,
+        // and the setters below must land on the pinned player (T17).
+        app.set_bit_perfect(settings.bit_perfect);
+        app.set_replay_gain(settings.replay_gain);
+        app.set_volume(settings.volume);
+        app.set_theme(settings.theme);
+        app.set_ui(settings.ui);
         app.show_artwork(picker);
         app.set_config_file(config_file);
         // The shuffle and repeat the file saved reach the files interface
         // too; the tab and the open node belong to the browser (S3), and
         // `set_session` remembers the volume above as what the file says.
-        app.set_session(session);
+        app.set_session(settings.session.clone());
         event_loop(&mut app, None, terminal)
     });
     report_outcome(outcome)
@@ -235,6 +228,8 @@ fn browse_interface(
     let outcome = with_terminal(|terminal| {
         let opened = Library::open();
         let mut app = App::browse(opened.as_ref().ok());
+        // Bit-perfect first, as in the file interface (T17).
+        app.set_bit_perfect(settings.bit_perfect);
         app.set_replay_gain(settings.replay_gain);
         app.set_volume(settings.volume);
         app.set_theme(settings.theme);
@@ -340,9 +335,16 @@ fn event_loop(
     terminal.show_cursor()
 }
 
-fn play(paths: &[PathBuf], replay_gain: ReplayGainMode) -> ExitCode {
-    let queue = std::sync::Arc::new(std::sync::Mutex::new(paths.to_vec()));
-    let mut player = match Player::play_gapless_with_gain(queue, replay_gain) {
+fn play(files: &[PathBuf], settings: &Settings) -> ExitCode {
+    let queue = std::sync::Arc::new(std::sync::Mutex::new(files.to_vec()));
+    let mut player = match Player::play_gapless_at_full(
+        queue,
+        0,
+        std::time::Duration::ZERO,
+        settings.replay_gain,
+        velo::audio::output::Repeat::Off,
+        settings.bit_perfect,
+    ) {
         Ok(player) => player,
         Err(error) => {
             eprintln!("velo: {error}");
@@ -353,6 +355,12 @@ fn play(paths: &[PathBuf], replay_gain: ReplayGainMode) -> ExitCode {
     if let Err(error) = player.wait_until_finished() {
         eprintln!("velo: {error}");
         return ExitCode::FAILURE;
+    }
+
+    // One-time notices — a bit-perfect fallback above all — before the end:
+    // they are advice, not failures (T17).
+    for notice in player.take_notices() {
+        eprintln!("velo: {notice}");
     }
 
     let skipped = player.take_failures();

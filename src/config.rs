@@ -8,9 +8,11 @@
 //! line wins over the config file, the config file wins over the built-in
 //! default.
 //!
-//! The merged [`Settings`] carries keys today's code does not read yet —
-//! notably `bit_perfect`, stored and passed through for T17 (bit-perfect
-//! playback opt-in) — so the config schema does not have to change when the
+//! The merged [`Settings`] resolves every key into what the binary runs with:
+//! `bit_perfect` is consumed by the audio path (T17) — it reopens the device
+//! at each track's own rate instead of resampling, pins the volume to 100%
+//! and skips `ReplayGain` — and `replay_gain` is what the audio path reads
+//!
 //! feature that consumes them arrives. `replay_gain` arrived the other way
 //! round (T11, S15): its [`ReplayGainMode`] is what the audio path reads.
 //!
@@ -83,7 +85,9 @@ Interface keys: j/k move, enter open/play, tab switches to the queue view
     drawn when the terminal supports the kitty, sixel or iTerm2 protocols.
 
 Audio must share one channel layout: sample rates are converted to the
-    output device, channel layouts are not.
+    output device, channel layouts are not. With bit_perfect in the config,
+    rates are not converted either — the device is reopened at each track's
+    own rate, the volume is pinned to 100% and ReplayGain is skipped.
 
 Configuration: $XDG_CONFIG_HOME/velo/config.toml, or
     ~/.config/velo/config.toml — keys: library, bit_perfect, replay_gain, and
@@ -132,8 +136,8 @@ pub struct Config {
     /// wins over it, and every write goes to `[state]` from then on (S2).
     #[serde(default, deserialize_with = "deserialize_volume")]
     pub volume: Option<u8>,
-    /// `bit_perfect` — stored and passed through for T17; nothing reads it
-    /// yet, and saying so here is the point.
+    /// `bit_perfect` — the decoder's samples reach the device unmodified:
+    /// no resampling, no `ReplayGain`, and the volume pinned to 100% (T17).
     pub bit_perfect: Option<bool>,
     /// `replay_gain` — which `ReplayGain` tags the audio path applies (T11,
     /// S15); the audio path reads it through [`ReplayGainMode`].
@@ -208,7 +212,9 @@ impl Config {
 /// What the binary actually runs with, after the command line, the config
 /// file and the defaults have been resolved.
 ///
-/// `bit_perfect` is set here and read nowhere; T17 will read it.
+/// `bit_perfect` is consumed by the audio path (T17): the device stream is
+/// reopened at each track's own rate instead of resampling, the volume is
+/// pinned at 100% and `ReplayGain` is skipped.
 /// `replay_gain` is consumed by the audio path (T11): the gain is applied in
 /// the producer, once per track, before the ring. `session`, `theme` and `ui`
 /// are what the interface needs on its very first frame (S2–S5).
@@ -522,7 +528,12 @@ pub fn default_config_text() -> String {
 # Unset, the interface asks for it the first time and saves the answer here.
 # library = \"~/Music\"
 
-# Bit-perfect playback opt-in. Accepted and stored; nothing reads it yet.
+# Bit-perfect playback: the samples the decoder produces reach the device
+# unmodified — no resampling, no ReplayGain, and the volume is pinned to
+# 100%. A track at a different rate reopens the device at its own rate (a
+# small gap at that boundary); channel layouts still map (mono plays on every
+# channel). When the device has no output at a track's rate, velo falls back
+# to converting and says so once.
 bit_perfect = false
 
 # ReplayGain: \"track\" (the track's gain), \"album\" (the album's, else the
