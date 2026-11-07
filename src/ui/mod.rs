@@ -28,7 +28,7 @@ use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph};
 
-use crate::audio::output::TrackFailure;
+use crate::audio::output::{SharedQueue, TrackFailure};
 use crate::audio::{Player, seek_target};
 use crate::library::{AlbumEntry, ArtistEntry, Library, TrackEntry};
 
@@ -43,6 +43,8 @@ pub enum Action {
     Quit,
     /// Start playing the track at this index.
     Play { from: usize },
+    /// Start playing the queue from this index.
+    PlayQueue { from: usize },
     /// Go one level deeper into the current selection.
     Descend,
     /// Go one level up; at the top level this does nothing.
@@ -86,12 +88,23 @@ enum Position {
 enum Playback {
     /// A flat command-line stream started at this index.
     Files { from: usize },
+    /// The queue itself, rotated so the entry it started from is its head.
+    Queue,
     /// An album stream started at this index of that album's track list.
     Album {
         artist: String,
         album: String,
         from: usize,
     },
+}
+
+/// Which list the arrow keys and the editing commands act on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum View {
+    /// The library browser, or the flat command-line list.
+    Library,
+    /// The queue, in play order.
+    Queue,
 }
 
 /// Where playback stands, for the header and the footer.
@@ -137,6 +150,13 @@ pub struct App<'lib> {
     queue: Vec<PathBuf>,
     /// The stream that is playing, if any.
     playing: Option<Playback>,
+    /// Which list the keys act on.
+    view: View,
+    /// The selected row of the queue view.
+    queue_selected: usize,
+    /// The handle the running player reads its queue from, so an edit reaches
+    /// the audio instead of only the screen (T18).
+    shared: Option<SharedQueue>,
     help: bool,
     volume: u8,
     state: PlayState,
@@ -158,6 +178,9 @@ impl<'lib> App<'lib> {
             selected: 0,
             queue: Vec::new(),
             playing: None,
+            view: View::Library,
+            queue_selected: 0,
+            shared: None,
             help: false,
             volume: 100,
             state: PlayState::Stopped,
@@ -180,6 +203,9 @@ impl<'lib> App<'lib> {
             selected: 0,
             queue: Vec::new(),
             playing: None,
+            view: View::Library,
+            queue_selected: 0,
+            shared: None,
             help: false,
             volume: 100,
             state: PlayState::Stopped,
@@ -194,6 +220,24 @@ impl<'lib> App<'lib> {
     #[must_use]
     pub const fn selected(&self) -> usize {
         self.selected
+    }
+
+    /// Which list the keys act on.
+    #[must_use]
+    pub const fn view(&self) -> View {
+        self.view
+    }
+
+    /// The selected row of the queue view.
+    #[must_use]
+    pub const fn queue_selected(&self) -> usize {
+        self.queue_selected
+    }
+
+    /// The queue, in play order.
+    #[must_use]
+    pub fn queue(&self) -> &[PathBuf] {
+        &self.queue
     }
 
     /// Where in the library the interface stands, or `None` over a flat
@@ -307,12 +351,41 @@ impl<'lib> App<'lib> {
                 Action::None
             }
             KeyCode::Char('g') => {
-                self.selected = 0;
+                self.select_first();
                 Action::None
             }
             KeyCode::Char('G') => {
-                self.selected = self.row_count().saturating_sub(1);
+                self.select_last();
                 Action::None
+            }
+            KeyCode::Tab => {
+                self.toggle_view();
+                Action::None
+            }
+            KeyCode::Char('a') => {
+                self.append_selection();
+                Action::None
+            }
+            KeyCode::Char('d') if self.view == View::Queue => {
+                self.remove_from_queue();
+                Action::None
+            }
+            KeyCode::Char('J') if self.view == View::Queue => {
+                self.move_in_queue(1);
+                Action::None
+            }
+            KeyCode::Char('K') if self.view == View::Queue => {
+                self.move_in_queue(-1);
+                Action::None
+            }
+            KeyCode::Enter if self.view == View::Queue => {
+                if self.queue.is_empty() {
+                    Action::None
+                } else {
+                    Action::PlayQueue {
+                        from: self.queue_selected,
+                    }
+                }
             }
             KeyCode::Enter => match &self.position {
                 Position::Files if !self.argv.is_empty() => Action::Play {
@@ -362,6 +435,7 @@ impl<'lib> App<'lib> {
             }
             Action::Quit => self.shutdown(),
             Action::Play { from } => self.play_from(from),
+            Action::PlayQueue { from } => self.play_queue_from(from),
             Action::Descend => self.descend(),
             Action::Ascend => self.ascend(),
             Action::TogglePause => self.toggle_pause(),
@@ -436,6 +510,24 @@ impl<'lib> App<'lib> {
     }
 
     fn draw_body(&self, frame: &mut Frame, area: Rect) {
+        if self.view == View::Queue {
+            if self.queue.is_empty() {
+                frame.render_widget(
+                    Paragraph::new(Line::styled(
+                        "nothing queued — press a on a track to add it",
+                        Style::new().fg(DIM),
+                    )),
+                    area,
+                );
+                return;
+            }
+            let list = List::new(self.queue_rows())
+                .style(Style::new().bg(BACKGROUND))
+                .highlight_style(Style::new().bg(ACCENT).fg(BACKGROUND));
+            let mut state = ListState::default().with_selected(Some(self.queue_selected));
+            frame.render_stateful_widget(list, area, &mut state);
+            return;
+        }
         if let Some(message) = self.empty_message() {
             frame.render_widget(
                 Paragraph::new(Line::styled(message, Style::new().fg(DIM))),
@@ -515,6 +607,34 @@ impl<'lib> App<'lib> {
                 })
                 .collect(),
         }
+    }
+
+    /// The queue, in play order, marked the way every other list marks the row
+    /// that is playing.
+    fn queue_rows(&self) -> Vec<ListItem<'static>> {
+        let playing = self.playing_queue_index();
+        self.queue
+            .iter()
+            .enumerate()
+            .map(|(index, path)| {
+                let marker = if playing == Some(index) {
+                    Span::styled("▸ ", Style::new().fg(ACCENT))
+                } else {
+                    Span::raw("  ")
+                };
+                let mut spans = vec![
+                    marker,
+                    Span::styled(Self::file_name(path), Style::new().fg(TEXT)),
+                ];
+                if let Some(parent) = path.parent() {
+                    spans.push(Span::styled(
+                        format!("  {}", parent.display()),
+                        Style::new().fg(DIM),
+                    ));
+                }
+                ListItem::new(Line::from(spans))
+            })
+            .collect()
     }
 
     /// One flat row: the play marker, the file name, the parent directory dimmed.
@@ -633,6 +753,10 @@ impl<'lib> App<'lib> {
             ", / .      seek 5 s back / forward",
             "+ / -      volume up / down",
             "?          toggle this help",
+            "tab        library / queue",
+            "a          add the selection to the queue",
+            "d          remove from the queue",
+            "J / K      move it down / up",
             "q          quit",
         ];
         let widest = rows.iter().map(|row| row.len()).max().unwrap_or(0);
@@ -701,14 +825,206 @@ impl<'lib> App<'lib> {
         }
     }
 
+    /// How many rows the view the keys act on holds.
+    fn view_len(&self) -> usize {
+        match self.view {
+            View::Library => self.row_count(),
+            View::Queue => self.queue.len(),
+        }
+    }
+
+    /// The selected row of the view the keys act on.
+    const fn view_selection(&self) -> usize {
+        match self.view {
+            View::Library => self.selected,
+            View::Queue => self.queue_selected,
+        }
+    }
+
+    fn set_view_selection(&mut self, index: usize) {
+        match self.view {
+            View::Library => self.selected = index,
+            View::Queue => self.queue_selected = index,
+        }
+    }
+
     fn select_next(&mut self) {
-        if self.selected + 1 < self.row_count() {
-            self.selected += 1;
+        let index = self.view_selection();
+        if index + 1 < self.view_len() {
+            self.set_view_selection(index + 1);
         }
     }
 
     fn select_previous(&mut self) {
-        self.selected = self.selected.saturating_sub(1);
+        let index = self.view_selection();
+        self.set_view_selection(index.saturating_sub(1));
+    }
+
+    fn select_first(&mut self) {
+        self.set_view_selection(0);
+    }
+
+    fn select_last(&mut self) {
+        self.set_view_selection(self.view_len().saturating_sub(1));
+    }
+
+    /// Switches between the library and the queue, naming the new view in the
+    /// status line so the screen says where the keys went.
+    fn toggle_view(&mut self) {
+        self.view = match self.view {
+            View::Library => View::Queue,
+            View::Queue => View::Library,
+        };
+        match self.view {
+            View::Queue => {
+                self.queue_selected = self.queue_selected.min(self.queue.len().saturating_sub(1));
+                self.status = format!(
+                    "velo: queue, {}",
+                    plural(self.queue.len(), "track", "tracks")
+                );
+            }
+            View::Library => self.status.clear(),
+        }
+    }
+
+    /// The queue index that is playing, when anything is: the player counts
+    /// from the list it was given, which is this queue.
+    fn playing_queue_index(&self) -> Option<usize> {
+        self.playing.as_ref()?;
+        self.player.as_ref().map(Player::current_index)
+    }
+
+    /// Applies an edit to the queue and to the handle the player reads, in that
+    /// order and in one place: two call sites that had to agree would drift.
+    fn edit_queue(&mut self, edit: impl FnOnce(&mut Vec<PathBuf>)) {
+        edit(&mut self.queue);
+        if let Some(shared) = &self.shared {
+            match shared.lock() {
+                Ok(mut queue) => queue.clone_from(&self.queue),
+                Err(poisoned) => poisoned.into_inner().clone_from(&self.queue),
+            }
+        }
+    }
+
+    /// The queue index an edit may touch, or why it may not. Only entries after
+    /// the one playing are editable: that keeps the producer's index valid
+    /// without renumbering, and the entries before it are history anyway.
+    fn editable_queue_index(&self, index: usize) -> Result<usize, String> {
+        Self::editable_queue_index_among(self.queue.len(), self.playing_queue_index(), index)
+    }
+
+    /// The edit rule on its own terms, so the playing-entry refusals are
+    /// testable without opening a sound device: given a queue of `len`
+    /// entries with entry `playing` being played, `index` may be edited only
+    /// when it is neither the playing entry nor anything before it.
+    fn editable_queue_index_among(
+        len: usize,
+        playing: Option<usize>,
+        index: usize,
+    ) -> Result<usize, String> {
+        if index >= len {
+            return Err("velo: nothing selected in the queue".to_owned());
+        }
+        match playing {
+            Some(playing) if index == playing => {
+                Err("velo: cannot remove the track that is playing".to_owned())
+            }
+            Some(playing) if index < playing => Err("velo: that track already played".to_owned()),
+            _ => Ok(index),
+        }
+    }
+
+    fn remove_from_queue(&mut self) {
+        let Ok(index) = self.editable_queue_index(self.queue_selected) else {
+            self.status = self.editable_queue_index(self.queue_selected).unwrap_err();
+            return;
+        };
+        let name = Self::file_name(&self.queue[index]);
+        self.edit_queue(|queue| {
+            queue.remove(index);
+        });
+        self.queue_selected = self.queue_selected.min(self.queue.len().saturating_sub(1));
+        self.status = format!("velo: removed {name}");
+    }
+
+    fn move_in_queue(&mut self, delta: i64) {
+        let Ok(index) = self.editable_queue_index(self.queue_selected) else {
+            self.status = self.editable_queue_index(self.queue_selected).unwrap_err();
+            return;
+        };
+        let Some(target) =
+            Self::queue_move_target(self.queue.len(), self.playing_queue_index(), index, delta)
+        else {
+            "velo: cannot move past the track that is playing".clone_into(&mut self.status);
+            return;
+        };
+        self.edit_queue(|queue| queue.swap(index, target));
+        self.queue_selected = target;
+    }
+
+    /// The move rule on its own terms: the index `J`/`K` may move entry
+    /// `index` to, or `None` when the move is refused — landing outside the
+    /// queue, or on, or across, the entry that is playing.
+    fn queue_move_target(
+        len: usize,
+        playing: Option<usize>,
+        index: usize,
+        delta: i64,
+    ) -> Option<usize> {
+        let target = i64::try_from(index).ok()?.checked_add(delta)?;
+        let target = usize::try_from(target).ok()?;
+        let reachable = target < len && playing.is_none_or(|playing| target > playing);
+        reachable.then_some(target)
+    }
+
+    /// Appends the current selection to the queue without interrupting what is
+    /// playing. A track appends itself; an album appends its tracks.
+    fn append_selection(&mut self) {
+        let paths: Vec<PathBuf> = match (&self.position, self.view) {
+            (Position::Tracks { .. }, _) => self
+                .tracks
+                .get(self.selected)
+                .map(|entry| vec![entry.path.clone()])
+                .unwrap_or_default(),
+            (Position::Files, _) => self
+                .argv
+                .get(self.selected)
+                .cloned()
+                .map(|path| vec![path])
+                .unwrap_or_default(),
+            (Position::Albums { artist }, _) => {
+                let Some(album) = self.albums.get(self.selected) else {
+                    return;
+                };
+                let Some(library) = self.library else {
+                    return;
+                };
+                match library.tracks_of(artist, &album.title) {
+                    Ok(tracks) => tracks.into_iter().map(|entry| entry.path).collect(),
+                    Err(error) => {
+                        self.status = format!("velo: {error}");
+                        return;
+                    }
+                }
+            }
+            (Position::Artists, _) => {
+                "velo: open an album to add its tracks".clone_into(&mut self.status);
+                return;
+            }
+        };
+        if paths.is_empty() {
+            return;
+        }
+        let count = paths.len();
+        self.edit_queue(|queue| queue.extend(paths));
+        self.status = format!("velo: added {}", plural(count, "track", "tracks"));
+    }
+
+    fn file_name(path: &std::path::Path) -> String {
+        path.file_name().map_or_else(
+            || path.display().to_string(),
+            |name| name.to_string_lossy().into_owned(),
+        )
     }
 
     /// Moves the volume by `percent`, clamped to 0..=100.
@@ -806,7 +1122,22 @@ impl<'lib> App<'lib> {
         let Some((paths, playback)) = started else {
             return;
         };
+        self.start_stream(paths, playback);
+    }
 
+    /// Plays the queue itself from `from`, rotating it so that entry is first:
+    /// the player counts from the list it is given, and every marker in the
+    /// interface counts from the same place.
+    fn play_queue_from(&mut self, from: usize) {
+        if from >= self.queue.len() {
+            return;
+        }
+        let paths = self.queue[from..].to_vec();
+        self.start_stream(paths, Playback::Queue);
+    }
+
+    /// Opens a device for these paths and makes them the queue.
+    fn start_stream(&mut self, paths: Vec<PathBuf>, playback: Playback) {
         // Dropping through `stop` also releases the producer thread.
         if let Some(old) = self.player.take() {
             old.stop();
@@ -814,9 +1145,10 @@ impl<'lib> App<'lib> {
         // The player reads the queue it is given, so the interface keeps the
         // handle and edits it in place (T18).
         let queue = Arc::new(Mutex::new(paths.clone()));
-        match Player::play_gapless(queue) {
+        match Player::play_gapless(Arc::clone(&queue)) {
             Ok(player) => {
                 self.queue = paths;
+                self.shared = Some(queue);
                 self.player = Some(player);
                 self.playing = Some(playback);
                 self.state = PlayState::Playing;
@@ -824,6 +1156,7 @@ impl<'lib> App<'lib> {
             }
             Err(error) => {
                 self.queue.clear();
+                self.shared = None;
                 self.player = None;
                 self.playing = None;
                 self.state = PlayState::Stopped;
@@ -860,6 +1193,7 @@ impl<'lib> App<'lib> {
             return;
         }
         let queue = Arc::new(Mutex::new(self.queue.clone()));
+        self.shared = Some(Arc::clone(&queue));
         match Player::play_gapless_at(queue, track, offset) {
             Ok(player) => {
                 // A rebuilt player starts at its own default level; without this
@@ -921,5 +1255,65 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
         y: area.y + (area.height - height) / 2,
         width,
         height,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::App;
+
+    // The playing-entry refusals of T18b cannot be driven through `App::on_key`
+    // without a sound device: marking an entry as playing means opening one.
+    // The rule is pure and lives in one place that `remove_from_queue` and
+    // `move_in_queue` both read, so it is pinned here, and the wiring from
+    // `on_key` into `App::status` is pinned headlessly in `tests/ui_state.rs`
+    // through the empty-queue refusal, which walks the same code path.
+
+    #[test]
+    fn an_edit_refuses_the_entry_that_is_playing() {
+        assert_eq!(
+            App::editable_queue_index_among(3, Some(1), 1),
+            Err("velo: cannot remove the track that is playing".to_owned())
+        );
+    }
+
+    #[test]
+    fn an_edit_refuses_every_entry_before_the_playing_one() {
+        assert_eq!(
+            App::editable_queue_index_among(3, Some(2), 0),
+            Err("velo: that track already played".to_owned())
+        );
+        assert_eq!(
+            App::editable_queue_index_among(3, Some(2), 1),
+            Err("velo: that track already played".to_owned())
+        );
+    }
+
+    #[test]
+    fn an_edit_allows_every_entry_after_the_playing_one() {
+        assert_eq!(App::editable_queue_index_among(3, Some(0), 1), Ok(1));
+        assert_eq!(App::editable_queue_index_among(3, Some(0), 2), Ok(2));
+        // Nothing is playing: the whole queue is editable.
+        assert_eq!(App::editable_queue_index_among(3, None, 0), Ok(0));
+    }
+
+    #[test]
+    fn a_move_refuses_to_land_on_or_across_the_playing_entry() {
+        // Playing entry 0: nothing may move up into or across it.
+        assert_eq!(App::queue_move_target(3, Some(0), 1, -1), None);
+        assert_eq!(App::queue_move_target(3, Some(0), 2, -2), None);
+        // Playing entry 1: the entry after it may not step back onto it.
+        assert_eq!(App::queue_move_target(3, Some(1), 2, -1), None);
+    }
+
+    #[test]
+    fn a_move_lands_only_after_the_playing_entry_or_outside_the_queue() {
+        // Playing entry 0: entry 1 may move down, entry 2 up to 1 — never 0.
+        assert_eq!(App::queue_move_target(3, Some(0), 1, 1), Some(2));
+        assert_eq!(App::queue_move_target(3, Some(0), 2, -1), Some(1));
+        // Nothing is playing: the whole queue is reachable, except outside it.
+        assert_eq!(App::queue_move_target(3, None, 2, -1), Some(1));
+        assert_eq!(App::queue_move_target(3, None, 0, -1), None);
+        assert_eq!(App::queue_move_target(3, None, 2, 1), None);
     }
 }

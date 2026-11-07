@@ -10,7 +10,7 @@ use lofty::tag::{Tag, TagType};
 use velo::audio::output::TrackFailure;
 use velo::library::Library;
 use velo::ui::crossterm::event::{KeyCode, KeyEvent};
-use velo::ui::{Action, App, Level};
+use velo::ui::{Action, App, Level, View};
 
 fn app_with_three_tracks() -> App<'static> {
     App::new(vec![
@@ -183,6 +183,203 @@ fn left_and_right_and_comma_and_dot_seek_five_seconds() {
         Action::Seek { delta_secs: 5 }
     );
 }
+
+// ---- the queue view (T18b, S11) -----------------------------------------
+
+/// Queues the three argv tracks in order without a device: select, append,
+/// step down, append, step down, append.
+fn app_with_a_queue_of_three() -> App<'static> {
+    let mut app = app_with_three_tracks();
+    for _ in 0..3 {
+        app.on_key(key(KeyCode::Char('a')));
+        app.on_key(key(KeyCode::Char('j')));
+    }
+    app
+}
+
+#[test]
+fn a_appends_the_selected_track_to_the_queue_without_starting_a_stream() {
+    let mut app = app_with_three_tracks();
+    app.on_key(key(KeyCode::Char('j'))); // onto two.flac
+    assert_eq!(app.queue(), [] as [PathBuf; 0]);
+
+    // `a` answers with no action: appending never interrupts what is playing,
+    // and here it does not even start a stream.
+    assert_eq!(app.on_key(key(KeyCode::Char('a'))), Action::None);
+    assert_eq!(app.queue(), [PathBuf::from("/library/artist/two.flac")]);
+    assert_eq!(app.selected(), 1, "the library selection is untouched");
+    assert_eq!(app.status(), "velo: added 1 track");
+
+    app.on_key(key(KeyCode::Char('a')));
+    assert_eq!(
+        app.queue().len(),
+        2,
+        "appending twice queues the track twice"
+    );
+}
+
+#[test]
+fn a_on_an_album_appends_all_of_its_tracks_in_order() {
+    let temp = TempLibrary::new("queue-album");
+    temp.write_wav("Tide/2019 - Harbor/01 - Dawn.wav");
+    temp.write_wav("Tide/2019 - Harbor/02 - Later.wav");
+    temp.write_wav("Tide/2019 - Lantern/01 - Far.wav");
+    temp.index();
+
+    let mut app = App::browse(Some(&temp.library));
+    app.on_key(key(KeyCode::Enter));
+    app.apply(Action::Descend); // the albums of Tide
+
+    // The selection stands on Harbor: `a` queues every track of that album.
+    assert_eq!(app.on_key(key(KeyCode::Char('a'))), Action::None);
+    let names: Vec<String> = app
+        .queue()
+        .iter()
+        .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, ["01 - Dawn.wav", "02 - Later.wav"]);
+    assert_eq!(app.status(), "velo: added 2 tracks");
+    assert_eq!(app.view(), View::Library, "appending stays in the browser");
+}
+
+#[test]
+fn d_on_an_empty_queue_refuses_and_says_why() {
+    let mut app = app_with_three_tracks();
+    app.on_key(key(KeyCode::Tab));
+
+    assert_eq!(app.on_key(key(KeyCode::Char('d'))), Action::None);
+    assert_eq!(app.queue(), [] as [PathBuf; 0], "nothing was removed");
+    assert_eq!(app.status(), "velo: nothing selected in the queue");
+}
+
+#[test]
+fn d_removes_a_pending_entry_and_keeps_the_selection_inside_the_queue() {
+    let mut app = app_with_a_queue_of_three();
+    app.on_key(key(KeyCode::Tab));
+    app.on_key(key(KeyCode::Char('j'))); // onto two.flac, the middle entry
+
+    assert_eq!(app.on_key(key(KeyCode::Char('d'))), Action::None);
+    let names: Vec<String> = app
+        .queue()
+        .iter()
+        .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, ["one.flac", "three.flac"]);
+    assert_eq!(app.status(), "velo: removed two.flac");
+    assert_eq!(app.queue_selected(), 1, "the selection stays on the screen");
+}
+
+#[test]
+fn k_then_j_moves_a_pending_entry_and_the_selection_moves_with_it() {
+    let mut app = app_with_a_queue_of_three();
+    app.on_key(key(KeyCode::Tab));
+    app.on_key(key(KeyCode::Char('G'))); // onto three.flac, the last entry
+    assert_eq!(app.queue_selected(), 2);
+
+    // `K` lifts the last entry over the one above it…
+    assert_eq!(app.on_key(key(KeyCode::Char('K'))), Action::None);
+    let lifted: Vec<String> = app
+        .queue()
+        .iter()
+        .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(lifted, ["one.flac", "three.flac", "two.flac"]);
+    assert_eq!(
+        app.queue_selected(),
+        1,
+        "the selection moves with the entry"
+    );
+
+    // …and `J` puts it back where it was.
+    assert_eq!(app.on_key(key(KeyCode::Char('J'))), Action::None);
+    let dropped: Vec<String> = app
+        .queue()
+        .iter()
+        .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(dropped, ["one.flac", "two.flac", "three.flac"]);
+    assert_eq!(app.queue_selected(), 2);
+}
+
+#[test]
+fn tab_switches_the_view_and_the_status_names_it() {
+    let mut app = app_with_a_queue_of_three();
+    assert_eq!(app.view(), View::Library);
+
+    assert_eq!(app.on_key(key(KeyCode::Tab)), Action::None);
+    assert_eq!(app.view(), View::Queue);
+    assert_eq!(app.status(), "velo: queue, 3 tracks");
+
+    assert_eq!(app.on_key(key(KeyCode::Tab)), Action::None);
+    assert_eq!(app.view(), View::Library);
+    assert_eq!(
+        app.status(),
+        "",
+        "returning to the library clears the status"
+    );
+}
+
+#[test]
+fn enter_in_the_queue_view_plays_from_the_queue_selection() {
+    let mut app = app_with_a_queue_of_three();
+    app.on_key(key(KeyCode::Tab));
+    app.on_key(key(KeyCode::Char('j'))); // onto two.flac
+
+    assert_eq!(
+        app.on_key(key(KeyCode::Enter)),
+        Action::PlayQueue { from: 1 }
+    );
+    // Not applying it: `apply` would open a sound device.
+}
+
+#[test]
+fn enter_on_an_empty_queue_view_does_nothing() {
+    let mut app = app_with_three_tracks();
+    app.on_key(key(KeyCode::Tab));
+    assert_eq!(app.on_key(key(KeyCode::Enter)), Action::None);
+}
+
+#[test]
+fn the_movement_keys_follow_the_active_view_and_leave_the_other_selection() {
+    let mut app = app_with_a_queue_of_three();
+    // Queuing three tracks stepped the library selection down to its last row;
+    // whatever it is, it must not move while the queue view is active.
+    let library_selection = app.selected();
+    assert_eq!(library_selection, 2);
+
+    app.on_key(key(KeyCode::Tab));
+    app.on_key(key(KeyCode::Char('G')));
+    assert_eq!(app.queue_selected(), 2);
+    assert_eq!(
+        app.selected(),
+        library_selection,
+        "`G` in the queue leaves the library alone"
+    );
+
+    // `j` at the last queue row clamps instead of wrapping…
+    app.on_key(key(KeyCode::Char('j')));
+    assert_eq!(app.queue_selected(), 2);
+    // …`k` walks back up, `g` jumps to the head.
+    app.on_key(key(KeyCode::Char('k')));
+    assert_eq!(app.queue_selected(), 1);
+    app.on_key(key(KeyCode::Char('g')));
+    assert_eq!(app.queue_selected(), 0);
+    assert_eq!(app.selected(), library_selection);
+
+    // And back in the library, the keys move the library selection again.
+    app.on_key(key(KeyCode::Tab));
+    app.on_key(key(KeyCode::Char('k')));
+    assert_eq!(app.selected(), library_selection - 1);
+    assert_eq!(app.queue_selected(), 0, "the queue selection is untouched");
+}
+
+// ---- the playing-entry refusals (T18b, S11) -----------------------------
+//
+// The rules that need a live player — `d` on the playing entry, `J`/`K`
+// across it — cannot be driven through `App::on_key` here: marking an entry
+// as playing means opening a sound device. The rule itself is pure and lives
+// in one place that `remove_from_queue` and `move_in_queue` both read, so it
+// is pinned in `src/ui/mod.rs`'s own `#[cfg(test)]` module instead.
 
 #[test]
 fn the_seek_target_never_leaves_the_track() {

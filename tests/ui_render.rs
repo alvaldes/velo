@@ -237,3 +237,37 @@ fn a_count_of_one_is_not_pluralised() {
     assert_eq!(velo::ui::plural(0, "track", "tracks"), "0 tracks");
     assert_eq!(velo::ui::plural(20, "artist", "artists"), "20 artists");
 }
+
+// ---- the queue view (T18b, S11) ------------------------------------------
+
+#[test]
+fn the_queue_view_draws_the_queued_file_names_and_empty_state() {
+    let mut app = App::new(tracks(&["one.flac", "two.flac"]));
+
+    // An empty queue explains itself instead of drawing nothing.
+    press(&mut app, KeyCode::Tab);
+    let empty = render(&app);
+    assert!(
+        empty.contains("nothing queued"),
+        "an empty queue explains itself, got: {empty}"
+    );
+
+    // Queue both tracks, then look at the queue view.
+    press(&mut app, KeyCode::Tab); // back to the library
+    press(&mut app, KeyCode::Char('a'));
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Char('a'));
+    press(&mut app, KeyCode::Tab); // into the queue
+    let screen = render(&app);
+
+    for expected in ["one.flac", "two.flac"] {
+        assert!(
+            screen.contains(expected),
+            "the queue view must show {expected:?}, got: {screen}"
+        );
+    }
+    assert!(
+        !screen.contains("nothing queued"),
+        "the empty-state hint is gone once something is queued"
+    );
+}
