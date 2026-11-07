@@ -32,6 +32,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, ListState, Paragraph};
 
 use crate::audio::output::{SharedQueue, TrackFailure};
+use crate::audio::spectrum::Spectrum;
 use crate::audio::{Player, seek_target};
 use crate::library::{AlbumEntry, ArtistEntry, Library, TrackEntry};
 
@@ -197,6 +198,13 @@ pub struct App<'lib> {
     state: PlayState,
     player: Option<Player>,
     status: String,
+    /// The analyzer the spectrum draws (T5): fed from the player's tap on
+    /// every tick, shown or not, so the tap never holds stale audio.
+    spectrum: Spectrum,
+    /// The tap's samples between draining and analysis, reused per tick.
+    heard: Vec<f32>,
+    /// How many bands the last frame had room for.
+    spectrum_bands: std::cell::Cell<usize>,
 }
 
 impl<'lib> App<'lib> {
@@ -232,6 +240,9 @@ impl<'lib> App<'lib> {
             state: PlayState::Stopped,
             player: None,
             status: String::new(),
+            spectrum: Spectrum::new(),
+            heard: Vec::new(),
+            spectrum_bands: std::cell::Cell::new(0),
         }
     }
 
@@ -268,6 +279,9 @@ impl<'lib> App<'lib> {
             state: PlayState::Stopped,
             player: None,
             status: String::new(),
+            spectrum: Spectrum::new(),
+            heard: Vec::new(),
+            spectrum_bands: std::cell::Cell::new(0),
         };
         app.reload();
         app
@@ -398,6 +412,7 @@ impl<'lib> App<'lib> {
     pub fn tick(&mut self) {
         self.refresh_artwork();
         self.explain_hidden_art();
+        self.listen();
         let Some(player) = &self.player else {
             return;
         };
@@ -423,6 +438,32 @@ impl<'lib> App<'lib> {
     /// only then: the file is read once per track, never per frame, and never
     /// from the audio callback (T8). A track whose file carries no picture
     /// draws no art until a different track plays.
+    /// Feeds the spectrum what the device played since the last tick and
+    /// moves its bars one step: up to the music, or down when none came.
+    /// Runs whether or not the spectrum is on screen, so the tap is always
+    /// drained and never shows half a second of old audio when it returns.
+    fn listen(&mut self) {
+        if let Some(player) = &self.player {
+            player.drain_tap(&mut self.heard);
+            self.spectrum.push(&self.heard);
+            self.heard.clear();
+        }
+        let rate = self
+            .player
+            .as_ref()
+            .map_or(48_000, |player| player.spec().sample_rate);
+        self.spectrum.update(self.spectrum_bands.get(), rate);
+    }
+
+    /// How long the event loop may wait for a key before drawing again:
+    /// about thirty frames a second while the bars move, ten otherwise.
+    #[must_use]
+    pub fn frame_interval(&self) -> Duration {
+        let moving = self.state == PlayState::Playing
+            || self.spectrum.levels().iter().any(|&level| level > 0.0);
+        Duration::from_millis(if moving { 33 } else { 100 })
+    }
+
     /// Tells the user once why a cover they own is not on screen, instead of
     /// leaving them staring at a panel that never appears (T8).
     fn explain_hidden_art(&mut self) {
@@ -725,15 +766,30 @@ impl<'lib> App<'lib> {
                 self.draw_transport(frame, bottom, volume);
             }
             _ => {
+                // The spectrum sits between the clock and the progress bar
+                // when the block was given room for it.
+                let bars = area.height.saturating_sub(7);
                 let [
                     title_row,
                     subtitle_row,
                     _,
                     clock_row,
+                    spectrum_area,
                     progress_row,
                     transport_row,
                     _,
-                ] = Layout::vertical([Constraint::Length(1); 7]).areas(area);
+                ] = Layout::vertical([
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                    Constraint::Length(bars),
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                ])
+                .areas(area);
+                self.draw_spectrum(frame, spectrum_area);
                 frame.render_widget(Paragraph::new(title), title_row);
                 frame.render_widget(
                     Paragraph::new(Line::styled(subtitle, Style::new().fg(DIM))),
@@ -826,6 +882,19 @@ impl<'lib> App<'lib> {
             return None;
         }
         Some((position.as_secs_f64() / total.as_secs_f64()).clamp(0.0, 1.0))
+    }
+
+    /// The spectrum bars, as many as the row holds at two columns each, and
+    /// the band count remembered so the next tick analyzes exactly that many.
+    fn draw_spectrum(&self, frame: &mut Frame, area: Rect) {
+        if area.height == 0 {
+            return;
+        }
+        let bands = usize::from(area.width).div_ceil(2);
+        self.spectrum_bands.set(bands);
+        let mut levels = self.spectrum.levels().to_vec();
+        levels.resize(bands, 0.0);
+        frame.render_widget(Paragraph::new(spectrum_lines(&levels, area.height)), area);
     }
 
     /// The play state as a pill: `▶ playing` in the accent, the others dim.
@@ -1843,14 +1912,71 @@ fn draw_empty(frame: &mut Frame, area: Rect, message: &str) {
 }
 
 /// How many rows the now-playing block takes out of a content area this tall.
-/// The list below always keeps rows of its own: the block is seven rows only
-/// when twelve are left over, three on a short window, one on a tiny one.
+/// The list below always keeps rows of its own: the block carries the
+/// spectrum only on a tall window, is seven rows when twelve are left over,
+/// three on a short window, one on a tiny one.
 const fn now_playing_rows(height: u16) -> u16 {
     match height {
+        22.. => 7 + SPECTRUM_ROWS,
         18.. => 7,
         7.. => 3,
         _ => 1,
     }
+}
+
+/// How tall the spectrum is, in rows; each row resolves eight steps.
+const SPECTRUM_ROWS: u16 = 4;
+
+/// Partial blocks by eighths, empty to full.
+const EIGHTHS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+/// The spectrum as `rows` lines, top first: one column per band and one of
+/// air after it, each bar filling from the bottom in eighths of a row and
+/// colored by height. A silent band keeps a baseline in the frame's color,
+/// so the analyzer reads as there and quiet rather than missing.
+fn spectrum_lines(levels: &[f32], rows: u16) -> Vec<Line<'static>> {
+    let rows = usize::from(rows);
+    let steps = rows * 8;
+    (0..rows)
+        .map(|row| {
+            let from_bottom = rows - 1 - row;
+            let color = bar_color(from_bottom, rows);
+            let spans: Vec<Span<'static>> = levels
+                .iter()
+                .flat_map(|&level| {
+                    #[expect(
+                        clippy::cast_possible_truncation,
+                        clippy::cast_sign_loss,
+                        clippy::cast_precision_loss,
+                        reason = "a level is 0..=1 and a bar a few dozen steps"
+                    )]
+                    let filled = (level.clamp(0.0, 1.0) * steps as f32).round() as usize;
+                    let here = filled.saturating_sub(from_bottom * 8).min(8);
+                    let cell = if here == 0 && from_bottom == 0 {
+                        Span::styled("▁", Style::new().fg(BORDER))
+                    } else {
+                        Span::styled(EIGHTHS[here].to_string(), Style::new().fg(color))
+                    };
+                    [cell, Span::raw(" ")]
+                })
+                .collect();
+            Line::from(spans)
+        })
+        .collect()
+}
+
+/// The bar color `from_bottom` rows up out of `rows`: a deep rose at the
+/// floor rising to the accent's lightest tint at the top.
+fn bar_color(from_bottom: usize, rows: usize) -> ratatui::style::Color {
+    let (low, high) = (theme::BAR_LOW, theme::BAR_HIGH);
+    let mix = |a: u8, b: u8| {
+        let span = rows.saturating_sub(1).max(1);
+        let a = usize::from(a);
+        let b = usize::from(b);
+        let value = (a * (span - from_bottom) + b * from_bottom) / span;
+        u8::try_from(value).unwrap_or(u8::MAX)
+    };
+    ratatui::style::Color::Rgb(mix(low.0, high.0), mix(low.1, high.1), mix(low.2, high.2))
 }
 
 /// The title and the dim subtitle of a playing file: its library row when
@@ -2004,6 +2130,23 @@ mod tests {
         assert_eq!(filled(Some(1.0), 10), 10);
         assert_eq!(filled(Some(0.5), 10), 5);
         assert_eq!(filled(None, 10), 0);
+    }
+
+    #[test]
+    fn spectrum_bars_fill_from_the_bottom_in_eighths_with_a_gap_between() {
+        let rows = |levels: &[f32]| -> Vec<String> {
+            super::spectrum_lines(levels, 4)
+                .iter()
+                .map(ToString::to_string)
+                .collect()
+        };
+
+        // Full, half, an eighth of the lowest row, and silence.
+        assert_eq!(
+            rows(&[1.0, 0.5, 1.0 / 32.0, 0.0]),
+            ["█       ", "█       ", "█ █     ", "█ █ ▁ ▁ "],
+            "four bars, each one column with one of air"
+        );
     }
 
     #[test]

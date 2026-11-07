@@ -473,8 +473,8 @@ struct Sequence {
 }
 
 /// Builds the device stream: the callback that drains the ring. Its whole job
-/// is copying samples and applying the gain ramp — no allocation, no locks,
-/// no logging, no decoding.
+/// is copying samples, handing their mono mix to the spectrum tap and applying
+/// the gain ramp — no allocation, no locks, no logging, no decoding.
 fn build_stream(
     device: &cpal::Device,
     config: cpal::StreamConfig,

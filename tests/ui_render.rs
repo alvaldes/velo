@@ -258,6 +258,64 @@ fn a_short_terminal_shrinks_the_block_before_the_list_disappears() {
     }
 }
 
+// ---- the spectrum (ui-redesign T5c, S1, S2, S4) ----------------------------
+
+/// The rows of a frame of `app` at this size.
+fn lines_at(app: &App, width: u16, height: u16) -> Vec<String> {
+    screen_at(app, width, height)
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+fn a_tall_window_draws_the_spectrum_as_a_quiet_baseline_when_nothing_plays() {
+    use velo::ui::theme::BORDER;
+
+    let app = App::new(tracks(&["one.flac"]));
+    let tall = lines_at(&app, 100, 32);
+    let baseline = tall
+        .iter()
+        .position(|line| line.contains("▁ ▁ ▁ ▁"))
+        .unwrap_or_else(|| panic!("a baseline of bars, got:\n{}", tall.join("\n")));
+    let clock = tall
+        .iter()
+        .position(|line| line.contains("■ stopped"))
+        .unwrap();
+    let progress = tall
+        .iter()
+        .position(|line| line.starts_with("│ ──────"))
+        .unwrap();
+    assert!(
+        clock < baseline && baseline < progress,
+        "the bars sit between the clock and the progress bar"
+    );
+    let x = tall[baseline].chars().position(|c| c == '▁').unwrap();
+    assert_eq!(
+        cell_at_size(&app, 100, 32, x, baseline).fg,
+        BORDER,
+        "silence is drawn as quietly as the frame"
+    );
+
+    // The 80×24 window keeps its seven-row block: no spectrum there.
+    assert!(!screen_at(&app, 80, 24).contains("▁ ▁ ▁"));
+}
+
+#[test]
+fn a_quiet_player_redraws_slowly_and_nothing_is_animating() {
+    let app = App::new(tracks(&["one.flac"]));
+    assert_eq!(app.frame_interval(), std::time::Duration::from_millis(100));
+}
+
+/// The cell at `(x, y)` of a `width`×`height` frame of `app`.
+fn cell_at_size(app: &App, width: u16, height: u16, x: usize, y: usize) -> Cell {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("a test terminal");
+    terminal
+        .draw(|frame| app.draw(frame))
+        .expect("the frame draws");
+    terminal.backend().buffer()[(u16::try_from(x).unwrap(), u16::try_from(y).unwrap())].clone()
+}
+
 // ---- the help overlay (ui-redesign T4, S1, S3) -----------------------------
 
 #[test]
