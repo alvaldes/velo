@@ -66,7 +66,7 @@ Root folder: `/Users/alvaldes/Music/Library` (L15). Metadata comes from tags fir
 | T10 | README, install path (brew / cargo-binstall), release workflow | S3 | inline | `5c28143` |
 | T11 | ReplayGain read + apply in the audio path | S15 | inline | `c8a418c` |
 | T12a | Subsonic client and authentication: JSON, token or API key, error sentences, `--subsonic-test` | S14 | worker (clone) | `f6f7ec7` |
-| T12b | Sync the remote library into the index as rows with a `source` column; search over them | S14 | pending | — |
+| T12b | Sync the remote library into the index as rows with a `source` column; search over them | S14 | worker (clone) | `b2eef0b` |
 | T12c | Cache-on-play: fetch the original bytes with `format=raw`, then play locally (keeps seek, gapless, bit-perfect) | S14 | pending | — |
 | T12d | Remote cover art via `getCoverArt` and scrobbling on track change | S14 | pending | — |
 | T13 | ReplayGain tag writer | S15 | inline | — |
@@ -295,8 +295,20 @@ The proof that matters is equality: a 48 kHz fixture drained with the stream ope
 
 **L37 — delivery plan for branch `work/next`** (2912 authored lines, two features, four commits). The slice rule exists to protect a reviewer, and the branch now carries two unrelated units: bit-perfect (T17) and the Subsonic client (T12a). They land as **two separate merges**, in that order, each with `--no-ff`, so either can be reverted on its own and a reviewer can read one idea per merge:
 
-1. `git fetch ../velo-clone work/next` then merge `f6f7ec7^..1ee0156` — no: merge by taking the two commits of T17 together (`6771fcc` and its docs `1ee0156`).
-2. Only then merge `f6f7ec7` and `db92eaa` for T12a.
+1. `git fetch ../velo-clone work/next`, then merge T17: `6771fcc` with its docs `1ee0156`.
+2. Then merge T12a: `f6f7ec7` with its docs `db92eaa`.
+3. Then merge T12b: `b2eef0b` with its docs commit.
+
+Three units, three merges. The branch is now ~4 500 authored lines across five commits, which is exactly why it must not land as one.
 
 Both wait for the main checkout to have no uncommitted work in `src/ui/mod.rs`. Merging features onto someone else's uncommitted edits is how a branch loses a day.
 
+**L38** (T12b closed in `b2eef0b`): the remote library is rows in the existing index. `source` and `remote_id` with a partial unique index, a migration in one transaction guarded by `user_version`, and queries that did not change their signatures — that is what lets fuzzy search, the artist and album views and `velo --index` reach a server's catalogue with no second code path.
+
+**The migration was the risk, so it was checked against real data, not a fixture.** I copied the human's actual 251-track index, ran the new binary on the copy, and it came back `user_version 2`, 251 rows, every one `source = local`. Fixtures prove the code path; a copy of the real file proves it survives contact with a real file.
+
+**Verified against Navidrome's public demo** (`https://demo.navidrome.org`, `demo`/`demo`) rather than only against canned JSON: `--subsonic-test` answered `navidrome 0.64.2, OpenSubsonic, token + salt — verified` (the demo does **not** advertise `apiKeyAuthentication`, so the fallback is what actually ran); `--sync` brought in 501 tracks and 50 albums in **52 requests** and 9 s, and a second run changed nothing; and searching `sad` in the interface listed `sad robot — pornophonique · 8-bit lagerfeuer`, a remote row found by the fuzzy matcher. The request formula is therefore arithmetic, not a hope: `1 ping + ⌈albums/500⌉ pages + one getAlbum per album`.
+
+**Two findings worth keeping.** First, a partial sync deletes nothing: the transaction is written at the end, so a failure anywhere before it leaves the index exactly as it was — destructive in intent, conservative in behaviour. Second, and this one is a UX gap T12b exposed: with only `[subsonic]` configured, the interface still demands a local `library` path, so a remote-only user is asked for a folder they do not have. That belongs with T12c or the config work; it is written here so it is not discovered twice.
+
+**What the tests pin that my terminal did not show me**: pressing Enter on a remote row (and on a remote search result) writes `velo: remote playback arrives with the cache (T12c)` and starts nothing — two tests assert the exact sentence and pass. My pty capture of the same interaction showed no status line at all, which is the known diff-stream trap of this project: ratatui only writes what changed. The tests are the evidence here; the terminal was the unreliable witness.
