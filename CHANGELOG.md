@@ -1,6 +1,10 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.8.1] - 2026-11-07
+
+### Fixes
+- **ui:** The help card keeps its height while the filter narrows it
 ## [0.8.0] - 2026-11-07
 
 ### Features
