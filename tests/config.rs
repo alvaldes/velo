@@ -12,7 +12,9 @@ use std::path::{Path, PathBuf};
 use std::ffi::OsStr;
 
 use clap::Parser as _;
-use velo::config::{Cli, Config, DEFAULT_LIBRARY_ROOT, DEFAULT_VOLUME, config_path};
+use velo::config::{
+    Cli, Config, DEFAULT_LIBRARY_ROOT, DEFAULT_VOLUME, ReplayGainMode, config_path,
+};
 
 /// Makes `<temp>/<name>`, verifies the directory can be removed, and returns
 /// the path. Each test gets its own directory, so tests cannot see each other.
@@ -190,6 +192,65 @@ fn an_unknown_key_is_an_error_naming_the_key() {
         error.contains("volum"),
         "error must name the unknown key, got: {error}"
     );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// ------------------------------------------------------------ replay_gain
+
+#[test]
+fn the_replay_gain_key_accepts_all_three_values() {
+    let cases = [
+        ("track", ReplayGainMode::Track),
+        ("album", ReplayGainMode::Album),
+        ("off", ReplayGainMode::Off),
+    ];
+    for (value, expected) in cases {
+        let dir = temp_dir("replay-gain-values");
+        let path = write_config(&dir, &format!("replay_gain = \"{value}\"\n"));
+        let config =
+            Config::load_from(&path).unwrap_or_else(|error| panic!("load failed: {error}"));
+        let settings = config.merged(&cli_with_no_flags());
+        assert_eq!(settings.replay_gain, expected, "replay_gain = \"{value}\"");
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[test]
+fn replay_gain_defaults_to_track_when_the_key_is_absent() {
+    let dir = temp_dir("replay-gain-default");
+    let path = write_config(&dir, "volume = 30\n");
+    let config = Config::load_from(&path).unwrap_or_else(|error| panic!("load failed: {error}"));
+    let settings = config.merged(&cli_with_no_flags());
+    assert_eq!(settings.replay_gain, ReplayGainMode::Track);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_bad_replay_gain_value_names_the_file_the_line_and_the_allowed_values() {
+    let dir = temp_dir("replay-gain-bad-value");
+    let path = write_config(
+        &dir,
+        r#"library = "/music/root"
+replay_gain = "loud"
+"#,
+    );
+
+    let error = Config::load_from(&path).unwrap_err().to_string();
+    let expected_file = path.display().to_string();
+    assert!(
+        error.contains(&expected_file),
+        "error must name the file, got: {error}"
+    );
+    assert!(
+        error.contains("line 2"),
+        "error must name line 2 (replay_gain), got: {error}"
+    );
+    for allowed in ["track", "album", "off"] {
+        assert!(
+            error.contains(allowed),
+            "error must allow \"{allowed}\", got: {error}"
+        );
+    }
     let _ = fs::remove_dir_all(&dir);
 }
 

@@ -120,6 +120,7 @@ $XDG_CONFIG_HOME/velo/config.toml      # else ~/.config/velo/config.toml
 | `library` | The root folder to index and browse | `--library` flag, else the config file, else the built-in default — which is the author's own `~/Music/Library`, so set your own |
 | `volume` | Start level, `0..=100` | `100` |
 | `bit_perfect` | Accepted and stored; nothing reads it yet | `false` |
+| `replay_gain` | ReplayGain mode: `track` (use the track's own gain), `album` (album gain, falling back to the track's), or `off` | `track` |
 
 Precedence: `--library` beats the config file, the config file beats the
 default. A missing file is normal and silent. An unknown key is an error
@@ -147,11 +148,18 @@ naming the key; a bad value names the file and the line.
 | `1` | A missing file, a missing library root, a non-interactive terminal, or a playback error |
 | `2` | A usage error, or a config file that cannot be read or parsed |
 
+When `replay_gain` is `track` or `album`, every track's ReplayGain tags are
+read at playback time and the gain is applied to the audio with clipping
+protection: a track that declares its own peak is never pushed past full scale.
+Tracks without usable tags play unchanged; a wrong tag value is ignored rather
+than misapplied.
+
 ## Not yet
 
 Honest list; none of these exist behind a flag:
 
-- ReplayGain.
+- ReplayGain tag writing (reading and applying them is in: the `replay_gain`
+  setting).
 - Subsonic/Navidrome (streaming from a server).
 - Opus — symphonia has no Opus decoder yet, so `.opus` files are rejected at
   probe time.

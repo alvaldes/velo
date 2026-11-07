@@ -16,8 +16,10 @@ use std::time::{Duration, Instant};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use rtrb::{Producer, RingBuffer};
 
+use super::replay_gain::Gain;
 use super::resample::{ChannelMap, RateConverter};
 use super::{AudioError, TrackSource, TrackSpec};
+use crate::config::ReplayGainMode;
 
 /// Two seconds of audio in flight: long enough to survive a slow decode, short
 /// enough to keep pause and stop responsive.
@@ -178,9 +180,8 @@ struct CallbackWires {
 
 impl Player {
     /// Plays every path as one continuous stream, in order, with no gap between
-    /// them. The device runs at the first track's own format when it accepts
-    /// it, otherwise at the device default, and every track is converted to
-    /// that format so the queue never stops (T2).
+    /// them, applying no `ReplayGain` beyond the built-in default (T11). A mode
+    /// resolved from the config goes through [`Player::play_gapless_with_gain`].
     ///
     /// # Errors
     ///
@@ -190,13 +191,27 @@ impl Player {
     /// [`AudioError::SpecMismatch`] when a track's channel layout cannot be
     /// joined to the output.
     pub fn play_gapless(queue: SharedQueue) -> Result<Self, AudioError> {
-        Self::play_gapless_at(queue, 0, Duration::ZERO)
+        Self::play_gapless_at_with_gain(queue, 0, Duration::ZERO, ReplayGainMode::default())
+    }
+
+    /// Like [`Player::play_gapless`], with the `ReplayGain` mode a caller has
+    /// resolved from the config (T11, S15): the producer reads each track's
+    /// tags and multiplies its samples on the way into the ring, per mode.
+    ///
+    /// # Errors
+    ///
+    /// The same errors as [`Player::play_gapless`]
+    pub fn play_gapless_with_gain(
+        queue: SharedQueue,
+        gain_mode: ReplayGainMode,
+    ) -> Result<Self, AudioError> {
+        Self::play_gapless_at_with_gain(queue, 0, Duration::ZERO, gain_mode)
     }
 
     /// Plays every path from `track_index` onwards as one continuous stream,
-    /// starting the first one `offset` into it. A seek is a rebuild from this
-    /// offset, never a command injected into a running engine (T6). A few
-    /// milliseconds of silence while the stream restarts are expected.
+    /// starting the first one `offset` into it, with the built-in default
+    /// `ReplayGain` mode (T11). A mode resolved from the config goes through
+    /// [`Player::play_gapless_at_with_gain`].
     ///
     /// # Errors
     ///
@@ -207,6 +222,22 @@ impl Player {
         queue: SharedQueue,
         track_index: usize,
         offset: Duration,
+    ) -> Result<Self, AudioError> {
+        Self::play_gapless_at_with_gain(queue, track_index, offset, ReplayGainMode::default())
+    }
+
+    /// Like [`Player::play_gapless_at`], with the `ReplayGain` mode a caller has
+    /// resolved from the config (T11, S15). A seek lands on a rebuilt player,
+    /// so this is also how a seek re-resolves the playing track's own gain.
+    ///
+    /// # Errors
+    ///
+    /// The same errors as [`Player::play_gapless_at`].
+    pub fn play_gapless_at_with_gain(
+        queue: SharedQueue,
+        track_index: usize,
+        offset: Duration,
+        gain_mode: ReplayGainMode,
     ) -> Result<Self, AudioError> {
         let (is_empty, len, first) = {
             let queue = match queue.lock() {
@@ -276,6 +307,7 @@ impl Player {
                         queue,
                         start_track: track_index,
                         offset_frames,
+                        gain_mode,
                     };
                     let result = produce(
                         job, spec, ring, &delivered, &stop, &current, &progress, &failures,
@@ -470,6 +502,9 @@ struct Sequence {
     queue: SharedQueue,
     start_track: usize,
     offset_frames: u64,
+    /// The `ReplayGain` mode resolved from the config when playback started
+    /// (T11); the producer resolves each track's own gain from it.
+    gain_mode: ReplayGainMode,
 }
 
 /// Builds the device stream: the callback that drains the ring. Its whole job
@@ -612,6 +647,14 @@ fn queued_path(queue: &Mutex<Vec<PathBuf>>, index: usize) -> Option<PathBuf> {
     }
 }
 
+/// A track failure record for the interface: the path it failed, and why.
+fn track_failure(path: &std::path::Path, error: &AudioError) -> TrackFailure {
+    TrackFailure {
+        path: path.to_path_buf(),
+        message: error.to_string(),
+    }
+}
+
 /// Produces every track of a job from `start_track` onwards, handing each
 /// block of output samples to `on_block` and every track it had to skip to
 /// `on_failure`. The ring, the counters and the failure slot all live behind
@@ -635,6 +678,7 @@ fn run_sequence(
         queue,
         start_track,
         offset_frames,
+        gain_mode,
     } = job;
     // One entry per turn, under the lock, because the queue is shared: what the
     // interface appended, removed or moved while this runs is what plays next.
@@ -664,10 +708,7 @@ fn run_sequence(
                 if requested {
                     return Err(error);
                 }
-                on_failure(TrackFailure {
-                    path: path.clone(),
-                    message: error.to_string(),
-                });
+                on_failure(track_failure(&path, &error));
                 continue 'tracks;
             }
         };
@@ -698,10 +739,7 @@ fn run_sequence(
         let map = match ChannelMap::new(spec.channels, expected.channels) {
             Ok(map) => map,
             Err(error) => {
-                on_failure(TrackFailure {
-                    path: path.clone(),
-                    message: error.to_string(),
-                });
+                on_failure(track_failure(&path, &error));
                 continue 'tracks;
             }
         };
@@ -711,6 +749,10 @@ fn run_sequence(
         };
         let mut converter = RateConverter::new(mapped_spec, expected)?;
 
+        // ReplayGain belongs to the track: recomputed once per track change,
+        // never per queue (T11, T18); multiplied below, before the ring, so
+        // the user's volume ramp stays exactly what it was.
+        let gain = Gain::read_from(&path, gain_mode);
         loop {
             if stop.load(Ordering::Relaxed) {
                 return Ok(());
@@ -718,42 +760,36 @@ fn run_sequence(
             let block = match source.read_block() {
                 Ok(Some(block)) => block,
                 Ok(None) => break,
-                // A track that stops decoding costs itself, not the album:
-                // whatever it decoded before the failure stays, the rest of it
-                // is skipped, and the next track follows immediately.
+                // A track that stops decoding costs itself, not the album: what
+                // it decoded stays, the rest is skipped, the next one follows.
                 Err(error) => {
-                    on_failure(TrackFailure {
-                        path: path.clone(),
-                        message: error.to_string(),
-                    });
+                    on_failure(track_failure(&path, &error));
                     continue 'tracks;
                 }
             };
-            let resampled = match converter.convert(&map.apply(&block)) {
+            let mut resampled = match converter.convert(&map.apply(&block)) {
                 Ok(resampled) => resampled,
                 Err(error) => {
-                    on_failure(TrackFailure {
-                        path: path.clone(),
-                        message: error.to_string(),
-                    });
+                    on_failure(track_failure(&path, &error));
                     continue 'tracks;
                 }
             };
+            // The gain's one multiplication, before the ring: the callback
+            // keeps copying and ramping (T11).
+            gain.apply(&mut resampled);
             on_block(&resampled);
         }
 
         // The resampler holds the track's last frames back until it sees what
         // follows them; without this the tail is heard as a cut-off ending.
-        let flushed = match converter.flush() {
+        let mut flushed = match converter.flush() {
             Ok(flushed) => flushed,
             Err(error) => {
-                on_failure(TrackFailure {
-                    path: path.clone(),
-                    message: error.to_string(),
-                });
+                on_failure(track_failure(&path, &error));
                 continue 'tracks;
             }
         };
+        gain.apply(&mut flushed);
         on_block(&flushed);
     }
     Ok(())
@@ -762,7 +798,9 @@ fn run_sequence(
 /// Drains a queue the way the producer writes it, without a device: every
 /// block of output samples goes to `on_block`, every track that had to be
 /// skipped goes to `on_failure`, and the queue is a success even when tracks
-/// were skipped (T19). Test support for the skip rule.
+/// were skipped (T19). Test support for the skip rule, with the built-in
+/// default `ReplayGain` mode; [`drain_headless_with_gain`] is the same drain
+/// under a resolved mode (T11).
 ///
 /// # Errors
 ///
@@ -779,6 +817,40 @@ pub fn drain_headless(
     on_block: &mut dyn FnMut(&[f32]),
     on_failure: &mut dyn FnMut(TrackFailure),
 ) -> Result<(), AudioError> {
+    drain_headless_with_gain(
+        queue,
+        start_track,
+        offset_frames,
+        expected,
+        ReplayGainMode::default(),
+        stop,
+        on_block,
+        on_failure,
+    )
+}
+
+/// [`drain_headless`] under an explicit `ReplayGain` mode (T11, S15): the
+/// producer resolves each track's gain from `gain_mode` and multiplies every
+/// block on its way into the ring, so the same loop proves where the gain
+/// reaches the audio without a device.
+///
+/// # Errors
+///
+/// The same errors as [`drain_headless`].
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the job, the mode and the two sinks are the whole contract of\n    the drain; bundling them would only hide what is shared"
+)]
+pub fn drain_headless_with_gain(
+    queue: SharedQueue,
+    start_track: usize,
+    offset_frames: u64,
+    expected: TrackSpec,
+    gain_mode: ReplayGainMode,
+    stop: &AtomicBool,
+    on_block: &mut dyn FnMut(&[f32]),
+    on_failure: &mut dyn FnMut(TrackFailure),
+) -> Result<(), AudioError> {
     let delivered = AtomicUsize::new(0);
     let current = AtomicUsize::new(start_track);
     let progress = Mutex::new(Progress {
@@ -791,6 +863,7 @@ pub fn drain_headless(
             queue,
             start_track,
             offset_frames,
+            gain_mode,
         },
         expected,
         stop,
