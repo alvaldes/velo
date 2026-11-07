@@ -59,7 +59,7 @@ Root folder: `/Users/alvaldes/Music/Library` (L15). Metadata comes from tags fir
 | T3 | ratatui skeleton: layout, keybindings, themes | S1, S13 | inline (worker) | `f8aee9f` |
 | T4 | Library scan: jwalk + lofty + rusqlite schema, artist/album/track browser | S6 | inline (worker) | `8b42092` |
 | T5 | Play from the library and manage the queue | S11 | inline (worker) | `b931250` |
-| T6 | Pause, seek, volume with fades | S8 | inline (worker) + fix `9a8dff1` | `8e2c4bc` |
+| T6 | Pause, seek, volume with fades | S8 | inline (worker) + fixes `9a8dff1`, `8139a22` | `8e2c4bc` |
 | T7 | Fuzzy search with nucleo | S9 | inline | — |
 | T8 | Cover art with ratatui-image | S10 | inline | — |
 | T9 | clap CLI, config TOML, `--help` | S12, S13 | inline | — |
@@ -161,3 +161,16 @@ Three separate things came out of that report, and only two were code:
 3. **The seek itself could not be reproduced as broken**, and four independent measurements say it moves: a UI trace showed `position=2.438s → target=7.438s`; a producer trace showed `index=0 == start_track=0 offset_frames=362592` (7.554 s × 48 kHz) reaching the decoder; a WAV test with every frame carrying its own index showed the first decoded sample after the seek is exactly frame 1000's; and a new MP3 fixture (one second of silence, then a tone) decoded exactly the tone's level after a seek to 1.5 s. The honest conclusion is that the seek now works and the earlier perception was dominated by the volume jump, but that is an inference, not a proof — it needs the human's ear on a rebuilt binary.
 
 **Lesson, again about test calibration:** the new MP3 test first failed and looked like proof that MP3 seeking is broken. It was my threshold that was wrong: I assumed the fixture's tone would measure near full scale, and it measures **0.084 RMS** (a 32 kbps mono encode of a pure sine). The fix was to assert against the fixture's own measured level, not against an invented one. A test can lie in the accusing direction, and a failing test is a claim to verify, not a verdict.
+
+**L23** (the seek, actually diagnosed): the human's second report was precise and it broke the case open —
+> lo que vi es que si se esta respetando el volumen pero el -> salta 5 atras y el <- salta 10 atras tambien
+
+**Root cause: one number in two units.** The seek is computed from the reported position, and the position mixed units. The played counter counts **interleaved samples** (rate × channels); the seek offset was stored as **frames**. On stereo the rebuild therefore reported exactly half its offset — a seek to 9.49 s reported 4.75 s — and the next seek computed from that halved value, so every press landed behind the music and compounded. The offset is now converted with `offset_samples`, pinned by a unit test that asserts one second of stereo 44.1 kHz is 88 200 samples and not 44 100.
+
+Two further defects could freeze the position at zero, both now gone in the same change: the producer published the current **track index before writing that track's start**, so a reader could get an index with no start and report zero (and the UI could then seek from zero); and the start table **filled gaps with zero**, which made a missing entry report the entire played count instead of a position. A single `Progress { track, start }` record, written in one step and read under one lock, removes the whole class.
+
+**Verification that finally worked.** Every earlier instrument measured the *decoder* — the offset reaching `open_at`, `open_at` landing on the exact frame, a device-level read of the first sample — and all of it was correct, which is why the seek looked innocent four times over. The defect lived between that offset and the number the UI used to *compute* it. The instrument that caught it logged two things: what `seek_by` read and computed (`position=4.493s → target=9.493s`), and what the rebuilt player then reported (`position=4.746s`). Half of 9.493 is not a coincidence; that is a unit bug, and it took one line to see once the pair was printed side by side.
+
+Verified end to end with a 40 s fixture whose each second carries its own DC level, read back from the device callback: a seek from 4.5 s lands at 9.5 s, and the clock reads `00:03` before the press and `00:10` after, where it used to read `00:05`.
+
+**Lesson:** when a symptom says "it lands in the wrong place", instrument *both* sides of the decision that produced it — what was read, and what was written — not just the side that looks guilty. Four correct measurements of the wrong layer feel exactly like proof.
