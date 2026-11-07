@@ -57,7 +57,7 @@ Root folder: `/Users/alvaldes/Music/Library` (L15). Metadata comes from tags fir
 | T1 | Audio spike: decode with symphonia, output through cpal, lock-free ring buffer, gapless join between two tracks | S5, S7, S16 | inline | `cc2d967` |
 | T2 | Replace the spike's resampling with rubato; audible verification of the join | S7 | inline (worker) | `a6adebc` |
 | T3 | ratatui skeleton: layout, keybindings, themes | S1, S13 | inline (worker) | `f8aee9f` |
-| T4 | Library scan: jwalk + lofty + rusqlite schema, artist/album/track browser | S6 | inline | — |
+| T4 | Library scan: jwalk + lofty + rusqlite schema, artist/album/track browser | S6 | inline (worker) | `8b42092` |
 | T5 | Play from the library and manage the queue | S11 | inline | — |
 | T6 | Pause, seek, volume with fades | S8 | inline | — |
 | T7 | Fuzzy search with nucleo | S9 | inline | — |
@@ -119,4 +119,10 @@ The interface was not assumed to work, it was driven: inside a real pty with a 2
 **L15** (library root, verbatim):
 > si usa la ruta music/library
 
-Verified after the confirmation: `/Users/alvaldes/Music/Library` exists, holds **32 MP3 files across 3 artists**, laid out as `Artist/YYYY - Album/NN - Title.ext` with a `cover.jpg` per album. Every sampled file carries real ID3 tags (title, artist, album, track, date) at 44.1 kHz stereo, and the album tag disagrees with the folder name (`Lo-Fi Scientists EP` vs `2009 - Lo-Fi Scientists`), so **tags are the source of truth and the folder layout is only a fallback** for files that carry none. T4 indexes this root by default; T9 makes it configurable.
+Verified after the confirmation: `/Users/alvaldes/Music/Library` exists, laid out as `Artist/YYYY - Album/NN - Title.ext` with a `cover.jpg` per album. The tree is being populated live, so any count is a snapshot: it held 32 MP3 across 3 artists when checked, and 104 audio files across 16 artists by T4 acceptance (56 mp3, 33 ogg, 4 m4a, 4 flac, 4 wav, 3 opus). That growth is why the incremental re-index matters. Every sampled file carries real ID3 tags (title, artist, album, track, date) at 44.1 kHz stereo, and the album tag disagrees with the folder name (`Lo-Fi Scientists EP` vs `2009 - Lo-Fi Scientists`), so **tags are the source of truth and the folder layout is only a fallback** for files that carry none. T4 indexes this root by default; T9 makes it configurable.
+
+**L16** (T4 acceptance evidence): `cargo test` 27/27 across nine suites (5 library rules), `cargo clippy --all-targets` 0 warnings, `cargo fmt --check` clean. Parent verification ran the binary against the real library with a throwaway `VELO_DB`: **104 tracks, 23 albums, 16 artists**, matching the tree exactly (104 audio files among 116 files), **zero duplicate paths, zero rows pointing at a file that does not exist**. A second run over an unchanged tree is idempotent and takes 22 ms, which is the incremental shortcut working. `--library /no/such/dir --index` exits **1** with a message. Data quality spot-check: 0 empty titles, 0 null albums, 0 null track numbers, 0 null durations, 56 rows with embedded cover art, and the album of `Lo-Fi Scientists` resolves to the tag `Lo-Fi Scientists EP` rather than the folder name `2009 - Lo-Fi Scientists` — tags really do win.
+
+Two corrections worth recording. First, an earlier count of "32 MP3 across 3 artists" was stale within the same session because the human is actively adding music; counts in this document are snapshots, never invariants. Second, a `--library /no/such/dir` run first appeared to exit 0 — that was a pipe swallowing the status code in the verification command, not a defect; measured without the pipe it exits 1.
+
+**Known limit (T4):** the path fallback understands exactly `Artist/Album/file`. An untagged file in a flatter or deeper tree would get an empty title. It does not occur in the current library (0 empty titles across 104 tracks), so it is recorded as a limit rather than guessed at. The worker also found and fixed a real case from live data: an album folder with no `YYYY - ` prefix was falling through to "Unknown album" and now keeps its full folder name with no year.
