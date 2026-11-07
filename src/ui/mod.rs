@@ -27,6 +27,7 @@ use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph};
 
+use crate::audio::output::TrackFailure;
 use crate::audio::{Player, seek_target};
 use crate::library::{AlbumEntry, ArtistEntry, Library, TrackEntry};
 
@@ -244,6 +245,37 @@ impl<'lib> App<'lib> {
     /// Writes the status line, e.g. indexing progress.
     pub fn note(&mut self, message: impl Into<String>) {
         self.status = message.into();
+    }
+
+    /// The current status line, empty when the transport line is shown.
+    #[must_use]
+    pub fn status(&self) -> &str {
+        &self.status
+    }
+
+    /// Runs once per turn of the event loop — the same cadence as key
+    /// polling — so the producer's announcements surface without a key
+    /// press. Without a player there is nothing to collect.
+    pub fn tick(&mut self) {
+        let Some(player) = &self.player else {
+            return;
+        };
+        let Some(failure) = player.take_failure() else {
+            return;
+        };
+        self.announce_failure(&failure);
+    }
+
+    /// Puts a skipped track into the status line: `velo: skipped <file name>:
+    /// <why>`. The message stays until the next status update — a play, a
+    /// seek or another failure — because a skipped track is not a sequence
+    /// error and nothing else has happened worth saying (T19).
+    pub fn announce_failure(&mut self, failure: &TrackFailure) {
+        let name = failure.path.file_name().map_or_else(
+            || failure.path.display().to_string(),
+            |name| name.to_string_lossy().to_string(),
+        );
+        self.status = format!("velo: skipped {name}: {}", failure.message);
     }
 
     /// Re-reads the artists snapshot from the index, e.g. right after

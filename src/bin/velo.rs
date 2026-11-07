@@ -244,6 +244,9 @@ fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
 ) -> std::io::Result<()> {
     loop {
+        // The producer announces skipped tracks asynchronously; every turn
+        // of the loop — the ~100 ms poll cadence — collects what it published.
+        app.tick();
         terminal.draw(|frame| app.draw(frame))?;
 
         if crossterm::event::poll(Duration::from_millis(100))?
@@ -275,8 +278,18 @@ fn play(paths: &[PathBuf]) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    let skipped = player.take_failures();
     let underruns = player.underruns();
     player.stop();
+    // A skip is not a failure — the album kept playing — but running to the end
+    // without a word would hide a corrupt file, which is what T19 is about.
+    for failure in &skipped {
+        let name = failure.path.file_name().map_or_else(
+            || failure.path.display().to_string(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        eprintln!("velo: skipped {name}: {}", failure.message);
+    }
     if underruns > 0 {
         eprintln!("velo: played with {underruns} underruns");
     }

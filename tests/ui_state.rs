@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use lofty::config::WriteOptions;
 use lofty::prelude::*;
 use lofty::tag::{Tag, TagType};
+use velo::audio::output::TrackFailure;
 use velo::library::Library;
 use velo::ui::crossterm::event::{KeyCode, KeyEvent};
 use velo::ui::{Action, App, Level};
@@ -274,6 +275,61 @@ fn tag_file(path: &Path, set: impl FnOnce(&mut Tag)) {
         .open(path)
         .unwrap();
     tagged.save_to(&mut file, WriteOptions::default()).unwrap();
+}
+
+// ---- skipped tracks (T19) ----------------------------------------------
+
+#[test]
+fn a_skipped_track_is_announced_by_file_name_and_stays_until_the_next_update() {
+    let mut app = app_with_three_tracks();
+    assert_eq!(app.status(), "");
+
+    app.announce_failure(&TrackFailure {
+        path: PathBuf::from("/library/Artist/2019 - Harbor/02 - broken.wav"),
+        message: "unsupported format: not a container".to_owned(),
+    });
+    assert_eq!(
+        app.status(),
+        "velo: skipped 02 - broken.wav: unsupported format: not a container",
+        "the message names the file, not its whole path",
+    );
+
+    // A skipped track is not a sequence error: ticks that bring no new event
+    // must not erase the message.
+    app.tick();
+    app.tick();
+    assert_eq!(
+        app.status(),
+        "velo: skipped 02 - broken.wav: unsupported format: not a container"
+    );
+
+    // The next status update replaces it.
+    app.note("indexed: 1 added");
+    assert_eq!(app.status(), "indexed: 1 added");
+}
+
+#[test]
+fn a_newer_failure_replaces_the_previous_one() {
+    let mut app = app_with_three_tracks();
+    app.announce_failure(&TrackFailure {
+        path: PathBuf::from("/library/first.flac"),
+        message: "cannot read the file: no such file".to_owned(),
+    });
+    app.announce_failure(&TrackFailure {
+        path: PathBuf::from("/library/second.flac"),
+        message: "cannot decode the file: bad packet".to_owned(),
+    });
+    assert_eq!(
+        app.status(),
+        "velo: skipped second.flac: cannot decode the file: bad packet"
+    );
+}
+
+#[test]
+fn a_tick_without_a_player_changes_nothing() {
+    let mut app = app_with_three_tracks();
+    app.tick();
+    assert_eq!(app.status(), "");
 }
 
 #[test]

@@ -5,6 +5,7 @@
 //! copy them, and fill the rest with silence. No allocation, no locking, no
 //! logging, no decoding. Everything expensive happens on the producer thread.
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -27,6 +28,17 @@ const POLL_INTERVAL: Duration = Duration::from_millis(2);
 
 /// How long the main thread waits before re-checking whether playback drained.
 const DRAIN_POLL: Duration = Duration::from_millis(20);
+
+/// A track the producer could not play, published so the interface can say so
+/// and the queue can continue without it (T19): a corrupt file must not kill
+/// an album, and it must not be silent either.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrackFailure {
+    /// The track that could not be played.
+    pub path: PathBuf,
+    /// What went wrong, as the audio path reports it.
+    pub message: String,
+}
 
 /// A linear gain ramp applied where clicks are born: in the callback, between
 /// one written sample and the next (S8).
@@ -113,6 +125,10 @@ pub struct Player {
     /// report a position of zero — a seek from there lands at the delta, not at
     /// the delta from where the music actually is.
     progress: Arc<Mutex<Progress>>,
+    /// The last track the producer had to skip, taken by the interface on its
+    /// tick. A skipped track is not a sequence error, so it never reaches
+    /// [`Player::wait_until_finished`] as one.
+    failures: Arc<Mutex<VecDeque<TrackFailure>>>,
     /// The track a seek landed on and how deep into it, in interleaved samples
     /// — the same unit as the played counter, which is what made a stereo seek
     /// report half its position when this was stored as frames.
@@ -206,6 +222,7 @@ impl Player {
             track: track_index,
             start: 0,
         }));
+        let failures = Arc::new(Mutex::new(VecDeque::new()));
         let wires = CallbackWires {
             playing: Arc::new(AtomicBool::new(true)),
             producing: Arc::new(AtomicBool::new(true)),
@@ -219,6 +236,7 @@ impl Player {
             let stop = Arc::clone(&stop);
             let current = Arc::clone(&current);
             let progress = Arc::clone(&progress);
+            let failures = Arc::clone(&failures);
             let producing = Arc::clone(&wires.producing);
             thread::Builder::new()
                 .name("velo-producer".to_owned())
@@ -228,7 +246,9 @@ impl Player {
                         start_track: track_index,
                         offset_frames,
                     };
-                    let result = produce(job, spec, ring, &delivered, &stop, &current, &progress);
+                    let result = produce(
+                        job, spec, ring, &delivered, &stop, &current, &progress, &failures,
+                    );
                     producing.store(false, Ordering::Release);
                     result
                 })
@@ -254,6 +274,7 @@ impl Player {
             delivered,
             current,
             progress,
+            failures,
             start_track: track_index,
             start_offset_samples: usize::try_from(clock_offset_samples).unwrap_or(usize::MAX),
             producer: Some(producer),
@@ -270,8 +291,11 @@ impl Player {
     ///
     /// # Errors
     ///
-    /// Propagates the first decoding error the producer thread hit, and returns
-    /// [`AudioError::Decode`] when that thread stopped unexpectedly.
+    /// Propagates the error when the track the player was built from cannot be
+    /// opened. Tracks that fail after that are skipped and announced through
+    /// [`Player::take_failure`] instead, so they do not fail the wait: a
+    /// corrupt file must not kill an album (T19). Returns
+    /// [`AudioError::Decode`] when the producer thread stopped unexpectedly.
     pub fn wait_until_finished(&mut self) -> Result<(), AudioError> {
         let outcome = match self.producer.take() {
             Some(handle) => handle.join().map_err(|_| {
@@ -287,6 +311,31 @@ impl Player {
             thread::sleep(DRAIN_POLL);
         }
         Ok(())
+    }
+
+    /// Takes the next skipped track the producer announced, if any. Taking —
+    /// not reading — is the point: the interface shows a failure once, and the
+    /// next [`Player::take_failure`] only sees a failure that came after it.
+    #[must_use]
+    pub fn take_failure(&self) -> Option<TrackFailure> {
+        let mut queue = match self.failures.lock() {
+            Ok(queue) => queue,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        queue.pop_front()
+    }
+
+    /// Takes every skip announced so far, in the order they happened.
+    ///
+    /// The interface takes them one per tick, so a message stays readable for a
+    /// moment; a command that runs to the end has no ticks and wants them all.
+    #[must_use]
+    pub fn take_failures(&self) -> Vec<TrackFailure> {
+        let mut queue = match self.failures.lock() {
+            Ok(queue) => queue,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        queue.drain(..).collect()
     }
 
     /// Moments where the device asked for samples the producer had not written
@@ -430,6 +479,12 @@ fn build_stream(
 }
 
 /// Fills the ring buffer from the file system until the queue is exhausted.
+/// The block-producing loop itself lives in [`run_sequence`], where it can
+/// also be driven without a ring, so the skip rule is testable headlessly.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the producer's shared handles are one logical bundle; a struct\n    would only move the same names one indirection away"
+)]
 fn produce(
     job: Sequence,
     expected: TrackSpec,
@@ -438,13 +493,55 @@ fn produce(
     stop: &AtomicBool,
     current: &AtomicUsize,
     progress: &Mutex<Progress>,
+    failures: &Mutex<VecDeque<TrackFailure>>,
+) -> Result<(), AudioError> {
+    let mut push_block = |samples: &[f32]| {
+        push_all(&mut ring, samples, delivered, stop);
+    };
+    let mut announce = |failure: TrackFailure| {
+        let mut queue = match failures.lock() {
+            Ok(queue) => queue,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        queue.push_back(failure);
+    };
+    run_sequence(
+        job,
+        expected,
+        stop,
+        delivered,
+        current,
+        progress,
+        &mut push_block,
+        &mut announce,
+    )
+}
+
+/// Produces every track of a job from `start_track` onwards, handing each
+/// block of output samples to `on_block` and every track it had to skip to
+/// `on_failure`. The ring, the counters and the failure slot all live behind
+/// those closures and the shared handles, which is what lets
+/// [`drain_headless`] run the same loop without a device.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the job, the shared handles and the two sinks are the whole\n    contract of the loop; bundling them would hide what is shared"
+)]
+fn run_sequence(
+    job: Sequence,
+    expected: TrackSpec,
+    stop: &AtomicBool,
+    delivered: &AtomicUsize,
+    current: &AtomicUsize,
+    progress: &Mutex<Progress>,
+    on_block: &mut dyn FnMut(&[f32]),
+    on_failure: &mut dyn FnMut(TrackFailure),
 ) -> Result<(), AudioError> {
     let Sequence {
         paths,
         start_track,
         offset_frames,
     } = job;
-    for (index, path) in paths.into_iter().enumerate() {
+    'tracks: for (index, path) in paths.into_iter().enumerate() {
         if index < start_track {
             continue;
         }
@@ -452,17 +549,35 @@ fn produce(
             return Ok(());
         }
 
-        // Announce which track is being produced before touching the file, so
-        // a reader always sees a track that is either playing or about to.
-        current.store(index, Ordering::Release);
+        // The track the player was built from was opened at selection time:
+        // if it cannot be opened now, that is the sequence error the interface
+        // already reports. Every other track is skipped, so one bad file costs
+        // one file, not the rest of the album (T19).
+        let requested = index == start_track;
 
-        // The track a seek landed on starts at its offset: the player is
-        // rebuilt there, nothing is injected into a running engine.
-        let mut source = if index == start_track && offset_frames > 0 {
-            TrackSource::open_at(&path, offset_frames)?
+        let opened = if requested && offset_frames > 0 {
+            TrackSource::open_at(&path, offset_frames)
         } else {
-            TrackSource::open(&path)?
+            TrackSource::open(&path)
         };
+        let mut source = match opened {
+            Ok(source) => source,
+            Err(error) => {
+                if requested {
+                    return Err(error);
+                }
+                on_failure(TrackFailure {
+                    path: path.clone(),
+                    message: error.to_string(),
+                });
+                continue 'tracks;
+            }
+        };
+
+        // Announce which track is being produced once it has opened, so a
+        // reader only ever sees a track that is playing or about to — never
+        // one that is about to be skipped.
+        current.store(index, Ordering::Release);
 
         // One write publishes both halves, so a reader can never see a track
         // without the point it began.
@@ -471,29 +586,105 @@ fn produce(
             start: delivered.load(Ordering::Acquire),
         };
         match progress.lock() {
-            Ok(mut current) => *current = record,
+            Ok(mut slot) => *slot = record,
             Err(poisoned) => *poisoned.into_inner() = record,
         }
 
         let spec = source.spec();
         // A rate difference is converted away; only a layout difference cannot
-        // be joined, because remixing channels changes the music itself.
+        // be joined, because remixing channels changes the music itself. That
+        // disagreement stays a sequence error rather than a skip: it is not a
+        // broken file, it is a queue that must not be mixed.
         let mut converter = RateConverter::new(spec, expected)?;
 
-        while let Some(block) = source.read_block()? {
+        loop {
             if stop.load(Ordering::Relaxed) {
                 return Ok(());
             }
-            let resampled = converter.convert(&block)?;
-            push_all(&mut ring, &resampled, delivered, stop);
+            let block = match source.read_block() {
+                Ok(Some(block)) => block,
+                Ok(None) => break,
+                // A track that stops decoding costs itself, not the album:
+                // whatever it decoded before the failure stays, the rest of it
+                // is skipped, and the next track follows immediately.
+                Err(error) => {
+                    on_failure(TrackFailure {
+                        path: path.clone(),
+                        message: error.to_string(),
+                    });
+                    continue 'tracks;
+                }
+            };
+            let resampled = match converter.convert(&block) {
+                Ok(resampled) => resampled,
+                Err(error) => {
+                    on_failure(TrackFailure {
+                        path: path.clone(),
+                        message: error.to_string(),
+                    });
+                    continue 'tracks;
+                }
+            };
+            on_block(&resampled);
         }
 
         // The resampler holds the track's last frames back until it sees what
         // follows them; without this the tail is heard as a cut-off ending.
-        let flushed = converter.flush()?;
-        push_all(&mut ring, &flushed, delivered, stop);
+        let flushed = match converter.flush() {
+            Ok(flushed) => flushed,
+            Err(error) => {
+                on_failure(TrackFailure {
+                    path: path.clone(),
+                    message: error.to_string(),
+                });
+                continue 'tracks;
+            }
+        };
+        on_block(&flushed);
     }
     Ok(())
+}
+
+/// Drains a queue the way the producer writes it, without a device: every
+/// block of output samples goes to `on_block`, every track that had to be
+/// skipped goes to `on_failure`, and the queue is a success even when tracks
+/// were skipped (T19). Test support for the skip rule.
+///
+/// # Errors
+///
+/// Returns the error of the track at `start_track` when it cannot be opened —
+/// the one failure that is a sequence error, because it is reported at
+/// selection time — and [`AudioError::SpecMismatch`] when two tracks in the
+/// queue disagree on their channel layout.
+pub fn drain_headless(
+    paths: Vec<PathBuf>,
+    start_track: usize,
+    offset_frames: u64,
+    expected: TrackSpec,
+    stop: &AtomicBool,
+    on_block: &mut dyn FnMut(&[f32]),
+    on_failure: &mut dyn FnMut(TrackFailure),
+) -> Result<(), AudioError> {
+    let delivered = AtomicUsize::new(0);
+    let current = AtomicUsize::new(start_track);
+    let progress = Mutex::new(Progress {
+        track: start_track,
+        start: 0,
+    });
+    run_sequence(
+        Sequence {
+            paths,
+            start_track,
+            offset_frames,
+        },
+        expected,
+        stop,
+        &delivered,
+        &current,
+        &progress,
+        on_block,
+        on_failure,
+    )
 }
 
 /// Converts a playback offset into interleaved samples at `spec`'s format.

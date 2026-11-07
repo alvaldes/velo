@@ -5,6 +5,7 @@
 //! the same way the producer thread reads a track.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use velo::audio::{GainRamp, TrackSource, TrackSpec, seek_target};
@@ -323,6 +324,106 @@ fn decode_all(mut source: TrackSource) -> Vec<f32> {
 /// test in this file and still fail the user. This fixture is one second of
 /// silence followed by one second of tone: after a seek past the halfway mark
 /// there must be sound, and from the start there must not.
+// ---- mid-queue skips (T19) ----------------------------------------------
+
+#[test]
+fn a_corrupt_track_mid_queue_is_skipped_without_silence_and_is_named() {
+    use velo::audio::output::{TrackFailure, drain_headless};
+
+    let spec = TrackSpec {
+        sample_rate: 44_100,
+        channels: 2,
+    };
+    let good_a = scratch_path("skip-a");
+    let broken = scratch_path("skip-broken");
+    let good_b = scratch_path("skip-c");
+
+    write_indexed_wav(&good_a, 1_000, spec);
+    // A file with an audio extension whose bytes are not a container: what a
+    // truncated download or a corrupted write looks like to the decoder.
+    std::fs::write(&broken, b"definitely not an audio container").expect("write broken file");
+    write_indexed_wav(&good_b, 900, spec);
+
+    let mut samples: Vec<f32> = Vec::new();
+    let mut failures: Vec<TrackFailure> = Vec::new();
+    let stop = AtomicBool::new(false);
+    let result = drain_headless(
+        vec![good_a.clone(), broken.clone(), good_b.clone()],
+        0,
+        0,
+        spec,
+        &stop,
+        &mut |block: &[f32]| samples.extend_from_slice(block),
+        &mut |failure: TrackFailure| failures.push(failure),
+    );
+    assert!(
+        result.is_ok(),
+        "a skipped track is not a sequence error: {result:?}"
+    );
+
+    // The queue is exactly the two good tracks back to back: no silence
+    // stands where the broken file was, and nothing else moved.
+    let mut expected: Vec<f32> = Vec::new();
+    for path in [&good_a, &good_b] {
+        let mut source = TrackSource::open(path).expect("the good tracks open");
+        while let Some(block) = source.read_block().expect("decodes") {
+            expected.extend_from_slice(&block);
+        }
+    }
+    assert_eq!(
+        samples, expected,
+        "the drained stream must be the exact concatenation of the good tracks"
+    );
+
+    // And the failure announces the file that broke, by its path.
+    assert_eq!(failures.len(), 1, "exactly one track failed: {failures:?}");
+    assert_eq!(failures[0].path, broken);
+    assert!(!failures[0].message.is_empty(), "the failure says why");
+
+    let _ = std::fs::remove_file(&good_a);
+    let _ = std::fs::remove_file(&broken);
+    let _ = std::fs::remove_file(&good_b);
+}
+
+#[test]
+fn a_queue_whose_only_track_is_broken_fails_instead_of_finishing_silently() {
+    use velo::audio::output::{TrackFailure, drain_headless};
+
+    let spec = TrackSpec {
+        sample_rate: 44_100,
+        channels: 2,
+    };
+    let broken = scratch_path("skip-only");
+    std::fs::write(&broken, b"definitely not an audio container").expect("write broken file");
+
+    let mut samples: Vec<f32> = Vec::new();
+    let mut failures: Vec<TrackFailure> = Vec::new();
+    let stop = AtomicBool::new(false);
+    let result = drain_headless(
+        vec![broken.clone()],
+        0,
+        0,
+        spec,
+        &stop,
+        &mut |block: &[f32]| samples.extend_from_slice(block),
+        &mut |failure: TrackFailure| failures.push(failure),
+    );
+
+    let _ = std::fs::remove_file(&broken);
+
+    // The requested track's failure is returned, not swallowed into an empty
+    // success: this is the error the interface reports at selection time.
+    assert!(
+        result.is_err(),
+        "the only track is broken, the drain must fail: {result:?}"
+    );
+    assert!(samples.is_empty(), "no sample can come from a broken file");
+    assert!(
+        failures.is_empty(),
+        "the requested track's failure is returned, not announced as a skip"
+    );
+}
+
 #[test]
 fn an_mp3_seek_lands_past_the_silence() {
     let path =
