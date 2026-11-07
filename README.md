@@ -53,6 +53,7 @@ Every key below is what the code does today.
 | `n` / `p` | Next track / previous track — `p` restarts a track already 3 s in |
 | `s` | Shuffle what is left of the queue; again to put it back in order |
 | `r` | Repeat: off → all (the queue again) → one (the track again) |
+| `L` | Set the library folder: the same prompt as the first run, at any time |
 | `+` / `-` | Volume up / down, 5% at a time |
 | `tab` | Switch between the library browser and the queue |
 | `a` | Append the selection to the queue — a track, or every track of an album or genre |

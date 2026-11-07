@@ -322,6 +322,8 @@ pub struct App<'lib> {
     /// Present while no library root is set (S4): the empty browser then
     /// says how to set one, and while its prompt is open every key edits it.
     library_setup: Option<LibrarySetup>,
+    /// The config file a library chosen with `L` is saved to.
+    config_file: Option<PathBuf>,
     /// An accepted library root, waiting for the shell to index it.
     library_root: Option<PathBuf>,
     volume: u8,
@@ -374,6 +376,7 @@ impl<'lib> App<'lib> {
             protocol: RefCell::new(None),
             help: false,
             library_setup: None,
+            config_file: None,
             library_root: None,
             volume: 100,
             state: PlayState::Stopped,
@@ -422,6 +425,7 @@ impl<'lib> App<'lib> {
             protocol: RefCell::new(None),
             help: false,
             library_setup: None,
+            config_file: None,
             library_root: None,
             volume: 100,
             state: PlayState::Stopped,
@@ -553,6 +557,7 @@ impl<'lib> App<'lib> {
     /// is configured. An accepted path is saved to `config_file` (when there
     /// is one) as the `library` key. `~/` stands for `$HOME`.
     pub fn ask_for_library(&mut self, config_file: Option<PathBuf>) {
+        self.config_file.clone_from(&config_file);
         let home = std::env::var_os("HOME")
             .filter(|value| !value.is_empty())
             .map(PathBuf::from);
@@ -567,6 +572,11 @@ impl<'lib> App<'lib> {
             home,
             prompt: Some(LibraryPrompt::new()),
         });
+    }
+
+    /// The config file a library chosen later with `L` is saved to.
+    pub fn set_config_file(&mut self, config_file: Option<PathBuf>) {
+        self.config_file = config_file;
     }
 
     /// The folders the last `Tab` in the library prompt offered.
@@ -895,6 +905,12 @@ impl<'lib> App<'lib> {
             KeyCode::Char('n') => Action::Next,
             KeyCode::Char('p') => Action::Previous,
             KeyCode::Char('s') => Action::ToggleShuffle,
+            // The library can be set again at any time (library-refresh T1);
+            // the files given on the command line have none to set.
+            KeyCode::Char('L') if !matches!(self.position, Position::Files) => {
+                self.ask_for_library(self.config_file.clone());
+                Action::None
+            }
             KeyCode::Char('r') => {
                 self.repeat = self.repeat.next();
                 Action::SetRepeat(self.repeat)
@@ -1721,7 +1737,7 @@ impl<'lib> App<'lib> {
             ("G", "last track"),
             ("enter", "open, or play from the selection"),
             ("esc", "back one level / close help"),
-            ("", "no library set: a prompt asks for it, tab completes"),
+            ("L", "set the library folder (tab completes)"),
             ("/", "search the whole library"),
             ("space", "pause / resume"),
             ("← / →", "seek 5 s back / forward"),

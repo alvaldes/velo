@@ -234,6 +234,40 @@ fn a_track_queued_while_shuffled_follows_the_rest_when_shuffle_ends() {
     assert_eq!(app.queue(), paths.as_slice());
 }
 
+// ---- reopening the library prompt (library-refresh T1) -------------------------
+
+#[test]
+fn shift_l_opens_the_library_prompt_again_after_esc() {
+    let mut app = App::browse(None);
+    app.set_config_file(Some(PathBuf::from("/nowhere/velo/config.toml")));
+    assert!(!app.library_prompt_open());
+
+    press(&mut app, KeyCode::Char('L'));
+    assert!(app.library_prompt_open());
+    assert_eq!(app.library_prompt_input(), "~/");
+
+    press(&mut app, KeyCode::Esc);
+    assert!(!app.library_prompt_open());
+    press(&mut app, KeyCode::Char('L'));
+    assert!(app.library_prompt_open(), "it opens again whenever asked");
+}
+
+#[test]
+fn shift_l_types_into_the_search_and_does_nothing_over_files() {
+    let mut files = app_with_three_tracks();
+    press(&mut files, KeyCode::Char('L'));
+    assert!(!files.library_prompt_open(), "files have no library to set");
+
+    let temp = TempLibrary::new("shift-l-search");
+    temp.write_wav("Tide/2019 - Harbor/01 - Dawn.wav");
+    temp.index();
+    let mut app = App::browse(Some(&temp.library));
+    press(&mut app, KeyCode::Char('/'));
+    press(&mut app, KeyCode::Char('L'));
+    assert_eq!(app.search_query(), "L");
+    assert!(!app.library_prompt_open());
+}
+
 #[test]
 fn n_and_p_ask_for_the_next_and_the_previous_track() {
     let mut app = app_with_three_tracks();

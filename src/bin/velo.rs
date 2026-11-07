@@ -213,6 +213,7 @@ fn browse_interface(
         app.set_replay_gain(settings.replay_gain);
         app.set_volume(settings.volume);
         app.show_artwork(picker);
+        app.set_config_file(config_file.clone());
         match (&opened, root) {
             (Err(error), _) => app.note(format!("velo: cannot open the library index: {error}")),
             (Ok(library), Some(root)) => index_root(&mut app, library, root, terminal)?,
