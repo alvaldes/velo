@@ -40,11 +40,13 @@ Every setting lives in that file and nowhere else: `library`, `replay_gain`, `bi
 **S5 — Show and hide.**
 > "y el show/hide de los elementos como es el caso del cover." Decision: all four elements.
 
-`[ui] cover_art`, `spectrum`, `hints`, `top_bar`, each a bool, all `true` by default.
+`[ui] cover_art`, `spectrum`, `hints`, `top_bar`, `advisories`, `view_numbers`, each a bool, all `true` by default.
 
 1. `cover_art = false` draws no cover and gives its columns to the list; with `true` the existing rules still decide (graphics protocol, `ART_MIN_*`, `cover_slot`).
 2. `spectrum = false` gives its rows back to the now-playing block; `hints = false` keeps the status row and drops the key hints; `top_bar = false` drops the tabs/`V E L O` row.
 3. Hiding something never leaves a hole, a blank row or a border where it was.
+4. `advisories = false` silences the status line that explains why something is not drawn — today the cover `velo: cover art hidden — the window is 80x40 and cover art needs 100x28` (S5.4, added after the first delivery; see L9). Errors and ordinary messages are never silenced by it.
+5. `view_numbers = true` writes the number of each library view before its name in the header — `1 artists  2 albums  3 tracks  4 genres` — so the `1`–`4` keys stop being folklore; `false` leaves the bare names (S5.5, same source).
 
 **S6 — The settings card.**
 > "Esto de la UI tambien debe de poder configurarse desde la app con una ventana como la de ayuda apra configurar todo esto."
@@ -58,10 +60,11 @@ Every setting lives in that file and nowhere else: `library`, `replay_gain`, `bi
 **S7 — Everything, live.**
 > Decision: "Todo lo que hay en config.toml".
 
-Rows, in order: `sound` — volume, replay gain, repeat, shuffle; `screen` — accent, text, dim, secondary, border, ink, background, cover art, spectrum, hints, top bar; `library` — folder.
+Rows, in order: `sound` — replay gain, repeat, shuffle; `theme` — accent, text, dim, secondary, border, ink, background; `screen` — cover art, spectrum, hints, top bar, advisories, view numbers; `library` — folder. The volume is not a row (S7.3): it stays in `[state]` and on `+`/`-`, which is where it has always been changed from the keyboard.
 
 1. A change takes effect on the next frame (colour, hidden element, volume, shuffle, repeat) and is written to the file immediately, following S2.
 2. The `folder` row shows the configured library and `enter` on it opens the existing library prompt (the one `L` opens), so saving a new folder keeps its single-path behaviour.
+3. The volume is not one of its rows: the card's `enter` starts at whatever the volume already is — 100 by default — so `enter` there only moves it down and reads as a dead key. `+`/`-` keep changing it and the `[state]` key keeps it.
 
 ## Tasks
 
@@ -73,6 +76,9 @@ Rows, in order: `sound` — volume, replay gain, repeat, shuffle; `screen` — a
 | T4 | The writer: `config::set_value` and `config::remove_value`, per key and per table, preserving the user's file | S2 | delegated writer | `9136a18` |
 | T5 | Restore and save: `App::set_session` at launch, and every persisted value written when it changes | S2, S3 | delegated writer | `ac83383` |
 | T6 | The settings card: `o`, rows, navigation, live apply, `HELP_ROWS`, README keys | S6, S7 | delegated writer | `9b832d8` |
+| T7 | The card's rows: no volume, and `theme` split from `screen` | S7, S7.3 | delegated writer | pending |
+| T8 | `[ui] advisories`: the cover-advisory status line can be silenced | S5.4 | delegated writer | pending |
+| T9 | `[ui] view_numbers`: `1`–`4` before the library views, and its switch | S5.5 | delegated writer | pending |
 
 ## Log
 
@@ -98,3 +104,12 @@ Rows, in order: `sound` — volume, replay gain, repeat, shuffle; `screen` — a
 **L7** (2026-11-07, writer, T6/S6–S7). `o` opens `App.settings: Option<SettingsCard>` routed after the prompt and before the help, so `q`, `space` and `?` are inert there. `SETTINGS_ROWS` (19 rows: the three headers plus the 16 settings), `SettingsKey`, `ColorRole`, `COLOR_PRESETS` (`#af00af`, `#5f87d7`, `#767676`, `#000000`, `#d70000`, `#00af5f`, `#d78700`, `#00d7d7`, with `reset` ahead of them for background and text). Every change goes through the existing hooks — `apply(SetVolume)`, `apply(SetRepeat)`, `ToggleShuffle`, `set_replay_gain` plus a top-level save, `change_color` rebuilding `ThemeColors` from the new `App.colors` and saving `[theme] <role>`, `toggle_ui` saving `[ui] <key>` — and `folder` closes the card and opens the library prompt. The card keeps one size (clamped, scrolled only to keep the cursor visible), draws last, and `HELP_ROWS` gained `("o", "settings")` (24 → 25, so eight help pins changed their total only). RED: `settings_open`/`settings_focused` did not exist (19 compile errors), then the unquoted colour write. GREEN: 17 suites, 310 tests, clippy and fmt clean; the card was also rendered and eyeballed at 90×30.
 
 **L8** (2026-11-07, parent, close). Every unit re-verified by the parent: `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` (17 suites, 310 tests, 0 failed) green after each commit, and the 80×24 golden screen byte-identical throughout. Slice note: T1 (824) and T6 (918) are above the ~400-line guide because each is one indivisible unit — a schema with its tests, a card with its row table and its render tests; T2–T5 stayed at or below it in spirit. Delivery is the branch: merge and `scripts/release.sh` are the user's decisions. Gaps: no real-terminal pass of the settings card or of a hidden cover; the repeat restored at launch reaches the first stream but a playing track keeps the gain of the mode it started with, and a view switch that leaves a node open keeps `artist`/`album` in the file until the next descend or ascend.
+
+**L9** (2026-11-07, user, verbatim, after trying the first delivery):
+
+> - para que esta volume en settings si no se puede editar, mejor no ponerlo aunque se quede en config.toml
+> - en la sesscion de screen esta unido tema con los show/hide mejor separarlo en theme y screen.
+> - En screen falta una barra por poner para ocultar y es la que dice "velo: cover art hidden - the window is 80x40 and cover art needs 100x28"
+> - en la parte donde esta artist|albums| tracks|genres estaria bien mostrar el numero porque no se sabe cual es cual 1,2,3,4 y en settings poder mostrar o ocultar estos numeros
+
+Parent note: the volume row *was* editable (`enter`/`←`/`→` in 5% steps), but the card opens at the volume already in effect — 100 by default — so `enter` could only move it down and the row read as broken. The user's disposition stands: no row, and the key stays in `[state]` with `+`/`-`. Specs S5 and S7 gained the two extra switches and lost the volume row; tasks T7–T9 reopen the work.
