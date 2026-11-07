@@ -168,6 +168,8 @@ struct Refresh {
     root: Option<PathBuf>,
     /// The folder a background index is scanning, while it runs.
     running: Option<PathBuf>,
+    /// Why the index could not be opened at launch, when it could not.
+    open_error: Option<String>,
 }
 
 /// Where in the library the interface stands while browsing.
@@ -681,11 +683,20 @@ impl<'lib> App<'lib> {
                 );
                 // A read error replaces the counts: it matters more.
                 self.reload();
+                self.reload_search();
             }
             // The index is written in one transaction, so a failure left it
             // as it was and the lists on screen are still true.
             Err(error) => self.status = format!("velo: indexing failed: {error}"),
         }
+    }
+
+    /// The shell could not open the library index at launch: `u` then says
+    /// so, with `error`, instead of asking for a library.
+    pub fn index_unavailable(&mut self, error: impl Into<String>) {
+        let error = error.into();
+        self.status = format!("velo: cannot open the library index: {error}");
+        self.refresh.open_error = Some(error);
     }
 
     /// What `u` answers: the refresh to run, or why there is none.
@@ -694,8 +705,21 @@ impl<'lib> App<'lib> {
             self.status = format!("already indexing {}", running.display());
             return Action::None;
         }
+        // Without an open index there is nothing to write to, whether or not
+        // a library is set: the shell would never start the refresh.
+        if self.library.is_none()
+            && let Some(error) = &self.refresh.open_error
+        {
+            self.status =
+                format!("velo: cannot open the library index: {error} — nothing to refresh");
+            return Action::None;
+        }
         if self.refresh.root.is_none() {
             self.note("no library set — press L to choose one");
+            return Action::None;
+        }
+        if self.library.is_none() {
+            self.note("the library index is not open — nothing to refresh");
             return Action::None;
         }
         Action::Reindex
@@ -861,7 +885,9 @@ impl<'lib> App<'lib> {
             return;
         };
         let kept = self.row_key(self.selected);
-        if let Err(error) = self.read_level(library) {
+        // One snapshot: a commit from the background indexer cannot land
+        // between the artists and the level's lists.
+        if let Err(error) = library.snapshot(|library| self.read_level(library)) {
             self.status = format!("velo: {error}");
         }
         let deep = matches!(
@@ -2121,16 +2147,50 @@ impl<'lib> App<'lib> {
         };
         match library.all_tracks() {
             Ok(pool) => {
-                self.search_haystacks = pool
-                    .iter()
-                    .map(|entry| format!("{} {} {}", entry.artist, entry.album, entry.title))
-                    .collect();
-                self.search_pool = pool;
+                self.set_search_pool(pool);
                 self.search_results = (0..self.search_pool.len()).collect();
                 self.search_selected = 0;
                 self.search = Some(Search::new());
             }
             Err(error) => self.status = format!("velo: {error}"),
+        }
+    }
+
+    /// The tracks the search ranks, with the text each one is matched on.
+    fn set_search_pool(&mut self, pool: Vec<TrackEntry>) {
+        self.search_haystacks = pool
+            .iter()
+            .map(|entry| format!("{} {} {}", entry.artist, entry.album, entry.title))
+            .collect();
+        self.search_pool = pool;
+    }
+
+    /// After an index, an open search reads the pool again and ranks the
+    /// query over it; the selected result stays selected while its track is
+    /// still there. A pool that cannot be read keeps the last one.
+    fn reload_search(&mut self) {
+        let (Some(library), Some(_)) = (self.library, &self.search) else {
+            return;
+        };
+        let kept = self
+            .search_results
+            .get(self.search_selected)
+            .and_then(|&index| self.search_pool.get(index))
+            .map(|entry| entry.path.clone());
+        match library.all_tracks() {
+            Ok(pool) => self.set_search_pool(pool),
+            Err(error) => {
+                self.status = format!("velo: {error}");
+                return;
+            }
+        }
+        self.rerank();
+        if let Some(found) = kept.and_then(|path| {
+            self.search_results
+                .iter()
+                .position(|&index| self.search_pool[index].path == path)
+        }) {
+            self.search_selected = found;
         }
     }
 

@@ -781,3 +781,50 @@ fn a_read_only_index_with_rows_still_in_its_wal_shows_every_row() {
     drop(scratch);
     let _ = fs::remove_dir_all(&root);
 }
+
+// one snapshot for several reads (help-and-advisories T2, S2.3) -----------
+
+#[test]
+fn reads_inside_a_snapshot_do_not_see_a_commit_made_between_them() {
+    let temp = TempLibrary::new("snapshot");
+    temp.write_wav("Tide/2019 - Harbor/01 - Dawn.wav");
+    temp.library.index(&temp.root).unwrap();
+    // The background indexer writes through a connection of its own.
+    let writer = Library::open_at(&temp.root.join("index.db")).unwrap();
+
+    let (before, after) = temp
+        .library
+        .snapshot(|library| {
+            let before = library.artists()?.len() + library.all_tracks()?.len();
+            temp.write_wav("Baltazar/2001 - Views/01 - Rising.wav");
+            writer.index(&temp.root).unwrap();
+            let after = library.artists()?.len() + library.all_tracks()?.len();
+            Ok((before, after))
+        })
+        .unwrap();
+
+    assert_eq!(before, 2, "one artist, one track");
+    assert_eq!(after, before, "the second read sees the same snapshot");
+    assert_eq!(
+        temp.library.artists().unwrap().len(),
+        2,
+        "a later read sees the commit"
+    );
+    assert_eq!(temp.count_tracks(), 2);
+}
+
+#[test]
+fn a_failed_read_inside_a_snapshot_is_its_error_and_the_library_still_reads() {
+    let temp = TempLibrary::new("snapshot-error");
+    temp.write_wav("Tide/2019 - Harbor/01 - Dawn.wav");
+    temp.library.index(&temp.root).unwrap();
+
+    let outcome: Result<(), _> = temp
+        .library
+        .snapshot(|_| Err(velo::library::LibraryError::DataDir));
+    assert!(outcome.is_err());
+    // The transaction ended with the closure: the next index still writes.
+    temp.write_wav("Tide/2019 - Harbor/02 - Noon.wav");
+    temp.library.index(&temp.root).unwrap();
+    assert_eq!(temp.count_tracks(), 2);
+}

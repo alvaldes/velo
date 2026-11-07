@@ -1574,3 +1574,82 @@ fn an_open_help_owns_the_keys_and_esc_clears_its_filter_before_closing() {
     press(&mut app, KeyCode::Char('j'));
     assert_eq!(app.selected(), 1);
 }
+
+// ---- the minor advisories (help-and-advisories T2, S2) ----------------------
+
+#[test]
+fn an_open_search_reads_the_new_pool_when_an_index_finishes_and_keeps_its_selection() {
+    let temp = TempLibrary::new("search-refresh");
+    temp.write_wav("Tide/2019 - Harbor/01 - Dawn.wav");
+    temp.write_wav("Tide/2019 - Harbor/02 - Noon.wav");
+    temp.index();
+    let mut app = App::browse(Some(&temp.library));
+    press(&mut app, KeyCode::Char('/'));
+    type_text(&mut app, "tide");
+    press(&mut app, KeyCode::Char('j'));
+    let picked = app.search_matches()[app.search_selected()].path.clone();
+    assert!(picked.ends_with("02 - Noon.wav"), "{}", picked.display());
+
+    temp.write_wav("Tide/2019 - Harbor/00 - Before.wav");
+    app.index_started(&temp.root);
+    app.index_finished(index_in_background(&temp));
+
+    assert!(app.search_open(), "the search stays open");
+    assert_eq!(app.search_query(), "tide");
+    assert_eq!(
+        app.search_matches().len(),
+        3,
+        "the new track is in the pool"
+    );
+    assert_eq!(
+        app.search_matches()[app.search_selected()].path,
+        picked,
+        "the selection follows its track"
+    );
+
+    // A selected track that is gone leaves the selection inside the list.
+    fs::remove_file(&picked).unwrap();
+    app.index_finished(index_in_background(&temp));
+    assert_eq!(app.search_matches().len(), 2);
+    assert!(app.search_selected() < 2);
+}
+
+#[test]
+fn u_says_the_index_could_not_be_opened_instead_of_asking_for_a_library() {
+    let mut app = App::browse(None);
+    app.index_unavailable("unable to open database file");
+
+    assert_eq!(app.on_key(key(KeyCode::Char('u'))), Action::None);
+    let status = app.status().to_owned();
+    assert!(status.contains("cannot open the library index"), "{status}");
+    assert!(status.contains("unable to open database file"), "{status}");
+    assert!(!status.contains("no library set"), "{status}");
+    assert_eq!(app.take_library_root(), None);
+}
+
+#[test]
+fn u_after_choosing_a_library_without_an_open_index_says_why_nothing_happens() {
+    let home = std::env::temp_dir().join(format!("velo-ui-no-index-{}", std::process::id()));
+    fs::create_dir_all(home.join("Music")).unwrap();
+    for error in [Some("unable to open database file"), None] {
+        let mut app = App::browse(None);
+        if let Some(error) = error {
+            app.index_unavailable(error);
+        }
+        app.ask_for_library_under(None, Some(home.clone()));
+        type_text(&mut app, "Music");
+        press(&mut app, KeyCode::Enter);
+        assert!(!app.library_prompt_open());
+
+        assert_eq!(app.on_key(key(KeyCode::Char('u'))), Action::None);
+        let status = app.status().to_owned();
+        assert!(status.contains("index"), "{status}");
+        assert!(!status.contains("no library set"), "{status}");
+        if let Some(error) = error {
+            assert!(status.contains(error), "{status}");
+        } else {
+            assert!(status.contains("not open"), "{status}");
+        }
+    }
+    let _ = fs::remove_dir_all(&home);
+}

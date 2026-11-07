@@ -187,6 +187,29 @@ impl Library {
         Ok(Self { conn, has_genre })
     }
 
+    /// Runs `read` inside one deferred read transaction on this connection,
+    /// so every query it makes sees the same snapshot of the index: a commit
+    /// from another connection (the background indexer) lands either before
+    /// all of them or after all of them. The transaction ends with `read`;
+    /// nothing is written. For reads only: `read` must not call
+    /// [`Library::index`], which opens a transaction of its own.
+    ///
+    /// # Errors
+    ///
+    /// The transaction cannot begin or end, or `read` fails; its error is
+    /// returned as it is.
+    pub fn snapshot<T>(
+        &self,
+        read: impl FnOnce(&Self) -> Result<T, LibraryError>,
+    ) -> Result<T, LibraryError> {
+        // Deferred: the snapshot is taken by the first read inside it.
+        let transaction = self.conn.unchecked_transaction()?;
+        let outcome = read(self)?;
+        // Ending it this way writes nothing; a failed `read` rolls back on drop.
+        transaction.commit()?;
+        Ok(outcome)
+    }
+
     /// Builds or refreshes the index for one root folder.
     ///
     /// Files whose mtime and size are unchanged are not re-read; rows whose

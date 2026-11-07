@@ -217,7 +217,7 @@ fn browse_interface(
         app.show_artwork(picker);
         app.set_config_file(config_file.clone());
         match (&opened, root) {
-            (Err(error), _) => app.note(format!("velo: cannot open the library index: {error}")),
+            (Err(error), _) => app.index_unavailable(error.to_string()),
             (Ok(_), Some(root)) => {
                 // Every launch refreshes the index; the event loop starts it.
                 app.set_library_root(Some(root.to_path_buf()));
