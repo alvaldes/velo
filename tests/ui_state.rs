@@ -92,6 +92,10 @@ fn an_empty_list_never_panics_on_any_key() {
         KeyCode::Char('?'),
         KeyCode::Esc,
         KeyCode::Char('q'),
+        KeyCode::Left,
+        KeyCode::Right,
+        KeyCode::Char(','),
+        KeyCode::Char('.'),
     ] {
         let _ = app.on_key(key(code));
         let _ = app.selected();
@@ -151,6 +155,48 @@ fn enter_returns_play_from_the_selection() {
     app.on_key(key(KeyCode::Char('j')));
     app.on_key(key(KeyCode::Char('j')));
     assert_eq!(app.on_key(key(KeyCode::Enter)), Action::Play { from: 2 });
+}
+
+// ---- transport keys (T6) ------------------------------------------------
+
+#[test]
+fn left_and_right_and_comma_and_dot_seek_five_seconds() {
+    let mut app = app_with_three_tracks();
+
+    // `Left` and `,` seek back five seconds…
+    assert_eq!(
+        app.on_key(key(KeyCode::Left)),
+        Action::Seek { delta_secs: -5 }
+    );
+    assert_eq!(
+        app.on_key(key(KeyCode::Char(','))),
+        Action::Seek { delta_secs: -5 }
+    );
+    // …and `Right` and `.` seek forward five seconds.
+    assert_eq!(
+        app.on_key(key(KeyCode::Right)),
+        Action::Seek { delta_secs: 5 }
+    );
+    assert_eq!(
+        app.on_key(key(KeyCode::Char('.'))),
+        Action::Seek { delta_secs: 5 }
+    );
+}
+
+#[test]
+fn the_seek_target_never_leaves_the_track() {
+    use std::time::Duration;
+
+    use velo::audio::seek_target;
+
+    let short = Some(Duration::from_secs(3));
+    // Back past the start clamps to the start…
+    assert_eq!(seek_target(Duration::ZERO, -5, short), Duration::ZERO);
+    // …and forward past the end clamps to the end.
+    assert_eq!(
+        seek_target(Duration::from_secs(2), 5, short),
+        Duration::from_secs(3)
+    );
 }
 
 // ---- browsing the library (T5) ------------------------------------------

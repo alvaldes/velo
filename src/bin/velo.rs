@@ -303,8 +303,8 @@ OPTIONS:
     --library <PATH>  Library root to index (default /Users/alvaldes/Music/Library)
     -h, --help      Show this help
 
-Interface keys: j/k move, enter open/play, esc back, space pause, +/- volume,
-    ? help, q quit. Without files, the interface browses the library.
+Interface keys: j/k move, enter open/play, ←/→ or ,/. seek ±5 s, space pause,
+    +/- volume, ? help, q quit. Without files, the interface browses the library.
 
 Audio must share one channel layout: sample rates are converted to the
     output device, channel layouts are not."

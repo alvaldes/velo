@@ -6,8 +6,8 @@
 //! logging, no decoding. Everything expensive happens on the producer thread.
 
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -28,19 +28,107 @@ const POLL_INTERVAL: Duration = Duration::from_millis(2);
 /// How long the main thread waits before re-checking whether playback drained.
 const DRAIN_POLL: Duration = Duration::from_millis(20);
 
+/// A linear gain ramp applied where clicks are born: in the callback, between
+/// one written sample and the next (S8).
+///
+/// Volume changes and pauses never step the gain; they fade across the buffer
+/// being written. The ramp owns the current gain, so once it has arrived at a
+/// target, writing more samples at that target changes nothing — there is no
+/// drift and no second fade.
+#[derive(Clone, Copy, Debug)]
+pub struct GainRamp {
+    current: f32,
+}
+
+impl GainRamp {
+    /// Starts the ramp at `current` gain.
+    #[must_use]
+    pub const fn new(current: f32) -> Self {
+        Self { current }
+    }
+
+    /// The gain the last ramp ended at.
+    #[must_use]
+    pub const fn current(&self) -> f32 {
+        self.current
+    }
+
+    /// Whether the gain is zero, i.e. the output is silent.
+    #[must_use]
+    pub const fn is_silent(&self) -> bool {
+        self.current == 0.0
+    }
+
+    /// Multiplies `samples` by a gain that moves linearly, sample by sample,
+    /// from the current gain to `target`, which it reaches at the last sample.
+    /// A callback calls this once per buffer, so the fade always completes
+    /// within one buffer and never moves more than `delta / buffer` per
+    /// sample — the anti-click rule.
+    pub fn ramp_to(&mut self, samples: &mut [f32], target: f32) {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "an audio buffer holds far fewer samples than f32 counts exactly"
+        )]
+        let count = samples.len() as f32;
+        let step = (target - self.current) / count;
+        let mut gain = self.current;
+        for sample in samples.iter_mut() {
+            gain += step;
+            *sample *= gain;
+        }
+        // The arrived state is the target itself, not an accumulation of
+        // rounded steps, so the next buffer at the same target is a no-op.
+        self.current = target;
+    }
+}
+
+/// The offset a seek lands on: `position` moved by `delta_secs`, clamped into
+/// `0..=duration`. A `None` duration only clamps the lower end; the player
+/// clamps an offset past the end of the track when it opens it.
+#[must_use]
+pub fn seek_target(position: Duration, delta_secs: i64, duration: Option<Duration>) -> Duration {
+    let moved = if delta_secs >= 0 {
+        position.saturating_add(Duration::from_secs(delta_secs.unsigned_abs()))
+    } else {
+        position.saturating_sub(Duration::from_secs(delta_secs.unsigned_abs()))
+    };
+    duration.map_or(moved, |duration| moved.min(duration))
+}
+
 /// A running output stream. Dropping it stops the device.
 pub struct Player {
     stream: cpal::Stream,
     spec: TrackSpec,
-    playing: Arc<AtomicBool>,
+    /// The counters the callback reads and writes; the same handles its
+    /// closure holds.
+    wires: CallbackWires,
     stop: Arc<AtomicBool>,
     delivered: Arc<AtomicUsize>,
-    played: Arc<AtomicUsize>,
-    underruns: Arc<AtomicUsize>,
     /// The queue index the producer is currently decoding; the UI reads it to
     /// mark the playing row.
     current: Arc<AtomicUsize>,
+    /// For each queue index, how many ring samples had been delivered when the
+    /// producer started pushing that track. `position` subtracts it from the
+    /// played counter to get elapsed time within the current track. Written by
+    /// the producer once per track, read by the UI; never by the callback.
+    track_starts: Arc<Mutex<Vec<usize>>>,
+    /// The track a seek landed on and how deep into it, in output frames.
+    /// Without this the played counter makes the clock restart at zero in the
+    /// middle of a song after every seek.
+    start_track: usize,
+    start_offset_frames: usize,
     producer: Option<JoinHandle<Result<(), AudioError>>>,
+}
+
+/// The atomics the device callback reads and writes. Created once per player
+/// and shared with its closure.
+#[derive(Clone)]
+struct CallbackWires {
+    playing: Arc<AtomicBool>,
+    producing: Arc<AtomicBool>,
+    played: Arc<AtomicUsize>,
+    underruns: Arc<AtomicUsize>,
+    volume: Arc<AtomicU8>,
 }
 
 impl Player {
@@ -57,47 +145,72 @@ impl Player {
     /// [`AudioError::SpecMismatch`] when a track's channel layout cannot be
     /// joined to the output.
     pub fn play_gapless(paths: Vec<PathBuf>) -> Result<Self, AudioError> {
+        Self::play_gapless_at(paths, 0, Duration::ZERO)
+    }
+
+    /// Plays every path from `track_index` onwards as one continuous stream,
+    /// starting the first one `offset` into it. A seek is a rebuild from this
+    /// offset, never a command injected into a running engine (T6). A few
+    /// milliseconds of silence while the stream restarts are expected.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AudioError::Unsupported`] when the list is empty or
+    /// `track_index` is past it, and otherwise the same errors as
+    /// [`Player::play_gapless`].
+    pub fn play_gapless_at(
+        paths: Vec<PathBuf>,
+        track_index: usize,
+        offset: Duration,
+    ) -> Result<Self, AudioError> {
         if paths.is_empty() {
             return Err(AudioError::Unsupported("no tracks to play".to_owned()));
+        }
+        if track_index >= paths.len() {
+            return Err(AudioError::Unsupported(
+                "no such track in the queue".to_owned(),
+            ));
         }
 
         // Opening once up front means a missing or broken first file fails
         // before a device is opened, and gives us the format to configure.
-        let spec = TrackSource::open(&paths[0])?.spec();
+        let spec = TrackSource::open(&paths[track_index])?.spec();
+        let offset_frames = duration_to_frames(offset, spec.sample_rate);
 
-        let host = cpal::default_host();
-        let device = host
-            .default_output_device()
-            .ok_or_else(|| AudioError::Device("no audio output device".to_owned()))?;
-        let spec = output_spec(&device, spec)?;
+        let (device, config, spec) = open_output(spec)?;
 
-        let config = cpal::StreamConfig {
-            channels: spec.channels,
-            sample_rate: spec.sample_rate,
-            buffer_size: cpal::BufferSize::Default,
-        };
+        let (ring, consumer) = RingBuffer::<f32>::new(spec.interleaved_rate() * RING_SECONDS);
 
-        let (ring, mut consumer) = RingBuffer::<f32>::new(spec.interleaved_rate() * RING_SECONDS);
-
-        let playing = Arc::new(AtomicBool::new(true));
         let stop = Arc::new(AtomicBool::new(false));
-        let producing = Arc::new(AtomicBool::new(true));
         let delivered = Arc::new(AtomicUsize::new(0));
-        let played = Arc::new(AtomicUsize::new(0));
-        let underruns = Arc::new(AtomicUsize::new(0));
-        // The first track is the one being produced until the producer says
+        // The requested track is the one being produced until the producer says
         // otherwise; it sets the index before it opens each track.
-        let current = Arc::new(AtomicUsize::new(0));
+        let current = Arc::new(AtomicUsize::new(track_index));
+        let track_starts = Arc::new(Mutex::new(Vec::new()));
+        let wires = CallbackWires {
+            playing: Arc::new(AtomicBool::new(true)),
+            producing: Arc::new(AtomicBool::new(true)),
+            played: Arc::new(AtomicUsize::new(0)),
+            underruns: Arc::new(AtomicUsize::new(0)),
+            volume: Arc::new(AtomicU8::new(100)),
+        };
 
         let producer = {
             let delivered = Arc::clone(&delivered);
             let stop = Arc::clone(&stop);
-            let producing = Arc::clone(&producing);
             let current = Arc::clone(&current);
+            let track_starts = Arc::clone(&track_starts);
+            let producing = Arc::clone(&wires.producing);
             thread::Builder::new()
                 .name("velo-producer".to_owned())
                 .spawn(move || {
-                    let result = produce(paths, spec, ring, &delivered, &stop, &current);
+                    let job = Sequence {
+                        paths,
+                        start_track: track_index,
+                        offset_frames,
+                    };
+                    let result =
+                        produce(job, spec, ring, &delivered, &stop, &current, &track_starts);
                     producing.store(false, Ordering::Release);
                     result
                 })
@@ -107,53 +220,9 @@ impl Player {
         // Give the producer a head start before the device starts asking for
         // samples: a callback that finds the ring empty at the start is heard as
         // a click. The wait is bounded, so a broken first file cannot hang here.
-        let preroll = spec.interleaved_rate() / 10;
-        let deadline = Instant::now() + Duration::from_millis(100);
-        while delivered.load(Ordering::Acquire) < preroll && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(1));
-        }
+        wait_for_preroll(&delivered, spec.interleaved_rate() / 10);
 
-        let stream = {
-            let playing = Arc::clone(&playing);
-            let played = Arc::clone(&played);
-            let underruns = Arc::clone(&underruns);
-            let producing = Arc::clone(&producing);
-
-            device
-                .build_output_stream(
-                    config,
-                    move |out: &mut [f32], _info: &cpal::OutputCallbackInfo| {
-                        if !playing.load(Ordering::Relaxed) {
-                            out.fill(0.0);
-                            return;
-                        }
-
-                        let ready = consumer.slots().min(out.len());
-                        let mut copied = 0;
-                        for slot in &mut out[..ready] {
-                            let Ok(sample) = consumer.pop() else {
-                                break;
-                            };
-                            *slot = sample;
-                            copied += 1;
-                        }
-
-                        if copied < out.len() {
-                            out[copied..].fill(0.0);
-                            // Silence once the queue is drained is the end of the
-                            // music, not a gap. Only a starve while the producer
-                            // still has work is a real underrun.
-                            if producing.load(Ordering::Relaxed) {
-                                underruns.fetch_add(1, Ordering::Relaxed);
-                            }
-                        }
-                        played.fetch_add(copied, Ordering::Release);
-                    },
-                    move |error| eprintln!("velo: audio device error: {error}"),
-                    None,
-                )
-                .map_err(|error| AudioError::Device(error.to_string()))?
-        };
+        let stream = build_stream(&device, config, consumer, &wires)?;
 
         stream
             .play()
@@ -162,12 +231,13 @@ impl Player {
         Ok(Self {
             stream,
             spec,
-            playing,
+            wires,
             stop,
             delivered,
-            played,
-            underruns,
             current,
+            track_starts,
+            start_track: track_index,
+            start_offset_frames: usize::try_from(offset_frames).unwrap_or(usize::MAX),
             producer: Some(producer),
         })
     }
@@ -195,7 +265,7 @@ impl Player {
 
         // The producer never runs ahead of the ring, so the queue is empty only
         // when everything it delivered has also been consumed by the device.
-        while self.delivered.load(Ordering::Acquire) > self.played.load(Ordering::Acquire) {
+        while self.delivered.load(Ordering::Acquire) > self.wires.played.load(Ordering::Acquire) {
             thread::sleep(DRAIN_POLL);
         }
         Ok(())
@@ -205,7 +275,7 @@ impl Player {
     /// yet. A steady zero here is what "no gap" sounds like.
     #[must_use]
     pub fn underruns(&self) -> usize {
-        self.underruns.load(Ordering::Relaxed)
+        self.wires.underruns.load(Ordering::Relaxed)
     }
 
     /// The index, within the list passed to [`Player::play_gapless`], of the
@@ -218,7 +288,49 @@ impl Player {
 
     /// Silences the device without stopping the stream.
     pub fn set_playing(&self, playing: bool) {
-        self.playing.store(playing, Ordering::Relaxed);
+        self.wires.playing.store(playing, Ordering::Relaxed);
+    }
+
+    /// Sets the target volume in percent, 0 to 100. The callback fades its
+    /// gain there across one buffer; it never jumps.
+    pub fn set_volume(&self, percent: u8) {
+        self.wires.volume.store(percent.min(100), Ordering::Relaxed);
+    }
+
+    /// The volume in percent.
+    #[must_use]
+    pub fn volume(&self) -> u8 {
+        self.wires.volume.load(Ordering::Relaxed)
+    }
+
+    /// Elapsed time within the current track, counted by the callback itself:
+    /// the samples it played minus the samples delivered before the track
+    /// started. A track still being buffered reports zero; a paused player
+    /// does not advance, because it does not play.
+    #[must_use]
+    pub fn position(&self) -> Duration {
+        let track = self.current.load(Ordering::Acquire);
+        let start = match self.track_starts.lock() {
+            Ok(starts) => starts.get(track).copied(),
+            Err(poisoned) => poisoned.into_inner().get(track).copied(),
+        };
+        let Some(start) = start else {
+            // The producer has not pushed this track's first sample yet.
+            return Duration::ZERO;
+        };
+        let frames = elapsed_frames(
+            self.wires.played.load(Ordering::Acquire),
+            start,
+            track,
+            self.start_track,
+            self.start_offset_frames,
+        );
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a track holds fewer frames than f64 represents exactly"
+        )]
+        let seconds = frames as f64 / self.spec.interleaved_rate() as f64;
+        Duration::from_secs_f64(seconds)
     }
 
     /// Asks the producer to stop and closes the device.
@@ -228,16 +340,101 @@ impl Player {
     }
 }
 
+/// Where a sequence starts: which track, and how far into it.
+struct Sequence {
+    paths: Vec<PathBuf>,
+    start_track: usize,
+    offset_frames: u64,
+}
+
+/// Builds the device stream: the callback that drains the ring. Its whole job
+/// is copying samples and applying the gain ramp — no allocation, no locks,
+/// no logging, no decoding.
+fn build_stream(
+    device: &cpal::Device,
+    config: cpal::StreamConfig,
+    mut consumer: rtrb::Consumer<f32>,
+    wires: &CallbackWires,
+) -> Result<cpal::Stream, AudioError> {
+    let CallbackWires {
+        playing,
+        producing,
+        played,
+        underruns,
+        volume,
+    } = wires.clone();
+    // The gain lives in the callback and is only ever moved by the ramp: no
+    // jump at start-up, on pause, on resume or on volume.
+    let mut gain = GainRamp::new(0.0);
+
+    device
+        .build_output_stream(
+            config,
+            move |out: &mut [f32], _info: &cpal::OutputCallbackInfo| {
+                let target = if playing.load(Ordering::Relaxed) {
+                    f32::from(volume.load(Ordering::Relaxed)) / 100.0
+                } else {
+                    0.0
+                };
+
+                // Paused and fully faded out: silence, and the ring keeps its
+                // audio, so the resume has something to play instead of the
+                // player having eaten it.
+                if gain.is_silent() && target == 0.0 {
+                    out.fill(0.0);
+                    return;
+                }
+
+                let ready = consumer.slots().min(out.len());
+                let mut copied = 0;
+                for slot in &mut out[..ready] {
+                    let Ok(sample) = consumer.pop() else {
+                        break;
+                    };
+                    *slot = sample;
+                    copied += 1;
+                }
+
+                if copied < out.len() {
+                    out[copied..].fill(0.0);
+                    // Silence once the queue is drained is the end of the
+                    // music, not a gap. Only a starve while the producer still
+                    // has work is a real underrun.
+                    if producing.load(Ordering::Relaxed) {
+                        underruns.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+
+                // One linear fade per buffer carries the gain to the target:
+                // pause and volume changes cannot click.
+                gain.ramp_to(out, target);
+                played.fetch_add(copied, Ordering::Release);
+            },
+            move |error| eprintln!("velo: audio device error: {error}"),
+            None,
+        )
+        .map_err(|error| AudioError::Device(error.to_string()))
+}
+
 /// Fills the ring buffer from the file system until the queue is exhausted.
 fn produce(
-    paths: Vec<PathBuf>,
+    job: Sequence,
     expected: TrackSpec,
     mut ring: Producer<f32>,
     delivered: &AtomicUsize,
     stop: &AtomicBool,
     current: &AtomicUsize,
+    track_starts: &Mutex<Vec<usize>>,
 ) -> Result<(), AudioError> {
+    let Sequence {
+        paths,
+        start_track,
+        offset_frames,
+    } = job;
     for (index, path) in paths.into_iter().enumerate() {
+        if index < start_track {
+            continue;
+        }
         if stop.load(Ordering::Relaxed) {
             return Ok(());
         }
@@ -246,7 +443,32 @@ fn produce(
         // a reader always sees a track that is either playing or about to.
         current.store(index, Ordering::Release);
 
-        let mut source = TrackSource::open(&path)?;
+        // The track a seek landed on starts at its offset: the player is
+        // rebuilt there, nothing is injected into a running engine.
+        let mut source = if index == start_track && offset_frames > 0 {
+            TrackSource::open_at(&path, offset_frames)?
+        } else {
+            TrackSource::open(&path)?
+        };
+
+        // Record where this track begins in the delivered stream, so position
+        // can subtract it from what the device has played.
+        match track_starts.lock() {
+            Ok(mut starts) => {
+                if starts.len() <= index {
+                    starts.resize(index + 1, 0);
+                }
+                starts[index] = delivered.load(Ordering::Acquire);
+            }
+            Err(poisoned) => {
+                let mut starts = poisoned.into_inner();
+                if starts.len() <= index {
+                    starts.resize(index + 1, 0);
+                }
+                starts[index] = delivered.load(Ordering::Acquire);
+            }
+        }
+
         let spec = source.spec();
         // A rate difference is converted away; only a layout difference cannot
         // be joined, because remixing channels changes the music itself.
@@ -266,6 +488,39 @@ fn produce(
         push_all(&mut ring, &flushed, delivered, stop);
     }
     Ok(())
+}
+
+/// Converts a playback offset into frames of the track's own sample rate.
+fn duration_to_frames(offset: Duration, sample_rate: u32) -> u64 {
+    let rate = u64::from(sample_rate);
+    offset.as_secs() * rate + u64::from(offset.subsec_millis()) * rate / 1000
+}
+
+/// Opens the default output device at `track`'s own format when it accepts it,
+/// otherwise at the device default, and the stream config to match.
+fn open_output(
+    track: TrackSpec,
+) -> Result<(cpal::Device, cpal::StreamConfig, TrackSpec), AudioError> {
+    let host = cpal::default_host();
+    let device = host
+        .default_output_device()
+        .ok_or_else(|| AudioError::Device("no audio output device".to_owned()))?;
+    let spec = output_spec(&device, track)?;
+    let config = cpal::StreamConfig {
+        channels: spec.channels,
+        sample_rate: spec.sample_rate,
+        buffer_size: cpal::BufferSize::Default,
+    };
+    Ok((device, config, spec))
+}
+
+/// Waits, bounded, until the ring holds enough audio for the device to start
+/// without its first callback finding it empty and being heard as a click.
+fn wait_for_preroll(delivered: &AtomicUsize, preroll: usize) {
+    let deadline = Instant::now() + Duration::from_millis(100);
+    while delivered.load(Ordering::Acquire) < preroll && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(1));
+    }
 }
 
 /// The format the device runs at: the first track's own format when the
@@ -358,5 +613,52 @@ fn push_all(
 
         delivered.fetch_add(pushed, Ordering::Release);
         samples = &samples[pushed..];
+    }
+}
+
+/// Elapsed frames within the current track.
+///
+/// The played counter starts at zero when the device opens, but a seek opens it
+/// deep inside the track the user asked for, so that track's offset has to be
+/// added back or the clock restarts mid-song. Tracks after the seek target are
+/// played from their beginning and take no offset.
+const fn elapsed_frames(
+    played: usize,
+    track_start: usize,
+    track: usize,
+    seek_track: usize,
+    seek_offset: usize,
+) -> usize {
+    let within_track = played.saturating_sub(track_start);
+    if track == seek_track {
+        within_track.saturating_add(seek_offset)
+    } else {
+        within_track
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::elapsed_frames;
+
+    #[test]
+    fn playing_from_the_start_counts_only_what_was_played() {
+        assert_eq!(elapsed_frames(1_000, 0, 0, 0, 0), 1_000);
+    }
+
+    #[test]
+    fn a_seek_is_added_to_the_clock_instead_of_restarting_it() {
+        // Seeks 5 s into the first track at 44.1 kHz, then plays 1 000 frames.
+        assert_eq!(elapsed_frames(1_000, 0, 0, 0, 220_500), 221_500);
+    }
+
+    #[test]
+    fn a_later_track_still_counts_from_its_own_beginning() {
+        assert_eq!(elapsed_frames(3_000, 2_000, 1, 0, 220_500), 1_000);
+    }
+
+    #[test]
+    fn a_negative_clock_is_clamped_to_zero() {
+        assert_eq!(elapsed_frames(0, 500, 1, 0, 220_500), 0);
     }
 }

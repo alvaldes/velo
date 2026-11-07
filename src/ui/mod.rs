@@ -17,7 +17,9 @@ pub mod theme;
 pub use ratatui;
 pub use ratatui::crossterm;
 
+use std::fmt::Write as _;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
@@ -25,7 +27,7 @@ use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph};
 
-use crate::audio::Player;
+use crate::audio::{Player, seek_target};
 use crate::library::{AlbumEntry, ArtistEntry, Library, TrackEntry};
 
 use self::theme::{ACCENT, BACKGROUND, DIM, SECONDARY, TEXT};
@@ -47,6 +49,8 @@ pub enum Action {
     TogglePause,
     /// The new volume, in percent.
     SetVolume(u8),
+    /// Move the position by this many seconds; negative is back.
+    Seek { delta_secs: i64 },
 }
 
 /// Where in the library the interface stands while browsing.
@@ -126,6 +130,9 @@ pub struct App<'lib> {
     albums: Vec<AlbumEntry>,
     tracks: Vec<TrackEntry>,
     selected: usize,
+    /// The paths of the running stream, in queue order, so a seek can rebuild
+    /// the player from the current track at an offset.
+    queue: Vec<PathBuf>,
     /// The stream that is playing, if any.
     playing: Option<Playback>,
     help: bool,
@@ -147,6 +154,7 @@ impl<'lib> App<'lib> {
             albums: Vec::new(),
             tracks: Vec::new(),
             selected: 0,
+            queue: Vec::new(),
             playing: None,
             help: false,
             volume: 100,
@@ -168,6 +176,7 @@ impl<'lib> App<'lib> {
             albums: Vec::new(),
             tracks: Vec::new(),
             selected: 0,
+            queue: Vec::new(),
             playing: None,
             help: false,
             volume: 100,
@@ -286,6 +295,8 @@ impl<'lib> App<'lib> {
             KeyCode::Char(' ') => Action::TogglePause,
             KeyCode::Char('+' | '=') => Action::SetVolume(self.change_volume(5)),
             KeyCode::Char('-') => Action::SetVolume(self.change_volume(-5)),
+            KeyCode::Left | KeyCode::Char(',') => Action::Seek { delta_secs: -5 },
+            KeyCode::Right | KeyCode::Char('.') => Action::Seek { delta_secs: 5 },
             KeyCode::Char('?') => {
                 self.help = !self.help;
                 Action::None
@@ -309,15 +320,19 @@ impl<'lib> App<'lib> {
     /// the status message instead of leaving the interface.
     pub fn apply(&mut self, action: Action) {
         match action {
-            Action::None | Action::SetVolume(_) => {
-                // The volume is already stored; sending it to the device is
-                // T6's transport work.
+            Action::None => {}
+            Action::SetVolume(percent) => {
+                self.volume = percent;
+                if let Some(player) = &self.player {
+                    player.set_volume(percent);
+                }
             }
             Action::Quit => self.shutdown(),
             Action::Play { from } => self.play_from(from),
             Action::Descend => self.descend(),
             Action::Ascend => self.ascend(),
             Action::TogglePause => self.toggle_pause(),
+            Action::Seek { delta_secs } => self.seek_by(delta_secs),
         }
     }
 
@@ -511,20 +526,59 @@ impl<'lib> App<'lib> {
         let [status_row, hints_row] =
             Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area);
 
-        if !self.status.is_empty() {
+        let status = if self.status.is_empty() {
+            self.transport_line()
+        } else {
+            self.status.clone()
+        };
+        if !status.is_empty() {
             frame.render_widget(
-                Paragraph::new(Line::styled(self.status.clone(), Style::new().fg(ACCENT))),
+                Paragraph::new(Line::styled(status, Style::new().fg(ACCENT))),
                 status_row,
             );
         }
 
         frame.render_widget(
             Paragraph::new(Line::styled(
-                "j/k move  enter open/play  esc back  space pause  +/- volume  ? help  q quit",
+                "j/k move  enter open/play  ←/→ seek  space pause  +/- volume  ? help  q quit",
                 Style::new().fg(DIM),
             )),
             hints_row,
         );
+    }
+
+    /// The transport line: `mm:ss / mm:ss` when the track's length is known,
+    /// then the volume percentage.
+    fn transport_line(&self) -> String {
+        let mut line = String::new();
+        if self.player.is_some() {
+            let position = self
+                .player
+                .as_ref()
+                .map_or(Duration::ZERO, Player::position);
+            line.push_str(&mmss(position));
+            if let Some(total) = self.current_track_duration() {
+                line.push_str(" / ");
+                line.push_str(&mmss(total));
+            }
+            line.push_str("  ");
+        }
+        let _ = write!(line, "vol {}%", self.volume);
+        line
+    }
+
+    /// The length of the track that is playing, from the interface's own track
+    /// row — never from a decoder. A flat command-line list carries none.
+    fn current_track_duration(&self) -> Option<Duration> {
+        let track = self.player.as_ref()?.current_index();
+        match (&self.playing, &self.position) {
+            (Some(Playback::Album { from, .. }), Position::Tracks { .. }) => {
+                let entry = self.tracks.get(from + track)?;
+                let millis = u64::try_from(entry.duration_ms).ok()?;
+                (millis > 0).then(|| Duration::from_millis(millis))
+            }
+            _ => None,
+        }
     }
 
     fn draw_help(frame: &mut Frame, area: Rect) {
@@ -536,6 +590,8 @@ impl<'lib> App<'lib> {
             "enter      open, or play from the selection",
             "esc        back one level / close help",
             "space      pause / resume",
+            "← / →      seek 5 s back / forward",
+            ", / .      seek 5 s back / forward",
             "+ / -      volume up / down",
             "?          toggle this help",
             "q          quit",
@@ -693,7 +749,7 @@ impl<'lib> App<'lib> {
     fn play_from(&mut self, from: usize) {
         let started = match &self.position {
             Position::Files if from < self.argv.len() => {
-                Some((self.argv[from..].to_vec(), Playback::Files { from }))
+                Some((self.argv.clone(), Playback::Files { from }))
             }
             Position::Tracks { artist, album } if from < self.tracks.len() => Some((
                 self.tracks[from..]
@@ -716,10 +772,54 @@ impl<'lib> App<'lib> {
         if let Some(old) = self.player.take() {
             old.stop();
         }
-        match Player::play_gapless(paths) {
+        match Player::play_gapless(paths.clone()) {
             Ok(player) => {
+                self.queue = paths;
                 self.player = Some(player);
                 self.playing = Some(playback);
+                self.state = PlayState::Playing;
+                self.status.clear();
+            }
+            Err(error) => {
+                self.queue.clear();
+                self.player = None;
+                self.playing = None;
+                self.state = PlayState::Stopped;
+                self.status = format!("velo: {error}");
+            }
+        }
+    }
+
+    /// Moves the position by `delta_secs`: the current position plus the
+    /// delta, clamped to the track, then the player rebuilt from that offset
+    /// (T6). A few milliseconds of silence are expected; a click is not.
+    fn seek_by(&mut self, delta_secs: i64) {
+        let Some(player) = &self.player else {
+            return;
+        };
+        let position = player.position();
+        let duration = self.current_track_duration();
+        let target = seek_target(position, delta_secs, duration);
+        self.start_at(target);
+    }
+
+    /// Closes the player and starts it again at the same track, `offset` into
+    /// it. The queue and the marker stay as they were.
+    fn start_at(&mut self, offset: Duration) {
+        let Some(player) = self.player.take() else {
+            return;
+        };
+        let track = player.current_index();
+        player.stop();
+
+        if self.queue.is_empty() || track >= self.queue.len() {
+            self.playing = None;
+            self.state = PlayState::Stopped;
+            return;
+        }
+        match Player::play_gapless_at(self.queue.clone(), track, offset) {
+            Ok(player) => {
+                self.player = Some(player);
                 self.state = PlayState::Playing;
                 self.status.clear();
             }
@@ -758,6 +858,12 @@ impl Default for App<'_> {
     fn default() -> Self {
         Self::new(Vec::new())
     }
+}
+
+/// A duration as `mm:ss`.
+fn mmss(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    format!("{:02}:{:02}", seconds / 60, seconds % 60)
 }
 
 /// A `width` × `height` rectangle centred in `area`, clamped to fit.

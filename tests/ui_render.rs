@@ -96,6 +96,28 @@ fn the_help_overlay_lists_the_keys_and_covers_the_list() {
     );
 }
 
+#[test]
+fn the_footer_shows_the_volume_and_the_help_lists_the_seek_keys() {
+    let app = App::new(tracks(&["one.flac"]));
+    let screen = render(&app);
+
+    assert!(
+        screen.contains("vol 100%"),
+        "the footer shows the volume percentage, got: {screen}"
+    );
+
+    let mut app = App::new(tracks(&["one.flac"]));
+    app.on_key(velo::ui::crossterm::event::KeyEvent::from(
+        velo::ui::crossterm::event::KeyCode::Char('?'),
+    ));
+    let helped = render(&app);
+
+    assert!(
+        helped.contains("seek 5 s"),
+        "the help lists the seek keys, got: {helped}"
+    );
+}
+
 // ---- browsing the library (T5) ------------------------------------------
 
 /// A temp library with its own index, self-removing on drop. The index is

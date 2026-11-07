@@ -12,15 +12,16 @@ use std::path::{Path, PathBuf};
 pub mod output;
 pub mod resample;
 
-pub use output::Player;
+pub use output::{GainRamp, Player, seek_target};
 
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{CodecParameters, Decoder, DecoderOptions};
 use symphonia::core::errors::Error as SymphoniaError;
-use symphonia::core::formats::{FormatOptions, FormatReader};
+use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
 use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
+use symphonia::core::units::TimeBase;
 
 /// Frames produced per block by [`TrackSource::read_block`].
 pub const BLOCK_FRAMES: usize = 1024;
@@ -92,6 +93,14 @@ pub struct TrackSource {
     /// A block decoded by [`TrackSource::open`] to learn the sample format of a
     /// container that does not declare it; it must be played first.
     pending: Option<Vec<f32>>,
+    /// The track's time base, which converts between frames and the timestamps
+    /// a seek is expressed in.
+    time_base: Option<TimeBase>,
+    /// The track's total frame count, when the container declares it.
+    n_frames: Option<u64>,
+    /// After a seek: the timestamp the decoded output must not start before.
+    /// Packets read before it contribute only their frames from it onwards.
+    skip_ts: Option<u64>,
 }
 
 /// The sample format a container declares, when it declares one at all.
@@ -159,6 +168,9 @@ impl TrackSource {
             }),
             finished: false,
             pending: None,
+            time_base: codec_params.time_base,
+            n_frames: codec_params.n_frames,
+            skip_ts: None,
         };
 
         if declared.is_none() {
@@ -177,6 +189,76 @@ impl TrackSource {
     #[must_use]
     pub const fn spec(&self) -> TrackSpec {
         self.spec
+    }
+
+    /// Opens a file and positions it `offset_frames` from its first frame, as
+    /// a seek does: the player is rebuilt from this offset, it never injects
+    /// anything into a running engine (T6).
+    ///
+    /// An offset past the end of the track clamps to the end: the stream then
+    /// simply has nothing left, it does not fail.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`TrackSource::open`]. A seek itself never
+    /// fails here: an offset the reader refuses is treated as the end.
+    pub fn open_at(path: &Path, offset_frames: u64) -> Result<Self, AudioError> {
+        let mut source = Self::open(path)?;
+        source.seek_to_frames(offset_frames);
+        Ok(source)
+    }
+
+    /// Positions the stream at `offset_frames` from the first frame.
+    fn seek_to_frames(&mut self, offset_frames: u64) {
+        if offset_frames == 0 {
+            return;
+        }
+
+        let offset = self
+            .n_frames
+            .map_or(offset_frames, |total| offset_frames.min(total));
+
+        // Clamped to (or past) the end: the stream finishes before it starts.
+        if self.n_frames.is_some_and(|total| offset >= total) {
+            self.finished = true;
+            self.pending = None;
+            return;
+        }
+
+        let Some(time_base) = self.time_base else {
+            // Without a time base the offset cannot be expressed; without a
+            // declared frame count the safest clamp is the end of the track.
+            self.finished = true;
+            self.pending = None;
+            return;
+        };
+        let ts = frames_to_ts(offset, time_base, self.spec.sample_rate);
+
+        // Audio decoded before the seek point must not reach the output.
+        self.pending = None;
+        match self.reader.seek(
+            SeekMode::Accurate,
+            SeekTo::TimeStamp {
+                ts,
+                track_id: self.track_id,
+            },
+        ) {
+            Ok(seeked) => {
+                // Accurate seeks land at or before the requested position, so
+                // the packets that follow still hold frames to drop.
+                self.skip_ts = Some(seeked.required_ts);
+                // The next packet is discontinuous with the last decoded one:
+                // the decoder keeps cross-packet state (an MP3 bit reservoir,
+                // say) that a seek invalidates.
+                self.decoder.reset();
+            }
+            Err(_) => {
+                // The reader refused the seek — an offset past the end of a
+                // track with no declared length, most likely. Clamp to the
+                // end instead of failing a transport action.
+                self.finished = true;
+            }
+        }
     }
 
     /// Returns the next block of interleaved `f32` samples, or `None` at the end.
@@ -235,13 +317,49 @@ impl TrackSource {
             let mut buffer = SampleBuffer::<f32>::new(decoded.capacity() as u64, signal);
             buffer.copy_interleaved_ref(decoded);
 
+            let mut samples = buffer.samples().to_vec();
+
+            // A seek: hold back everything before the timestamp it asked for.
+            if let Some(skip_ts) = self.skip_ts {
+                let channels = usize::from(self.spec.channels);
+                let drop_ts = skip_ts.saturating_sub(packet.ts());
+                let drop_frames = self.time_base.map_or(0, |time_base| {
+                    ts_to_frames(drop_ts, time_base, self.spec.sample_rate)
+                });
+                let packet_frames = samples.len() / channels;
+                let drop = usize::try_from(drop_frames).unwrap_or(usize::MAX);
+                if drop == 0 {
+                    self.skip_ts = None;
+                } else if drop < packet_frames {
+                    samples.drain(..drop * channels);
+                    self.skip_ts = None;
+                } else {
+                    // The whole packet lies before the seek target; the next
+                    // one starts closer to it.
+                    continue;
+                }
+            }
+
             // A packet that decodes to nothing must not surface as an empty
             // block: to the caller that is indistinguishable from the end.
-            if !buffer.samples().is_empty() {
-                return Ok(Some(buffer.samples().to_vec()));
+            if !samples.is_empty() {
+                return Ok(Some(samples));
             }
         }
     }
+}
+
+/// Converts a span of track timestamps into decoded frames.
+fn ts_to_frames(ts: u64, time_base: TimeBase, sample_rate: u32) -> u64 {
+    let frames = u128::from(ts) * u128::from(time_base.numer) * u128::from(sample_rate.max(1));
+    u64::try_from(frames / u128::from(time_base.denom)).unwrap_or(u64::MAX)
+}
+
+/// Converts decoded frames into a track timestamp for [`TrackSource::seek_to_frames`].
+fn frames_to_ts(frames: u64, time_base: TimeBase, sample_rate: u32) -> u64 {
+    let ts = u128::from(frames) * u128::from(time_base.denom);
+    let rate = u128::from(sample_rate.max(1)) * u128::from(time_base.numer);
+    u64::try_from(ts / rate).unwrap_or(u64::MAX)
 }
 
 /// Drains several tracks as one continuous stream, as the gapless path must.
