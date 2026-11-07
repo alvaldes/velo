@@ -564,3 +564,157 @@ fn previous_restarts_a_track_already_under_way_and_otherwise_goes_back() {
     // The first track has nothing before it, so it starts over.
     assert_eq!(skip_target(0, 3, Duration::ZERO, false), Some(0));
 }
+
+// ---- repeat (S8) -------------------------------------------------------------
+
+use velo::audio::output::{Repeat, RepeatCell, drain_headless_repeating, next_track};
+
+#[test]
+fn the_next_track_follows_the_repeat_mode() {
+    assert_eq!(next_track(0, 3, Repeat::Off), Some(1));
+    assert_eq!(
+        next_track(2, 3, Repeat::Off),
+        None,
+        "off ends after the last"
+    );
+    assert_eq!(next_track(2, 3, Repeat::All), Some(0), "all wraps around");
+    assert_eq!(next_track(1, 3, Repeat::One), Some(1), "one plays it again");
+    assert_eq!(
+        next_track(0, 0, Repeat::All),
+        None,
+        "an empty queue has nothing"
+    );
+    assert_eq!(Repeat::Off.next(), Repeat::All);
+    assert_eq!(Repeat::All.next(), Repeat::One);
+    assert_eq!(Repeat::One.next(), Repeat::Off);
+}
+
+/// Two short tracks with different lengths, so whatever plays third tells
+/// which rule picked it.
+fn two_tracks(tag: &str) -> (TrackSpec, PathBuf, PathBuf) {
+    let spec = TrackSpec {
+        sample_rate: 44_100,
+        channels: 2,
+    };
+    let first = scratch_path(&format!("{tag}-first"));
+    let second = scratch_path(&format!("{tag}-second"));
+    write_indexed_wav(&first, 500, spec);
+    write_indexed_wav(&second, 700, spec);
+    (spec, first, second)
+}
+
+/// Drains `queue` under `repeat` until `enough` samples were heard.
+fn drain_until(
+    queue: Vec<PathBuf>,
+    offset_frames: u64,
+    spec: TrackSpec,
+    repeat: &RepeatCell,
+    enough: usize,
+    mut also: impl FnMut(usize),
+) -> (Vec<f32>, Vec<TrackFailure>) {
+    let queue = std::sync::Arc::new(std::sync::Mutex::new(queue));
+    let stop = AtomicBool::new(false);
+    let mut samples: Vec<f32> = Vec::new();
+    let mut failures: Vec<TrackFailure> = Vec::new();
+    drain_headless_repeating(
+        queue,
+        0,
+        offset_frames,
+        spec,
+        repeat,
+        &stop,
+        &mut |block: &[f32]| {
+            samples.extend_from_slice(block);
+            also(samples.len());
+            if samples.len() >= enough {
+                stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        },
+        &mut |failure: TrackFailure| failures.push(failure),
+    )
+    .expect("the sequence runs");
+    (samples, failures)
+}
+
+#[test]
+fn repeat_all_plays_the_queue_again_from_its_first_track() {
+    let (spec, first, second) = two_tracks("repeat-all");
+    let repeat = RepeatCell::new(Repeat::All);
+    let (samples, failures) = drain_until(vec![first, second], 0, spec, &repeat, 3_400, |_| ());
+
+    assert!(failures.is_empty(), "{failures:?}");
+    assert_eq!(
+        samples[2_400..3_400],
+        samples[..1_000],
+        "after both tracks the first one plays again"
+    );
+}
+
+#[test]
+fn repeat_one_plays_the_same_track_again() {
+    let (spec, first, second) = two_tracks("repeat-one");
+    let repeat = RepeatCell::new(Repeat::One);
+    let (samples, _) = drain_until(vec![first, second], 0, spec, &repeat, 2_000, |_| ());
+
+    assert_eq!(
+        samples[1_000..2_000],
+        samples[..1_000],
+        "the first track twice"
+    );
+}
+
+#[test]
+fn turning_repeat_off_while_it_plays_lets_the_queue_end() {
+    let (spec, first, second) = two_tracks("repeat-switch");
+    let repeat = RepeatCell::new(Repeat::One);
+    // Switched off during the first track: the producer reads the mode at the
+    // next boundary, so the second track follows and the queue ends there.
+    let (samples, _) = drain_until(vec![first, second], 0, spec, &repeat, usize::MAX, |_| {
+        repeat.set(Repeat::Off);
+    });
+
+    assert_eq!(samples.len(), (500 + 700) * 2);
+}
+
+#[test]
+fn a_seek_offset_applies_to_the_first_turn_only() {
+    let (spec, first, _) = two_tracks("repeat-seek");
+    let repeat = RepeatCell::new(Repeat::One);
+    // 200 frames into the track, then the same track from its beginning.
+    let (samples, _) = drain_until(vec![first.clone()], 200, spec, &repeat, 1_600, |_| ());
+    let whole = as_f32(&write_indexed_wav(&first, 500, spec));
+
+    assert_eq!(
+        samples[..600],
+        whole[400..1_000],
+        "the first turn starts at 200"
+    );
+    assert_eq!(
+        samples[600..1_600],
+        whole[..1_000],
+        "the second starts at 0"
+    );
+}
+
+#[test]
+fn a_repeating_queue_whose_every_track_fails_stops_instead_of_spinning() {
+    let (spec, first, _) = two_tracks("repeat-fail");
+    let gone_a = scratch_path("repeat-fail-gone-a");
+    let gone_b = scratch_path("repeat-fail-gone-b");
+    let repeat = RepeatCell::new(Repeat::All);
+    let to_delete = first.clone();
+    // The first track opens and plays, then its file disappears; on the next
+    // pass all three fail in a row and the producer gives up.
+    let (_, failures) = drain_until(
+        vec![first, gone_a, gone_b],
+        0,
+        spec,
+        &repeat,
+        usize::MAX,
+        |_| {
+            let _ = std::fs::remove_file(&to_delete);
+        },
+    );
+
+    assert_eq!(failures.len(), 3, "{failures:?}");
+}

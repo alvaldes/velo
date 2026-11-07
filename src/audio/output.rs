@@ -115,6 +115,84 @@ pub fn seek_target(position: Duration, delta_secs: i64, duration: Option<Duratio
     duration.map_or(moved, |duration| moved.min(duration))
 }
 
+/// What follows the end of a track.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Repeat {
+    /// The next track, and silence after the last.
+    #[default]
+    Off,
+    /// The next track, and the first again after the last.
+    All,
+    /// The same track again.
+    One,
+}
+
+impl Repeat {
+    /// The mode the repeat key moves to: off, all, one, and off again.
+    #[must_use]
+    pub const fn next(self) -> Self {
+        match self {
+            Self::Off => Self::All,
+            Self::All => Self::One,
+            Self::One => Self::Off,
+        }
+    }
+
+    /// The mode's name as the interface shows it.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::All => "all",
+            Self::One => "one",
+        }
+    }
+}
+
+/// The repeat mode a running player follows, shared with the interface: the
+/// producer reads it at every track boundary, so a change takes effect at the
+/// next one without rebuilding the stream. Never read by the device callback.
+#[derive(Debug, Default)]
+pub struct RepeatCell(AtomicU8);
+
+impl RepeatCell {
+    /// A cell holding `mode`.
+    #[must_use]
+    pub const fn new(mode: Repeat) -> Self {
+        Self(AtomicU8::new(mode as u8))
+    }
+
+    /// The mode in force.
+    #[must_use]
+    pub fn get(&self) -> Repeat {
+        match self.0.load(Ordering::Relaxed) {
+            1 => Repeat::All,
+            2 => Repeat::One,
+            _ => Repeat::Off,
+        }
+    }
+
+    /// Changes the mode from the next track boundary on.
+    pub fn set(&self, mode: Repeat) {
+        self.0.store(mode as u8, Ordering::Relaxed);
+    }
+}
+
+/// The queue index that follows track `index` of `len` under `repeat`, or
+/// `None` when the sequence ends there.
+#[must_use]
+pub const fn next_track(index: usize, len: usize, repeat: Repeat) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    match repeat {
+        Repeat::One if index < len => Some(index),
+        Repeat::All => Some((index + 1) % len),
+        _ if index + 1 < len => Some(index + 1),
+        _ => None,
+    }
+}
+
 /// How far into a track "previous" restarts it instead of going back one.
 const RESTART_AFTER: Duration = Duration::from_secs(3);
 
@@ -157,18 +235,19 @@ pub struct Player {
     /// tick. A skipped track is not a sequence error, so it never reaches
     /// [`Player::wait_until_finished`] as one.
     failures: Arc<Mutex<VecDeque<TrackFailure>>>,
-    /// The track a seek landed on and how deep into it, in interleaved samples
-    /// — the same unit as the played counter, which is what made a stereo seek
-    /// report half its position when this was stored as frames.
+    /// How deep into its first track the stream began, in interleaved
+    /// samples — the same unit as the played counter, which is what made a
+    /// stereo seek report half its position when this was stored as frames.
     /// Without this the played counter makes the clock restart at zero in the
     /// middle of a song after every seek.
-    start_track: usize,
     start_offset_samples: usize,
     producer: Option<JoinHandle<Result<(), AudioError>>>,
     /// The reading end of the spectrum tap (ui-redesign T5): the mono mix of
     /// every frame the callback played. The callback owns the writing end and
     /// never waits on this one; the lock is only ever taken by the interface.
     tap: Mutex<rtrb::Consumer<f32>>,
+    /// The repeat mode the producer follows at each track boundary.
+    repeat: Arc<RepeatCell>,
 }
 
 /// The queue a player reads from, shared with whoever edits it.
@@ -182,9 +261,12 @@ pub type SharedQueue = Arc<Mutex<Vec<PathBuf>>>;
 /// current track began. Only the producer writes it, only the UI reads it.
 #[derive(Clone, Copy, Debug, Default)]
 struct Progress {
-    track: usize,
     start: usize,
     duration: Option<Duration>,
+    /// Whether this is the stream's first turn — the track a seek opened
+    /// partway in. A repeat can bring the same index back, so the index alone
+    /// cannot say it.
+    first: bool,
 }
 
 /// The atomics the device callback reads and writes. Created once per player
@@ -259,6 +341,23 @@ impl Player {
         offset: Duration,
         gain_mode: ReplayGainMode,
     ) -> Result<Self, AudioError> {
+        Self::play_gapless_at_with(queue, track_index, offset, gain_mode, Repeat::Off)
+    }
+
+    /// Like [`Player::play_gapless_at_with_gain`], starting under `repeat`:
+    /// the mode is in force from the first track boundary, and
+    /// [`Player::set_repeat`] changes it while the stream plays.
+    ///
+    /// # Errors
+    ///
+    /// The same errors as [`Player::play_gapless_at`].
+    pub fn play_gapless_at_with(
+        queue: SharedQueue,
+        track_index: usize,
+        offset: Duration,
+        gain_mode: ReplayGainMode,
+        repeat: Repeat,
+    ) -> Result<Self, AudioError> {
         let (is_empty, len, first) = {
             let queue = match queue.lock() {
                 Ok(queue) => queue,
@@ -300,11 +399,12 @@ impl Player {
         // otherwise; it sets the index before it opens each track.
         let current = Arc::new(AtomicUsize::new(track_index));
         let progress = Arc::new(Mutex::new(Progress {
-            track: track_index,
             start: 0,
             duration: None,
+            first: true,
         }));
         let failures = Arc::new(Mutex::new(VecDeque::new()));
+        let repeat = Arc::new(RepeatCell::new(repeat));
         let wires = CallbackWires {
             playing: Arc::new(AtomicBool::new(true)),
             producing: Arc::new(AtomicBool::new(true)),
@@ -319,6 +419,7 @@ impl Player {
             let current = Arc::clone(&current);
             let progress = Arc::clone(&progress);
             let failures = Arc::clone(&failures);
+            let repeat = Arc::clone(&repeat);
             let producing = Arc::clone(&wires.producing);
             thread::Builder::new()
                 .name("velo-producer".to_owned())
@@ -329,9 +430,14 @@ impl Player {
                         offset_frames,
                         gain_mode,
                     };
-                    let result = produce(
-                        job, spec, ring, &delivered, &stop, &current, &progress, &failures,
-                    );
+                    let shared = Shared {
+                        stop: &stop,
+                        delivered: &delivered,
+                        current: &current,
+                        progress: &progress,
+                        repeat: &repeat,
+                    };
+                    let result = produce(job, spec, ring, &shared, &failures);
                     producing.store(false, Ordering::Release);
                     result
                 })
@@ -361,11 +467,17 @@ impl Player {
             current,
             progress,
             failures,
-            start_track: track_index,
             start_offset_samples: usize::try_from(clock_offset_samples).unwrap_or(usize::MAX),
             producer: Some(producer),
             tap: Mutex::new(tap_reader),
+            repeat,
         })
+    }
+
+    /// Changes what follows the current track, from its end on: the producer
+    /// reads the mode at the boundary, so the music does not stop for it.
+    pub fn set_repeat(&self, mode: Repeat) {
+        self.repeat.set(mode);
     }
 
     /// Moves every mono sample the callback has played since the last call
@@ -498,8 +610,7 @@ impl Player {
         let samples = elapsed_samples(
             self.wires.played.load(Ordering::Acquire),
             progress.start,
-            progress.track,
-            self.start_track,
+            progress.first,
             self.start_offset_samples,
         );
         #[expect(
@@ -620,25 +731,29 @@ pub fn tap_mono(samples: &[f32], channels: usize, tap: &mut Producer<f32>) {
     }
 }
 
+/// The handles the producer shares with the player and the interface: the
+/// stop flag, the delivered counter, the index and progress it publishes, and
+/// the repeat mode it reads at every track boundary.
+struct Shared<'a> {
+    stop: &'a AtomicBool,
+    delivered: &'a AtomicUsize,
+    current: &'a AtomicUsize,
+    progress: &'a Mutex<Progress>,
+    repeat: &'a RepeatCell,
+}
+
 /// Fills the ring buffer from the file system until the queue is exhausted.
 /// The block-producing loop itself lives in [`run_sequence`], where it can
 /// also be driven without a ring, so the skip rule is testable headlessly.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the producer's shared handles are one logical bundle; a struct\n    would only move the same names one indirection away"
-)]
 fn produce(
     job: Sequence,
     expected: TrackSpec,
     mut ring: Producer<f32>,
-    delivered: &AtomicUsize,
-    stop: &AtomicBool,
-    current: &AtomicUsize,
-    progress: &Mutex<Progress>,
+    shared: &Shared<'_>,
     failures: &Mutex<VecDeque<TrackFailure>>,
 ) -> Result<(), AudioError> {
     let mut push_block = |samples: &[f32]| {
-        push_all(&mut ring, samples, delivered, stop);
+        push_all(&mut ring, samples, shared.delivered, shared.stop);
     };
     let mut announce = |failure: TrackFailure| {
         let mut queue = match failures.lock() {
@@ -647,23 +762,16 @@ fn produce(
         };
         queue.push_back(failure);
     };
-    run_sequence(
-        job,
-        expected,
-        stop,
-        delivered,
-        current,
-        progress,
-        &mut push_block,
-        &mut announce,
-    )
+    run_sequence(job, expected, shared, &mut push_block, &mut announce)
 }
 
-/// Copies one queue entry out, so the lock is held only for the copy.
-fn queued_path(queue: &Mutex<Vec<PathBuf>>, index: usize) -> Option<PathBuf> {
+/// Copies one queue entry out with the queue's length, so the lock is held
+/// only for the copy.
+fn queued_entry(queue: &Mutex<Vec<PathBuf>>, index: usize) -> (Option<PathBuf>, usize) {
+    let read = |queue: &Vec<PathBuf>| (queue.get(index).cloned(), queue.len());
     match queue.lock() {
-        Ok(queue) => queue.get(index).cloned(),
-        Err(poisoned) => poisoned.into_inner().get(index).cloned(),
+        Ok(queue) => read(&queue),
+        Err(poisoned) => read(&poisoned.into_inner()),
     }
 }
 
@@ -675,22 +783,15 @@ fn track_failure(path: &std::path::Path, error: &AudioError) -> TrackFailure {
     }
 }
 
-/// Produces every track of a job from `start_track` onwards, handing each
-/// block of output samples to `on_block` and every track it had to skip to
-/// `on_failure`. The ring, the counters and the failure slot all live behind
-/// those closures and the shared handles, which is what lets
-/// [`drain_headless`] run the same loop without a device.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the job, the shared handles and the two sinks are the whole\n    contract of the loop; bundling them would hide what is shared"
-)]
+/// Produces the tracks of a job from `start_track` on, in the order the
+/// repeat mode picks, handing each block of output samples to `on_block` and
+/// every track it had to skip to `on_failure`. The ring, the counters and the
+/// failure slot all live behind those closures and the shared handles, which
+/// is what lets [`drain_headless`] run the same loop without a device.
 fn run_sequence(
     job: Sequence,
     expected: TrackSpec,
-    stop: &AtomicBool,
-    delivered: &AtomicUsize,
-    current: &AtomicUsize,
-    progress: &Mutex<Progress>,
+    shared: &Shared<'_>,
     on_block: &mut dyn FnMut(&[f32]),
     on_failure: &mut dyn FnMut(TrackFailure),
 ) -> Result<(), AudioError> {
@@ -700,119 +801,180 @@ fn run_sequence(
         offset_frames,
         gain_mode,
     } = job;
-    // One entry per turn, under the lock, because the queue is shared: what the
-    // interface appended, removed or moved while this runs is what plays next.
-    'tracks: for index in start_track.. {
-        if stop.load(Ordering::Relaxed) {
+    let mut turn = TurnJob {
+        index: start_track,
+        // The first turn is the track the player was built from — opened at
+        // selection time, perhaps partway in. A repeat can bring its index
+        // back, so the turn, not the index, says which one it is.
+        first: true,
+        offset_frames,
+        gain_mode,
+    };
+    // Tracks that failed one after another: once that is the whole queue, a
+    // repeat would only spin through failures, so the sequence ends instead.
+    let mut failed_in_a_row = 0;
+    loop {
+        if shared.stop.load(Ordering::Relaxed) {
             return Ok(());
         }
-
-        // The track the player was built from was opened at selection time:
-        // if it cannot be opened now, that is the sequence error the interface
-        // already reports. Every other track is skipped, so one bad file costs
-        // one file, not the rest of the album (T19).
-        // Past the end is how a sequence finishes: the queue can also shrink.
-        let Some(path) = queued_path(&queue, index) else {
+        // One entry per turn, under the lock, because the queue is shared: what
+        // the interface appended, removed or moved while this runs is what
+        // plays next. Past the end is how a sequence finishes; the queue can
+        // also shrink.
+        let (Some(path), _) = queued_entry(&queue, turn.index) else {
             return Ok(());
         };
-        let requested = index == start_track;
+        let outcome = play_turn(&path, &turn, expected, shared, on_block, on_failure)?;
 
-        let opened = if requested && offset_frames > 0 {
-            TrackSource::open_at(&path, offset_frames)
-        } else {
-            TrackSource::open(&path)
-        };
-        let mut source = match opened {
-            Ok(source) => source,
-            Err(error) => {
-                if requested {
-                    return Err(error);
+        // The length now, not when the track began: an entry appended while
+        // it played is what comes next (T18).
+        let len = queued_entry(&queue, turn.index).1;
+        let mut repeat = shared.repeat.get();
+        match outcome {
+            Turn::Stopped => return Ok(()),
+            Turn::Played => failed_in_a_row = 0,
+            Turn::Failed => {
+                failed_in_a_row += 1;
+                if failed_in_a_row >= len {
+                    return Ok(());
                 }
-                on_failure(track_failure(&path, &error));
-                continue 'tracks;
+                // A track that failed is never repeated on its own.
+                if repeat == Repeat::One {
+                    repeat = Repeat::Off;
+                }
             }
-        };
-
-        // Announce which track is being produced once it has opened, so a
-        // reader only ever sees a track that is playing or about to — never
-        // one that is about to be skipped.
-        current.store(index, Ordering::Release);
-
-        // One write publishes both halves, so a reader can never see a track
-        // without the point it began.
-        let record = Progress {
-            track: index,
-            start: delivered.load(Ordering::Acquire),
-            duration: source.duration(),
-        };
-        match progress.lock() {
-            Ok(mut slot) => *slot = record,
-            Err(poisoned) => *poisoned.into_inner() = record,
         }
-
-        let spec = source.spec();
-        // A rate difference is converted away, and a layout difference is
-        // mapped: mono into stereo is a duplicate, not a remix, and refusing it
-        // made every mono file unplayable. A layout that would need real
-        // downmix coefficients is announced and skipped, because a device that
-        // cannot hold one track must not silence the album (T20).
-        let map = match ChannelMap::new(spec.channels, expected.channels) {
-            Ok(map) => map,
-            Err(error) => {
-                on_failure(track_failure(&path, &error));
-                continue 'tracks;
-            }
+        let Some(next) = next_track(turn.index, len, repeat) else {
+            return Ok(());
         };
-        let mapped_spec = TrackSpec {
-            sample_rate: spec.sample_rate,
-            channels: expected.channels,
-        };
-        let mut converter = RateConverter::new(mapped_spec, expected)?;
-
-        // ReplayGain belongs to the track: recomputed once per track change,
-        // never per queue (T11, T18); multiplied below, before the ring, so
-        // the user's volume ramp stays exactly what it was.
-        let gain = Gain::read_from(&path, gain_mode);
-        loop {
-            if stop.load(Ordering::Relaxed) {
-                return Ok(());
-            }
-            let block = match source.read_block() {
-                Ok(Some(block)) => block,
-                Ok(None) => break,
-                // A track that stops decoding costs itself, not the album: what
-                // it decoded stays, the rest is skipped, the next one follows.
-                Err(error) => {
-                    on_failure(track_failure(&path, &error));
-                    continue 'tracks;
-                }
-            };
-            let mut resampled = match converter.convert(&map.apply(&block)) {
-                Ok(resampled) => resampled,
-                Err(error) => {
-                    on_failure(track_failure(&path, &error));
-                    continue 'tracks;
-                }
-            };
-            // The gain's one multiplication, before the ring: the callback
-            // keeps copying and ramping (T11).
-            gain.apply(&mut resampled);
-            on_block(&resampled);
-        }
-
-        // The resampler holds the track's last frames back until it sees what
-        // follows them; without this the tail is heard as a cut-off ending.
-        let mut flushed = match converter.flush() {
-            Ok(flushed) => flushed,
-            Err(error) => {
-                on_failure(track_failure(&path, &error));
-                continue 'tracks;
-            }
-        };
-        gain.apply(&mut flushed);
-        on_block(&flushed);
+        turn.index = next;
+        turn.first = false;
     }
-    Ok(())
+}
+
+/// Which track a turn plays and how it opens it.
+struct TurnJob {
+    index: usize,
+    first: bool,
+    offset_frames: u64,
+    gain_mode: ReplayGainMode,
+}
+
+/// How one turn of the sequence ended.
+enum Turn {
+    /// The track played to its end.
+    Played,
+    /// The track was skipped and announced.
+    Failed,
+    /// The stream was asked to stop.
+    Stopped,
+}
+
+/// Plays one track into `on_block`. The track the player was built from
+/// failing to open is the sequence error the interface already reports;
+/// every other failure is announced and costs this one track, so one bad file
+/// does not take the rest of the album with it (T19).
+fn play_turn(
+    path: &std::path::Path,
+    turn: &TurnJob,
+    expected: TrackSpec,
+    shared: &Shared<'_>,
+    on_block: &mut dyn FnMut(&[f32]),
+    on_failure: &mut dyn FnMut(TrackFailure),
+) -> Result<Turn, AudioError> {
+    let opened = if turn.first && turn.offset_frames > 0 {
+        TrackSource::open_at(path, turn.offset_frames)
+    } else {
+        TrackSource::open(path)
+    };
+    let mut source = match opened {
+        Ok(source) => source,
+        Err(error) if turn.first => return Err(error),
+        Err(error) => {
+            on_failure(track_failure(path, &error));
+            return Ok(Turn::Failed);
+        }
+    };
+
+    // Announce which track is being produced once it has opened, so a reader
+    // only ever sees a track that is playing or about to — never one that is
+    // about to be skipped.
+    shared.current.store(turn.index, Ordering::Release);
+
+    // One write publishes every part, so a reader can never see a track
+    // without the point it began.
+    let record = Progress {
+        start: shared.delivered.load(Ordering::Acquire),
+        duration: source.duration(),
+        first: turn.first,
+    };
+    match shared.progress.lock() {
+        Ok(mut slot) => *slot = record,
+        Err(poisoned) => *poisoned.into_inner() = record,
+    }
+
+    let spec = source.spec();
+    // A rate difference is converted away, and a layout difference is mapped:
+    // mono into stereo is a duplicate, not a remix, and refusing it made every
+    // mono file unplayable. A layout that would need real downmix coefficients
+    // is announced and skipped, because a device that cannot hold one track
+    // must not silence the album (T20).
+    let map = match ChannelMap::new(spec.channels, expected.channels) {
+        Ok(map) => map,
+        Err(error) => {
+            on_failure(track_failure(path, &error));
+            return Ok(Turn::Failed);
+        }
+    };
+    let mapped_spec = TrackSpec {
+        sample_rate: spec.sample_rate,
+        channels: expected.channels,
+    };
+    let mut converter = RateConverter::new(mapped_spec, expected)?;
+
+    // ReplayGain belongs to the track: recomputed once per track change, never
+    // per queue (T11, T18); multiplied below, before the ring, so the user's
+    // volume ramp stays exactly what it was.
+    let gain = Gain::read_from(path, turn.gain_mode);
+    loop {
+        if shared.stop.load(Ordering::Relaxed) {
+            return Ok(Turn::Stopped);
+        }
+        let block = match source.read_block() {
+            Ok(Some(block)) => block,
+            Ok(None) => break,
+            // A track that stops decoding costs itself, not the album: what it
+            // decoded stays, the rest is skipped, the next one follows.
+            Err(error) => {
+                on_failure(track_failure(path, &error));
+                return Ok(Turn::Failed);
+            }
+        };
+        let mut resampled = match converter.convert(&map.apply(&block)) {
+            Ok(resampled) => resampled,
+            Err(error) => {
+                on_failure(track_failure(path, &error));
+                return Ok(Turn::Failed);
+            }
+        };
+        // The gain's one multiplication, before the ring: the callback keeps
+        // copying and ramping (T11).
+        gain.apply(&mut resampled);
+        on_block(&resampled);
+    }
+
+    // The resampler holds the track's last frames back until it sees what
+    // follows them; without this the tail is heard as a cut-off ending.
+    let mut flushed = match converter.flush() {
+        Ok(flushed) => flushed,
+        Err(error) => {
+            on_failure(track_failure(path, &error));
+            return Ok(Turn::Failed);
+        }
+    };
+    gain.apply(&mut flushed);
+    on_block(&flushed);
+    Ok(Turn::Played)
 }
 
 /// Drains a queue the way the producer writes it, without a device: every
@@ -871,28 +1033,77 @@ pub fn drain_headless_with_gain(
     on_block: &mut dyn FnMut(&[f32]),
     on_failure: &mut dyn FnMut(TrackFailure),
 ) -> Result<(), AudioError> {
-    let delivered = AtomicUsize::new(0);
-    let current = AtomicUsize::new(start_track);
-    let progress = Mutex::new(Progress {
-        track: start_track,
-        start: 0,
-        duration: None,
-    });
-    run_sequence(
-        Sequence {
-            queue,
-            start_track,
-            offset_frames,
-            gain_mode,
-        },
+    let job = Sequence {
+        queue,
+        start_track,
+        offset_frames,
+        gain_mode,
+    };
+    drain(
+        job,
         expected,
+        &RepeatCell::default(),
         stop,
-        &delivered,
-        &current,
-        &progress,
         on_block,
         on_failure,
     )
+}
+
+/// [`drain_headless`] under a repeat mode the caller can change while it
+/// runs, the way the interface changes a playing stream's: the loop reads it
+/// at every track boundary. Under `All` or `One` the drain only ends when
+/// `stop` is set or every track fails in a row.
+///
+/// # Errors
+///
+/// The same errors as [`drain_headless`].
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the job, the mode and the two sinks are the whole contract of\n    the drain; bundling them would only hide what is shared"
+)]
+pub fn drain_headless_repeating(
+    queue: SharedQueue,
+    start_track: usize,
+    offset_frames: u64,
+    expected: TrackSpec,
+    repeat: &RepeatCell,
+    stop: &AtomicBool,
+    on_block: &mut dyn FnMut(&[f32]),
+    on_failure: &mut dyn FnMut(TrackFailure),
+) -> Result<(), AudioError> {
+    let job = Sequence {
+        queue,
+        start_track,
+        offset_frames,
+        gain_mode: ReplayGainMode::default(),
+    };
+    drain(job, expected, repeat, stop, on_block, on_failure)
+}
+
+/// The headless drains' one body: the producer's loop with local counters.
+fn drain(
+    job: Sequence,
+    expected: TrackSpec,
+    repeat: &RepeatCell,
+    stop: &AtomicBool,
+    on_block: &mut dyn FnMut(&[f32]),
+    on_failure: &mut dyn FnMut(TrackFailure),
+) -> Result<(), AudioError> {
+    let delivered = AtomicUsize::new(0);
+    let current = AtomicUsize::new(job.start_track);
+    let progress = Mutex::new(Progress {
+        start: 0,
+        duration: None,
+        first: true,
+    });
+    let shared = Shared {
+        stop,
+        delivered: &delivered,
+        current: &current,
+        progress: &progress,
+        repeat,
+    };
+    run_sequence(job, expected, &shared, on_block, on_failure)
 }
 
 /// Converts a playback offset into interleaved samples at `spec`'s format.
@@ -1008,17 +1219,17 @@ fn push_all(
 ///
 /// The played counter starts at zero when the device opens, but a seek opens it
 /// deep inside the track the user asked for, so that track's offset has to be
-/// added back or the clock restarts mid-song. Tracks after the seek target are
-/// played from their beginning and take no offset.
+/// added back or the clock restarts mid-song. Every later turn — the tracks
+/// after it, and the same track again under a repeat — plays from its
+/// beginning and takes no offset.
 const fn elapsed_samples(
     played: usize,
     track_start: usize,
-    track: usize,
-    seek_track: usize,
+    first_turn: bool,
     seek_offset: usize,
 ) -> usize {
     let within_track = played.saturating_sub(track_start);
-    if track == seek_track {
+    if first_turn {
         within_track.saturating_add(seek_offset)
     } else {
         within_track
@@ -1031,18 +1242,18 @@ mod tests {
 
     #[test]
     fn playing_from_the_start_counts_only_what_was_played() {
-        assert_eq!(elapsed_samples(1_000, 0, 0, 0, 0), 1_000);
+        assert_eq!(elapsed_samples(1_000, 0, true, 0), 1_000);
     }
 
     #[test]
     fn a_seek_is_added_to_the_clock_instead_of_restarting_it() {
         // Seeks 5 s into the first track at 44.1 kHz, then plays 1 000 frames.
-        assert_eq!(elapsed_samples(1_000, 0, 0, 0, 220_500), 221_500);
+        assert_eq!(elapsed_samples(1_000, 0, true, 220_500), 221_500);
     }
 
     #[test]
     fn a_later_track_still_counts_from_its_own_beginning() {
-        assert_eq!(elapsed_samples(3_000, 2_000, 1, 0, 220_500), 1_000);
+        assert_eq!(elapsed_samples(3_000, 2_000, false, 220_500), 1_000);
     }
 
     #[test]
@@ -1065,6 +1276,6 @@ mod tests {
 
     #[test]
     fn a_negative_clock_is_clamped_to_zero() {
-        assert_eq!(elapsed_samples(0, 500, 1, 0, 220_500), 0);
+        assert_eq!(elapsed_samples(0, 500, false, 220_500), 0);
     }
 }
