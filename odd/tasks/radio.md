@@ -357,3 +357,49 @@ contradicted what this logbook had assumed:
   the seam is not called done until it plays a real station by hand. If the probe
   fails there, the fix is to probe from the first clean frame after the demux, which
   is exactly what `icy.rs` already knows how to find.
+
+**L15** — T5a closed (`db5712a`, `src/audio/mod.rs` +94/−20 and 168 lines of tests:
+4 seam tests, **549 green over three consecutive full runs**). `TrackSource` now has
+`open_stream(Box<dyn MediaSource>)`; `open`/`open_at` and the stream all build
+through one `build()`, and the decoder comes from one `make_decoder(params, gapless)`
+— the single place `AudioDecoderOptions` is decided, which is where the other
+session will add Opus.
+
+Two findings, one of them a bug the plan predicted and would have shipped:
+
+- **`duration()` lied about live streams.** symphonia 0.6's MP3 reader reads the
+  LAME tag and reports `num_frames` **even from a non-seekable source**, so a stream
+  first answered `Some(2s)` — exactly what S2/S3 forbid, and it would have drawn a
+  progress bar that counts down over a station that never ends. Fixed by forcing
+  `n_frames = None` on the live path. A test now pins it.
+- **The priming delta is real and is not a leak.** The stream keeps 1656 frames the
+  file path trims (LAME delay 1105 + padding 551): gapless off means no trim, and a
+  station declares no priming to trim anyway. The literal "identical `Vec`" from the
+  delegation was therefore wrong for a tagged MP3, and the test pins the stricter
+  relationship instead — same `spec()`, samples equal from the declared offset,
+  total = file + delay + padding. Weakening it would have hidden both facts.
+- **API corrections for anyone else touching this:** `AudioDecoderOptions` is
+  `#[non_exhaustive]`, so `{ gapless, ..Default::default() }` is refused across the
+  crate boundary — the builder `AudioDecoderOptions::default().gapless(g)` is the way
+  (the other session's T14 plan used the struct literal). `MediaSourceStream` also
+  carries a lifetime in 0.6. And the MP3 probe heuristic **survived** an ICY-wrapped
+  body, so L13's fallback (probe from the first clean frame) is not needed yet.
+
+**L16** — a flaky test I shipped in T6b, found by running the whole suite for real:
+`a_failing_transport_reports_and_leaves_the_view_usable` waited on the transport
+*having recorded the request* instead of on the answer *having been delivered*, so
+under the load of 31 test binaries it panicked on a missing status message roughly
+one run in N (it passed ten times alone). Fixed in the shared `settle` helper
+(`!data.loading()` must hold as well), and re-verified with three consecutive full
+runs. The lesson is general: a thread-plus-channel test that asserts on a delivered
+message must wait for delivery, not for the trigger. `1094354` is that fix, kept as
+its own commit so it never hides inside a feature.
+
+**Slice 8** is T5a (`db5712a`, 242 authored lines) — back inside the review slice,
+and the first unit in this feature that changes shared code (`TrackSource::open`)
+rather than only adding to it: the file path keeps its old behaviour, proven by the
+pre-existing suite passing unmodified.
+
+**Log order note**: entries are appended as they happen; L13 and L14 were written in
+the reverse order of their numbers because L13's content (the 0.6.1 API facts)
+arrived after L14 was already recorded. Numbers, not positions, are the order.
