@@ -536,20 +536,41 @@ fn drained_at(path: &Path, offset_frames: u64) -> Vec<f32> {
 /// deliberate change re-measures with `cargo test --test aac_priming --
 /// --ignored --nocapture capture_open_baseline` and updates the constants.
 #[test]
-fn open_stays_byte_identical_on_every_fixture() {
-    let pinned = [
-        ("mono-tone.wav", 11_025usize, 0x1c47_9321_d296_fb19u64),
-        ("silence-then-tone.mp3", 88_200, 0xf52f_4603_84d8_d871),
-        ("tiny.m4a", 26_460, 0x3447_058f_b99a_19d9),
-        ("priming-itunsmpb.m4a", 27_284, 0x0ff2_8238_c881_1e85),
-    ];
-    for (name, length, hash) in pinned {
-        let samples = drained(&fixture(name));
+fn open_stays_stable_on_every_fixture() {
+    // What this pin is for: if the priming logic moves, the *length* of the
+    // drained stream moves with it — those numbers are integers the containers
+    // declare, so they are portable, and they are the part that catches
+    // regressions in T16/T14b.
+    //
+    // What it must not do: compare f32 bits across machines. The first version
+    // of this test hashed the samples, and CI on x86 contradicted this arm64
+    // machine on the two `.mp3`/`.m4a` fixtures — same length, different hash.
+    // symphonia takes different SIMD paths per architecture, so bit identity
+    // across platforms is not a property this project has, and a test that
+    // asserts it is a test that fails on somebody else's computer.
+    for (name, length) in [
+        ("mono-tone.wav", 11_025usize),
+        ("silence-then-tone.mp3", 88_200),
+        ("tiny.m4a", 26_460),
+        ("priming-itunsmpb.m4a", 27_284),
+    ] {
+        let first = drained(&fixture(name));
+        let second = drained(&fixture(name));
+
+        assert_eq!(first.len(), length, "{name}: the drained length moved");
+
+        // Determinism inside one build is something we can promise, and it
+        // catches a decoder whose output depends on unrelated state.
         assert_eq!(
-            (samples.len(), fnv1a(&samples)),
-            (length, hash),
-            "{name}: the drained stream moved"
+            fnv1a(&first),
+            fnv1a(&second),
+            "{name}: decoding the same bytes twice gave different samples"
         );
+
+        // And the content is really there: a priming regression that keeps the
+        // length but eats the signal would slip past the two assertions above.
+        let peak = first.iter().fold(0.0_f32, |max, s| max.max(s.abs()));
+        assert!(peak > 0.01, "{name}: decoded silence, peak {peak}");
     }
 }
 
