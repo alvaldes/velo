@@ -8,10 +8,12 @@
 //! every case speaks to a `std::net::TcpListener` on `127.0.0.1:0` that
 //! answers with canned bytes, exactly like `tests/subsonic.rs`.
 
+use std::collections::HashMap;
 use std::io::{Cursor, Read as _, Write as _};
 use std::net::TcpListener;
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use symphonia::core::io::ReadOnlySource;
@@ -32,6 +34,22 @@ fn timeouts() -> Timeouts {
         connect: Duration::from_secs(2),
         response: Duration::from_millis(500),
         read: Duration::from_millis(300),
+    }
+}
+
+/// The wrapper tests' timeouts: looser bounds than [`timeouts`], because
+/// under a loaded test machine a 500 ms response bound can fire before the
+/// local server thread is even scheduled, producing a spurious
+/// `Unreachable` that masks the error variant actually under test (the
+/// lesson from the T6b flake: never let a scheduler race decide the
+/// outcome). The bodies here are a few KiB and the server always answers,
+/// so the looser bounds are never approached — and every assertion still
+/// sits far inside [`HANG_BOUND`].
+fn wrapper_timeouts() -> Timeouts {
+    Timeouts {
+        connect: Duration::from_secs(2),
+        response: Duration::from_secs(2),
+        read: Duration::from_secs(1),
     }
 }
 
@@ -259,12 +277,290 @@ fn a_non_200_status_is_an_error_naming_it() {
 }
 
 #[test]
-fn a_body_that_is_not_audio_is_rejected() {
-    let playlist = b"#EXTM3U\nhttp://example.com/stream.m3u8\n".to_vec();
-    let (url, _requests) = served(ok_head("", playlist.len()), playlist);
+fn a_body_that_is_neither_audio_nor_a_playlist_is_rejected() {
+    // Once resolved wrappers (T5b2), a playlist body no longer lands here:
+    // it resolves. What keeps its current behaviour is a body that is
+    // neither audio nor a wrapper, so this test serves exactly that.
+    let junk = b"this is neither audio nor a wrapper playlist\r\n".to_vec();
+    let (url, _requests) = served(ok_head("", junk.len()), junk);
 
-    let error = stream::open(&url, timeouts()).expect_err("a playlist body is not audio");
+    let error = stream::open(&url, timeouts()).expect_err("junk is not audio");
     assert!(matches!(error, StreamError::NotAudio { .. }), "got: {error:?}");
+}
+
+// ------------------------------------------------------------------ wrappers (T5b2)
+
+/// The fixture audio as the server sends it, plus the plain bytes the
+/// correct demux must reproduce.
+fn audio_parts() -> (Vec<u8>, Vec<u8>) {
+    let plain = std::fs::read(fixture()).expect("the fixture is readable");
+    let wrapped = icy_wrap(&plain, 8192);
+    (plain, wrapped)
+}
+
+/// A multi-route server that records the path of every request it serves,
+/// so a test can prove which URLs were fetched, how often, and which were
+/// never touched. One short-lived connection per request (`Connection:
+/// close` in every head, like [`ok_head`]).
+struct CountingServer {
+    url: String,
+    requests: Arc<Mutex<Vec<String>>>,
+    stop: Arc<AtomicBool>,
+}
+
+impl CountingServer {
+    /// Binds a listener and serves the routes `build` returns; `build`
+    /// receives the server's base URL so routes can point at each other.
+    fn start(build: impl FnOnce(&str) -> Vec<(String, String, Vec<u8>)>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a local port");
+        let base = format!("http://{}", listener.local_addr().expect("a local address"));
+        let routes: HashMap<String, (String, Vec<u8>)> = build(&base)
+            .into_iter()
+            .map(|(path, extra, body)| (path, (ok_head(&extra, body.len()), body)))
+            .collect();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let seen = Arc::clone(&requests);
+        let done = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            listener.set_nonblocking(true).expect("the listener goes nonblocking");
+            while !done.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut connection, _)) => {
+                        // On macOS an accepted socket inherits the
+                        // listener's non-blocking flag, so a read can
+                        // return `WouldBlock` before the request bytes
+                        // arrive — which must look like "wait", never like
+                        // EOF. Back to blocking before reading.
+                        connection.set_nonblocking(false).expect("the connection blocks");
+                        // Read until the request headers are complete: one
+                        // `read` can return a partial request under load,
+                        // and a truncated path would answer a spurious 404.
+                        let mut request = Vec::with_capacity(4096);
+                        let mut chunk = [0_u8; 1024];
+                        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                            let read = connection.read(&mut chunk).unwrap_or(0);
+                            if read == 0 || request.len() > 4096 {
+                                break;
+                            }
+                            request.extend_from_slice(&chunk[..read]);
+                        }
+                        let request = String::from_utf8_lossy(&request).to_string();
+                        let path = request
+                            .lines()
+                            .next()
+                            .and_then(|line| line.split_whitespace().nth(1))
+                            .unwrap_or("")
+                            .to_string();
+                        seen.lock().expect("the request log is uncontended").push(path.clone());
+                        if let Some((head, body)) = routes.get(&path).map(|(head, body)| {
+                            (head.as_bytes().to_vec(), body.clone())
+                        }) {
+                            connection
+                                .write_all(&head)
+                                .and_then(|()| connection.write_all(&body))
+                                .expect("the route answer is written");
+                        } else {
+                            connection
+                                .write_all(
+                                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                                )
+                                .expect("the 404 is written");
+                        }
+                    }
+                    Err(_) => std::thread::sleep(Duration::from_millis(10)),
+                }
+            }
+        });
+
+        Self { url: base, requests, stop }
+    }
+
+    /// The full URL of one route on this server.
+    fn url(&self, path: &str) -> String {
+        format!("{}{path}", self.url)
+    }
+
+    /// The recorded request paths, in arrival order.
+    fn paths(&self) -> Vec<String> {
+        self.requests.lock().expect("the request log is uncontended").clone()
+    }
+
+    /// Waits until at least `n` requests have arrived.
+    fn wait_for(&self, n: usize) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while self.paths().len() < n && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// A grace window before asserting a negative: any request that was
+    /// going to happen has had every chance to arrive.
+    fn settle() {
+        std::thread::sleep(Duration::from_millis(300));
+    }
+}
+
+impl Drop for CountingServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+#[test]
+fn a_pls_wrapper_resolves_to_its_stream_and_plays() {
+    let (plain, wrapped) = audio_parts();
+    let server = CountingServer::start(|base| {
+        vec![
+            (
+                "/station.pls".to_owned(),
+                String::new(),
+                format!("[playlist]\r\nNumberOfEntries=1\r\nFile1={base}/audio\r\n").into_bytes(),
+            ),
+            ("/audio".to_owned(), "icy-metaint: 8192\r\n".to_owned(), wrapped),
+        ]
+    });
+
+    let mut station = stream::open(&server.url("/station.pls"), wrapper_timeouts())
+        .expect("the wrapper resolves to real audio");
+    let samples = drain(&mut station);
+
+    assert_eq!(samples, reference(&plain), "the resolved stream decodes exactly the audio");
+    assert_eq!(station.title().as_deref(), Some(STREAM_TITLE), "the title arrives");
+    server.wait_for(2);
+    assert_eq!(
+        server.paths(),
+        vec!["/station.pls".to_owned(), "/audio".to_owned()],
+        "the resolved URL is requested exactly once, after the wrapper"
+    );
+}
+
+#[test]
+fn an_m3u_wrapper_resolves_to_its_stream_and_plays() {
+    let (plain, wrapped) = audio_parts();
+    let server = CountingServer::start(|base| {
+        vec![
+            (
+                "/station.m3u".to_owned(),
+                String::new(),
+                format!("#EXTM3U\r\n#EXTINF:-1,Fela Kuti\r\n{base}/audio\r\n").into_bytes(),
+            ),
+            ("/audio".to_owned(), "icy-metaint: 8192\r\n".to_owned(), wrapped),
+        ]
+    });
+
+    let mut station = stream::open(&server.url("/station.m3u"), wrapper_timeouts())
+        .expect("the wrapper resolves to real audio");
+    let samples = drain(&mut station);
+
+    assert_eq!(samples, reference(&plain), "the resolved stream decodes exactly the audio");
+    assert_eq!(station.title().as_deref(), Some(STREAM_TITLE), "the title arrives");
+    server.wait_for(2);
+    assert_eq!(
+        server.paths(),
+        vec!["/station.m3u".to_owned(), "/audio".to_owned()],
+        "the resolved URL is requested exactly once, after the wrapper"
+    );
+}
+
+#[test]
+fn an_hls_manifest_fails_by_name_without_fetching_a_segment() {
+    let server = CountingServer::start(|base| {
+        vec![
+            (
+                "/stream.m3u8".to_owned(),
+                String::new(),
+                format!(
+                    "#EXTM3U\r\n#EXT-X-STREAM-INF:BANDWIDTH=128000\r\n{base}/seg0.ts\r\n"
+                )
+                .into_bytes(),
+            ),
+            // Registered so a stray fetch answers 200 instead of 404 —
+            // only the recorded paths can prove it never happens.
+            ("/seg0.ts".to_owned(), String::new(), vec![0_u8; 64]),
+        ]
+    });
+
+    let error = stream::open(&server.url("/stream.m3u8"), wrapper_timeouts())
+        .expect_err("an HLS manifest cannot be played by this decoder");
+
+    assert!(matches!(error, StreamError::Hls), "got: {error:?}");
+    assert!(error.to_string().contains("HLS"), "the error names HLS: {error}");
+    CountingServer::settle();
+    assert_eq!(
+        server.paths(),
+        vec!["/stream.m3u8".to_owned()],
+        "the .ts segment must never be fetched"
+    );
+}
+
+#[test]
+fn a_wrapper_pointing_at_another_wrapper_is_a_bounded_error() {
+    let start = Instant::now();
+    let server = CountingServer::start(|base| {
+        vec![
+            (
+                "/one.pls".to_owned(),
+                String::new(),
+                format!("[playlist]\r\nFile1={base}/two.m3u\r\n").into_bytes(),
+            ),
+            (
+                "/two.m3u".to_owned(),
+                String::new(),
+                format!("#EXTM3U\r\n{base}/audio\r\n").into_bytes(),
+            ),
+            ("/audio".to_owned(), "icy-metaint: 8192\r\n".to_owned(), audio_parts().1),
+        ]
+    });
+
+    let error = stream::open(&server.url("/one.pls"), wrapper_timeouts())
+        .expect_err("a wrapper of a wrapper is an error, not an infinite loop");
+    let elapsed = start.elapsed();
+
+    let StreamError::NotAudio { detail } = error else {
+        panic!("expected NotAudio, got: {error:?}");
+    };
+    assert!(detail.contains("another wrapper"), "the error says so: {detail}");
+    assert!(elapsed < HANG_BOUND, "one level only: the open took {elapsed:?}");
+    CountingServer::settle();
+    assert_eq!(
+        server.paths(),
+        vec!["/one.pls".to_owned(), "/two.m3u".to_owned()],
+        "the third hop must never be fetched"
+    );
+}
+
+#[test]
+fn a_wrapper_with_an_unparsable_body_is_not_audio_never_a_panic() {
+    let server = CountingServer::start(|_| {
+        vec![(
+            "/junk".to_owned(),
+            String::new(),
+            b"this is neither audio nor a wrapper playlist\r\n".to_vec(),
+        )]
+    });
+
+    let error = stream::open(&server.url("/junk"), wrapper_timeouts()).expect_err("junk is not audio");
+    assert!(matches!(error, StreamError::NotAudio { .. }), "got: {error:?}");
+}
+
+#[test]
+fn a_wrapper_with_no_playable_entry_maps_to_a_named_error() {
+    let server = CountingServer::start(|_| {
+        vec![(
+            "/empty.pls".to_owned(),
+            String::new(),
+            b"[playlist]\r\nNumberOfEntries=0\r\n".to_vec(),
+        )]
+    });
+
+    let error = stream::open(&server.url("/empty.pls"), wrapper_timeouts())
+        .expect_err("a wrapper with no playable entry is an error");
+    let StreamError::NotAudio { detail } = error else {
+        panic!("expected NotAudio, got: {error:?}");
+    };
+    assert!(detail.contains("no playable"), "the mapped reason is named: {detail}");
 }
 
 // ------------------------------------------------------------------ timeouts

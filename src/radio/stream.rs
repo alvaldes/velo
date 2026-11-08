@@ -9,6 +9,19 @@
 //! stream has no duration, no seek and no disk cache: it is read, not
 //! downloaded.
 //!
+//! ## Wrapper playlists and HLS (T5b2)
+//!
+//! Radio Browser's `url_resolved` frequently points at a one-entry `.pls`
+//! or `.m3u` instead of audio. [`open`] inspects at most [`WRAPPER_CAP`]
+//! bytes of the body and lets [`lists::unwrap_station`] sniff the format —
+//! no sniffing is re-implemented here. A wrapper's first playable entry is
+//! fetched **once** more with the same timeouts and headers; a wrapper of a
+//! wrapper is an error naming that, never another hop. An HLS manifest
+//! fails as [`StreamError::Hls`]: its `.ts` segments are unplayable here
+//! and no byte of a segment is ever fetched. The inspected prefix is
+//! chained back in front of the body when the body is audio, so the cap
+//! costs nothing.
+//!
 //! ## Timeouts are per operation, never a deadline
 //!
 //! The ureq 3 agent here sets exactly three knobs and deliberately not
@@ -38,19 +51,29 @@
 //! remains the only authority on titles.
 
 use std::fmt;
-use std::io::{self, Read};
+use std::io::{self, Cursor, Read};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use symphonia::core::io::ReadOnlySource;
 
 use super::icy::IcyReader;
+use super::lists::{self, ListsError};
 use crate::audio::{AudioError, TrackSource};
 use crate::radio::client::USER_AGENT;
 
 /// The largest `Icy-Metaint` accepted: 64 KiB of audio per metadata block.
 /// Real stations use 8 KiB–64 KiB; anything larger is a corrupt header.
 const MAX_METINT: usize = 64 * 1024;
+
+/// The most body bytes inspected while deciding whether a station URL is a
+/// wrapper playlist. A real `.pls`/`.m3u` is a few KiB — Radio Browser
+/// entries are a handful of lines — so 16 KiB is four times anything seen
+/// in the wild, and a hostile server cannot stream forever into the
+/// inspection buffer. The inspected bytes are never thrown away: when the
+/// body turns out to be audio, the prefix is chained back in front of the
+/// remaining stream, so no audio is lost and the cap is not a filter.
+const WRAPPER_CAP: u64 = 16 * 1024;
 
 /// The per-operation timeouts of one live stream. Every field bounds one
 /// kind of wait; none of them bounds the *body as a whole*, which never
@@ -101,12 +124,19 @@ pub enum StreamError {
         /// The header value exactly as the server sent it.
         value: String,
     },
-    /// The body is not audio this player can decode (wrapper playlists and
-    /// HLS manifests land here too; resolving them is T5b2, not this unit).
+    /// The body is not audio this player can decode, and not a wrapper
+    /// playlist either. A wrapper that yields nothing playable (`NoStream`)
+    /// or one pointing at another wrapper also lands here, with the reason
+    /// in `detail`.
     NotAudio {
         /// Why the probe or decoder refused the body.
         detail: String,
     },
+    /// The body is an HLS manifest: its entries are `.ts` media segments,
+    /// and no decoder compiled here plays those. Named on its own because
+    /// "unsupported format" from deep inside the decoder is exactly the
+    /// message that starts a debugging session.
+    Hls,
 }
 
 impl fmt::Display for StreamError {
@@ -120,6 +150,10 @@ impl fmt::Display for StreamError {
                 write!(formatter, "the station sent an unusable Icy-Metaint: {value}")
             }
             Self::NotAudio { detail } => write!(formatter, "the station body is not audio: {detail}"),
+            Self::Hls => write!(
+                formatter,
+                "the station body is an HLS manifest: its .ts segments cannot be decoded"
+            ),
         }
     }
 }
@@ -224,25 +258,14 @@ impl<R: Read> Read for Observed<R> {
     }
 }
 
-/// Opens a live station: one GET with `Icy-MetaData: 1`, `Icy-Metaint`
-/// validation, and the body wired into a non-seekable
-/// [`TrackSource::open_stream`]. The agent uses per-operation timeouts
-/// only — see the module documentation for why no total budget exists.
-///
-/// # Errors
-///
-/// Returns [`StreamError::Unreachable`] when the station cannot be reached
-/// in time, [`StreamError::BadStatus`] for a non-200 answer,
-/// [`StreamError::BadMetaint`] for an unusable `Icy-Metaint`, and
-/// [`StreamError::NotAudio`] when the body does not decode.
-pub fn open(url: &str, timeouts: Timeouts) -> Result<StationStream, StreamError> {
-    let agent = ureq::Agent::config_builder()
-        .timeout_connect(Some(timeouts.connect))
-        .timeout_recv_response(Some(timeouts.response))
-        .timeout_per_read(Some(timeouts.read))
-        .build()
-        .new_agent();
-
+/// Performs one GET with `Icy-MetaData: 1` sent before the body, checks the
+/// status, parses `Icy-Metaint` case-insensitively, and returns the owned
+/// body reader plus the interval. Used for the station URL and, at most
+/// once more, for a wrapper's resolved entry.
+fn fetch(
+    agent: &ureq::Agent,
+    url: &str,
+) -> Result<(impl Read + use<>, Option<usize>), StreamError> {
     let response = agent
         .get(url)
         .header("Icy-MetaData", "1")
@@ -286,11 +309,117 @@ pub fn open(url: &str, timeouts: Timeouts) -> Result<StationStream, StreamError>
     // `into_reader` is the owned, `'static` body reader: it keeps reading
     // the live connection after `response` is dropped here.
     let (_, body) = response.into_parts();
-    let body = body.into_reader();
+    Ok((body.into_reader(), metaint))
+}
+
+/// The first [`WRAPPER_CAP`] bytes of `body`, with `body` itself handed back
+/// positioned after them, plus whether the inspection finished cleanly.
+///
+/// A clean finish means the body ended (or the cap was reached) inside the
+/// read bound — the bytes are complete enough to sniff. An error means the
+/// body did not deliver its bytes within the read bound, which is an
+/// audio-shaped property, not a playlist one: the caller skips sniffing and
+/// hands the partial prefix to the decoder, where the stall surfaces through
+/// the normal read path.
+fn bounded_prefix<R: Read>(body: R) -> (Vec<u8>, R, bool) {
+    let mut prefix = Vec::new();
+    let mut taken = body.take(WRAPPER_CAP);
+    let complete = taken.read_to_end(&mut prefix).is_ok();
+    (prefix, taken.into_inner(), complete)
+}
+
+/// One list-sniffing decision shared by the resolved level. A body that is
+/// neither a wrapper nor HLS goes on to the decoder; a known wrapper with no
+/// playable entry is [`StreamError::NotAudio`] naming why; a nested wrapper
+/// is the bounded end of resolution.
+fn sniff<R: Read>(
+    prefix: &[u8],
+    body: R,
+    metaint: Option<usize>,
+) -> Result<(Vec<u8>, R, Option<usize>), StreamError> {
+    match lists::unwrap_station(prefix) {
+        Err(ListsError::NotAPlaylist) => Ok((prefix.to_vec(), body, metaint)),
+        Err(lists_error) => Err(map_lists(&lists_error)),
+        Ok(_) => Err(StreamError::NotAudio {
+            detail: String::from(
+                "the wrapper playlist points at another wrapper playlist; \
+                 only one level is resolved",
+            ),
+        }),
+    }
+}
+
+/// A wrapper failure that is final at whichever level it appeared, as a
+/// [`StreamError`]: HLS is its own variant, a wrapper with no playable entry
+/// keeps the reason [`lists`] gave.
+fn map_lists(error: &ListsError) -> StreamError {
+    match error {
+        ListsError::Hls => StreamError::Hls,
+        ListsError::NoStream | ListsError::NotAPlaylist => {
+            StreamError::NotAudio { detail: error.to_string() }
+        }
+    }
+}
+
+/// Opens a live station: one GET with `Icy-MetaData: 1`, `Icy-Metaint`
+/// validation, and the body wired into a non-seekable
+/// [`TrackSource::open_stream`]. The agent uses per-operation timeouts
+/// only — see the module documentation for why no total budget exists.
+///
+/// When the body sniffs as a wrapper playlist ([`lists::unwrap_station`]
+/// knows the formats; no sniffing is re-implemented here), its first
+/// playable entry is fetched **once more** with the same timeouts and the
+/// same headers, and whatever that body is, is final: a wrapper pointing at
+/// another wrapper is an error naming that, never another hop. An HLS
+/// manifest fails as [`StreamError::Hls`]; a body that is neither audio nor
+/// a playlist keeps failing as [`StreamError::NotAudio`].
+///
+/// # Errors
+///
+/// Returns [`StreamError::Unreachable`] when a station or a resolved
+/// wrapper entry cannot be reached in time, [`StreamError::BadStatus`] for
+/// a non-200 answer, [`StreamError::BadMetaint`] for an unusable
+/// `Icy-Metaint`, [`StreamError::Hls`] for an HLS manifest, and
+/// [`StreamError::NotAudio`] when the body does not decode and no wrapper
+/// explains it.
+pub fn open(url: &str, timeouts: Timeouts) -> Result<StationStream, StreamError> {
+    let agent = ureq::Agent::config_builder()
+        .timeout_connect(Some(timeouts.connect))
+        .timeout_recv_response(Some(timeouts.response))
+        .timeout_per_read(Some(timeouts.read))
+        .build()
+        .new_agent();
+
+    let (body, metaint) = fetch(&agent, url)?;
+    let (prefix, body, complete) = bounded_prefix(body);
+    let (prefix, body, metaint) = if complete {
+        match lists::unwrap_station(&prefix) {
+            Err(ListsError::NotAPlaylist) => (prefix, body, metaint),
+            Err(lists_error) => return Err(map_lists(&lists_error)),
+            Ok(entry) => {
+                // One level only: fetch the resolved entry once more, with
+                // the same timeouts and the same headers, and whatever the
+                // body turns out to be is final. A wrapper here is an
+                // error naming that, never another hop.
+                let (body, metaint) = fetch(&agent, &entry)?;
+                let (prefix, body, complete) = bounded_prefix(body);
+                if complete {
+                    sniff(&prefix, body, metaint)?
+                } else {
+                    (prefix, body, metaint)
+                }
+            }
+        }
+    } else {
+        // The inspection was cut off by the read bound: an audio-shaped
+        // stall, not a playlist. Decode from what arrived; the stall
+        // surfaces through the normal read path.
+        (prefix, body, metaint)
+    };
 
     let state = Arc::new(Mutex::new(DemuxState::default()));
     let observed = Observed {
-        demux: IcyReader::new(body, metaint),
+        demux: IcyReader::new(Cursor::new(prefix).chain(body), metaint),
         last_seq: 0,
         state: Arc::clone(&state),
     };
