@@ -482,3 +482,17 @@ The area is famous for breaking priming, so the regression is pinned mechanicall
 
 **Where the project stands**: the original v1 scope is complete and green (25 suites, 482 tests, clippy 0), the cover renders in the human's Ghostty (L51), and no known audio defect remains — AAC priming, Opus pre-skip (file *and* live) and the post-seek shift are all closed with measurements and discriminating tests. The radio feature is the parallel session's and is not blocked on this one; the only shared seam left is `queued_entry`, already retyped on their side.
 
+**L54 — published, and what publishing actually caught.** `v0.10.2` is the first release with four working binaries, and a downloaded artifact was verified by hand: checksum OK, `velo --version` reports `0.10.2`, `--info` decodes a real MP3. Everything below was invisible from this machine.
+
+**Three CI failures, three different floors, none of them code:**
+
+1. **autotools** — `audiopus_sys 0.1.8` built libopus with `sh autogen.sh`, and the macOS runner ships no autotools. Fixed by moving to `audiopus = "=0.3.0-rc.0"`, whose sys 0.2.2 builds with cmake. Pinned exactly, with the reason in the manifest.
+2. **CMake 4** — cmake was present and refused to configure: CMake 4 removed compatibility with `cmake_minimum_required(VERSION < 3.5)`, and the bundled libopus predates that. Fixed in `.cargo/config.toml` with `CMAKE_POLICY_VERSION_MINIMUM = "3.5"` — in the repo, so it covers this machine, a contributor's and CI's, and documented in the README because a published crate does not carry that file.
+3. **the cross container** — aarch64 Linux failed on `alsa-sys`: the container `cross` builds in carries no ALSA headers (the workflow's comment claimed it did) and no cmake either. Fixed with a `Cross.toml` pre-build hook, which keeps all four targets instead of quietly shipping three.
+
+**And one that was not a floor at all**: the `Release` workflow had **never run, for any tag** — zero runs for v0.6 through v0.10.0, with the workflow active and its `on: push: tags` valid. It ran for the first tag whose commit carried a `workflow_dispatch` I added, which also gave the release a manual lever. The same patch fixed a real bug: the artifact path read `github.ref_name`, which under a dispatch is `main`, so a manual run would have uploaded a file nobody could find.
+
+**Two tags were minted wrong and removed**: `v0.10.0` lived publicly for about twelve minutes pointing at a commit without the CMake fix, and `v0.10.1` never published a release because aarch64 failed. A public tag that cannot build is worse than a missing one, and deleting it is a decision for the human — which is why it was asked, twice, and not assumed.
+
+**The lesson worth more than the release**: every one of these was reported by the first machine that was not mine. Four local instrumentations of the seek bug taught me the same thing in L23, and the pattern has not changed: an arm64 laptop cannot see an x86 SIMD difference, a machine with Homebrew libopus cannot see a missing cmake, and a `cargo test` that passes cannot see a container that lacks a header. **The environment is part of the test.**
+
