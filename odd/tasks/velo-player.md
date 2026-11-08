@@ -71,7 +71,7 @@ Root folder: `/Users/alvaldes/Music/Library` (L15). Metadata comes from tags fir
 | T12d | Remote cover art via `getCoverArt` and scrobbling on track change | S14 | pending | `3662e85` |
 | T13 | ReplayGain tag writer | S15 | inline | — |
 | T14 | Opus decode via a bundled `libopus` (`audiopus_sys`), keeping the single-binary promise | S5 | inline | — |
-| T15 | Evaluate the symphonia 0.6 API (`codecs::audio::AudioDecoder`, generic buffers) and migrate behind the existing tests | S5, S7 | inline | — |
+| T15 | Evaluate the symphonia 0.6 API (`codecs::audio::AudioDecoder`, generic buffers) and migrate behind the existing tests | S5, S7 | inline | `b2187ad` |
 | T16 | Trim AAC/MP4 encoder priming: symphonia 0.5 does not populate `delay`/`padding` for isomp4, so an M4A join carries up to ~1024 frames of priming (read `iTunSMPB` or the `elst` edit list) | S7 | inline | `1e7e36d` |
 | T18a | Share the queue with the interface so edits reach the audio (proved by appending mid-track) | S11 | inline | `9ca9b4f` |
 | T18b | Queue view and keys: `Tab` to switch, `a` append, `d` remove, `J`/`K` move, refusals in the status line | S11 | inline | `e43c02b` |
@@ -370,4 +370,16 @@ The caches now have caps — 2 GiB for tracks, 256 MiB for covers — enforced *
 The `subsonic.key` readability warning used to exist only on stderr, which means the only user who ever saw it was one whose download had already failed. It now appears once in the status line with the path and the mode; **taking the warning is the "once"**, so a second tick cannot repeat it.
 
 Verified against the real 9.4 MiB file the previous session had cached: `--cache-clean` answered `removed 1 file, freed 9.4 MiB` and left the directory empty. A cache with nothing to prune prints two zero lines and exits 0, because "nothing to do" is not an error.
+
+**L44** (T15 closed in `b2187ad`): symphonia 0.5 → 0.6.1, one API, no shims, no downgrade.
+
+The surface was **17 references** and the 444-test suite was the differential, so every assertion survived untouched. The 0.6 shape was read from the crate source in the registry rather than recalled: `AudioDecoder` built by `make_audio_decoder`; `GenericAudioBufferRef` whose samples come out through `copy_to_vec_interleaved` (which **resizes** the destination, so each packet needs a fresh buffer); the prober returns the reader directly; priming, length and time base moved onto `Track`; timestamps are **i64 and may be negative** (an MP3 starts at minus its own delay, which velo clamps); and the gapless gate that used to be `FormatOptions::enable_gapless` on the reader is now `AudioDecoderOptions::default()` on the decoder.
+
+**The danger here was silent, so it was measured on both sides.** T16 removed the AAC priming by hand because 0.5 left `delay`/`padding` empty for isomp4. If 0.6 had started trimming for itself, velo's window would have removed the priming **twice**, and the audit would hear the beginning of the music missing — a regression every test in the suite would have had to be lucky to catch. Measured: on 0.5.5 and on 0.6.1 both report no delay, no padding, 14 254 declared frames and 14 336 decoded, because 0.6's isomp4 reader still ignores edit lists ("edits are not currently supported"). The manual window stays, and the sample-exact tests still pass.
+
+**An independent check that costs nothing and proves a lot**: a real M4A from the human's library reported 8 267 776 frames before the upgrade and reports the same number after. That is the exact figure that would have moved if anything had begun trimming twice.
+
+**`TrackSource`'s public shape did not change, deliberately.** The parallel radio session is building a seam on it, and T15 existed partly so they build it once instead of twice. Sequencing across sessions is a design decision, not a courtesy.
+
+symphonia 0.6.1 still ships no Opus decoder, so T14 stands exactly as written.
 
