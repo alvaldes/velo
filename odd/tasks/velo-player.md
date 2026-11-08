@@ -456,3 +456,94 @@ Measured on the test's own file: 48 kHz, 312 samples of pre-skip, duration **exa
 
 **Why this is worth a log entry of its own**: the defect lived in a path **no test covered** (the live stream), was introduced by a correct-looking gate, and was found by someone reasoning from the codec's contract instead of from our code. Three of the four things it cost were questions: *is the pre-skip the same as padding?* No. *Should a stream trim it?* Yes, always. *Does the trim depend on gapless?* It must not, or a future change to gaplessness drags the pre-skip with it. A peer reading the standard caught what my suite could not see.
 
+**L51 — the cover renders (the oldest debt, closed by the human).** L34 left one thing owed that no test could give: seeing a cover as pixels in a real terminal. Reported confirmed in **Ghostty**, with the art working — so the path from "a protocol was detected and the size allows a pane" through to a drawn image is now verified end to end, by the only instrument that could verify it.
+
+What that closes, precisely: the protocol detection, the 100×28 threshold, the quarter-width rule, the once-per-track decode, the "never fake it with half-blocks" decision, and the diagnostic that says *why* it hides (T8b) — all of it now has both a test and a human's eyes behind it.
+
+And it frees `src/ui/mod.rs` completely: the radio session had been holding its radio view back in case the cover needed `draw_artwork`/`pane` surgery. It does not. That file is theirs, with no reservation left.
+
+**L52** (the last known audio defect, closed in `b5c08ac`..`HEAD`): a seek no longer emits the codec's warm-up, and the measurement changed what the defect *was*.
+
+L49 had described it as "the warm-up is not re-trimmed after a seek", which sounds cosmetic. Measuring it first turned it into a correctness bug: seeking into an Ogg Opus file emitted **312 extra frames at the head**, and therefore **every one of the following 23 664 samples was in the wrong place** — diff RMS **−3.23 dB** against content at −9.03, peak **1.005** against 0.5034, which is the antiphase signature of a misalignment, not of noise. A "warm-up blip" and a "whole stream shifted" are the same sentence until somebody measures.
+
+The fix discards exactly **the delay the codec declares** (RFC 7845 for Opus), once, from the heads of the packets that follow the decoder reset, carrying the debt across packet boundaries so the stream is never shifted and never loses content. No constant appears anywhere: a codec that declares no delay gets nothing discarded.
+
+**And symphonia's own decoders were measured before being touched** — MP3 and AAC show no shift at all, so they were left alone. The temptation to "fix" all codecs symmetrically would have removed content frames from two formats that were already right.
+
+The area is famous for breaking priming, so the regression is pinned mechanically: the FNV-1a of `open` on **all four committed fixtures** is identical before and after. The file-start trim, the isomp4 window and the live-stream pre-skip are provably untouched by a change to the seek path.
+
+**Reported and deliberately not implemented**: libopus would benefit from seeking a packet early and discarding more, trading a short reconvergence for exactness at the landing. That is a change to seek *semantics*, not a bug fix — and after the f-string and heredoc incidents of this session, adding an unrequested semantic change under the banner of a bug fix would be the same mistake in a different costume.
+
+**L53 — operational notes worth keeping (nothing here is a defect).**
+
+**The worker harness can die without starting.** The parallel radio session reported two delegations killed by worker timeout, the second one *before the model started*. Every unit of the audio/subsonic work in this session was delegated and none failed, so this is a real but intermittent failure mode rather than a broken tool. What it changes is planning, not code: **a large delegated unit should have a cheap inline path**, and "the worker died" must never be read as "the code is wrong". A future session seeing a half-applied task should check whether the delegated process ever ran before diagnosing the change.
+
+**Cross-session citations go stale in minutes, not days.** Twice in this session a peer and I cited the same line with different contents because each message described the tree at the moment it was written: `make_decoder` existed or did not, `queued_entry` was path-concrete or retyped, `main` carried the radio branch or did not. The rule that came out of it: **cite a line with the commit you read it at**, or say you have not re-read it. It cost four rounds of "verified on my side" that could have been one.
+
+**Where the project stands**: the original v1 scope is complete and green (25 suites, 482 tests, clippy 0), the cover renders in the human's Ghostty (L51), and no known audio defect remains — AAC priming, Opus pre-skip (file *and* live) and the post-seek shift are all closed with measurements and discriminating tests. The radio feature is the parallel session's and is not blocked on this one; the only shared seam left is `queued_entry`, already retyped on their side.
+
+**L54 — published, and what publishing actually caught.** `v0.10.2` is the first release with four working binaries, and a downloaded artifact was verified by hand: checksum OK, `velo --version` reports `0.10.2`, `--info` decodes a real MP3. Everything below was invisible from this machine.
+
+**Three CI failures, three different floors, none of them code:**
+
+1. **autotools** — `audiopus_sys 0.1.8` built libopus with `sh autogen.sh`, and the macOS runner ships no autotools. Fixed by moving to `audiopus = "=0.3.0-rc.0"`, whose sys 0.2.2 builds with cmake. Pinned exactly, with the reason in the manifest.
+2. **CMake 4** — cmake was present and refused to configure: CMake 4 removed compatibility with `cmake_minimum_required(VERSION < 3.5)`, and the bundled libopus predates that. Fixed in `.cargo/config.toml` with `CMAKE_POLICY_VERSION_MINIMUM = "3.5"` — in the repo, so it covers this machine, a contributor's and CI's, and documented in the README because a published crate does not carry that file.
+3. **the cross container** — aarch64 Linux failed on `alsa-sys`: the container `cross` builds in carries no ALSA headers (the workflow's comment claimed it did) and no cmake either. Fixed with a `Cross.toml` pre-build hook, which keeps all four targets instead of quietly shipping three.
+
+**And one that was not a floor at all**: the `Release` workflow had **never run, for any tag** — zero runs for v0.6 through v0.10.0, with the workflow active and its `on: push: tags` valid. It ran for the first tag whose commit carried a `workflow_dispatch` I added, which also gave the release a manual lever. The same patch fixed a real bug: the artifact path read `github.ref_name`, which under a dispatch is `main`, so a manual run would have uploaded a file nobody could find.
+
+**Two tags were minted wrong and removed**: `v0.10.0` lived publicly for about twelve minutes pointing at a commit without the CMake fix, and `v0.10.1` never published a release because aarch64 failed. A public tag that cannot build is worse than a missing one, and deleting it is a decision for the human — which is why it was asked, twice, and not assumed.
+
+**The lesson worth more than the release**: every one of these was reported by the first machine that was not mine. Four local instrumentations of the seek bug taught me the same thing in L23, and the pattern has not changed: an arm64 laptop cannot see an x86 SIMD difference, a machine with Homebrew libopus cannot see a missing cmake, and a `cargo test` that passes cannot see a container that lacks a header. **The environment is part of the test.**
+
+**L55 — a class of defect, not bad luck (found by the radio session).** Three comments in this repository asserted something about the **environment** that nobody had verified, and each one cost a red run:
+
+1. "the cross image carries the ALSA headers" — it does not (`alsa-sys`: `No package 'alsa' found`);
+2. the `audiopus_sys` build needed only a C compiler — it needed `autogen.sh` and `./configure` on macOS;
+3. libopus would build with cmake as-is — CMake 4 refuses a `cmake_minimum_required` below 3.5.
+
+Three instances make it a class: **a comment that describes the environment is a claim with no test behind it, written by whoever last believed it.** The remedy that works is not "be careful with comments" but two structural habits, both now in place:
+
+- **Put the claim next to the file that resolves it.** `Cross.toml` exists because the container lacks ALSA and cmake, so that sentence lives in `CONTRIBUTING.md` beside the `Cross.toml` it points at (PR #2), not in a second copy inside the workflow that can age alone. When the resolution changes, the sentence sits next to the thing that changed.
+- **Cite the run that disproved it.** The note names run 42519251288. A claim with an event attached can be re-checked in ten seconds; a claim with only a date cannot be re-checked at all.
+
+The same reasoning is why the release verification stopped at "four builds compiled" and went one step further: downloading the artifact, checking its checksum and decoding a real file. **"It compiles" and "it works" are both claims; only one of them was tested.**
+
+**L56 — the changelog was regenerated, not edited (and that is why the entry vanished).** The human asked to remove `v0.10.1`'s entry along with its tag. Two hand-written options were available and both were worse:
+
+- **Delete the 0.10.1 section**: it held the whole campaign — Subsonic, ReplayGain, Opus, symphonia 0.6, the AAC priming — because `v0.9.0` is the tag before it. Deleting it would have erased the record of the release that actually shipped.
+- **Hand-merge the two sections**: correct in outcome, but it breaks the repo's own rule (`do not edit the version or the changelog by hand`), and a hand-merged changelog drifts the moment the next release is cut.
+
+**What was done instead**: delete the tag, then run the repository's own generator (`git cliff -o CHANGELOG.md`, no `--tag`). With `v0.10.1` gone, the last remaining tag is `v0.9.0`, so the generator attributes everything since then to **0.10.2** — the release that genuinely delivered it, because 0.10.1 never published anything — and leaves an `Unreleased` section for the post-tag documentation commits. Zero occurrences of 0.10.1 remain, the twenty-four entries survive under the release they belong to, and nobody edited a generated file by hand.
+
+One trap worth recording: `git cliff --tag v0.10.2` produces **two** `0.10.2` sections, because it labels the unreleased range with the tag as well. Running the generator *without* `--tag` is the correct form for "rewrite history after removing a tag"; `--tag` is for cutting a new release.
+
+**L57 — handoff: this session closes, one agent continues.**
+
+**Where the project is.** `main` at `aa6c251`; tags `v0.9.0` and `v0.10.2`; the only published release is **v0.10.2**, whose artifact was downloaded, checksum-verified and run against a real file. 25 suites, 482 tests, clippy 0, fmt clean. The human's `.mise.toml` carries their own `[tasks]` (variant B: `dev` = `cargo run --release`, the app indexes at startup) and must stay uncommitted.
+
+**What is done and must not regress** — each of these has a test that fails if it is undone:
+- the **audio callback** copies, ramps and counts, nothing else; it is byte-identical across every change of this campaign and should stay that way (compare against the previous commit, do not trust a comment);
+- **priming**: the file-start trim (`mp4::read_priming`, the `iTunSMPB`/`elst` reader) and the **pre-skip of Opus**, which is trimmed in files *and in live streams* because it is normative, not gapless-dependent;
+- **seek**: it discards exactly the codec's declared warm-up once, and the open path stays byte-identical on every fixture;
+- **cover art** is drawn only when a protocol was detected, never faked with half-blocks, and says why it hides;
+- **anything that writes the user's files** is read-only by default and needs an explicit flag to write (`--replaygain-scan` then `--apply`), and preserves every existing tag;
+- **the queue** is shared with the player (`SharedQueue`), and only entries after the playing one are editable.
+
+**Build facts that cost red runs** (all in `CONTRIBUTING.md`/`README.md` now): `audiopus = "=0.3.0-rc.0"` pulls `audiopus_sys 0.2.2`, which builds libopus with **cmake**; CMake 4 needs `CMAKE_POLICY_VERSION_MINIMUM=3.5`, set in `.cargo/config.toml` (a published crate does not carry that file, so the README says it too); the **cross container has neither ALSA headers nor cmake**, which is what `Cross.toml`'s `pre-build` installs.
+
+**Process rules this campaign paid for** (the expensive ones):
+1. **Cite a line with the commit you read it at**, or say you have not re-read it. Four cross-session rounds were spent on citations that were true when written.
+2. **The environment is part of the test.** An arm64 laptop cannot see an x86 SIMD difference, a machine with Homebrew libopus cannot see a missing cmake, and `cargo test` cannot see a container without headers.
+3. **A comment that describes the environment is a claim with no test behind it** (L55). Put it next to the file that resolves it, and cite the run that disproved the previous version.
+4. **Generated files are regenerated, not edited** (L56) — and `git cliff` without `--tag` is the form for rewriting after a tag removal; `--tag` duplicates sections.
+5. **Do not act on a tree with someone else's uncommitted work.** Two incidents in this session came from tree-wide operations (`read-tree --reset -u` is as destructive as `reset --hard`), one of which destroyed and then recovered the human's `.mise.toml` from dangling blobs.
+
+**What is open, and whose it is:**
+- **radio**: T6c (enqueue from the view, `● live` footer, the `## Keys` section), T6d, the `feat/radio` merge, and **T5d — a real station end to end**, which is the only test that decides whether that engine works.
+- **the human**: the next minor and the merge timing; whether to keep or drop the deferred items below.
+- **deferred on purpose, not forgotten**: Opus seek with one packet of pre-roll (a change to seek *semantics*, which is why it was measured and left alone); true-peak round trips on FLAC/Ogg (no fixture, no encoder crate allowed).
+- **reviewed and closed**: the dispatch with the `Station` arm and the retry budget lives in `fbe75b5`; the retry policy is `Retry { attempts, delay }` with a **per-turn** budget, and the test that proves it is the one where the opener always succeeds and the source always fails.
+
+The reasoning behind every line above is in `L42`–`L56`. Read those before changing audio.
+

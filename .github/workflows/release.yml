@@ -4,12 +4,21 @@ on:
   push:
     tags:
       - "v*"
+  # A tag push is the normal path. This exists because the first release had to
+  # be built by hand: the push trigger never reached GitHub for it, and a
+  # release that cannot be re-run is a release that cannot be repaired.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build, e.g. v0.10.1"
+        required: true
 
 permissions:
   contents: write
 
 env:
-  TAG: ${{ github.ref_name }}
+  # A tag push sets ref_name; a manual run passes the tag explicitly.
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
 
 jobs:
   build:
@@ -29,6 +38,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -40,9 +51,12 @@ jobs:
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
 
-      # aarch64 Linux is cross-built on the ubuntu x86_64 runner with `cross`:
-      # its glibc image carries the aarch64 toolchain and the ALSA headers
-      # cpal links against, so one tool covers both halves of the job.
+      # aarch64 Linux is cross-built on the ubuntu x86_64 runner with `cross`.
+      # The cross image carries the aarch64 toolchain, but NOT the ALSA headers
+      # or cmake the dependencies need — run 42519251288 (v0.10.1) died in
+      # alsa-sys with "No package 'alsa' found". Cross.toml's pre-build hook
+      # installs libasound2-dev and cmake inside the container before any
+      # build script runs, so no extra step is needed here.
       - name: Install cross (aarch64 Linux cross-build)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         uses: taiki-e/install-action@v2
@@ -69,7 +83,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
-          path: velo-${{ github.ref_name }}-${{ matrix.target }}.tar.gz*
+          path: velo-${{ env.TAG }}-${{ matrix.target }}.tar.gz*
 
   release:
     needs: build

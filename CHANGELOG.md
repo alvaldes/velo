@@ -1,6 +1,45 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## Unreleased
+
+### Documentation
+- The cross container has neither ALSA headers nor cmake, and Cross.toml says so (#2)
+## [0.10.2] - 2026-11-08
+
+### Features
+- **audio:** Bit-perfect playback reopens the stream per track T17
+- **subsonic:** A client that speaks the protocol and knows why it failed T12a
+- **library:** The remote library becomes rows in the index T12b
+- **subsonic:** A remote track plays from the cache T12c
+- **subsonic:** Remote covers and scrobbling T12d
+- **subsonic:** Prune the caches and say when the key is readable
+- **audio:** Measure and write ReplayGain T13
+- **audio:** True peak, and tags proved on the formats people have
+- **audio:** An Opus decoder, and one mouth for codec playability T14
+- **audio:** Decode a live stream from a media source, with one decoder factory T5a
+- **audio:** Opus plays, pre-skip trimmed T14b
+
+### Fixes
+- **audio:** Trim the encoder priming of an M4A T16
+- **audio:** A live Opus stream trims its pre-skip too
+- **audio:** A seek does not emit the codec's warm-up
+- **build:** Build libopus with cmake, not autotools
+- **build:** Tell CMake 4 the policy floor audiopus_sys needs
+- **ci:** Install alsa headers and cmake in the cross container
+
+### Tests
+- **aac:** Pin the content, not the float bits, in the priming baseline
+
+### Maintenance
+- **deps:** Migrate to symphonia 0.6.1 T15
+- **release:** Make the release buildable by hand, and fix the artifact path
+- Repo hygiene — contributing guide, issue templates, CI build deps (#1)
+
+### Merge
+- Bit-perfect (T17) into main
+- The Subsonic client (T12a) into main
+- The remote library index (T12b) into main
 ## [0.9.0] - 2026-11-07
 
 ### Features

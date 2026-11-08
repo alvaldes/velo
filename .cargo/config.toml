@@ -1,0 +1,11 @@
+# audiopus_sys 0.2.2 bundles libopus with a CMakeLists.txt written for CMake
+# older than 3.5, and CMake 4 removed compatibility with those by default. The
+# variable (or its env equivalent, which is what this sets for every build
+# script) tells CMake the policy floor to assume.
+#
+# Without it, building on a machine with CMake 4 stops in audiopus_sys with
+# "Compatibility with CMake < 3.5 has been removed from CMake". A published
+# crate does not carry this file, so the README says the same thing for people
+# installing from crates.io.
+[env]
+CMAKE_POLICY_VERSION_MINIMUM = "3.5"

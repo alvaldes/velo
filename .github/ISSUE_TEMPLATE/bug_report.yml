@@ -1,0 +1,77 @@
+name: Bug report
+description: velo does something it should not, or fails to do something it should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Two things make a bug report actionable: the exact
+        command you ran, and what the player said. `velo --info` prints the
+        version, the library path and the audio device it found — paste all of it.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you saw, in your words. Paste any error or status line verbatim.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The keys you pressed, the files involved, anything that makes it happen again.
+      placeholder: |
+        1. velo ~/Music/Library
+        2. press 1, enter on an album
+        3. press n twice
+    validations:
+      required: true
+  - type: textarea
+    id: info
+    attributes:
+      label: Output of `velo --info`
+      description: Version, library path and audio device. If it is long, the first 30 lines are enough.
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: terminal
+    attributes:
+      label: Terminal
+      description: The terminal and its version. Cover art depends on it — Kitty, Sixel and iTerm2 are different code paths.
+      placeholder: Ghostty 1.2, iTerm2 3.5, kitty 0.41, Alacritty 0.15…
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: macOS 26.1 (arm64), Ubuntu 24.04…
+    validations:
+      required: true
+  - type: dropdown
+    id: source
+    attributes:
+      label: Which source were you playing from
+      options:
+        - Local library
+        - Subsonic server
+        - Command line (`--play`, a path)
+        - Not playing anything
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I looked for an existing issue describing this.
+          required: true
+        - label: I am on the latest release, or I say which commit I built.
+          required: true

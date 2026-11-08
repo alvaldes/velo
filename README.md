@@ -1,5 +1,7 @@
 # velo
 
+[![CI](https://github.com/alvaldes/velo/actions/workflows/ci.yml/badge.svg)](https://github.com/alvaldes/velo/actions/workflows/ci.yml)
+
 A single-binary music player for your terminal: point it at your music folder,
 and it indexes your library from your files' own tags, browses by artist,
 album, track or genre, plays gaplessly, and renders cover art — all from one
@@ -338,6 +340,17 @@ server is reported as unreachable — never as a credential problem.
 - Linux or macOS. Windows is untested.
 - To build from source on Linux, the ALSA development headers
   (`libasound2-dev` on Debian/Ubuntu); the audio output goes through cpal.
+- **Opus needs one of two things at build time**: `cmake` (used to build the
+  bundled libopus from source), or a system libopus that `pkg-config` can find
+  (`brew install opus`, `apt install libopus-dev`) — in which case that one is
+  linked statically and cmake is never called. Either way nothing is needed at
+  runtime. Without both, the build stops in `audiopus_sys` with a message about
+  cmake, which is the honest place for it to stop. **With CMake 4** (the current
+  release) the bundled libopus needs one more word, because its build files
+  predate CMake 3.5 and CMake 4 refuses those by default:
+  `CMAKE_POLICY_VERSION_MINIMUM=3.5 cargo install velo`. A clone of this
+  repository carries that setting in `.cargo/config.toml` already; a published
+  crate cannot, which is why it is written here.
 - A terminal. The interface needs an interactive terminal and refuses to run
   otherwise.
 - Cover art is drawn when the terminal speaks the kitty, sixel or iTerm2
@@ -375,8 +388,12 @@ Honest list; none of these exist behind a flag:
 - Playlists.
 
 MP3, FLAC, M4A/AAC, OGG Vorbis, OGG Opus and WAV are what plays today, decoded
-with symphonia 0.6 (Opus through a statically linked libopus behind `audiopus`
-— no dynamic dependency). Sample rates are
+with symphonia 0.6 (Opus through a statically linked libopus behind `audiopus`,
+pinned exactly at `0.3.0-rc.0` because that is the version whose `audiopus_sys`
+builds libopus with cmake instead of autotools — an RC that does not drift is
+worth more than a stable version that needs `autoconf`, `automake` and
+`libtool` on every machine that installs this). No dynamic dependency. Sample
+rates are
 converted to your output device; channel layouts are not converted, except
 mono, which plays through every output channel — a layout that would need a
 real downmix (5.1 into stereo, say) is skipped with an announcement instead of
@@ -387,7 +404,10 @@ MP3 the LAME tag's delay and padding are honoured, and for M4A/AAC — where
 symphonia reports neither, measured on 0.5.5 and 0.6.1 alike — the priming is
 read from the container itself
 (the `elst` edit list, or an `iTunSMPB` tag when one is present) and trimmed.
-Durations and seeks count content frames, not the raw encoded frames.
+Durations and seeks count content frames, not the raw encoded frames. A seek
+also discards the codec's own declared warm-up after the jump — for Opus, the
+normative pre-skip (RFC 7845) that the decoder re-runs after a reset — so the
+stream resumes with the music, not the decoder's re-priming.
 
 With `bit_perfect = true` in the config, sample rates are not converted
 either: the device is reopened at each track's own rate, so the decoder's
@@ -398,6 +418,22 @@ different rates; consecutive tracks that share a rate stay one continuous
 stream, and channel layouts still map the way they do without the setting.
 When the device has no output at a track's rate, velo falls back to
 converting and says so once — a track is never lost to bit-perfect mode.
+
+## Contributing
+
+Two commands get you from a clone to a running binary, and the third checks your
+change the way CI will:
+
+```sh
+cargo build --release
+./target/release/velo ~/Music
+cargo fmt --all -- --check && cargo clippy --all-targets -- -D warnings && cargo test
+```
+
+`CONTRIBUTING.md` has the platform dependencies, the commit convention, and what
+a reviewable slice looks like. Bug reports and feature requests have templates;
+a report that includes your platform, your terminal and `velo --info` is worth
+ten without them.
 
 ## License
 
