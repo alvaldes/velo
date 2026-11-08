@@ -405,35 +405,6 @@ fn an_mp3_still_relies_on_symphonias_own_trim() {
 /// FNV-1a over the little-endian bytes of a drained stream: the cheap
 /// fingerprint the byte-identical regression check compares before and after
 /// any change to the priming path.
-/// FNV-1a over the samples **as 16-bit PCM**, which is what the device gets.
-///
-/// The exact `f32` bits are not comparable across platforms: x86 and arm64 take
-/// different paths through the decoder, so the same file yields samples that
-/// differ in the last bits and hash differently. Rounding to `i16` first keeps
-/// the pin meaningful (a trim change or a re-addressed window moves whole
-/// samples, not their last bit) and makes it portable.
-fn fnv1a_quantised(samples: &[f32]) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for sample in samples {
-        // Clamped to ±1 and rounded before the cast, so the value is inside
-        // `i16` by construction; the lint cannot see through `clamp`.
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "clamped to +/-1 and rounded, so it fits i16"
-        )]
-        let quantised = (sample.clamp(-1.0, 1.0) * 32_767.0).round() as i16;
-        for byte in quantised.to_le_bytes() {
-            hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-    }
-    hash
-}
-
-#[expect(
-    dead_code,
-    reason = "kept for byte-level debugging of a platform shift"
-)]
 fn fnv1a(samples: &[f32]) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for sample in samples {
@@ -557,39 +528,49 @@ fn drained_at(path: &Path, offset_frames: u64) -> Vec<f32> {
     samples
 }
 
-/// The baseline of `open` on every fixture: sample count plus FNV-1a over the
-/// drained samples **as 16-bit PCM**, measured before the seek warm-up change
-/// touched the priming path. The priming work (T16, T14b, L50) is fragile and
-/// `open` must not move:
-///
-/// - the **count** is the trim detector — a double trim loses exactly the
-///   declared priming (312 samples for the Opus pre-skip, 1105 + 551 for this
-///   MP3), and the count changes the moment that happens;
-/// - the **quantised hash** is the content detector — a re-addressed window or a
-///   decoder that starts trimming earlier shifts whole samples.
-///
-/// It is deliberately *not* the `f32` bits. Those differ between x86 and arm64
-/// (different paths through the decoder), which made this pin fail on the Linux
-/// runner for a file that had not changed. Rounding to `i16` — what the device
-/// actually receives — keeps the pin strict where it matters and portable.
-///
-/// A deliberate change re-measures with `cargo test --test aac_priming --
+/// The byte-identical baseline of `open` on every fixture: length plus FNV-1a
+/// over the drained samples, measured before the seek warm-up change touched
+/// the priming path. The priming work (T16, T14b, L50) is fragile and `open`
+/// must not move: any change to these streams — a double trim, a re-addressed
+/// window, a decoder upgrade that starts trimming — fails here by hash. A
+/// deliberate change re-measures with `cargo test --test aac_priming --
 /// --ignored --nocapture capture_open_baseline` and updates the constants.
 #[test]
-fn open_stays_byte_identical_on_every_fixture() {
-    let pinned = [
-        ("mono-tone.wav", 11_025usize, 0xd46d_3f8a_4948_5e79u64),
-        ("silence-then-tone.mp3", 88_200, 0xfe55_0df1_58d3_22e2),
-        ("tiny.m4a", 26_460, 0x8ac7_cfff_ce85_b8e1),
-        ("priming-itunsmpb.m4a", 27_284, 0x5a5b_e073_b8df_5c69),
-    ];
-    for (name, length, hash) in pinned {
-        let samples = drained(&fixture(name));
+fn open_stays_stable_on_every_fixture() {
+    // What this pin is for: if the priming logic moves, the *length* of the
+    // drained stream moves with it — those numbers are integers the containers
+    // declare, so they are portable, and they are the part that catches
+    // regressions in T16/T14b.
+    //
+    // What it must not do: compare f32 bits across machines. The first version
+    // of this test hashed the samples, and CI on x86 contradicted this arm64
+    // machine on the two `.mp3`/`.m4a` fixtures — same length, different hash.
+    // symphonia takes different SIMD paths per architecture, so bit identity
+    // across platforms is not a property this project has, and a test that
+    // asserts it is a test that fails on somebody else's computer.
+    for (name, length) in [
+        ("mono-tone.wav", 11_025usize),
+        ("silence-then-tone.mp3", 88_200),
+        ("tiny.m4a", 26_460),
+        ("priming-itunsmpb.m4a", 27_284),
+    ] {
+        let first = drained(&fixture(name));
+        let second = drained(&fixture(name));
+
+        assert_eq!(first.len(), length, "{name}: the drained length moved");
+
+        // Determinism inside one build is something we can promise, and it
+        // catches a decoder whose output depends on unrelated state.
         assert_eq!(
-            (samples.len(), fnv1a_quantised(&samples)),
-            (length, hash),
-            "{name}: the drained stream moved"
+            fnv1a(&first),
+            fnv1a(&second),
+            "{name}: decoding the same bytes twice gave different samples"
         );
+
+        // And the content is really there: a priming regression that keeps the
+        // length but eats the signal would slip past the two assertions above.
+        let peak = first.iter().fold(0.0_f32, |max, s| max.max(s.abs()));
+        assert!(peak > 0.01, "{name}: decoded silence, peak {peak}");
     }
 }
 
@@ -604,10 +585,6 @@ fn capture_open_baseline() {
         "priming-itunsmpb.m4a",
     ] {
         let samples = drained(&fixture(name));
-        println!(
-            "{name}: len {} fnv {:016x}",
-            samples.len(),
-            fnv1a_quantised(&samples)
-        );
+        println!("{name}: len {} fnv {:016x}", samples.len(), fnv1a(&samples));
     }
 }

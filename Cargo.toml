@@ -1,6 +1,6 @@
 [package]
 name = "velo"
-version = "0.9.0"
+version = "0.10.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
@@ -15,8 +15,12 @@ exclude = [".mise.toml", "odd/", "design/"]
 [dependencies]
 # Opus decode (T14): libopus built statically by audiopus_sys — no dynamic
 # runtime dependency (measured in L47: ~400 KB on an 8.9 MB binary, otool shows
-# none). The 0.3 series is a release candidate only, so 0.2 it is.
-audiopus = "0.2"
+# none). audiopus_sys 0.1 (behind 0.2) builds libopus with autogen.sh/configure
+# — autotools, which macOS runners do not ship — while audiopus_sys 0.2 builds
+# it with cmake. The 0.3 binding that pulls sys 0.2 is a release candidate, so
+# the requirement is exact on purpose: an RC must never drift under us, and a
+# caret bump to a different RC would be an unreviewed API change.
+audiopus = "=0.3.0-rc.0"
 clap = { version = "4.5", features = ["derive"] }
 cpal = "0.18.2"
 dirs = "7.0.0"

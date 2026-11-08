@@ -20,16 +20,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # cpal needs ALSA headers; audiopus_sys builds libopus from source with
       # cmake, so both are build dependencies, not test-only ones.
-      # Build dependencies, not test-only ones: cpal needs the ALSA headers, and
-      # audiopus_sys builds libopus from its own sources — with cmake on
-      # Linux, and through `sh autogen.sh` + `./configure` on macOS, which
-      # needs autotools that the macOS runner does not ship.
+      # Build dependencies, not test-only ones: cpal needs the ALSA headers on
+      # Linux, and audiopus_sys builds libopus with cmake — which the runner
+      # images already ship, so it is installed only where it is cheap to be
+      # explicit about it.
       - name: Install Linux build dependencies (ALSA headers)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev cmake autoconf automake libtool
-      - name: Install macOS build dependencies (autotools for the Opus build)
-        if: runner.os == 'macOS'
-        run: brew install autoconf automake libtool
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev cmake
       - name: Format check
         run: cargo fmt --all -- --check
       - name: Clippy

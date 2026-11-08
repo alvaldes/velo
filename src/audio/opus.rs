@@ -3,9 +3,11 @@
 //! symphonia ships no Opus decoder in 0.5 or 0.6, but its Ogg reader *does*
 //! recognise the Opus mapping (identification header, `OpusTags`, packet
 //! durations), so the container half stays with symphonia and only the codec
-//! half is bound here, through `audiopus` 0.2 over `audiopus_sys`, which
-//! builds libopus statically — the single-binary promise holds (L47: ~400 KB
-//! on an 8.9 MB binary, no dynamic linkage).
+//! half is bound here, through `audiopus` 0.3 over `audiopus_sys` 0.2, which
+//! builds libopus statically with cmake — the single-binary promise holds
+//! (L47: ~400 KB on an 8.9 MB binary, no dynamic linkage). 0.2 of the binding
+//! would need autotools to build its libopus, which macOS runners do not
+//! ship; 0.3 (pinned exactly — it is a release candidate) needs only cmake.
 //!
 //! Two facts this module is built around: Opus **always** decodes at 48 kHz
 //! regardless of the rate it was encoded at, and the decoder must be told
@@ -23,6 +25,8 @@
 
 use std::sync::{Mutex, MutexGuard};
 
+use audiopus::MutSignals;
+use audiopus::packet::Packet;
 use symphonia::core::audio::{
     AsGenericAudioBufferRef, AudioBuffer, AudioMut, AudioSpec, GenericAudioBufferRef,
 };
@@ -137,6 +141,12 @@ impl OpusDecoder {
     /// # Errors
     ///
     /// [`AudioError::Decode`] for every refusal above and any libopus error.
+    ///
+    /// # Panics
+    ///
+    /// Never for the buffers this decoder owns: the scratch is 5 760 frames,
+    /// far inside the `i32` length [`MutSignals`] requires, and the `expect`
+    /// below exists only to say that invariant out loud.
     pub fn decode_packet(&mut self, packet: &[u8]) -> Result<Vec<f32>, AudioError> {
         if packet.is_empty() {
             return Err(AudioError::Decode("empty Opus packet".to_owned()));
@@ -153,9 +163,20 @@ impl OpusDecoder {
         // The scratch is taken out while libopus holds the lock, so the guard
         // and the scratch never borrow `self` at the same time.
         let mut scratch = std::mem::take(&mut self.scratch);
+        // 0.3's `decode_float` takes newtypes that carry libopus' invariants:
+        // a packet is never empty (checked above) and a buffer fits an `i32`
+        // length (the scratch is 5 760 frames, far inside it).
         let frames = self
             .libopus()
-            .decode_float(Some(packet), &mut scratch, false)
+            .decode_float(
+                Some(
+                    Packet::try_from(packet)
+                        .map_err(|error| AudioError::Decode(format!("Opus packet: {error}")))?,
+                ),
+                MutSignals::try_from(&mut scratch)
+                    .expect("the decode scratch always fits an i32 length"),
+                false,
+            )
             .map_err(|error| AudioError::Decode(format!("libopus decode: {error}")));
         self.scratch = scratch;
         let frames = frames?;
