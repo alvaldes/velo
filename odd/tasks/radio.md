@@ -486,3 +486,32 @@ answer, not this code's opinion.*
   files were unformatted because every worker ran clippy and none ran fmt, and that
   is what produced the conflict when `main` came back with a formatting-clean
   `mod.rs`.
+
+**L20** — T5c1 closed (`c996545`, 213 insertions / 63 deletions across ten files: **602
+green across 34 binaries**, three consecutive runs, clippy and `fmt --check` clean).
+The queue has a type now and **no behaviour changed** — the untouched 601-test suite
+is the proof, and the one new test is the mechanism T5c2 will rely on.
+
+- **`pub enum Entry { File(PathBuf) }`** with `SharedQueue = Arc<Mutex<Vec<Entry>>>`.
+  Only `File`, deliberately: no `Station` variant with placeholder behaviour, because
+  a variant that always errors is worse than a variant that does not exist yet.
+- **The resolver dispatch is structural, not commented**:
+  `fn resolve_entry(resolver, entry) { match entry { Entry::File(path) => … } }`.
+  T5c2 adds one arm; nothing else in the producer moves. That single match is why a
+  station will never enter the Subsonic path.
+- **A workaround removed before it could become a bug.** `shuffle::restore_order` was
+  concrete over `PathBuf`, so restoring the shuffled order had to round-trip entries
+  through paths. Lossless for files, **destructive for stations** — a station has no
+  path, and a round trip would have silently dropped it. The function is now generic
+  over `T: PartialEq` and the workaround is gone. Decisive evidence that it really was
+  behaviour-identical: **no shuffle test needed a single line changed.**
+- **`impl FromIterator<PathBuf> for Vec<Entry>` is impossible** (orphan rule), so the
+  convenience is `impl From<PathBuf> for Entry` plus `.map(Entry::from).collect()` at
+  the call sites. Worth knowing before someone tries it again.
+- **My delegation's surface list was too narrow, and the worker did the right thing**:
+  it stopped, listed the seven construction lines the compiler demanded (compiler
+  proven, not guessed) and waited. When a shared type changes, the surface list has to
+  include every construction site *and* the imports they need. Approved and done as
+  construction-only.
+- Known and intended: `Entry::as_path()` cannot survive a `Station`; T5c2 widens the
+  consumers rather than faking a path.
