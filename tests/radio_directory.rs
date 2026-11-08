@@ -2,7 +2,8 @@
 //! string is the contract, pinned parameter by parameter; the wire JSON is
 //! parsed leniently and never panics; stations that cannot load are skipped
 //! before they reach a queue; the codec filter answers from symphonia's
-//! compiled-in codecs.
+//! compiled-in codecs; and an HLS manifest is unplayable however the codec
+//! is spelled.
 //!
 //! All fixtures are string literals in this file: no network, no files
 //! outside the repo, no new dependencies.
@@ -10,7 +11,7 @@
 use std::cell::RefCell;
 
 use velo::radio::client::{self, Client, Error, Order, StationSearch, Transport};
-use velo::radio::directory::{is_playable_codec, loadable_stations};
+use velo::radio::directory::{is_playable_codec, is_playable_station, loadable_stations};
 
 /// A canned transport: records every URL it is asked to fetch and always
 /// answers with one fixed body. Tests never touch the network.
@@ -379,11 +380,23 @@ fn codecs_symphonia_compiled_in_are_playable() {
 }
 
 #[test]
-fn a_known_codec_missing_from_the_build_is_not_playable() {
-    // Opus is a table row, not a build feature, so this flips to playable the
-    // day the feature is compiled in — which is the whole point of the seam.
-    assert!(!is_playable_codec("opus"));
-    assert!(!is_playable_codec("OPUS,mp4"));
+fn the_table_answers_what_the_build_can_decode_and_holds_no_opinion_of_its_own() {
+    use symphonia::core::codecs::audio::well_known::CODEC_ID_OPUS;
+
+    // The invariant, not a snapshot: compiling a decoder must flip this table
+    // without the table changing. A hardcoded `true` or `false` for opus fails
+    // one half of this on the day T14 lands.
+    let opus = velo::audio::opus::decodable(CODEC_ID_OPUS);
+    assert_eq!(
+        is_playable_codec("opus"),
+        opus,
+        "the opus row follows the build"
+    );
+    assert_eq!(
+        is_playable_codec("OPUS,mp4"),
+        opus,
+        "a multi-part codec string follows the build too"
+    );
 }
 
 #[test]
@@ -393,4 +406,84 @@ fn an_unrecognised_codec_is_allowed_because_the_directory_often_lies() {
     assert!(is_playable_codec(""));
     assert!(is_playable_codec("unknown"));
     assert!(is_playable_codec("h.264"));
+}
+
+// --- An HLS manifest is unplayable, whatever the codec says -----------------
+
+/// One parsed station with codec `MP3` and the resolved URL asked for: the
+/// directory JSON is the only way stations exist here.
+fn one_station(url_resolved: &str) -> client::Station {
+    let recorder = Recorder::serving(&format!("[{}]", station_json("Station", url_resolved)));
+    let client = Client::new(recorder);
+    let mut stations = client
+        .search_stations(&StationSearch::default())
+        .expect("parse");
+    assert_eq!(stations.len(), 1);
+    stations.remove(0)
+}
+
+#[test]
+fn an_hls_manifest_is_not_playable_even_when_the_codec_is_fine() {
+    let station = one_station("https://stream.example/live/index.m3u8");
+    assert_eq!(station.codec, "MP3", "the codec alone would play");
+    assert!(!is_playable_station(&station));
+}
+
+#[test]
+fn an_hls_manifest_with_a_query_or_fragment_is_not_playable_either() {
+    let token = one_station("https://stream.example/live/index.m3u8?token=abc&exp=1");
+    assert!(!is_playable_station(&token));
+    let anchored = one_station("https://stream.example/live/index.M3U8#list");
+    assert!(!is_playable_station(&anchored));
+}
+
+#[test]
+fn an_ordinary_stream_url_plays_whatever_the_extension_hints() {
+    // The decision is `.m3u8`-shaped, not suspicious-of-everything: an mp3
+    // path, an m3u path (a wrapper the stream layer unwraps) and no
+    // extension at all all stay playable.
+    for url in [
+        "https://stream.example/nova.mp3",
+        "https://stream.example/live/list.m3u",
+        "https://stream.example/live",
+    ] {
+        assert!(is_playable_station(&one_station(url)), "url {url}");
+    }
+}
+
+#[test]
+fn the_hls_decision_is_per_station_and_leaves_no_trace() {
+    // One list, one manifest, one plain stream: each answers for itself,
+    // and deciding against the manifest cannot mark anything else — there
+    // is no global state to stick.
+    let recorder = Recorder::serving(&format!(
+        "[{},{}]",
+        station_json("Hls One", "https://stream.example/live/index.m3u8"),
+        station_json("Nova", "https://stream.example/nova.mp3"),
+    ));
+    let client = Client::new(recorder);
+    let stations = client
+        .search_stations(&StationSearch::default())
+        .expect("parse");
+    assert_eq!(stations.len(), 2);
+    assert!(!is_playable_station(&stations[0]), "the manifest");
+    assert!(is_playable_station(&stations[1]), "the plain stream");
+    // And again, in the other order of asking: the manifest still refuses.
+    assert!(!is_playable_station(&stations[0]));
+}
+
+#[test]
+fn the_directory_rule_composes_the_codec_rule_and_hls() {
+    let manifest = one_station("https://stream.example/live/index.m3u8");
+    let plain = one_station("https://stream.example/nova.mp3");
+    assert_eq!(
+        is_playable_station(&plain),
+        is_playable_codec(&plain.codec),
+        "with no manifest, the codec rule decides alone"
+    );
+    assert!(
+        is_playable_codec(&manifest.codec),
+        "the codec alone would play"
+    );
+    assert!(!is_playable_station(&manifest), "the manifest rule refuses");
 }

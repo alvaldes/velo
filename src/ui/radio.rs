@@ -29,7 +29,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, ListState, Paragraph};
 
 use crate::radio::client::{Country, Order, Station, Tag};
-use crate::radio::directory::is_playable_codec;
+use crate::radio::directory::is_playable_station;
 use crate::radio::store::{Favorite, Pinned, RadioStore};
 
 use super::plural;
@@ -813,12 +813,12 @@ impl RadioView {
     }
 
     /// The loaded catalog: every station, favourites starred, stations the
-    /// codec filter rejects marked with `✗`.
+    /// directory rejects as unplayable marked with `✗`.
     fn catalog_rows(&self) -> Vec<Row> {
         self.catalog
             .iter()
             .map(|station| {
-                let playable = is_playable_codec(&station.codec);
+                let playable = is_playable_station(station);
                 let favorite = self.store.is_favorite(&station.url_resolved);
                 let mut label = String::new();
                 if !playable {

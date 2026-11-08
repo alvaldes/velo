@@ -86,9 +86,9 @@ fn catalog() -> Vec<Station> {
     vec![
         station("Nova", "https://stream.example/nova.mp3", "MP3", 128, "NO"),
         station(
-            "Opus One",
-            "https://stream.example/opus.opus",
-            "OPUS",
+            "Hls One",
+            "https://stream.example/live/index.m3u8",
+            "MP3",
             96,
             "NO",
         ),
@@ -114,7 +114,7 @@ fn the_sections_appear_in_order_only_when_they_have_content() {
             "Night FM",
             "★ Jazz One [MP3] · NO",
             "Nova [128k] · NO",
-            "✗ Opus One [96k] · NO",
+            "✗ Hls One [96k] · NO",
         ],
         "the sections keep their order, got: {:?}",
         view.labels()
@@ -187,7 +187,7 @@ fn enter_on_a_country_opens_its_stations() {
     view.set_catalog(catalog());
     assert_eq!(
         view.labels(),
-        ["Nova [128k] · NO", "✗ Opus One [96k] · NO"],
+        ["Nova [128k] · NO", "✗ Hls One [96k] · NO"],
         "the place lists its stations, got: {:?}",
         view.labels()
     );
@@ -419,13 +419,13 @@ fn n_opens_the_country_index_from_anywhere() {
 #[test]
 fn enter_on_a_station_holds_the_selection_and_does_nothing_else() {
     let mut view = view();
-    press(&mut view, KeyCode::Char('G')); // last row: Opus One
+    press(&mut view, KeyCode::Char('G')); // last row: Hls One
     let selection = view.selection().expect("a row is selected");
     let RowKind::CatalogStation { station, playable } = &selection.kind else {
         panic!("the last row is a catalog station, got: {selection:?}");
     };
-    assert_eq!(station.name, "Opus One");
-    assert!(!playable, "the codec filter rejected this station");
+    assert_eq!(station.name, "Hls One");
+    assert!(!playable, "the directory rejected this station");
 
     let before = view.labels();
     press(&mut view, KeyCode::Enter);
@@ -468,7 +468,7 @@ fn the_radio_list_draws_its_sections_and_lights_the_selected_row() {
         "Night FM",
         "★ Jazz One",
         "Nova [128k] · NO",
-        "✗ Opus One",
+        "✗ Hls One",
     ] {
         assert!(
             screen.contains(expected),

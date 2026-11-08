@@ -11,6 +11,10 @@
 //!   set comes from the codecs actually compiled into symphonia, never a
 //!   hardcoded list, so a later symphonia bump (e.g. enabling opus) widens
 //!   it without touching any other file.
+//! - [`is_playable_station`] is the per-station answer the views use: the
+//!   codec seam above, minus the stations whose URL is an HLS manifest —
+//!   a list of `.ts` segments nothing compiled here can decode, whatever
+//!   the codec field claims.
 
 use crate::radio::client::Station;
 
@@ -44,14 +48,15 @@ fn absolute_http(url: &str) -> bool {
     !host.is_empty()
 }
 
-/// Whether a station's `codec`, as the directory spells it, is one
-/// symphonia has compiled in.
+/// Whether a station's `codec`, as the directory spells it, is one this build
+/// can actually decode.
 ///
 /// The table below only translates the directory's spellings to symphonia's
-/// [`CodecType`]s; the accepted set itself is decided by asking the default
-/// codec registry whether each type is registered. A codec absent from the
-/// build — opus today, maybe compiled in tomorrow — answers `false` with no
-/// change here beyond adding its spelling to the table.
+/// [`AudioCodecId`]s; whether a codec plays is the build's answer, never this
+/// file's opinion. Two decoders count: symphonia's own, asked of its registry,
+/// and the crate's own module ([`crate::audio::opus::decodable`]). Compiling one
+/// of them flips the answer here without a line changing — which is why this
+/// seam exists in exactly one function.
 ///
 /// A spelling the table does not know is **allowed**: the directory leaves
 /// `codec` blank or says `unknown` often enough that hiding those stations
@@ -79,9 +84,33 @@ pub fn is_playable_codec(codec: &str) -> bool {
             continue;
         };
         recognised = true;
-        if registry.get_audio_decoder(*codec_id).is_some() {
+        if registry.get_audio_decoder(*codec_id).is_some()
+            || crate::audio::opus::decodable(*codec_id)
+        {
             return true;
         }
     }
     !recognised
+}
+
+/// Whether one URL points at an HLS manifest: a path ending in `.m3u8`,
+/// case-insensitively, with any query or fragment ignored. The manifest
+/// itself is a list of `.ts` segments, and no decoder compiled here plays
+/// those — which is true regardless of which codecs the build ships, so
+/// the answer cannot evaporate the way a codec table's can.
+fn is_hls_manifest(url: &str) -> bool {
+    let path = url.split(['?', '#']).next().unwrap_or_default();
+    path.to_ascii_lowercase().ends_with(".m3u8")
+}
+
+/// Whether one station can play as things stand: its codec is decodable
+/// ([`is_playable_codec`]) and its resolved URL is not an HLS manifest
+/// ([`is_hls_manifest`]).
+///
+/// The URL rule is spelled from the directory's own `url_resolved` only —
+/// no network, no sniffing. The stream layer keeps its body-level HLS
+/// refusal as the backstop for servers that hide the extension.
+#[must_use]
+pub fn is_playable_station(station: &Station) -> bool {
+    is_playable_codec(&station.codec) && !is_hls_manifest(&station.url_resolved)
 }
