@@ -296,12 +296,37 @@ impl StreamCell {
     }
 }
 
+/// One entry of the queue: what the producer turns into sound. The queue is
+/// typed so an entry can say what it is instead of every consumer guessing
+/// from a path alone.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Entry {
+    /// A file on disk, possibly a remote one the resolver has yet to cache.
+    File(PathBuf),
+}
+
+impl Entry {
+    /// The path the entry stands for: the file's own, for [`Entry::File`].
+    #[must_use]
+    pub fn as_path(&self) -> &Path {
+        match self {
+            Self::File(path) => path.as_path(),
+        }
+    }
+}
+
+impl From<PathBuf> for Entry {
+    fn from(path: PathBuf) -> Self {
+        Self::File(path)
+    }
+}
+
 /// The queue a player reads from, shared with whoever edits it.
 ///
 /// The producer takes one entry at a time under this lock, so appending,
 /// removing or moving a pending entry while it plays changes what plays next
 /// (T18). The audio callback never touches it.
-pub type SharedQueue = Arc<Mutex<Vec<PathBuf>>>;
+pub type SharedQueue = Arc<Mutex<Vec<Entry>>>;
 
 /// Resolves one queue entry into the file the producer opens, right before
 /// the producer reaches it (T12c). A remote row's `subsonic://…` entry
@@ -494,10 +519,13 @@ impl Player {
         // track is fetched once and then opened like any file (T12c); its
         // failure is the error the caller reports, as for a missing file.
         // The producer resolves every entry again when it reaches it — a hit
-        // costs no network.
-        let first_path = match resolver.as_ref() {
-            Some(resolver) => resolver.resolve(&first)?,
-            None => first.clone(),
+        // costs no network. The resolver is consulted only for file entries:
+        // the dispatch, not a comment, is what makes that so.
+        let first_path = match first {
+            Entry::File(path) => match resolver.as_ref() {
+                Some(resolver) => resolver.resolve(&path)?,
+                None => path,
+            },
         };
         // Opening once up front means a missing or broken first file fails
         // before a device is opened, and gives us the format to configure.
@@ -1149,8 +1177,8 @@ impl SequenceSink for FnSink<'_> {
 
 /// Copies one queue entry out with the queue's length, so the lock is held
 /// only for the copy.
-fn queued_entry(queue: &Mutex<Vec<PathBuf>>, index: usize) -> (Option<PathBuf>, usize) {
-    let read = |queue: &Vec<PathBuf>| (queue.get(index).cloned(), queue.len());
+fn queued_entry(queue: &Mutex<Vec<Entry>>, index: usize) -> (Option<Entry>, usize) {
+    let read = |queue: &Vec<Entry>| (queue.get(index).cloned(), queue.len());
     match queue.lock() {
         Ok(queue) => read(&queue),
         Err(poisoned) => read(&poisoned.into_inner()),
@@ -1216,7 +1244,7 @@ fn run_sequence(
         let outcome = match resolve_entry(resolver.as_ref(), &entry) {
             Ok(path) => play_turn(&entry, &path, &turn, &mut expected, shared, sink)?,
             Err(error) => {
-                sink.failure(track_failure(&entry, &error));
+                sink.failure(track_failure(entry.as_path(), &error));
                 Turn::Failed
             }
         };
@@ -1275,14 +1303,17 @@ enum Turn {
 
 /// Resolves one queue entry into the file the producer opens (T12c).
 /// Without a resolver every entry already is a file, which is today's
-/// behaviour.
+/// behaviour. The resolver is consulted only for file entries — that is the
+/// match's shape, not a promise this comment makes.
 fn resolve_entry(
     resolver: Option<&Arc<dyn PathResolver>>,
-    entry: &Path,
+    entry: &Entry,
 ) -> Result<PathBuf, AudioError> {
-    match resolver {
-        Some(resolver) => resolver.resolve(entry),
-        None => Ok(entry.to_path_buf()),
+    match entry {
+        Entry::File(path) => match resolver {
+            Some(resolver) => resolver.resolve(path),
+            None => Ok(path.clone()),
+        },
     }
 }
 
@@ -1294,7 +1325,7 @@ fn resolve_entry(
 /// the hash-named cached file (T12c); the samples, however, come from the
 /// resolved file — the cache — whose tags are the originals'.
 fn play_turn(
-    entry: &Path,
+    entry: &Entry,
     path: &Path,
     turn: &TurnJob,
     expected: &mut TrackSpec,
@@ -1310,7 +1341,7 @@ fn play_turn(
         Ok(source) => source,
         Err(error) if turn.first => return Err(error),
         Err(error) => {
-            sink.failure(track_failure(entry, &error));
+            sink.failure(track_failure(entry.as_path(), &error));
             return Ok(Turn::Failed);
         }
     };
@@ -1348,7 +1379,7 @@ fn play_turn(
     let map = match ChannelMap::new(spec.channels, expected.channels) {
         Ok(map) => map,
         Err(error) => {
-            sink.failure(track_failure(entry, &error));
+            sink.failure(track_failure(entry.as_path(), &error));
             return Ok(Turn::Failed);
         }
     };
@@ -1378,14 +1409,14 @@ fn play_turn(
             // A track that stops decoding costs itself, not the album: what it
             // decoded stays, the rest is skipped, the next one follows.
             Err(error) => {
-                sink.failure(track_failure(entry, &error));
+                sink.failure(track_failure(entry.as_path(), &error));
                 return Ok(Turn::Failed);
             }
         };
         let mut resampled = match converter.convert(&map.apply(&block)) {
             Ok(resampled) => resampled,
             Err(error) => {
-                sink.failure(track_failure(entry, &error));
+                sink.failure(track_failure(entry.as_path(), &error));
                 return Ok(Turn::Failed);
             }
         };
@@ -1401,7 +1432,7 @@ fn play_turn(
     let mut flushed = match converter.flush() {
         Ok(flushed) => flushed,
         Err(error) => {
-            sink.failure(track_failure(entry, &error));
+            sink.failure(track_failure(entry.as_path(), &error));
             return Ok(Turn::Failed);
         }
     };

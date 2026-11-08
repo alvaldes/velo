@@ -8,7 +8,7 @@ use clap::Parser as _;
 use lofty::config::WriteOptions;
 use lofty::prelude::*;
 use lofty::tag::{Tag, TagType};
-use velo::audio::output::TrackFailure;
+use velo::audio::output::{Entry, TrackFailure};
 use velo::library::Library;
 use velo::ui::crossterm::event::{KeyCode, KeyEvent};
 use velo::ui::indexing::Indexer;
@@ -200,7 +200,7 @@ fn five_queued() -> (App<'static>, Vec<PathBuf>) {
         app.apply(action);
         app.on_key(key(KeyCode::Char('j')));
     }
-    assert_eq!(app.queue(), paths.as_slice());
+    assert_eq!(queue_paths(app.queue()), paths);
     (app, paths)
 }
 
@@ -211,7 +211,7 @@ fn s_shuffles_the_queue_and_s_again_puts_it_back_in_order() {
     let action = app.on_key(key(KeyCode::Char('s')));
     assert_eq!(action, Action::ToggleShuffle);
     app.apply(action);
-    let mut shuffled = app.queue().to_vec();
+    let mut shuffled = queue_paths(app.queue());
     shuffled.sort();
     let mut sorted = paths.clone();
     sorted.sort();
@@ -219,7 +219,11 @@ fn s_shuffles_the_queue_and_s_again_puts_it_back_in_order() {
 
     let action = app.on_key(key(KeyCode::Char('s')));
     app.apply(action);
-    assert_eq!(app.queue(), paths.as_slice(), "back in the order they came");
+    assert_eq!(
+        queue_paths(app.queue()),
+        paths,
+        "back in the order they came"
+    );
 }
 
 #[test]
@@ -233,7 +237,7 @@ fn a_track_queued_while_shuffled_follows_the_rest_when_shuffle_ends() {
     press(&mut app, KeyCode::Char('s'));
 
     paths.push(paths[0].clone());
-    assert_eq!(app.queue(), paths.as_slice());
+    assert_eq!(queue_paths(app.queue()), paths);
 }
 
 // ---- reopening the library prompt (library-refresh T1) -------------------------
@@ -331,12 +335,15 @@ fn app_with_a_queue_of_three() -> App<'static> {
 fn a_appends_the_selected_track_to_the_queue_without_starting_a_stream() {
     let mut app = app_with_three_tracks();
     app.on_key(key(KeyCode::Char('j'))); // onto two.flac
-    assert_eq!(app.queue(), [] as [PathBuf; 0]);
+    assert_eq!(app.queue(), [] as [Entry; 0]);
 
     // `a` answers with no action: appending never interrupts what is playing,
     // and here it does not even start a stream.
     assert_eq!(app.on_key(key(KeyCode::Char('a'))), Action::None);
-    assert_eq!(app.queue(), [PathBuf::from("/library/artist/two.flac")]);
+    assert_eq!(
+        app.queue(),
+        [Entry::File(PathBuf::from("/library/artist/two.flac"))]
+    );
     assert_eq!(app.selected(), 1, "the library selection is untouched");
     assert_eq!(app.status(), "velo: added 1 track");
 
@@ -365,7 +372,14 @@ fn a_on_an_album_appends_all_of_its_tracks_in_order() {
     let names: Vec<String> = app
         .queue()
         .iter()
-        .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+        .map(|entry| {
+            entry
+                .as_path()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        })
         .collect();
     assert_eq!(names, ["01 - Dawn.wav", "02 - Later.wav"]);
     assert_eq!(app.status(), "velo: added 2 tracks");
@@ -378,7 +392,7 @@ fn d_on_an_empty_queue_refuses_and_says_why() {
     app.on_key(key(KeyCode::Tab));
 
     assert_eq!(app.on_key(key(KeyCode::Char('d'))), Action::None);
-    assert_eq!(app.queue(), [] as [PathBuf; 0], "nothing was removed");
+    assert_eq!(app.queue(), [] as [Entry; 0], "nothing was removed");
     assert_eq!(app.status(), "velo: nothing selected in the queue");
 }
 
@@ -392,7 +406,14 @@ fn d_removes_a_pending_entry_and_keeps_the_selection_inside_the_queue() {
     let names: Vec<String> = app
         .queue()
         .iter()
-        .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+        .map(|entry| {
+            entry
+                .as_path()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        })
         .collect();
     assert_eq!(names, ["one.flac", "three.flac"]);
     assert_eq!(app.status(), "velo: removed two.flac");
@@ -411,7 +432,14 @@ fn k_then_j_moves_a_pending_entry_and_the_selection_moves_with_it() {
     let lifted: Vec<String> = app
         .queue()
         .iter()
-        .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+        .map(|entry| {
+            entry
+                .as_path()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        })
         .collect();
     assert_eq!(lifted, ["one.flac", "three.flac", "two.flac"]);
     assert_eq!(
@@ -425,7 +453,14 @@ fn k_then_j_moves_a_pending_entry_and_the_selection_moves_with_it() {
     let dropped: Vec<String> = app
         .queue()
         .iter()
-        .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+        .map(|entry| {
+            entry
+                .as_path()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        })
         .collect();
     assert_eq!(dropped, ["one.flac", "two.flac", "three.flac"]);
     assert_eq!(app.queue_selected(), 2);
@@ -1130,6 +1165,15 @@ fn file_names(paths: &[PathBuf]) -> Vec<String> {
         .collect()
 }
 
+/// The queue's entries as the paths they stand for, so the assertions that
+/// read the queue keep talking about files, the way the player resolves them.
+fn queue_paths(queue: &[Entry]) -> Vec<PathBuf> {
+    queue
+        .iter()
+        .map(|entry| entry.as_path().to_path_buf())
+        .collect()
+}
+
 #[test]
 fn the_number_keys_switch_between_the_four_library_views() {
     let temp = library_for_views("views-switch");
@@ -1274,7 +1318,7 @@ fn a_appends_from_every_view() {
     act(&mut app, KeyCode::Char('2')); // Harbor first
     act(&mut app, KeyCode::Char('a'));
     assert_eq!(
-        file_names(app.queue()),
+        file_names(&queue_paths(app.queue())),
         ["01 - Dawn.wav", "02 - Noon.wav"],
         "an album appends its tracks"
     );
@@ -1286,7 +1330,7 @@ fn a_appends_from_every_view() {
     act(&mut app, KeyCode::Char('3')); // Rising first
     act(&mut app, KeyCode::Char('a'));
     assert_eq!(
-        app.queue().last().unwrap().file_name().unwrap(),
+        app.queue().last().unwrap().as_path().file_name().unwrap(),
         "01 - Rising.wav"
     );
 }

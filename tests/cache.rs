@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use velo::audio::output::{PathResolver, drain_headless_resolving};
+use velo::audio::output::{Entry, PathResolver, drain_headless_resolving};
 use velo::audio::{AudioError, TrackSpec};
 use velo::subsonic::Error;
 use velo::subsonic::cache::{Cache, SubsonicResolver, Unconfigured, cache_dir};
@@ -547,18 +547,23 @@ const SPEC: TrackSpec = TrackSpec {
 /// becomes after the fetch, and what lets the playback tests run offline.
 struct FakeResolver {
     files: Vec<(String, PathBuf)>,
+    /// How many times the queue asked it to resolve, shared so a test can
+    /// read it after the resolver has been handed to the drain.
+    calls: Arc<AtomicUsize>,
 }
 
 impl FakeResolver {
     fn serving(id: &str, path: PathBuf) -> Self {
         Self {
             files: vec![(id.to_owned(), path)],
+            calls: Arc::new(AtomicUsize::new(0)),
         }
     }
 }
 
 impl PathResolver for FakeResolver {
     fn resolve(&self, path: &Path) -> Result<PathBuf, AudioError> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
         let text = path.to_str().expect("a pseudo path is utf-8");
         let (_, id) = text
             .strip_prefix("subsonic://")
@@ -591,8 +596,8 @@ fn a_remote_queue_drains_exactly_the_fixtures_the_resolver_serves() {
     write_wav(&second, SPEC, &second_pcm);
 
     let queue = Arc::new(Mutex::new(vec![
-        PathBuf::from("subsonic://music.example.com/a"),
-        PathBuf::from("subsonic://music.example.com/b"),
+        Entry::File(PathBuf::from("subsonic://music.example.com/a")),
+        Entry::File(PathBuf::from("subsonic://music.example.com/b")),
     ]));
     let mut resolver = FakeResolver::serving("a", first.clone());
     resolver.files.push(("b".to_owned(), second.clone()));
@@ -632,8 +637,8 @@ fn a_failed_download_is_announced_once_and_the_next_local_track_still_plays() {
     write_wav(&local, SPEC, &local_pcm);
 
     let queue = Arc::new(Mutex::new(vec![
-        PathBuf::from("subsonic://music.example.com/dead"),
-        local.clone(),
+        Entry::File(PathBuf::from("subsonic://music.example.com/dead")),
+        Entry::File(local.clone()),
     ]));
 
     let mut heard: Vec<f32> = Vec::new();
@@ -661,4 +666,50 @@ fn a_failed_download_is_announced_once_and_the_next_local_track_still_plays() {
         "the announcement names the queue entry"
     );
     assert!(failures[0].message.contains("could not be reached"));
+}
+
+/// A file entry round-trips: the path a caller queues is stored as a file
+/// entry and comes back as the same path, and when the producer reaches it
+/// the resolver is consulted for it exactly once per start.
+#[test]
+fn a_file_entry_round_trips_through_the_queue_and_resolves_once_per_start() {
+    let dir = temp_dir("entry");
+    let file = dir.join("round.wav");
+    let pcm: Vec<i16> = (0..1_000)
+        .map(|frame| i16::try_from(frame % 400 + 30).expect("in range"))
+        .collect();
+    write_wav(&file, SPEC, &pcm);
+
+    let entry = PathBuf::from("subsonic://music.example.com/round");
+    let queue: Arc<Mutex<Vec<Entry>>> = Arc::new(Mutex::new(vec![Entry::File(entry.clone())]));
+    assert_eq!(
+        queue.lock().expect("queue").clone(),
+        vec![Entry::File(entry.clone())],
+        "the path became a file entry and stayed one"
+    );
+
+    let resolver = FakeResolver::serving("round", file.clone());
+    let calls = Arc::clone(&resolver.calls);
+    let mut heard: Vec<f32> = Vec::new();
+    let mut failures: Vec<velo::audio::output::TrackFailure> = Vec::new();
+    drain_headless_resolving(
+        queue,
+        0,
+        0,
+        SPEC,
+        velo::config::ReplayGainMode::default(),
+        Some(Arc::new(resolver)),
+        &std::sync::atomic::AtomicBool::new(false),
+        &mut |block| heard.extend_from_slice(block),
+        &mut |failure| failures.push(failure),
+    )
+    .expect("the sequence drains");
+
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        1,
+        "one resolution, at the start"
+    );
+    assert_eq!(heard, as_f32(&pcm), "the entry played the file it named");
+    assert!(failures.is_empty(), "nothing was skipped: {failures:?}");
 }

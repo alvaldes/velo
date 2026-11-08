@@ -19,7 +19,9 @@ use lofty::tag::TagType;
 use lofty::tag::{ItemKey, Tag, TagExt as _};
 
 use velo::audio::TrackSource;
-use velo::audio::output::{TrackFailure, drain_headless_bit_perfect, drain_headless_with_gain};
+use velo::audio::output::{
+    Entry, TrackFailure, drain_headless_bit_perfect, drain_headless_with_gain,
+};
 use velo::audio::{TrackSpec, output::needs_stream_reopen};
 use velo::config::ReplayGainMode;
 use velo::ui::App;
@@ -142,7 +144,7 @@ fn drain_bit_perfect(queue: Vec<PathBuf>, expected: TrackSpec, mode: ReplayGainM
     let mut samples = Vec::new();
     let stop = AtomicBool::new(false);
     drain_headless_bit_perfect(
-        Arc::new(Mutex::new(queue)),
+        Arc::new(Mutex::new(queue.into_iter().map(Entry::from).collect())),
         0,
         0,
         expected,
@@ -234,7 +236,7 @@ fn turning_bit_perfect_off_restores_the_conversion_and_the_gain() {
     let mut samples = Vec::new();
     let stop = AtomicBool::new(false);
     drain_headless_with_gain(
-        Arc::new(Mutex::new(vec![path.clone()])),
+        Arc::new(Mutex::new(vec![Entry::File(path.clone())])),
         0,
         0,
         RATE_44K,

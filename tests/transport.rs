@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
-use velo::audio::output::{TrackFailure, drain_headless};
+use velo::audio::output::{Entry, TrackFailure, drain_headless};
 use velo::audio::{GainRamp, TrackSource, TrackSpec, seek_target};
 
 /// Writes a minimal PCM16 WAV file so the tests need no external tooling.
@@ -350,9 +350,9 @@ fn a_corrupt_track_mid_queue_is_skipped_without_silence_and_is_named() {
     let stop = AtomicBool::new(false);
     let result = drain_headless(
         std::sync::Arc::new(std::sync::Mutex::new(vec![
-            good_a.clone(),
-            broken.clone(),
-            good_b.clone(),
+            Entry::File(good_a.clone()),
+            Entry::File(broken.clone()),
+            Entry::File(good_b.clone()),
         ])),
         0,
         0,
@@ -405,7 +405,7 @@ fn a_queue_whose_only_track_is_broken_fails_instead_of_finishing_silently() {
     let mut failures: Vec<TrackFailure> = Vec::new();
     let stop = AtomicBool::new(false);
     let result = drain_headless(
-        std::sync::Arc::new(std::sync::Mutex::new(vec![broken.clone()])),
+        std::sync::Arc::new(std::sync::Mutex::new(vec![Entry::File(broken.clone())])),
         0,
         0,
         spec,
@@ -472,7 +472,7 @@ fn a_track_appended_while_it_plays_is_played_next() {
     write_indexed_wav(&first, 500, spec);
     write_indexed_wav(&second, 700, spec);
 
-    let queue = std::sync::Arc::new(std::sync::Mutex::new(vec![first]));
+    let queue = std::sync::Arc::new(std::sync::Mutex::new(vec![Entry::File(first)]));
     let for_append = std::sync::Arc::clone(&queue);
     let stop = AtomicBool::new(false);
     let mut samples: Vec<f32> = Vec::new();
@@ -482,7 +482,10 @@ fn a_track_appended_while_it_plays_is_played_next() {
         samples.extend_from_slice(block);
         if !appended {
             appended = true;
-            for_append.lock().expect("queue").push(second.clone());
+            for_append
+                .lock()
+                .expect("queue")
+                .push(Entry::File(second.clone()));
         }
     };
 
@@ -510,7 +513,7 @@ fn a_queue_that_shrinks_to_nothing_ends_cleanly() {
     let first = scratch_path("shrink-first");
     write_indexed_wav(&first, 400, spec);
 
-    let queue = std::sync::Arc::new(std::sync::Mutex::new(vec![first]));
+    let queue = std::sync::Arc::new(std::sync::Mutex::new(vec![Entry::File(first)]));
     let for_clear = std::sync::Arc::clone(&queue);
     let stop = AtomicBool::new(false);
     let mut samples: Vec<f32> = Vec::new();
@@ -612,7 +615,9 @@ fn drain_until(
     enough: usize,
     mut also: impl FnMut(usize),
 ) -> (Vec<f32>, Vec<TrackFailure>) {
-    let queue = std::sync::Arc::new(std::sync::Mutex::new(queue));
+    let queue = std::sync::Arc::new(std::sync::Mutex::new(
+        queue.into_iter().map(Entry::from).collect(),
+    ));
     let stop = AtomicBool::new(false);
     let mut samples: Vec<f32> = Vec::new();
     let mut failures: Vec<TrackFailure> = Vec::new();
@@ -730,7 +735,7 @@ fn a_track_with_no_audio_is_not_repeated_forever() {
     };
     let empty = scratch_path("repeat-empty");
     write_indexed_wav(&empty, 0, spec);
-    let queue = std::sync::Arc::new(std::sync::Mutex::new(vec![empty]));
+    let queue = std::sync::Arc::new(std::sync::Mutex::new(vec![Entry::File(empty)]));
     let repeat = RepeatCell::new(Repeat::One);
     let stop = std::sync::Arc::new(AtomicBool::new(false));
     let guard = std::sync::Arc::clone(&stop);

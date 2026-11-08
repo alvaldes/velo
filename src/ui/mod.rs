@@ -39,7 +39,7 @@ use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, ListState, Paragraph};
 
-use crate::audio::output::{PathResolver, Repeat, SharedQueue, TrackFailure};
+use crate::audio::output::{Entry, PathResolver, Repeat, SharedQueue, TrackFailure};
 use crate::audio::spectrum::Spectrum;
 use crate::audio::{Player, seek_target, skip_target};
 use crate::config::{OpenNode, ReplayGainMode, Session, ThemeColor, ThemeColors, UiParts};
@@ -304,9 +304,9 @@ pub struct App<'lib> {
     /// block still names its track after the browser moved elsewhere.
     played: Vec<TrackEntry>,
     selected: usize,
-    /// The paths of the running stream, in queue order, so a seek can rebuild
-    /// the player from the current track at an offset.
-    queue: Vec<PathBuf>,
+    /// The entries of the running stream, in queue order, so a seek can
+    /// rebuild the player from the current track at an offset.
+    queue: Vec<Entry>,
     /// The stream that is playing, if any.
     playing: Option<Playback>,
     /// Which list the keys act on.
@@ -330,7 +330,7 @@ pub struct App<'lib> {
     /// Whether what is left of the queue plays in a mixed order.
     shuffle: bool,
     /// The queue as it was before it was shuffled, to put it back.
-    unshuffled: Vec<PathBuf>,
+    unshuffled: Vec<Entry>,
     /// What follows the end of a track; handed to every player built.
     repeat: Repeat,
     /// The open search, if any (T7). While it is open the body lists its
@@ -875,7 +875,7 @@ impl<'lib> App<'lib> {
 
     /// The queue, in play order.
     #[must_use]
-    pub fn queue(&self) -> &[PathBuf] {
+    pub fn queue(&self) -> &[Entry] {
         &self.queue
     }
 
@@ -2698,8 +2698,8 @@ impl<'lib> App<'lib> {
         self.queue
             .iter()
             .enumerate()
-            .map(|(index, path)| {
-                let (name, note) = describe(path, self.known_tracks());
+            .map(|(index, entry)| {
+                let (name, note) = describe(entry.as_path(), self.known_tracks());
                 ListItem::new(list_row(
                     ListRow {
                         playing: playing == Some(index),
@@ -2838,9 +2838,7 @@ impl<'lib> App<'lib> {
     /// marker has to find the playing row wherever a list shows whole tracks.
     fn playing_path(&self) -> Option<&std::path::Path> {
         let player = self.player.as_ref()?;
-        self.queue
-            .get(player.current_index())
-            .map(std::path::PathBuf::as_path)
+        self.queue.get(player.current_index()).map(Entry::as_path)
     }
 
     /// The length of the track that is playing: from the interface's own track
@@ -3263,7 +3261,10 @@ impl<'lib> App<'lib> {
             return;
         }
         self.close_search();
-        self.start_stream(paths, Playback::Queue);
+        self.start_stream(
+            paths.into_iter().map(Entry::from).collect(),
+            Playback::Queue,
+        );
     }
 
     /// How many rows the view the keys act on holds.
@@ -3339,7 +3340,7 @@ impl<'lib> App<'lib> {
 
     /// Applies an edit to the queue and to the handle the player reads, in that
     /// order and in one place: two call sites that had to agree would drift.
-    fn edit_queue(&mut self, edit: impl FnOnce(&mut Vec<PathBuf>)) {
+    fn edit_queue(&mut self, edit: impl FnOnce(&mut Vec<Entry>)) {
         edit(&mut self.queue);
         if let Some(shared) = &self.shared {
             match shared.lock() {
@@ -3382,7 +3383,7 @@ impl<'lib> App<'lib> {
             self.status = self.editable_queue_index(self.queue_selected).unwrap_err();
             return;
         };
-        let name = Self::file_name(&self.queue[index]);
+        let name = Self::file_name(self.queue[index].as_path());
         self.edit_queue(|queue| {
             queue.remove(index);
         });
@@ -3486,7 +3487,7 @@ impl<'lib> App<'lib> {
             return;
         }
         let count = paths.len();
-        self.edit_queue(|queue| queue.extend(paths));
+        self.edit_queue(|queue| queue.extend(paths.into_iter().map(Entry::from)));
         self.status = format!("velo: added {}", plural(count, "track", "tracks"));
     }
 
@@ -3635,7 +3636,7 @@ impl<'lib> App<'lib> {
         if !matches!(self.position, Position::Files) {
             self.played = self.tracks[from..].to_vec();
         }
-        self.start_stream(paths, playback);
+        self.start_stream(paths.into_iter().map(Entry::from).collect(), playback);
     }
 
     /// Plays the queue itself from `from`, rotating it so that entry is first:
@@ -3649,8 +3650,8 @@ impl<'lib> App<'lib> {
         self.start_stream(paths, Playback::Queue);
     }
 
-    /// Opens a device for these paths and makes them the queue.
-    fn start_stream(&mut self, paths: Vec<PathBuf>, playback: Playback) {
+    /// Opens a device for these entries and makes them the queue.
+    fn start_stream(&mut self, paths: Vec<Entry>, playback: Playback) {
         // Dropping through `stop` also releases the producer thread.
         if let Some(old) = self.player.take() {
             old.stop();

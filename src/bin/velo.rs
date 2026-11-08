@@ -7,7 +7,7 @@ use std::sync::Arc;
 use clap::{CommandFactory as _, Parser};
 
 use velo::audio::loudness;
-use velo::audio::output::PathResolver;
+use velo::audio::output::{Entry, PathResolver};
 use velo::audio::replay_gain::{GainTags, format_gain_db, format_peak, write_tags};
 use velo::audio::{Player, TrackSource};
 use velo::config::{self, Cli, Config, Settings};
@@ -880,7 +880,9 @@ fn play(
     settings: &Settings,
     resolver: Option<Arc<dyn PathResolver>>,
 ) -> ExitCode {
-    let queue = std::sync::Arc::new(std::sync::Mutex::new(files.to_vec()));
+    let queue = std::sync::Arc::new(std::sync::Mutex::new(
+        files.iter().cloned().map(Entry::from).collect(),
+    ));
     let mut player = match Player::play_gapless_at_full(
         queue,
         0,

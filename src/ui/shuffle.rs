@@ -3,8 +3,6 @@
 //! the interface applies them through its one queue edit, which is how they
 //! reach the player.
 
-use std::path::PathBuf;
-
 /// Mixes `items[keep..]` in place — a Fisher–Yates over a xorshift sequence
 /// started from `seed` — and leaves `items[..keep]`, what played and what
 /// plays now, exactly where it was.
@@ -27,9 +25,9 @@ pub fn shuffle_after<T>(items: &mut [T], keep: usize, seed: u64) {
 /// entry claims one matching pending entry, in order; whatever matches none
 /// — a track queued while the queue was shuffled — follows them, in the order
 /// it is in now. Nothing is dropped and nothing is added.
-pub fn restore_order(items: &mut Vec<PathBuf>, keep: usize, original: &[PathBuf]) {
+pub fn restore_order<T: PartialEq>(items: &mut Vec<T>, keep: usize, original: &[T]) {
     let keep = keep.min(items.len());
-    let mut pending: Vec<Option<PathBuf>> = items.drain(keep..).map(Some).collect();
+    let mut pending: Vec<Option<T>> = items.drain(keep..).map(Some).collect();
     for wanted in original {
         if let Some(slot) = pending
             .iter_mut()
