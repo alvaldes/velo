@@ -296,3 +296,31 @@ MP3 fixture through a `Cursor`; **T5b** the HTTP stream source in
 `timeout_global`), `Icy-MetaData: 1`, `Icy-Metaint` validation, HLS sniff after the
 wrapper unwrap; **T5c** the queue in `src/audio/output.rs` — `Entry::File \|
 Station`, resolver only for files, seek a no-op for stations, one retry then skip.
+
+**L13** — the exact 0.6.1 API for the seam, read by the other session out of
+`symphonia-core-0.6.1` rather than remembered. Four things, and the first one
+contradicted what this logbook had assumed:
+
+- **`FormatOptions::enable_gapless` no longer exists.** It moved to the decoder:
+  `AudioDecoderOptions { gapless: bool, verify: bool }` (non-exhaustive), with
+  `gapless` defaulting to **true**. Files keep `default()`; a station gets
+  `AudioDecoderOptions { gapless: false, ..Default::default() }`. That is the right
+  default for a live stream twice over — no gapless, and no trimming of delay that
+  a stream does not declare.
+- **No adapter to write**: 0.6 ships `ReadOnlySource<R: io::Read + Send + Sync>`,
+  whose `MediaSource` impl reports `is_seekable() == false` and
+  `byte_len() == None`. The `IcyReader` goes inside it and a non-seekable source is
+  a first-class path, not an `unimplemented!`. `Seek` stays a type requirement and
+  symphonia simply does not call it.
+- **`MediaSourceStreamOptions::buffer_len`** kept its name and now defaults to
+  64 KiB. Plenty for a body arriving at ~1.27× real time; raising it buys headroom
+  at the cost of memory and startup latency, not correctness.
+- **The probe risk that decides T5a's tests.** An empty `Hint::new()` is accepted
+  and the probers fall back to content sniffing, but **MP3 is the weak case**: no
+  magic number, only a frame-sync heuristic. If the body starts with garbage or
+  with metadata that leaked past the demux, the probe can fail. So T5a's fixture
+  must be an **ICY-wrapped MP3** — `tests/fixtures/silence-then-tone.mp3` with
+  metadata blocks interleaved, pushed through `IcyReader` and `ReadOnlySource` — and
+  the seam is not called done until it plays a real station by hand. If the probe
+  fails there, the fix is to probe from the first clean frame after the demux, which
+  is exactly what `icy.rs` already knows how to find.
