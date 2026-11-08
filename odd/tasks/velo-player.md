@@ -496,3 +496,16 @@ The area is famous for breaking priming, so the regression is pinned mechanicall
 
 **The lesson worth more than the release**: every one of these was reported by the first machine that was not mine. Four local instrumentations of the seek bug taught me the same thing in L23, and the pattern has not changed: an arm64 laptop cannot see an x86 SIMD difference, a machine with Homebrew libopus cannot see a missing cmake, and a `cargo test` that passes cannot see a container that lacks a header. **The environment is part of the test.**
 
+**L55 — a class of defect, not bad luck (found by the radio session).** Three comments in this repository asserted something about the **environment** that nobody had verified, and each one cost a red run:
+
+1. "the cross image carries the ALSA headers" — it does not (`alsa-sys`: `No package 'alsa' found`);
+2. the `audiopus_sys` build needed only a C compiler — it needed `autogen.sh` and `./configure` on macOS;
+3. libopus would build with cmake as-is — CMake 4 refuses a `cmake_minimum_required` below 3.5.
+
+Three instances make it a class: **a comment that describes the environment is a claim with no test behind it, written by whoever last believed it.** The remedy that works is not "be careful with comments" but two structural habits, both now in place:
+
+- **Put the claim next to the file that resolves it.** `Cross.toml` exists because the container lacks ALSA and cmake, so that sentence lives in `CONTRIBUTING.md` beside the `Cross.toml` it points at (PR #2), not in a second copy inside the workflow that can age alone. When the resolution changes, the sentence sits next to the thing that changed.
+- **Cite the run that disproved it.** The note names run 42519251288. A claim with an event attached can be re-checked in ten seconds; a claim with only a date cannot be re-checked at all.
+
+The same reasoning is why the release verification stopped at "four builds compiled" and went one step further: downloading the artifact, checking its checksum and decoding a real file. **"It compiles" and "it works" are both claims; only one of them was tested.**
+
