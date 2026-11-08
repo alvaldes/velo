@@ -363,3 +363,11 @@ Duration and seek now count **content frames**: the fixture reports 300 ms rathe
 
 Verified on a real file from the human's library as well: `--info` reports 187.48 s and `--play` exits clean.
 
+**L43** (the two debts of the remote feature, closed in `7443f74`): cache pruning and the readable-key warning.
+
+The caches now have caps — 2 GiB for tracks, 256 MiB for covers — enforced **after** a store, never before one: whole files evicted oldest-first by mtime until the directory fits. Three decisions worth the ink: the file just stored is never a candidate (evicting what you just downloaded is a re-download loop, so a single oversized file stays and the cache is over its limit until something else goes), a failed walk or removal is silent (an unpruned cache is still correct, only bigger), and `--cache-clean` touches nothing outside the two directories — proven in a test with a sibling file that must survive.
+
+The `subsonic.key` readability warning used to exist only on stderr, which means the only user who ever saw it was one whose download had already failed. It now appears once in the status line with the path and the mode; **taking the warning is the "once"**, so a second tick cannot repeat it.
+
+Verified against the real 9.4 MiB file the previous session had cached: `--cache-clean` answered `removed 1 file, freed 9.4 MiB` and left the directory empty. A cache with nothing to prune prints two zero lines and exits 0, because "nothing to do" is not an error.
+
