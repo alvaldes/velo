@@ -687,3 +687,30 @@ the last unwired seam of the feature.
 - The help card and the README were left untouched on purpose: they are T6c-ii, which is
   documentation, and it comes after the feature is merged with `main` so the text is
   written once against the final state.
+
+**L27** — T6c-ii closed (`2d6f11b`, three files, **635 green across 35 binaries**, clippy and
+`fmt` at zero). The feature is documented where a user looks: a `## Radio` section in the
+README (what it is, why a station has no position, the one-level wrapper rule, why HLS is
+refused, where favourites and pins live, that the country is opt-in and read from the
+locale, and what it deliberately does not do), four rows in `## Keys`, and four rows in the
+in-app help card.
+
+Two things had to change besides text, and both are the session's recurring defect:
+
+- **Two render tests pinned the help card's size, not its behaviour.** One asserted the
+  literal `"1–12 of 25"`, the other that the card "fits" at 80x30. Adding four rows made
+  both fail — correctly, because the card grew. The fix was not to bump the numbers but to
+  assert the property: the total is **read from the card** (`position_range` parses the
+  `N–M of T` line), and the scroll test now asserts that `j` moves the window by one, `G`
+  lands on the last row, and `g` returns to the first. A section added to the card must not
+  fail it; a card that stops scrolling must.
+- **`" of "` is not unique on a screen.** My first parser took the first occurrence and hit
+  the label *"shuffle what is left of the queue"*. It now tries every occurrence on every
+  line and answers only the one shaped like a range. Same lesson as the `ls-remote` and the
+  same as the `("q", "quit")` anchor that appeared four times and put four rows into the
+  footer hints instead of the card: **verify the effect, not the intent** — presence of an
+  anchor is not uniqueness, and one match is not the right match.
+
+With this, the radio feature is complete and documented on the branch. What remains is not
+code: `T5d` (a real station, end to end, which needs the human's ears), the merge into
+`main`, and the version that follows it.
