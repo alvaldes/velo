@@ -446,3 +446,13 @@ Measured on the test's own file: 48 kHz, 312 samples of pre-skip, duration **exa
 
 **What "complete" means, precisely**: every item the human listed for v1 — formats, gapless, library index, browse and play, search, cover art, CLI and config, Subsonic, ReplayGain — is implemented, tested and committed. What remains is not scope: the cover rendering in a real terminal (owed since L34), the radio feature owned by the parallel session, and the small known limits recorded in L42/L48/L49.
 
+**L50** (a real bug, found by a peer's question, fixed in `b5c08ac`): a live Opus stream was not trimming its pre-skip.
+
+**The bug**: priming was gated on having a *path* (`path.and_then(declared_priming)`) because the isomp4 case reads it from the container. A stream has no path, so a live Opus station delivered its **312 samples of pre-skip** to the device. Measured, not reasoned: the same bytes as a stream produced **48000** samples against **47688** as a file — exactly the pre-skip, and the difference the failing test printed.
+
+**The distinction the fix encodes is the radio session's, and it is the standard's**: the pre-skip is **normative** (RFC 6716 — the decoder must discard it), while encoder padding is a compression artifact that only matters when something follows. So the pre-skip is trimmed whether or not there is a file; the padding is a sequence concern, and a live stream has no end to respect and does not carry it. `declared_priming` now takes `Option<&Path>`; only the container-reading branch needs one.
+
+**The test proves it by the strongest property available** — a live stream and the same bytes as a file must decode to the same samples — and it is honestly discriminating: stashed the fix, ran it, and it failed with the two numbers above.
+
+**Why this is worth a log entry of its own**: the defect lived in a path **no test covered** (the live stream), was introduced by a correct-looking gate, and was found by someone reasoning from the codec's contract instead of from our code. Three of the four things it cost were questions: *is the pre-skip the same as padding?* No. *Should a stream trim it?* Yes, always. *Does the trim depend on gapless?* It must not, or a future change to gaplessness drags the pre-skip with it. A peer reading the standard caught what my suite could not see.
+
