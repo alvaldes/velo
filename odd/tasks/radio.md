@@ -80,7 +80,7 @@ is English. Footer shows `● live` instead of a position and total.
 | T1 | S4 | worker | `src/radio/icy.rs`: ICY length-prefixed demux over a `Read`, `StreamTitle` extraction, passthrough when no metaint | `b9bb2c2` |
 | T2 | S7 | worker | `src/radio/lists.rs`: PLS and M3U parse to the first playable entry | `f804a64` |
 | T3 | S1, S8 | worker | `src/radio/{client,directory}.rs`: Radio Browser client, indexes, station search, codec filter from symphonia features | `a0f946a` |
-| T4 | S5 | worker | `src/radio/store.rs`: atomic `radio.toml` for favourites, pins and hand-added stations | |
+| T4 | S5 | worker | `src/radio/store.rs`: atomic `radio.toml` for favourites, pins and hand-added stations | `654f348` |
 | T5 | S2, S3 | parent | stream engine: `MediaSource` over the HTTP body, queue entry `File \| Station`, live semantics; **blocked on the other session's T15 (symphonia 0.6)** | |
 | T6 | S9 | parent | radio view in `src/ui/mod.rs`; **serialised with the other session's artwork work** | |
 | T7 | S5 | worker | country from TZ/locale, asked once | |
@@ -178,3 +178,30 @@ codec seam are one behaviour pinned by one test file, and splitting the file wou
 have cost more than it bought — but it is recorded here so the reviewer knows the
 size before opening it. **T4 and T7 stay small; the next task over ~400 lines gets
 split at delegation time, not after.**
+
+**L9** — T4 closed (`654f348`, 601 lines in three files: 11 tests, 476 green in
+the whole suite, clippy `-D warnings` clean). This is the first unit that touches
+user data, so the two tests that matter are the ones about not losing it: a
+successful `save` leaves exactly `radio.toml` in the directory (no temp), and a
+corrupt file is never truncated — `load` only ever reads, `save` only ever goes
+through `create_new` + `rename`.
+
+- **Parent change: a toggle on a key match now unmarks.** The worker produced
+  `Toggled::Already` when a favourite arrived under a differently written URL
+  (`…/stream/` stored, `…/stream` pressed) and flagged the asymmetry itself. That
+  contradicts the rule the UI needs — pressing `f` on a marked station unmarks it,
+  whatever shape the URL arrives in — so the toggles now decide on
+  [`station_key`](src/radio/store.rs) alone and `Already` survives only for
+  `add_station`, where "already there" is the truth. Two tests were rewritten,
+  not weakened: the dedup case now asserts the station comes off and the list is
+  empty.
+- **Known limit**: `station_key` is hand-rolled URL parsing (no `url` crate in the
+  tree); userinfo and IPv6 authorities pass through unnormalised. Directory
+  stations are plain `host/path` URLs, so this is a documented edge, not a bug.
+- `Toggled::needs_save()` stays useful: `Already` is the only answer that needs
+  no write.
+
+**Slice 4** is T4 alone (`654f348`, 601 lines). Same call as slice 3 and for the
+same reason: one behaviour (the preferences file) pinned by one test file.
+**T7 is small by design; if anything here grows past ~400 lines it gets split at
+delegation time.**
