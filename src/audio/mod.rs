@@ -12,6 +12,7 @@ use std::time::Duration;
 
 pub mod loudness;
 pub mod mp4;
+pub mod opus;
 pub mod output;
 pub mod replay_gain;
 pub mod resample;
@@ -227,10 +228,7 @@ impl TrackSource {
         path: Option<&Path>,
         live: bool,
     ) -> Result<Self, AudioError> {
-        let name = path.map_or_else(
-            || "stream".to_owned(),
-            |path| path.display().to_string(),
-        );
+        let name = path.map_or_else(|| "stream".to_owned(), |path| path.display().to_string());
 
         let probed = symphonia::default::get_probe()
             .probe(
@@ -242,17 +240,15 @@ impl TrackSource {
             .map_err(|error| AudioError::Unsupported(error.to_string()))?;
 
         let reader = probed;
-        let track = reader.default_track(TrackType::Audio).ok_or_else(|| {
-            AudioError::Unsupported(format!("{name} has no audio track"))
-        })?;
+        let track = reader
+            .default_track(TrackType::Audio)
+            .ok_or_else(|| AudioError::Unsupported(format!("{name} has no audio track")))?;
 
         let audio_params = track
             .codec_params
             .as_ref()
             .and_then(symphonia::core::codecs::CodecParameters::audio)
-            .ok_or_else(|| {
-                AudioError::Unsupported(format!("{name} has no audio track"))
-            })?
+            .ok_or_else(|| AudioError::Unsupported(format!("{name} has no audio track")))?
             .clone();
 
         let decoder = make_decoder(&audio_params, gapless)?;
@@ -266,8 +262,11 @@ impl TrackSource {
         // source: in 0.6 the track's timing lives on `Track`, not in the codec
         // parameters. A live stream never reports a frame count even when a
         // tag declares one — a station has no duration and never seeks (S2).
-        let (track_id, time_base, n_frames) =
-            (track.id, track.time_base, if live { None } else { track.num_frames });
+        let (track_id, time_base, n_frames) = (
+            track.id,
+            track.time_base,
+            if live { None } else { track.num_frames },
+        );
         let mut source = Self {
             reader,
             decoder,
@@ -288,9 +287,9 @@ impl TrackSource {
         if declared.is_none() {
             // The device must be configured before the first sample plays, so
             // the format has to be resolved now rather than at playback time.
-            let first = source.decode_next()?.ok_or_else(|| {
-                AudioError::Unsupported(format!("{name} has no playable audio"))
-            })?;
+            let first = source
+                .decode_next()?
+                .ok_or_else(|| AudioError::Unsupported(format!("{name} has no playable audio")))?;
             source.pending = Some(first);
         }
 

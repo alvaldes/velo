@@ -372,8 +372,10 @@ Honest list; none of these exist behind a flag:
   playback with capped, self-pruning caches, remote covers and scrobbling
   all exist (see above). Streaming over HTTP ranges (playing before the
   whole track is on disk) is a later optimisation.
-- Opus — symphonia has no Opus decoder yet, so `.opus` files are rejected at
-  probe time.
+- Opus — the decoder exists now (a statically linked libopus behind
+  `audiopus`, no dynamic dependency), tested by encoding and decoding known
+  signals; it is not yet wired into the player's decoder factory, so `.opus`
+  files are still rejected at probe time.
 - Playlists.
 
 MP3, FLAC, M4A/AAC, OGG Vorbis and WAV are what plays today, decoded with
