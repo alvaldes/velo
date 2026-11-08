@@ -537,3 +537,36 @@ ICY-wrapped MP3 — still passes.
   pre-skip was fixed. A comment that describes the old behaviour with the authority of
   sitting next to the code is worse than no comment, and this is the second time in
   this feature that a doc outlived its truth.
+
+**L22** — T5c2a closed (`e2f31dc`, 9 files, ~1000 lines: **610 green across 35 binaries,
+twice**, clippy `--all-targets` and `fmt --check` clean). A station now sits in the queue
+and plays.
+
+- **The two seams never cross, and the tests count instead of asserting prose.** A
+  counting `PathResolver` and a recording `StationOpener` run through the same queue:
+  for `[Station, File]` the resolver records only the file path and the opener only the
+  URL, mirrored in the other order. Structurally, `resolve_entry` is reachable only from
+  the `Entry::File` arm, so a station cannot enter the Subsonic path even by mistake.
+- **`as_path()` became `Option<&Path>`** and `label()` was added, because a station has
+  no path and the tempting fix — an invented empty path — is the kind of shortcut that
+  reappears months later as a mystery in the queue.
+- **`TrackFailure` is honest now**: `{ label, message }`, where `label` is exactly what
+  the status line prints (a file's name, a station's own name; never a URL, never the
+  hash-named cache file). That made the T12c doc true as a by-product: a post-resolve
+  failure used to name the resolved cache path. One approved assertion changed value
+  (`"subsonic://music.example.com/dead"` → `"dead"`) because the old one pinned an
+  internal field the listener never saw, while the UI had always printed `dead`.
+- **The CLI line is byte-for-byte unchanged for a skipped file**, proven the only way it
+  can be: `tests/cli.rs` untouched and passing. A skipped station prints its name, and a
+  test asserts the URL never appears.
+- **Seek on a live station says so**: "velo: nothing to seek in a live station", instead
+  of a rebuild-and-refetch that would look like a seek and behave like a reconnect.
+- **Four rounds of surface extensions, and the cost was mine.** My first surface list
+  omitted the test files that construct the queue, and the `TrackFailure` rename I
+  demanded pulled in three more. The worker stopped every time with compiler-proven line
+  lists instead of inventing scope. Lesson for the next shared-struct change: name the
+  files that *construct* it in the delegation, not after the compiler complains.
+
+**Slice 9** is T5c2a alone (`e2f31dc`): oversized at ~1000 lines across nine files, recorded
+as such. It is one behaviour (a station in the queue) but it carries a type change and a
+struct rename; if review wants smaller, the rename is separable in the history by file.
