@@ -85,8 +85,9 @@ is English. Footer shows `● live` instead of a position and total.
 | T3 | S1, S8 | worker | `src/radio/{client,directory}.rs`: Radio Browser client, indexes, station search, codec filter from symphonia features | `a0f946a` |
 | T4 | S5 | worker | `src/radio/store.rs`: atomic `radio.toml` for favourites, pins and hand-added stations | `654f348` |
 | T5 | S2, S3 | parent | stream engine: `MediaSource` over the HTTP body, queue entry `File \| Station`, live semantics; **blocked on the other session's T15 (symphonia 0.6)** | || T6a | S9 | worker | `src/ui/radio.rs`: the view's state machine, sections, fuzzy filter and order card, hooked with 41 additive lines in `src/ui/mod.rs` | `9e3e835` |
-| T6b | S9 | parent | wiring: `RadioStore` load, `country::detect`, directory fetch for countries/tags/stations, refresh, catalog handoff | |
+| T6b | S9 | worker | wiring: `RadioStore` load, `country::detect`, directory fetch for countries/tags/stations, refresh, catalog handoff | `a2b4b78` |
 | T6c | S9, S3 | parent | playing a station and the `● live` footer; **needs T5**; also README `## Keys` and the help card | |
+| T6d | S5 | parent | `/states/<country>/` for the home country, so a region can actually be pinned — today only countries are reachable | |
 | T7 | S5 | worker | country from the locale, asked once | `fc650a3` |
 
 ## Log
@@ -296,6 +297,38 @@ MP3 fixture through a `Cursor`; **T5b** the HTTP stream source in
 `timeout_global`), `Icy-MetaData: 1`, `Icy-Metaint` validation, HLS sniff after the
 wrapper unwrap; **T5c** the queue in `src/audio/output.rs` — `Entry::File \|
 Station`, resolver only for files, seek a no-op for stations, one retry then skip.
+
+**Slice 7** is T6b (`a2b4b78`, 1168 lines): the biggest yet, and AGAIN because I
+delegated it too wide. Splitting T6a/T6b/T6c by *layer* was not enough — the test
+file alone is 591 lines. The lesson to apply at the next delegation: split by
+behaviour, and split the test file with it.
+
+**L14** — T6b closed (`a2b4b78`, 1168 lines: 11 tests, **545 green** across 30
+binaries, clippy `-D warnings` clean). The view now has real data: store beside the
+config file, locale country, lazy directory requests, `f` persisting, `Ctrl+R`
+re-requesting only what the current place needs.
+
+- **Lazy is proven, not asserted**: a counting transport records zero calls after
+  view construction, five polls and navigation keys at the top; one call per
+  section entry; caching on re-entry; `Ctrl+R` re-requests. The worker wrote that
+  test first and it is the one that keeps the feature honest.
+- **Nothing blocks the loop**: one detached thread per request, a single in-flight
+  slot, `try_recv` only — the same shape as the library indexer, and a disconnected
+  thread lands as one status message instead of a hang.
+- **Corrupt `radio.toml` refuses all saving for the session**, not just the first
+  write. Stronger than the spec, and the right reading of "never overwrite what you
+  could not read".
+- **Gap found and NOT hidden**: `/states/<country>/` is never fetched, so a region
+  cannot be reached and cannot be pinned, which is what S5 promised ("pinned
+  countries/regions"). Countries work; regions do not. **T6d** exists for exactly
+  this and is not optional bookkeeping — it is the missing half of a spec line.
+- Small accepted behaviours, all documented in the code: `Ctrl+R` mid-flight is
+  consumed (single slot); an order change applies to the next load rather than
+  reloading the open place; browse rows show before their indexes load, which is
+  what makes lazy entry possible at all.
+- **A process note about this session**: the worker hit a transient compile failure
+  because I rebased the worktree under it mid-task. It recovered by re-reading, but
+  the rule stands — no rebase while a worker is running in the same checkout.
 
 **L13** — the exact 0.6.1 API for the seam, read by the other session out of
 `symphonia-core-0.6.1` rather than remembered. Four things, and the first one
