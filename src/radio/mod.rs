@@ -2,6 +2,7 @@
 //! directory.
 
 pub mod client;
+pub mod country;
 pub mod directory;
 pub mod icy;
 pub mod lists;
