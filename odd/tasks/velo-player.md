@@ -518,3 +518,32 @@ The same reasoning is why the release verification stopped at "four builds compi
 
 One trap worth recording: `git cliff --tag v0.10.2` produces **two** `0.10.2` sections, because it labels the unreleased range with the tag as well. Running the generator *without* `--tag` is the correct form for "rewrite history after removing a tag"; `--tag` is for cutting a new release.
 
+**L57 — handoff: this session closes, one agent continues.**
+
+**Where the project is.** `main` at `aa6c251`; tags `v0.9.0` and `v0.10.2`; the only published release is **v0.10.2**, whose artifact was downloaded, checksum-verified and run against a real file. 25 suites, 482 tests, clippy 0, fmt clean. The human's `.mise.toml` carries their own `[tasks]` (variant B: `dev` = `cargo run --release`, the app indexes at startup) and must stay uncommitted.
+
+**What is done and must not regress** — each of these has a test that fails if it is undone:
+- the **audio callback** copies, ramps and counts, nothing else; it is byte-identical across every change of this campaign and should stay that way (compare against the previous commit, do not trust a comment);
+- **priming**: the file-start trim (`mp4::read_priming`, the `iTunSMPB`/`elst` reader) and the **pre-skip of Opus**, which is trimmed in files *and in live streams* because it is normative, not gapless-dependent;
+- **seek**: it discards exactly the codec's declared warm-up once, and the open path stays byte-identical on every fixture;
+- **cover art** is drawn only when a protocol was detected, never faked with half-blocks, and says why it hides;
+- **anything that writes the user's files** is read-only by default and needs an explicit flag to write (`--replaygain-scan` then `--apply`), and preserves every existing tag;
+- **the queue** is shared with the player (`SharedQueue`), and only entries after the playing one are editable.
+
+**Build facts that cost red runs** (all in `CONTRIBUTING.md`/`README.md` now): `audiopus = "=0.3.0-rc.0"` pulls `audiopus_sys 0.2.2`, which builds libopus with **cmake**; CMake 4 needs `CMAKE_POLICY_VERSION_MINIMUM=3.5`, set in `.cargo/config.toml` (a published crate does not carry that file, so the README says it too); the **cross container has neither ALSA headers nor cmake**, which is what `Cross.toml`'s `pre-build` installs.
+
+**Process rules this campaign paid for** (the expensive ones):
+1. **Cite a line with the commit you read it at**, or say you have not re-read it. Four cross-session rounds were spent on citations that were true when written.
+2. **The environment is part of the test.** An arm64 laptop cannot see an x86 SIMD difference, a machine with Homebrew libopus cannot see a missing cmake, and `cargo test` cannot see a container without headers.
+3. **A comment that describes the environment is a claim with no test behind it** (L55). Put it next to the file that resolves it, and cite the run that disproved the previous version.
+4. **Generated files are regenerated, not edited** (L56) — and `git cliff` without `--tag` is the form for rewriting after a tag removal; `--tag` duplicates sections.
+5. **Do not act on a tree with someone else's uncommitted work.** Two incidents in this session came from tree-wide operations (`read-tree --reset -u` is as destructive as `reset --hard`), one of which destroyed and then recovered the human's `.mise.toml` from dangling blobs.
+
+**What is open, and whose it is:**
+- **radio**: T6c (enqueue from the view, `● live` footer, the `## Keys` section), T6d, the `feat/radio` merge, and **T5d — a real station end to end**, which is the only test that decides whether that engine works.
+- **the human**: the next minor and the merge timing; whether to keep or drop the deferred items below.
+- **deferred on purpose, not forgotten**: Opus seek with one packet of pre-roll (a change to seek *semantics*, which is why it was measured and left alone); true-peak round trips on FLAC/Ogg (no fixture, no encoder crate allowed).
+- **reviewed and closed**: the dispatch with the `Station` arm and the retry budget lives in `fbe75b5`; the retry policy is `Retry { attempts, delay }` with a **per-turn** budget, and the test that proves it is the one where the opener always succeeds and the source always fails.
+
+The reasoning behind every line above is in `L42`–`L56`. Read those before changing audio.
+
