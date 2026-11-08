@@ -6,7 +6,9 @@ use std::sync::Arc;
 
 use clap::{CommandFactory as _, Parser};
 
+use velo::audio::loudness;
 use velo::audio::output::PathResolver;
+use velo::audio::replay_gain::{GainTags, format_gain_db, format_peak, write_tags};
 use velo::audio::{Player, TrackSource};
 use velo::config::{self, Cli, Config, Settings};
 use velo::library::Library;
@@ -69,6 +71,14 @@ fn main() -> ExitCode {
     // The sync needs no terminal either — it runs over ssh like the probe.
     if cli.sync {
         return sync_library(&settings, home.as_deref());
+    }
+    // The ReplayGain scan is the same kind of headless chore: files in, a
+    // report out, and nothing written unless `--apply` was passed (T13).
+    if cli.replaygain_scan {
+        if cli.files.is_empty() {
+            return usage_help();
+        }
+        return replaygain_scan(&cli.files, cli.apply);
     }
     // `bit_perfect` is resolved and carried in `settings`; the audio path
     // and the interface read it (T17).
@@ -476,6 +486,121 @@ fn sync_library(settings: &Settings, home: Option<&OsStr>) -> ExitCode {
             eprintln!("velo: sync failed: {error}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Measures each file's loudness and reports the `ReplayGain` tags velo would
+/// write (T13, S15). All files in one invocation are one album: the album gain
+/// is the pooled blocks gated together, never an average of track gains.
+///
+/// Per file the report says `ok`, `skipped (no audio)` or `failed (reason)`;
+/// one bad file never stops the run. Without `--apply` nothing on disk is
+/// touched — a dry run is the only default for something that edits files.
+/// Exit 0 when every file succeeded, 1 when any file failed (measuring it or
+/// writing it), after every file was still attempted.
+fn replaygain_scan(files: &[PathBuf], apply: bool) -> ExitCode {
+    enum Outcome {
+        Measured(loudness::LoudnessMeter),
+        NoAudio,
+        Failed(String),
+    }
+
+    let outcomes: Vec<(&PathBuf, Outcome)> = files
+        .iter()
+        .map(|path| {
+            let outcome = match loudness::meter_for(path) {
+                Ok(meter) => match meter.integrated() {
+                    Some(_) => Outcome::Measured(meter),
+                    None => Outcome::NoAudio,
+                },
+                Err(error) => Outcome::Failed(error.to_string()),
+            };
+            (path, outcome)
+        })
+        .collect();
+
+    // The album: every measured file's blocks pooled and gated together.
+    let album =
+        loudness::integrated_album(outcomes.iter().filter_map(|(_, outcome)| match outcome {
+            Outcome::Measured(meter) => Some(meter),
+            _ => None,
+        }));
+
+    let mut failures = 0_usize;
+    let mut written = 0_usize;
+    for (path, outcome) in &outcomes {
+        match outcome {
+            Outcome::NoAudio => println!("{}: skipped (no audio)", path.display()),
+            Outcome::Failed(reason) => {
+                failures += 1;
+                println!("{}: failed ({reason})", path.display());
+            }
+            Outcome::Measured(meter) => {
+                // Some(_) above: a measured file has a measurement.
+                let track = meter
+                    .integrated()
+                    .expect("a measured file has a measurement");
+                let album = album.expect("a measured file makes an album measurement");
+                let tags = GainTags {
+                    track_gain_db: track.gain_db(),
+                    track_peak: track.true_peak,
+                    album_gain_db: album.gain_db(),
+                    album_peak: album.true_peak,
+                };
+                if apply {
+                    match write_tags(path, &tags) {
+                        Ok(()) => {
+                            written += 1;
+                            println!(
+                                "{}: ok, wrote track gain {}, peak {}; album gain {}, peak {}",
+                                path.display(),
+                                format_gain_db(tags.track_gain_db),
+                                format_peak(tags.track_peak),
+                                format_gain_db(tags.album_gain_db),
+                                format_peak(tags.album_peak)
+                            );
+                        }
+                        Err(error) => {
+                            failures += 1;
+                            println!(
+                                "{}: failed (cannot write the tags: {error})",
+                                path.display()
+                            );
+                        }
+                    }
+                } else {
+                    println!(
+                        "{}: ok, track gain {}, peak {}; album gain {}, peak {}",
+                        path.display(),
+                        format_gain_db(tags.track_gain_db),
+                        format_peak(tags.track_peak),
+                        format_gain_db(tags.album_gain_db),
+                        format_peak(tags.album_peak)
+                    );
+                }
+            }
+        }
+    }
+
+    if let Some(album) = album {
+        println!(
+            "album: gain {}, peak {}",
+            format_gain_db(album.gain_db()),
+            format_peak(album.true_peak)
+        );
+    }
+    if apply {
+        if written > 0 {
+            let unit = if written == 1 { "file" } else { "files" };
+            println!("wrote ReplayGain tags to {written} {unit}");
+        }
+    } else {
+        println!("dry run: nothing written — rerun with --apply to write these tags");
+    }
+    if failures > 0 {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
     }
 }
 

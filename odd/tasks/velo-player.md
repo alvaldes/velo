@@ -69,7 +69,7 @@ Root folder: `/Users/alvaldes/Music/Library` (L15). Metadata comes from tags fir
 | T12b | Sync the remote library into the index as rows with a `source` column; search over them | S14 | worker (clone) | `b2eef0b` |
 | T12c | Cache-on-play: fetch the original bytes with `format=raw`, then play locally (keeps seek, gapless, bit-perfect) | S14 | pending | `05e6c76` |
 | T12d | Remote cover art via `getCoverArt` and scrobbling on track change | S14 | pending | `3662e85` |
-| T13 | ReplayGain tag writer | S15 | inline | — |
+| T13 | ReplayGain tag writer | S15 | inline | `c006a62` |
 | T14 | Opus decode via a bundled `libopus` (`audiopus_sys`), keeping the single-binary promise | S5 | inline | — |
 | T15 | Evaluate the symphonia 0.6 API (`codecs::audio::AudioDecoder`, generic buffers) and migrate behind the existing tests | S5, S7 | inline | `b2187ad` |
 | T16 | Trim AAC/MP4 encoder priming: symphonia 0.5 does not populate `delay`/`padding` for isomp4, so an M4A join carries up to ~1024 frames of priming (read `iTunSMPB` or the `elst` edit list) | S7 | inline | `1e7e36d` |
@@ -382,4 +382,41 @@ The surface was **17 references** and the 444-test suite was the differential, s
 **`TrackSource`'s public shape did not change, deliberately.** The parallel radio session is building a seam on it, and T15 existed partly so they build it once instead of twice. Sequencing across sessions is a design decision, not a courtesy.
 
 symphonia 0.6.1 still ships no Opus decoder, so T14 stands exactly as written.
+
+**L45** (T13 closed in `c006a62`): ReplayGain measured and written, and the safety was the design.
+
+The metering follows the standards instead of approximating them: the two K-weighting biquads re-derived per sample rate from BS.1770-4's analog parameters, 400 ms blocks at 75 % overlap, absolute gate at −70 LUFS, relative gate at −10 LU. Album gain is a **second measurement pooling every file's blocks**, never an average of per-track numbers — averaging is what album gain exists to avoid.
+
+**The anchors are known answers**: a 1 kHz sine at −20 dBFS integrates to −20 LUFS within 0.1, and that works for a reason worth stating — K-weighting is +0.70 dB at 1 kHz, which cancels the −0.691 offset in the formula almost exactly. The 48 kHz coefficients are pinned to the standard's own table, because a filter copied from a blog is a filter nobody can defend later.
+
+**Everything about the command follows from "this writes to somebody's files".** The default is read-only: `--replaygain-scan` measures and prints what it *would* write, and the file is untouched — verified byte for byte on a real track. `--apply` is refused without the scan, so nobody writes tags by accident. Writing preserves every existing tag, proved by a round trip carrying artist, title, comment, genre and a cover picture through unchanged: **destroying a user's tags is worse than not writing at all.** Per file the report says `ok`, `skipped (no audio)` or `failed (reason)`, and one bad file never stops the run.
+
+A real track from the library measured **−10.74 dB** of gain with a **peak of 1.10** — a master already running hot, which the reader's clipping cap (L33) keeps from being amplified into distortion. The two halves of ReplayGain finally meet: measure it here, respect it there.
+
+Follow-ups left explicit: true peak (4× oversampling) instead of sample peak, and round trips on real MP3/FLAC/M4A files rather than the hand-built WAVs the tests use — the lofty path is the same, but "the same path" is not a measurement.
+
+**L46** (the two limits of T13, closed in `387dd53`): true peak and real-format round trips.
+
+**True peak is now the peak.** The signal is oversampled 4× with the interpolating filter **ITU-R BS.1770-4 Annex 2** specifies — the standard's own 48-tap, four-phase table, transcribed with each phase's printed DC sum pinned by a unit test — and the largest absolute value of that oversampled signal is what gets written. The motivating case is the Annex's own: a full-scale sine at a quarter of the sample rate reports a sample peak of 0.99997 and a true peak of **1.4277**. A peak under-reported by 3 dB is a clipping cap that lets a track clip, which is the whole reason the cap exists.
+
+**The convincing number came from a real file, not a synthetic one**: the same track from the library reported a sample peak of `1.102890` before and `1.116036` after. The user-facing behaviour moved by exactly the inter-sample overshoot the feature exists to catch — a change you can point at.
+
+**Round trips stopped being an assumption.** MP3 and M4A fixtures are copied to scratch, tagged, read back through the reader the player uses, and every pre-existing item is asserted to survive **by name**. FLAC and Ogg cannot be tested honestly — no fixture, and neither `lofty` nor `symphonia` can encode one without a new dependency — so those tests are **absent rather than faked**. "The same lofty path" was never a measurement, and now the two formats that can be measured are.
+
+**A small lesson about delegation**: the worker that did this stopped at the one line it could not touch and *said so* — the CLI still built its tags from the sample peak, so the feature would have measured beautifully and reached no user. Wiring that line is what turned a measurement into a behaviour. A report that names what it could not finish is worth more than one that claims completion.
+
+**L47 — where the project stands, measured (written while waiting on a decision).**
+
+**Done and in `main`**: formats, gapless, library index from tags (schema **v3**: `source`, `remote_id`, `cover_id`), browse by artist/album/track/genre, fuzzy search, cover art that never fakes itself, an editable queue, transport with seek and a clock that counts the right unit, broken tracks skipped and named, mono playing into stereo, Subsonic end to end (client, index rows, cache-on-play, remote covers, scrobbling), ReplayGain read **and now measured and written**, AAC/MP4 priming trimmed, symphonia on **0.6.1**, `clap` with a strict config, README/LICENSE/CI/release, and `cargo install` measured working. 24 suites, 469 tests, clippy 0, fmt clean.
+
+**The one thing missing from the original scope is Opus (T14)**, and the decision that was blocking it was the price of a C dependency. Measuring it settled the question better than arguing: no `symphonia-codec-opus` exists for 0.6 (only pcm, vorbis, aac, adpcm), `audiopus_sys` builds libopus **1.6.1** statically in **3.1 s** cold-release, the linked binary grew by **~400 KB** on an 8.9 MB binary, and `otool` shows **no dynamic linkage** — zero runtime dependency. A worry of three seconds is not a reason to leave a format out.
+
+**Coordination with the parallel radio session (01a1b812)**, recorded because a future session will inherit it:
+- They own `src/radio/**` and `odd/tasks/radio.md`; T14 owns `src/audio/mod.rs` **after** their T5a lands. They own `src/audio/output.rs` for T5c (typed queue: `enum Entry { File(PathBuf), Station(..) }`, resolver consulted only for `File`). I do not touch it.
+- **The single mouth for building a decoder** is `open_decoder(params: &AudioCodecParameters, gapless: bool) -> Result<Box<dyn AudioDecoder>, AudioError>`, being extracted in their T5a. `open`/`open_at` pass `gapless: true`; a station passes `false`. T14 adds Opus as **one arm** there, and `decodable(codec)` must live beside it — two copies of the decoder factory would let the player and the radio stream disagree about which codecs are playable, and that is a bug that surfaces months later.
+- Their question "does the visual cover check edit `src/ui/mod.rs`?" was answered honestly: it does not, **unless** the human reports the cover missing, in which case I touch only `draw_artwork`/`pane`/`refresh_artwork` and warn them first.
+
+**Two things owed by a human, both older than this entry**: the cover rendering in a real Kitty/Sixel/iTerm2 terminal (owed since L34, and the diagnostic sentence already exists to say *why* it hides), and a `velo --replaygain-scan <folder>` on the real library to judge whether the LUFS numbers match what they hear.
+
+**The lesson I keep relearning in this project, written where it costs me next time**: an unquoted heredoc turned Markdown code spans into shell commands twice in one session — once injecting two hundred lines of ImageMagick help into this very file. When the text being written contains backticks, the heredoc must be quoted. The repair is an amend; the attention is cheaper.
 

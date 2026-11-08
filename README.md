@@ -121,6 +121,31 @@ velo song.flac song.mp3        # open the interface over them
 velo --play song.flac song.mp3 # play and exit when finished
 ```
 
+## ReplayGain
+
+velo can measure a file's loudness the EBU R128 way and write the ReplayGain
+2.0 tags the player then applies (see `replay_gain` in the configuration):
+
+```sh
+velo --replaygain-scan album/*.flac          # measure and print — a dry run
+velo --replaygain-scan --apply album/*.flac  # write the tags
+```
+
+Every file passed in one invocation is measured as one album: the track gain
+come from each file's own measurement, the album gain from all the files'
+blocks pooled and gated together (EBU R128 / ITU-R BS.1770-4, −18 LUFS target,
+absolute gate −70 LUFS, relative gate −10 LU). The dry run is the default —
+nothing is ever written without `--apply`. A file that already carries artist,
+title, comments or cover art keeps every one of them; only the four
+`REPLAYGAIN_*` keys are added. The written peak is a **true peak**: the signal is
+oversampled 4× with the interpolating filter ITU-R BS.1770-4 Annex 2 specifies,
+and the largest absolute value of that oversampled signal is what gets written —
+which catches the inter-sample overshoot a sample peak misses, and which is what
+the clipping cap further up respects.
+
+Each file is reported as `ok`, `skipped (no audio)` or `failed (reason)`; one
+bad file never stops the run, and a read-only file is reported, not forced.
+
 ## Configuration
 
 One TOML file, read once at startup, and the only place velo keeps anything:
@@ -335,14 +360,13 @@ When `replay_gain` is `track` or `album`, every track's ReplayGain tags are
 read at playback time and the gain is applied to the audio with clipping
 protection: a track that declares its own peak is never pushed past full scale.
 Tracks without usable tags play unchanged; a wrong tag value is ignored rather
-than misapplied.
+than misapplied. To fill those tags in from a measurement, see
+`--replaygain-scan` above.
 
 ## Not yet
 
 Honest list; none of these exist behind a flag:
 
-- ReplayGain tag writing (reading and applying them is in: the `replay_gain`
-  setting).
 - Subsonic/Navidrome, still early access: the connection, authentication,
   `velo --subsonic-test`, `velo --sync`, `velo --cache-clean`, cache-on-play
   playback with capped, self-pruning caches, remote covers and scrobbling

@@ -237,3 +237,208 @@ fn a_library_in_the_config_file_is_expanded_and_indexed() {
     );
     let _ = std::fs::remove_dir_all(&home);
 }
+
+// ------------------------------------------------ the ReplayGain scan (T13)
+
+/// [`run_in`] with stdout captured too: the scan's per-file report *is* its
+/// product, so its lines are part of the contract.
+fn run_capture(home: &std::path::Path, arguments: &[&str]) -> (i32, String, String) {
+    let output = Command::new(binary())
+        .args(arguments)
+        .env("HOME", home)
+        .env_remove("XDG_CONFIG_HOME")
+        .env("VELO_DB", home.join("index.db"))
+        .current_dir(home)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap_or_else(|error| panic!("cannot run {}: {error}", binary()));
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// Writes a 16-bit PCM stereo WAV with a 1 kHz sine at `amplitude` (i16 units),
+/// `frames` frames long.
+fn write_sine_wav(path: &std::path::Path, frames: usize, amplitude: i16) {
+    let sample_rate: u32 = 44_100;
+    let channels: u16 = 2;
+    let data_len = u32::try_from(frames * usize::from(channels) * 2).unwrap();
+    let mut out = Vec::with_capacity(44 + data_len as usize);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36 + data_len).to_le_bytes());
+    out.extend_from_slice(b"WAVE");
+    out.extend_from_slice(b"fmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    out.extend_from_slice(&channels.to_le_bytes());
+    out.extend_from_slice(&sample_rate.to_le_bytes());
+    out.extend_from_slice(&(sample_rate * u32::from(channels) * 2).to_le_bytes());
+    out.extend_from_slice(&(channels * 2).to_le_bytes());
+    out.extend_from_slice(&16u16.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data_len.to_le_bytes());
+    for frame in 0..frames {
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "test fixtures stay far below u32::MAX frames"
+        )]
+        let frame = frame as u32;
+        let value = f64::from(amplitude)
+            * (2.0 * std::f64::consts::PI * 1_000.0 * f64::from(frame) / f64::from(sample_rate))
+                .sin();
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the try_from below clamps the rounded amplitude"
+        )]
+        let rounded = value.round() as i64;
+        let value = i16::try_from(rounded).unwrap();
+        for _ in 0..channels {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+    std::fs::write(path, out).unwrap();
+}
+
+/// A zero-frame WAV: a valid container with no audio in it.
+fn write_empty_wav(path: &std::path::Path) {
+    let mut out = Vec::with_capacity(44);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&36u32.to_le_bytes());
+    out.extend_from_slice(b"WAVE");
+    out.extend_from_slice(b"fmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    out.extend_from_slice(&2u16.to_le_bytes());
+    out.extend_from_slice(&44_100u32.to_le_bytes());
+    out.extend_from_slice(&176_400u32.to_le_bytes());
+    out.extend_from_slice(&4u16.to_le_bytes());
+    out.extend_from_slice(&16u16.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&0u32.to_le_bytes());
+    std::fs::write(path, out).unwrap();
+}
+
+#[test]
+fn apply_without_the_scan_is_a_usage_error() {
+    let error = Cli::try_parse_from(["velo", "--apply", "/a.flac"])
+        .expect_err("--apply alone must be refused");
+    assert_eq!(error.exit_code(), 2);
+}
+
+#[test]
+fn the_scan_without_the_write_flag_changes_nothing_on_disk() {
+    let home = temp_home("scan-dry");
+    let wav = home.join("song.wav");
+    write_sine_wav(&wav, 22_050, 3_277); // −20 dBFS
+    let before = std::fs::read(&wav).unwrap();
+
+    let (code, stdout, _) = run_capture(&home, &["--replaygain-scan", "song.wav"]);
+
+    assert_eq!(code, 0, "a clean dry run exits 0");
+    assert!(
+        stdout.contains("track gain") && stdout.contains("album: gain"),
+        "the dry run prints what it would write:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("nothing written"),
+        "the dry run says so:\n{stdout}"
+    );
+    assert_eq!(
+        std::fs::read(&wav).unwrap(),
+        before,
+        "without --apply the file must be byte-identical"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn the_scan_with_the_write_flag_writes_the_tags() {
+    let home = temp_home("scan-apply");
+    let wav = home.join("song.wav");
+    write_sine_wav(&wav, 22_050, 3_277);
+    let before = std::fs::read(&wav).unwrap();
+
+    let (code, stdout, _) = run_capture(&home, &["--replaygain-scan", "--apply", "song.wav"]);
+
+    assert_eq!(code, 0, "stdout: {stdout}");
+    assert_ne!(
+        std::fs::read(&wav).unwrap(),
+        before,
+        "with --apply the file changes"
+    );
+    // The tag is readable through the same path the player uses.
+    let gain = velo::audio::replay_gain::Gain::read_from(&wav, velo::config::ReplayGainMode::Track);
+    assert!(gain.applies(), "the written tag must reach the player");
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn a_read_only_file_is_reported_and_the_run_continues() {
+    let home = temp_home("scan-readonly");
+    let readonly = home.join("first.wav");
+    let writable = home.join("second.wav");
+    write_sine_wav(&readonly, 22_050, 3_277);
+    write_sine_wav(&writable, 22_050, 6_538);
+    let mut perms = std::fs::metadata(&readonly).unwrap().permissions();
+    perms.set_readonly(true);
+    std::fs::set_permissions(&readonly, perms).unwrap();
+
+    let (code, stdout, _) = run_capture(
+        &home,
+        &["--replaygain-scan", "--apply", "first.wav", "second.wav"],
+    );
+
+    assert_eq!(code, 1, "a failed file must not exit 0\nstdout: {stdout}");
+    assert!(
+        stdout.contains("first.wav") && stdout.contains("failed"),
+        "the read-only file is reported:\n{stdout}"
+    );
+    assert!(
+        velo::audio::replay_gain::Gain::read_from(&writable, velo::config::ReplayGainMode::Track)
+            .applies(),
+        "the run continued with the next file"
+    );
+    assert!(
+        !velo::audio::replay_gain::Gain::read_from(&readonly, velo::config::ReplayGainMode::Track)
+            .applies(),
+        "the read-only file was never written"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn a_file_without_audio_is_skipped_not_failed() {
+    let home = temp_home("scan-empty");
+    let wav = home.join("empty.wav");
+    write_empty_wav(&wav);
+
+    let (code, stdout, _) = run_capture(&home, &["--replaygain-scan", "empty.wav"]);
+
+    assert_eq!(code, 0, "stdout: {stdout}");
+    assert!(stdout.contains("skipped (no audio)"), "stdout:\n{stdout}");
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn a_broken_file_fails_without_stopping_the_run() {
+    let home = temp_home("scan-broken");
+    let broken = home.join("broken.wav");
+    std::fs::write(&broken, b"this is not audio at all").unwrap();
+    let good = home.join("good.wav");
+    write_sine_wav(&good, 22_050, 3_277);
+
+    let (code, stdout, _) = run_capture(&home, &["--replaygain-scan", "broken.wav", "good.wav"]);
+
+    assert_eq!(code, 1, "stdout: {stdout}");
+    assert!(
+        stdout.contains("broken.wav") && stdout.contains("failed ("),
+        "the broken file is reported with a reason:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("good.wav") && stdout.contains("track gain"),
+        "the run continued with the good file:\n{stdout}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
