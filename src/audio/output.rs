@@ -39,6 +39,45 @@ const TAP_DIVISOR: usize = 2;
 /// How long the main thread waits before re-checking whether playback drained.
 const DRAIN_POLL: Duration = Duration::from_millis(20);
 
+/// The station retry policy (T5c2b, S2): how many attempts a failing
+/// station gets and how long the producer waits between them. The policy is
+/// data so it travels from the caller — [`Retry::NONE`] is the default and
+/// the fast path; [`Retry::ONCE`] is production's explicit ask.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Retry {
+    /// Total attempts per episode: 1 is no retry, 2 is exactly one retry.
+    /// The budget belongs to the turn, not to one connection: it is spent by
+    /// failures and restored only by audio actually emitted, so a station
+    /// that accepts and cuts at once burns the same budget as one that
+    /// played — never a loop.
+    pub attempts: u32,
+    /// How long the producer waits between attempts, on its own thread —
+    /// never in the audio callback, and never before the first attempt.
+    pub delay: Duration,
+}
+
+impl Retry {
+    /// No retry: one attempt, no wait. The default, so a caller that
+    /// forgets to choose a policy gets the path that never sleeps.
+    pub const NONE: Self = Self {
+        attempts: 1,
+        delay: Duration::ZERO,
+    };
+
+    /// Production (S2): exactly one retry after 2 s.
+    pub const ONCE: Self = Self {
+        attempts: 2,
+        delay: Duration::from_secs(2),
+    };
+}
+
+impl Default for Retry {
+    /// [`Retry::NONE`] — the fast path, never a hidden 2 s sleep.
+    fn default() -> Self {
+        Self::NONE
+    }
+}
+
 /// A track the producer could not play, published so the interface can say so
 /// and the queue can continue without it (T19): a corrupt file must not kill
 /// an album, and it must not be silent either.
@@ -389,8 +428,8 @@ pub trait StationSource: Send {
     ///
     /// Returns [`AudioError`] when the body stalls past its read bound or
     /// the decoder fails; the caller decides what follows — here, one
-    /// failure announcement and the next queue entry (the retry policy is
-    /// T5c2b).
+    /// retry, then a failure announcement and the next queue entry (the
+    /// retry policy is T5c2b).
     fn read_block(&mut self) -> Result<Option<Vec<f32>>, AudioError>;
 
     /// The format the station decodes at.
@@ -407,13 +446,13 @@ pub trait StationSource: Send {
 /// off the network, in the same spirit as [`PathResolver`]: production goes
 /// through `radio::stream::open` with the default per-operation timeouts
 /// ([`LiveOpener`]); a test injects a fake over fixture bytes. Called once
-/// per station entry, when the producer reaches it.
+/// per station open — a retry opens through it again (T5c2b).
 pub trait StationOpener: Send + Sync {
     /// # Errors
     ///
     /// Fails when the station cannot be reached or its body does not
-    /// decode; the producer announces the failure and moves to the next
-    /// entry — one attempt; the retry-and-skip policy is T5c2b.
+    /// decode; the caller retries exactly once after its injected delay,
+    /// then announces the failure and moves to the next entry (T5c2b).
     fn open(&self, url: &str) -> Result<Box<dyn StationSource>, StreamError>;
 }
 
@@ -591,7 +630,8 @@ impl Player {
         // the device to be built on (T12c). A file resolves through the
         // resolver and opens; a station opens through the station opener —
         // never the resolver, never a path — and the opened stream is handed
-        // to the producer, so a station is fetched once, never twice. The
+        // to the producer, so a station is fetched once at most — twice only
+        // under the one-retry policy (T5c2b). The
         // producer decides every entry again when it reaches it — a cache hit
         // costs no network. The dispatch, not a comment, is what keeps the
         // two seams apart.
@@ -604,8 +644,7 @@ impl Player {
                 (TrackSource::open(&first_path)?.spec(), None)
             }
             Entry::Station { url, .. } => {
-                let source = LiveOpener
-                    .open(url)
+                let source = open_station_retrying(&LiveOpener, url, Retry::ONCE)
                     .map_err(|error| AudioError::Unsupported(error.to_string()))?;
                 (source.spec(), Some((url.clone(), source)))
             }
@@ -693,6 +732,7 @@ impl Player {
                         bit_perfect,
                         resolver,
                         opener: None,
+                        retry: Retry::ONCE,
                         preopen: preopened,
                     };
                     let shared = Shared {
@@ -974,6 +1014,8 @@ struct Sequence {
     /// means the production opener — one GET with the default per-operation
     /// timeouts. Never asked about a file entry.
     opener: Option<Arc<dyn StationOpener>>,
+    /// The station retry policy (T5c2b): the delay travels from the caller.
+    retry: Retry,
     /// The first station, opened at selection time and handed over so it is
     /// fetched once. The producer uses it only while the entry it reaches
     /// still carries the same URL.
@@ -1330,6 +1372,7 @@ fn run_sequence(
         bit_perfect,
         resolver,
         opener,
+        retry,
         mut preopen,
     } = job;
     let mut expected = expected;
@@ -1374,9 +1417,22 @@ fn run_sequence(
                 }
             },
             Entry::Station { url, .. } => {
-                match station_source(&mut preopen, opener.as_ref(), url) {
+                match station_source(&mut preopen, opener.as_ref(), url, retry) {
                     Ok(source) => {
-                        play_station_turn(&label, source, &turn, &mut expected, shared, sink)
+                        // The reopen is pure — it opens and nothing else. The
+                        // policy's delay is spent by the turn itself, on this
+                        // (producer) thread, never in the audio callback.
+                        let mut reopen = || station_opener(opener.as_ref()).open(url);
+                        play_station_turn(
+                            &label,
+                            source,
+                            &turn,
+                            &mut expected,
+                            shared,
+                            sink,
+                            retry,
+                            &mut reopen,
+                        )
                     }
                     Err(error) if turn.first => {
                         return Err(AudioError::Unsupported(error.to_string()));
@@ -1469,16 +1525,43 @@ fn station_opener(opener: Option<&Arc<dyn StationOpener>>) -> &dyn StationOpener
 /// The station source for `url`: the one opened at selection time, while the
 /// entry the producer reached still is that URL, otherwise a fresh open. A
 /// preopen that no longer matches is dropped — the queue may have moved
-/// under it.
+/// under it. A fresh open carries the retry policy (T5c2b); a preopen was
+/// already tried under it at selection time.
 fn station_source(
     preopen: &mut Option<(String, Box<dyn StationSource>)>,
     opener: Option<&Arc<dyn StationOpener>>,
     url: &str,
+    retry: Retry,
 ) -> Result<Box<dyn StationSource>, StreamError> {
     match preopen.take() {
         Some((preopen_url, source)) if preopen_url == url => Ok(source),
-        _ => station_opener(opener).open(url),
+        _ => open_station_retrying(station_opener(opener), url, retry),
     }
+}
+
+/// Opens a station under the retry policy (T5c2b, S2): each failed attempt
+/// after the first waits `retry.delay` on the caller's thread — the delay
+/// sits between attempts, never before the first — and the last failure is
+/// the caller's to announce. With [`Retry::NONE`] this is one attempt and
+/// no wait. No stall timer sits beside this: a stall is already an error
+/// through the stream source's per-read bound (T5b1), and a second
+/// mechanism would only lie about which one fired.
+fn open_station_retrying(
+    opener: &dyn StationOpener,
+    url: &str,
+    retry: Retry,
+) -> Result<Box<dyn StationSource>, StreamError> {
+    let mut last: Option<StreamError> = None;
+    for attempt in 0..retry.attempts {
+        if attempt > 0 {
+            thread::sleep(retry.delay);
+        }
+        match opener.open(url) {
+            Ok(source) => return Ok(source),
+            Err(error) => last = Some(error),
+        }
+    }
+    Err(last.expect("attempts is at least 1, so the opener answered"))
 }
 
 /// Plays one track into the sink. The track the player was built from
@@ -1614,9 +1697,18 @@ fn play_turn(
 /// bytes arrive. It has no duration, is never seeked (S3: the offset a seek
 /// passes is ignored), and skips `ReplayGain` and bit-perfect reopening
 /// (S3); its samples convert into the sequence's format exactly as a file's
-/// do, so it never pairs with a neighbour as a gapless join (S3). Its
-/// failure is announced for the station's own name and costs this one
-/// entry: one attempt, then the queue moves on (the retry policy is T5c2b).
+/// do, so it never pairs with a neighbour as a gapless join (S3). A failure
+/// — at open or while reading — gets the caller's retry policy: the
+/// producer spends the budget between attempts on its own thread and
+/// restores it only when audio actually reaches the ring, so a cut stream
+/// cannot loop. A spent budget announces the failure for the station's own
+/// name and costs this one entry: the queue moves on (T5c2b).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the turn is one story — open state, the sequence's shared
+    handles, the sink, the policy and the pure reopen — and every one is
+    distinct data, not a bundle to hide"
+)]
 fn play_station_turn(
     label: &str,
     mut source: Box<dyn StationSource>,
@@ -1624,6 +1716,8 @@ fn play_station_turn(
     expected: &mut TrackSpec,
     shared: &Shared<'_>,
     sink: &mut dyn SequenceSink,
+    retry: Retry,
+    reopen: &mut dyn Fn() -> Result<Box<dyn StationSource>, StreamError>,
 ) -> Turn {
     // Announce which entry is being produced once it has opened, so a
     // reader only ever sees an entry that is playing or about to — never
@@ -1668,6 +1762,12 @@ fn play_station_turn(
     // tags from, so the samples go through at unity gain.
     let gain = Gain::identity();
     let mut heard = false;
+    // The retry budget belongs to this turn, not to one connection (T5c2b):
+    // it is spent by failures and restored only by audio actually emitted,
+    // so a stream that accepts and cuts at once burns the same budget as
+    // one that played — the turn ends, never loops. The delay is slept here
+    // on the producer thread, between attempts, never in the callback.
+    let mut failures_without_progress: u32 = 0;
     loop {
         if shared.stop.load(Ordering::Relaxed) {
             return Turn::Stopped;
@@ -1675,11 +1775,23 @@ fn play_station_turn(
         let block = match source.read_block() {
             Ok(Some(block)) => block,
             Ok(None) => break,
-            // A station that stops decoding costs itself, not the queue:
-            // what it decoded stays, the next entry follows.
             Err(error) => {
-                sink.failure(track_failure(label, error.to_string()));
-                return Turn::Failed;
+                if failures_without_progress + 1 >= retry.attempts {
+                    sink.failure(track_failure(label, error.to_string()));
+                    return Turn::Failed;
+                }
+                failures_without_progress += 1;
+                thread::sleep(retry.delay);
+                match reopen() {
+                    Ok(fresh) => {
+                        source = fresh;
+                        continue;
+                    }
+                    Err(retry_error) => {
+                        sink.failure(track_failure(label, retry_error.to_string()));
+                        return Turn::Failed;
+                    }
+                }
             }
         };
         let mut resampled = match converter.convert(&map.apply(&block)) {
@@ -1690,11 +1802,19 @@ fn play_station_turn(
             }
         };
         gain.apply(&mut resampled);
-        heard |= !resampled.is_empty();
+        let emitted = !resampled.is_empty();
+        heard |= emitted;
+        if emitted {
+            // Real progress: the budget is restored.
+            failures_without_progress = 0;
+        }
         sink.push_block(&resampled);
         // What the station is announcing now is published when it changes,
-        // so a repeated title never repaints (S4).
-        let title = source.title();
+        // so a repeated title never repaints (S4). A `None` after a retry
+        // means "not announced yet", not a change: the title the listener
+        // already saw is held until the reopened station says something new
+        // (T5c2b — a retry must not reset what the UI is showing).
+        let title = source.title().or_else(|| last_title.clone());
         if title != last_title {
             publish_title(shared, sink, title.as_deref());
             last_title = title;
@@ -1810,6 +1930,7 @@ pub fn drain_headless_with_gain(
         bit_perfect: false,
         resolver: None,
         opener: None,
+        retry: Retry::NONE,
         preopen: None,
     };
     let mut refuse = |_: TrackSpec| -> Result<TrackSpec, AudioError> {
@@ -1863,6 +1984,7 @@ pub fn drain_headless_resolving(
         bit_perfect: false,
         resolver,
         opener: None,
+        retry: Retry::NONE,
         preopen: None,
     };
     let mut refuse = |_: TrackSpec| -> Result<TrackSpec, AudioError> {
@@ -1888,7 +2010,10 @@ pub fn drain_headless_resolving(
 /// a file entry resolves exactly as before. Every published progress record
 /// — the duration when known, the station's title when announced — goes to
 /// `on_progress`, which is how a headless test observes what the player
-/// exposes to the interface.
+/// exposes to the interface. `retry` is the station retry policy (T5c2b),
+/// passed by the caller — [`Retry::ONCE`] in production, [`Retry::NONE`] or
+/// a zero-delay [`Retry::ONCE`] in tests, which is how the retry tests
+/// prove the policy without waiting on the wall clock.
 ///
 /// # Errors
 ///
@@ -1905,6 +2030,7 @@ pub fn drain_headless_with_opener(
     gain_mode: ReplayGainMode,
     resolver: Option<Arc<dyn PathResolver>>,
     opener: Option<Arc<dyn StationOpener>>,
+    retry: Retry,
     stop: &AtomicBool,
     on_block: &mut dyn FnMut(&[f32]),
     on_failure: &mut dyn FnMut(TrackFailure),
@@ -1918,6 +2044,7 @@ pub fn drain_headless_with_opener(
         bit_perfect: false,
         resolver,
         opener,
+        retry,
         preopen: None,
     };
     let mut refuse = |_: TrackSpec| -> Result<TrackSpec, AudioError> {
@@ -1967,6 +2094,7 @@ pub fn drain_headless_repeating(
         bit_perfect: false,
         resolver: None,
         opener: None,
+        retry: Retry::NONE,
         preopen: None,
     };
     let mut refuse = |_: TrackSpec| -> Result<TrackSpec, AudioError> {
@@ -2017,6 +2145,7 @@ pub fn drain_headless_bit_perfect(
         bit_perfect: true,
         resolver: None,
         opener: None,
+        retry: Retry::NONE,
         preopen: None,
     };
     let channels = expected.channels;
@@ -2238,7 +2367,33 @@ const fn elapsed_samples(
 
 #[cfg(test)]
 mod tests {
-    use super::elapsed_samples;
+    use super::{Retry, elapsed_samples};
+    use std::time::Duration;
+
+    #[test]
+    fn the_retry_policies_are_exactly_the_two_the_spec_names() {
+        assert_eq!(
+            Retry::NONE,
+            Retry {
+                attempts: 1,
+                delay: Duration::ZERO
+            },
+            "no retry: one attempt, no wait"
+        );
+        assert_eq!(
+            Retry::ONCE,
+            Retry {
+                attempts: 2,
+                delay: Duration::from_secs(2)
+            },
+            "production: one retry after 2 s (S2)"
+        );
+        assert_eq!(
+            Retry::default(),
+            Retry::NONE,
+            "the default is the fast path, never a hidden sleep"
+        );
+    }
 
     #[test]
     fn playing_from_the_start_counts_only_what_was_played() {
