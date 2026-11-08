@@ -13,6 +13,10 @@ categories = ["multimedia::audio", "command-line-utilities"]
 exclude = [".mise.toml", "odd/", "design/"]
 
 [dependencies]
+# Opus decode (T14): libopus built statically by audiopus_sys — no dynamic
+# runtime dependency (measured in L47: ~400 KB on an 8.9 MB binary, otool shows
+# none). The 0.3 series is a release candidate only, so 0.2 it is.
+audiopus = "0.2"
 clap = { version = "4.5", features = ["derive"] }
 cpal = "0.18.2"
 dirs = "7.0.0"

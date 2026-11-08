@@ -12,6 +12,7 @@ use std::time::Duration;
 
 pub mod loudness;
 pub mod mp4;
+pub mod opus;
 pub mod output;
 pub mod replay_gain;
 pub mod resample;
