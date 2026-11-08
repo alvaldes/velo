@@ -137,8 +137,11 @@ blocks pooled and gated together (EBU R128 / ITU-R BS.1770-4, −18 LUFS target,
 absolute gate −70 LUFS, relative gate −10 LU). The dry run is the default —
 nothing is ever written without `--apply`. A file that already carries artist,
 title, comments or cover art keeps every one of them; only the four
-`REPLAYGAIN_*` keys are added. The written peak is a sample peak (the largest
-absolute sample), not an oversampled true peak.
+`REPLAYGAIN_*` keys are added. The written peak is a **true peak**: the signal is
+oversampled 4× with the interpolating filter ITU-R BS.1770-4 Annex 2 specifies,
+and the largest absolute value of that oversampled signal is what gets written —
+which catches the inter-sample overshoot a sample peak misses, and which is what
+the clipping cap further up respects.
 
 Each file is reported as `ok`, `skipped (no audio)` or `failed (reason)`; one
 bad file never stops the run, and a read-only file is reported, not forced.

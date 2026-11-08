@@ -11,7 +11,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use lofty::config::WriteOptions;
-use lofty::file::TaggedFileExt as _;
+use lofty::file::{AudioFile as _, TaggedFileExt as _};
 use lofty::picture::{MimeType, Picture, PictureType};
 use lofty::tag::TagType;
 use lofty::tag::{ItemKey, Tag, TagExt as _};
@@ -445,6 +445,213 @@ fn a_gain_applies_to_every_track_of_a_queue_not_once_for_it() {
             "sample {index} should carry the track gain {want}, got {sample}"
         );
     }
+}
+
+// ---- round trips on the formats people actually have (T13 follow-up) ------
+
+/// A copy of a committed fixture at a unique scratch path: the fixture itself
+/// is never touched, and the copy is removed by the caller.
+fn fixture_copy(tag: &str, fixture: &str) -> PathBuf {
+    // The extension stays: lofty guesses the format from it.
+    let extension = Path::new(fixture)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("bin");
+    let path = std::env::temp_dir().join(format!(
+        "velo-replay-gain-{tag}-{}.{extension}",
+        std::process::id()
+    ));
+    let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join(fixture);
+    fs::copy(&source, &path).expect("copy the fixture to scratch");
+    path
+}
+
+/// Every item of `path`'s primary (or first) tag, as (key, value) strings.
+fn existing_items(path: &Path) -> Vec<(String, String)> {
+    let tagged = lofty::read_from_path(path).expect("the file reads");
+    let tag = tagged
+        .primary_tag()
+        .or_else(|| tagged.first_tag())
+        .expect("the file carries a tag");
+    let mut items: Vec<(String, String)> = tag
+        .items()
+        .map(|item| {
+            (
+                format!("{:?}", item.key()),
+                item.value().text().unwrap_or("<binary>").to_owned(),
+            )
+        })
+        .collect();
+    items.sort();
+    items
+}
+
+/// Writes the four tags and reads them back the way the player reads them.
+fn round_trip_tags(path: &Path) {
+    write_tags(
+        path,
+        &GainTags {
+            track_gain_db: -6.02,
+            track_peak: 0.5,
+            album_gain_db: -3.01,
+            album_peak: 0.75,
+        },
+    )
+    .unwrap_or_else(|error| panic!("the tags write to {}: {error}", path.display()));
+
+    let track = Gain::read_from(path, ReplayGainMode::Track);
+    let album = Gain::read_from(path, ReplayGainMode::Album);
+    assert!(
+        (track.factor() - linear(-6.02)).abs() < 1e-5,
+        "the written track gain must come back as the gain velo applies, got {}",
+        track.factor()
+    );
+    assert!(
+        (album.factor() - linear(-3.01)).abs() < 1e-5,
+        "the written album gain must come back as the gain velo applies, got {}",
+        album.factor()
+    );
+}
+
+#[test]
+fn an_mp3_from_the_fixtures_round_trips_the_four_tags_and_keeps_every_tag() {
+    let path = fixture_copy("mp3", "silence-then-tone.mp3");
+
+    // The fixture's own tag (its encoder frame) is pre-existing by definition.
+    let before = existing_items(&path);
+    assert!(
+        !before.is_empty(),
+        "the fixture must carry at least its encoder tag"
+    );
+
+    // Make it a user's file first: artist, title and album, written the way a
+    // tagger writes them, so the ReplayGain write has real tags to preserve.
+    {
+        let mut tagged = lofty::read_from_path(&path).expect("read");
+        let tag = match tagged.primary_tag_mut() {
+            Some(tag) => tag,
+            None => tagged.first_tag_mut().expect("the fixture carries a tag"),
+        };
+        tag.insert_text(ItemKey::TrackArtist, "Round Trip Artist".to_owned());
+        tag.insert_text(ItemKey::TrackTitle, "Round Trip Title".to_owned());
+        tag.insert_text(ItemKey::AlbumTitle, "Round Trip Album".to_owned());
+        tagged
+            .save_to_path(&path, WriteOptions::default())
+            .expect("write the user tags");
+    }
+    let before = existing_items(&path);
+
+    round_trip_tags(&path);
+
+    // Every pre-existing tag survives, whatever it is — including the four
+    // ReplayGain values' textual form, checked by name.
+    let after = existing_items(&path);
+    for (key, value) in &before {
+        assert!(
+            after.contains(&(key.clone(), value.clone())),
+            "the pre-existing tag {key} = {value} must survive the ReplayGain write"
+        );
+    }
+    let tag = read_tag(&path);
+    assert_eq!(
+        tag.get_string(ItemKey::TrackArtist),
+        Some("Round Trip Artist")
+    );
+    assert_eq!(
+        tag.get_string(ItemKey::TrackTitle),
+        Some("Round Trip Title")
+    );
+    assert_eq!(
+        tag.get_string(ItemKey::AlbumTitle),
+        Some("Round Trip Album")
+    );
+    assert_eq!(
+        tag.get_string(ItemKey::ReplayGainTrackGain),
+        Some("-6.02 dB")
+    );
+    assert_eq!(
+        tag.get_string(ItemKey::ReplayGainTrackPeak),
+        Some("0.500000")
+    );
+    assert_eq!(
+        tag.get_string(ItemKey::ReplayGainAlbumGain),
+        Some("-3.01 dB")
+    );
+    assert_eq!(
+        tag.get_string(ItemKey::ReplayGainAlbumPeak),
+        Some("0.750000")
+    );
+
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
+fn an_m4a_from_the_fixtures_round_trips_the_four_tags_and_keeps_every_tag() {
+    let path = fixture_copy("m4a", "tiny.m4a");
+
+    let before = existing_items(&path);
+    assert!(
+        !before.is_empty(),
+        "the fixture must carry at least its encoder tag"
+    );
+    {
+        let mut tagged = lofty::read_from_path(&path).expect("read");
+        let tag = match tagged.primary_tag_mut() {
+            Some(tag) => tag,
+            None => tagged.first_tag_mut().expect("the fixture carries a tag"),
+        };
+        tag.insert_text(ItemKey::TrackArtist, "Round Trip Artist".to_owned());
+        tag.insert_text(ItemKey::TrackTitle, "Round Trip Title".to_owned());
+        tag.insert_text(ItemKey::AlbumTitle, "Round Trip Album".to_owned());
+        tagged
+            .save_to_path(&path, WriteOptions::default())
+            .expect("write the user tags");
+    }
+    let before = existing_items(&path);
+
+    round_trip_tags(&path);
+
+    let after = existing_items(&path);
+    for (key, value) in &before {
+        assert!(
+            after.contains(&(key.clone(), value.clone())),
+            "the pre-existing tag {key} = {value} must survive the ReplayGain write"
+        );
+    }
+    let tag = read_tag(&path);
+    assert_eq!(
+        tag.get_string(ItemKey::TrackArtist),
+        Some("Round Trip Artist")
+    );
+    assert_eq!(
+        tag.get_string(ItemKey::TrackTitle),
+        Some("Round Trip Title")
+    );
+    assert_eq!(
+        tag.get_string(ItemKey::AlbumTitle),
+        Some("Round Trip Album")
+    );
+    assert_eq!(
+        tag.get_string(ItemKey::ReplayGainTrackGain),
+        Some("-6.02 dB")
+    );
+    assert_eq!(
+        tag.get_string(ItemKey::ReplayGainAlbumGain),
+        Some("-3.01 dB")
+    );
+    assert_eq!(
+        tag.get_string(ItemKey::ReplayGainTrackPeak),
+        Some("0.500000")
+    );
+    assert_eq!(
+        tag.get_string(ItemKey::ReplayGainAlbumPeak),
+        Some("0.750000")
+    );
+
+    let _ = fs::remove_file(&path);
 }
 
 // ---- what existed still stands --------------------------------------------

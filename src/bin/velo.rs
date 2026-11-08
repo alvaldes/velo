@@ -543,9 +543,9 @@ fn replaygain_scan(files: &[PathBuf], apply: bool) -> ExitCode {
                 let album = album.expect("a measured file makes an album measurement");
                 let tags = GainTags {
                     track_gain_db: track.gain_db(),
-                    track_peak: track.sample_peak,
+                    track_peak: track.true_peak,
                     album_gain_db: album.gain_db(),
-                    album_peak: album.sample_peak,
+                    album_peak: album.true_peak,
                 };
                 if apply {
                     match write_tags(path, &tags) {
@@ -586,7 +586,7 @@ fn replaygain_scan(files: &[PathBuf], apply: bool) -> ExitCode {
         println!(
             "album: gain {}, peak {}",
             format_gain_db(album.gain_db()),
-            format_peak(album.sample_peak)
+            format_peak(album.true_peak)
         );
     }
     if apply {

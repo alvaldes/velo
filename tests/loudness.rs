@@ -138,6 +138,63 @@ fn a_file_with_no_audio_returns_no_measurement() {
     );
 }
 
+// ---- true peak versus sample peak -------------------------------------------
+
+#[test]
+fn a_full_scale_quarter_rate_sine_reads_a_true_peak_well_above_its_sample_peak() {
+    // BS.1770-4 Annex 2's own example (Appendix 1): a tone at a quarter of
+    // the sampling frequency, phased so every sample lands at full scale,
+    // really peaks √2 (≈ +3 dB) higher *between* the samples. The sample peak
+    // stays at 1.0; only the 4× oversampled true peak sees the overshoot.
+    let path = scratch_path("true-peak");
+    let sqrt2 = std::f64::consts::SQRT_2;
+    write_wav(&path, STEREO, 2 * 44_100, |frame, _| {
+        let n = f64::from(u32::try_from(frame).expect("test frames fit u32"));
+        32_767.0 * sqrt2 * (std::f64::consts::FRAC_PI_4 + std::f64::consts::FRAC_PI_2 * n).sin()
+    });
+
+    let meter = meter_for(&path).expect("the file decodes");
+    let _ = fs::remove_file(&path);
+    let measurement = meter.integrated().expect("a sine has a loudness");
+    assert!(
+        measurement.sample_peak <= 1.0,
+        "the sample peak is every sample's own magnitude, at or under full scale, got {}",
+        measurement.sample_peak
+    );
+    assert!(
+        measurement.true_peak > 1.35,
+        "the true peak must catch the √2 inter-sample overshoot (got {} against a sample peak of {})",
+        measurement.true_peak,
+        measurement.sample_peak
+    );
+    assert!(
+        measurement.true_peak > measurement.sample_peak,
+        "true peak {} must exceed the sample peak {} — that difference is the feature",
+        measurement.true_peak,
+        measurement.sample_peak
+    );
+}
+
+#[test]
+fn a_low_sine_shows_only_a_fraction_of_a_decibel_of_true_peak_overshoot() {
+    // Control: a 1 kHz tone's crests land on samples, so the oversampled peak
+    // agrees with the sample peak to a fraction of a percent (measured ≈ 0.008
+    // dB apart) — the filter is not inflating peaks wholesale.
+    let path = scratch_path("true-peak-control");
+    let amplitude = 29_222.0; // ≈ −1 dBFS
+    write_wav(&path, STEREO, 2 * 44_100, |frame, _| sine(frame, amplitude));
+
+    let meter = meter_for(&path).expect("the file decodes");
+    let _ = fs::remove_file(&path);
+    let measurement = meter.integrated().expect("a sine has a loudness");
+    assert!(
+        measurement.true_peak < measurement.sample_peak * 1.02,
+        "a 1 kHz sine's true peak {} must sit within 2 % of its sample peak {}",
+        measurement.true_peak,
+        measurement.sample_peak
+    );
+}
+
 // ---- the relative gate ------------------------------------------------------
 
 #[test]

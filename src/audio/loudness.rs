@@ -24,9 +24,16 @@
 //!
 //! ## Honesty
 //!
-//! * **Peak is sample peak** — the largest absolute decoded sample. True peak
-//!   (BS.1770 oversampled to 4×) is a follow-up; until then the written
-//!   `REPLAYGAIN_*_PEAK` is a sample peak, and this module says so.
+//! * **Peak is true peak** — the largest absolute value of a 4× oversampled
+//!   version of the signal, per BS.1770-4 Annex 2: an inter-sample overshoot
+//!   that a sample peak misses (a peak that under-reports is a clipping cap
+//!   that lets a track clip). The plain sample peak is reported alongside it.
+//!   The interpolation filter is the standard's own: an order-48, 4-phase FIR
+//!   interpolator whose 12 coefficients per phase are taken **verbatim from
+//!   the table printed in Rec. ITU-R BS.1770-4, Annex 2** (each an exact
+//!   dyadic rational, so `f64` holds them exactly). The Annex's 12.04 dB
+//!   attenuation step is skipped — it exists for integer arithmetic, and this
+//!   meter is floating point, as the Annex itself notes.
 //! * A file with no audio (or digital silence — every block below the
 //!   absolute gate) yields **no measurement**, never a number.
 //! * Blocks are only formed from full 400 ms windows: the first 300 ms of a
@@ -120,6 +127,103 @@ struct BiquadState {
     y2: f64,
 }
 
+/// BS.1770-4 Annex 2's true-peak interpolation filter, verbatim: an order-48,
+/// 4-phase FIR interpolator, 12 coefficients per phase, exactly as printed in
+/// the table of Rec. ITU-R BS.1770-4, Annex 2. Every coefficient is an exact
+/// dyadic rational, so these `f64` literals are the standard's numbers without
+/// rounding. Each phase's coefficients sum to ≈ 1 (the quantised DC gain:
+/// 1.0015869140625 for phases 0 and 3, 0.9730224609375 for phases 1 and 2),
+/// and phase 2 is phase 1 time-reversed and phase 3 is phase 0 time-reversed —
+/// the linear-phase prototype the table decomposes.
+const TRUE_PEAK_FILTER: [[f64; 12]; 4] = [
+    [
+        0.001_708_984_375,
+        0.010_986_328_125,
+        -0.019_653_320_312_5,
+        0.033_203_125,
+        -0.059_448_242_187_5,
+        0.137_329_101_562_5,
+        0.972_167_968_75,
+        -0.102_294_921_875,
+        0.047_607_421_875,
+        -0.026_611_328_125,
+        0.014_892_578_125,
+        -0.008_300_781_25,
+    ],
+    [
+        -0.029_174_804_687_5,
+        0.029_296_875,
+        -0.051_757_812_5,
+        0.089_111_328_125,
+        -0.166_503_906_25,
+        0.465_087_890_625,
+        0.779_785_156_25,
+        -0.200_317_382_812_5,
+        0.101_562_5,
+        -0.058_227_539_062_5,
+        0.033_081_054_687_5,
+        -0.018_920_898_437_5,
+    ],
+    [
+        -0.018_920_898_437_5,
+        0.033_081_054_687_5,
+        -0.058_227_539_062_5,
+        0.101_562_5,
+        -0.200_317_382_812_5,
+        0.779_785_156_25,
+        0.465_087_890_625,
+        -0.166_503_906_25,
+        0.089_111_328_125,
+        -0.051_757_812_5,
+        0.029_296_875,
+        -0.029_174_804_687_5,
+    ],
+    [
+        -0.008_300_781_25,
+        0.014_892_578_125,
+        -0.026_611_328_125,
+        0.047_607_421_875,
+        -0.102_294_921_875,
+        0.972_167_968_75,
+        0.137_329_101_562_5,
+        -0.059_448_242_187_5,
+        0.033_203_125,
+        -0.019_653_320_312_5,
+        0.010_986_328_125,
+        0.001_708_984_375,
+    ],
+];
+
+/// How many input samples one phase of [`TRUE_PEAK_FILTER`] spans.
+const TRUE_PEAK_TAPS: usize = 12;
+
+/// The 4× oversampler of BS.1770-4 Annex 2, per channel: every input sample
+/// yields the signal's four values on the 4× grid, computed from the last 12
+/// input samples. The filter's group delay only shifts where the estimates
+/// sit in time, which peak measurement does not care about; the input sample
+/// itself is always part of the maximum as well.
+#[derive(Debug, Default, Clone)]
+struct Interpolator {
+    history: [f64; TRUE_PEAK_TAPS],
+}
+
+impl Interpolator {
+    /// Consumes one sample, returns its four 4× grid values.
+    fn push(&mut self, sample: f64) -> [f64; 4] {
+        self.history.copy_within(1.., 0);
+        self.history[TRUE_PEAK_TAPS - 1] = sample;
+        let mut out = [0.0; 4];
+        for (phase, value) in TRUE_PEAK_FILTER.iter().zip(&mut out) {
+            *value = phase
+                .iter()
+                .zip(self.history.iter().rev())
+                .map(|(coefficient, sample)| coefficient * sample)
+                .sum();
+        }
+        out
+    }
+}
+
 /// BS.1770-4's K-weighting: a high shelf into a high-pass, per channel.
 #[derive(Debug, Clone, Copy)]
 struct KWeighting {
@@ -184,16 +288,23 @@ struct Channel {
     window: VecDeque<f64>,
     /// The running sum of squares over `window`.
     sum_sq: f64,
+    /// The 4× oversampler that estimates the true peak.
+    interpolator: Interpolator,
 }
 
-/// One measured value: an integrated loudness and the file's sample peak.
+/// One measured value: an integrated loudness, the file's sample peak and its
+/// true peak.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Measurement {
     /// The gated integrated loudness, in LUFS.
     pub integrated_lufs: f64,
-    /// Sample peak: the largest absolute sample. *Not* true peak — that needs
-    /// 4× oversampling and is a follow-up (see the module docs).
+    /// Sample peak: the largest absolute decoded sample.
     pub sample_peak: f32,
+    /// True peak: the largest absolute value of the 4× oversampled signal
+    /// (BS.1770-4 Annex 2's filter — see the module docs). It catches the
+    /// inter-sample overshoot a sample peak misses, and is at least the
+    /// sample peak.
+    pub true_peak: f32,
 }
 
 impl Measurement {
@@ -221,6 +332,8 @@ pub struct LoudnessMeter {
     seen: u64,
     blocks: Vec<f64>,
     peak: f32,
+    /// The largest absolute oversampled value so far, in f64 for exactness.
+    true_peak: f64,
 }
 
 impl LoudnessMeter {
@@ -236,6 +349,7 @@ impl LoudnessMeter {
             seen: 0,
             blocks: Vec::new(),
             peak: 0.0,
+            true_peak: 0.0,
         }
     }
 
@@ -266,6 +380,12 @@ impl LoudnessMeter {
                 let magnitude = sample.abs();
                 if magnitude > self.peak {
                     self.peak = magnitude;
+                }
+                for value in self.channels[channel].interpolator.push(f64::from(sample)) {
+                    let magnitude = value.abs();
+                    if magnitude > self.true_peak {
+                        self.true_peak = magnitude;
+                    }
                 }
                 let filtered = self.filters[channel]
                     .shelf
@@ -317,14 +437,16 @@ impl LoudnessMeter {
     /// absolute gate — no audio, or digital silence.
     #[must_use]
     pub fn integrated(&self) -> Option<Measurement> {
-        integrated_from(&self.blocks, self.peak)
+        integrated_from(&self.blocks, self.peak, self.true_peak)
     }
 }
 
 /// Gates a run of block powers into one integrated loudness (see the module
-/// docs for the rule). `None` when nothing survives the absolute gate.
+/// docs for the rule). `None` when nothing survives the absolute gate. The
+/// reported true peak is the larger of the oversampled peak and the plain
+/// sample peak.
 #[must_use]
-pub fn integrated_from(blocks: &[f64], sample_peak: f32) -> Option<Measurement> {
+pub fn integrated_from(blocks: &[f64], sample_peak: f32, true_peak: f64) -> Option<Measurement> {
     let loudness = |power: f64| OFFSET_LUFS + 10.0 * power.log10();
     let gated: Vec<f64> = blocks
         .iter()
@@ -354,14 +476,20 @@ pub fn integrated_from(blocks: &[f64], sample_peak: f32) -> Option<Measurement> 
         reason = "a file holds far fewer blocks than f64 counts exactly"
     )]
     let integrated = OFFSET_LUFS + 10.0 * (over.iter().sum::<f64>() / over.len() as f64).log10();
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the peak is reported as f32 like every ReplayGain peak"
+    )]
+    let true_peak = true_peak.max(f64::from(sample_peak)) as f32;
     Some(Measurement {
         integrated_lufs: integrated,
         sample_peak,
+        true_peak,
     })
 }
 
 /// Integrates a whole album: every meter's blocks pooled and gated together,
-/// the peak the loudest file's. This is a second measurement, not an average
+/// the peaks the loudest file's. This is a second measurement, not an average
 /// of track measurements — that is the point of album gain.
 #[must_use]
 pub fn integrated_album<'a>(
@@ -369,11 +497,13 @@ pub fn integrated_album<'a>(
 ) -> Option<Measurement> {
     let mut blocks = Vec::new();
     let mut peak = 0.0_f32;
+    let mut true_peak = 0.0_f64;
     for meter in meters {
         blocks.extend_from_slice(meter.blocks());
         peak = peak.max(meter.sample_peak());
+        true_peak = true_peak.max(meter.true_peak);
     }
-    integrated_from(&blocks, peak)
+    integrated_from(&blocks, peak, true_peak)
 }
 
 /// Decodes a whole file into a meter, through the player's own
@@ -415,6 +545,88 @@ mod tests {
     fn the_absolute_gate_drops_silence_rather_than_reporting_it() {
         // Digital silence: every power is 0, every loudness −∞, nothing passes.
         let blocks = vec![0.0_f64; 50];
-        assert!(integrated_from(&blocks, 0.0).is_none());
+        assert!(integrated_from(&blocks, 0.0, 0.0).is_none());
+    }
+
+    // ---- true peak (BS.1770-4 Annex 2) ------------------------------------
+
+    #[test]
+    fn the_annex_2_table_is_the_linear_phase_prototype_it_claims_to_be() {
+        // Phases 2 and 3 are phases 1 and 0 time-reversed: a transcription
+        // error in any single coefficient breaks this. The DC gains are the
+        // exact sums of the printed (dyadic) coefficients.
+        assert_eq!(TRUE_PEAK_FILTER[3], {
+            let mut phase = TRUE_PEAK_FILTER[0];
+            phase.reverse();
+            phase
+        });
+        assert_eq!(TRUE_PEAK_FILTER[2], {
+            let mut phase = TRUE_PEAK_FILTER[1];
+            phase.reverse();
+            phase
+        });
+        assert_eq!(TRUE_PEAK_FILTER[0].iter().sum::<f64>(), 1.001_586_914_062_5);
+        assert_eq!(TRUE_PEAK_FILTER[1].iter().sum::<f64>(), 0.973_022_460_937_5);
+    }
+
+    #[test]
+    fn the_interpolator_reproduces_dc_at_each_phase_printed_gain() {
+        // Constant 1.0 in: once the 12-sample history is full, each phase
+        // outputs exactly the sum of its own printed coefficients — the
+        // quantised DC gains of the standard's table (1.0015869140625 for
+        // phases 0 and 3, 0.9730224609375 for phases 1 and 2).
+        let mut interpolator = Interpolator::default();
+        let mut last = [0.0; 4];
+        for _ in 0..30 {
+            last = interpolator.push(1.0);
+        }
+        for (phase, value) in TRUE_PEAK_FILTER.iter().zip(last) {
+            let dc = phase.iter().sum::<f64>();
+            assert!(
+                (value - dc).abs() < 1e-9,
+                "phase must sit at its own DC gain {dc}, got {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_meter_reads_a_true_peak_above_the_sample_peak_on_the_annex_example() {
+        // Annex 2, Appendix 1's own example: a full-scale tone at a quarter
+        // of the sampling rate, phased so every sample sits at full scale,
+        // peaks √2 higher between the samples. Pushed directly, no file.
+        let mut meter = LoudnessMeter::new();
+        let samples: Vec<f32> = (0..44_100)
+            .map(|n| {
+                let n = f64::from(n);
+                let sine = std::f64::consts::SQRT_2
+                    * (std::f64::consts::FRAC_PI_4 + std::f64::consts::FRAC_PI_2 * n).sin();
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "the fixture's samples are f32 like every decoded sample"
+                )]
+                let sample = sine as f32;
+                sample
+            })
+            .collect();
+        let stereo: Vec<f32> = samples.iter().flat_map(|&s| [s, s]).collect();
+        meter.push(
+            &stereo,
+            TrackSpec {
+                sample_rate: 44_100,
+                channels: 2,
+            },
+        );
+
+        let measurement = meter.integrated().expect("a loud sine measures");
+        assert!(
+            measurement.sample_peak <= 1.0,
+            "every sample sits at full scale, got {}",
+            measurement.sample_peak
+        );
+        assert!(
+            measurement.true_peak > 1.35,
+            "the oversampled signal must reach ≈ √2, got {}",
+            measurement.true_peak
+        );
     }
 }
