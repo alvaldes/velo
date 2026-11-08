@@ -18,9 +18,15 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Install ALSA development headers (cpal needs them on Linux)
+      # cpal needs ALSA headers; audiopus_sys builds libopus from source with
+      # cmake, so both are build dependencies, not test-only ones.
+      # Build dependencies, not test-only ones: cpal needs the ALSA headers on
+      # Linux, and audiopus_sys builds libopus with cmake — which the runner
+      # images already ship, so it is installed only where it is cheap to be
+      # explicit about it.
+      - name: Install Linux build dependencies (ALSA headers)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev cmake
       - name: Format check
         run: cargo fmt --all -- --check
       - name: Clippy
