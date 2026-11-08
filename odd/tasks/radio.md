@@ -460,3 +460,29 @@ nothing.
   request and answered 404 before the request arrived. Fixed test-side
   (`set_nonblocking(false)` after accept, read until headers) and confirmed with ten
   consecutive full-suite runs. Worth remembering for any future fake server here.
+
+**L19** — closed as `47a95b3` (24 tests in `radio_directory`, 13 in `ui_radio`, **601 green
+across 34 binaries**, clippy and `cargo fmt --check` clean). Two things landed
+together because they are one decision: *what counts as playable is the build's
+answer, not this code's opinion.*
+
+- **The codec table stopped having an opinion.** `is_playable_codec` translates
+  spellings and then asks two decoders: symphonia's registry and
+  `crate::audio::opus::decodable`. Its test no longer pins a value, it asserts the
+  **invariant** (`is_playable_codec("opus") == decodable(CODEC_ID_OPUS)`), so
+  compiling a decoder flips the answer without a line changing here.
+- **Four T6a tests were pinning a state, not a rule.** They used a station called
+  `Opus One` as the "unplayable" fixture; the moment opus became decodable the `✗`
+  marker vanished and they failed. Restoring the snapshot would have been the wrong
+  fix. The marker now has a reason that cannot evaporate: **an HLS manifest**
+  (`is_playable_station` = decodable codec AND not a `.m3u8` path), which is true
+  today, true after every future codec, and refuses exactly what nothing here can
+  decode. The fixture is `Hls One` and no assertion was weakened.
+- **A pattern worth naming, third time in this feature**: tests that assert on a
+  *capability of today's build* (opus undecodable, one codec missing) rot the moment
+  the build changes, and they rot silently until someone compiles the thing. Assert
+  the rule, or assert against the capability accessor — never the snapshot.
+- `cargo fmt` is now part of every delegation's verification list: sixteen of my
+  files were unformatted because every worker ran clippy and none ran fmt, and that
+  is what produced the conflict when `main` came back with a formatting-clean
+  `mod.rs`.
