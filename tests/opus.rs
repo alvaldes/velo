@@ -9,6 +9,7 @@
 //! silence, never a panic, never a hang — for malformed input.
 
 use std::io::Cursor;
+use std::path::Path;
 use std::time::Duration;
 
 use symphonia::core::codecs::audio::well_known::{
@@ -21,6 +22,7 @@ use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::core::meta::MetadataOptions;
 
 use velo::audio::AudioError;
+use velo::audio::TrackSource;
 use velo::audio::opus::{OpusDecoder, SAMPLE_RATE, decodable};
 
 /// Opus always decodes at 48 kHz, so the fixtures are generated there.
@@ -488,5 +490,73 @@ fn decodable_answers_true_for_opus_and_false_for_everything_else() {
         CODEC_ID_PCM_S16LE,
     ] {
         assert!(!decodable(id), "codec id {id:?} must not answer true yet");
+    }
+}
+
+// --- reaching the player (T14b) -------------------------------------------
+//
+// The decoder above is only half of Opus: a file must open through the same
+// `TrackSource::open` every format uses, report its duration in content
+// frames, and hand the player content rather than the encoder's warm-up. The
+// fixtures are the same ones the round-trip tests build — the container and
+// codec are exactly what the player will be handed.
+
+/// A scratch file outside the worktree, deleted when dropped.
+struct ScratchFile(std::path::PathBuf);
+
+impl std::ops::Deref for ScratchFile {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for ScratchFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn scratch_file(name: &str, extension: &str, bytes: &[u8]) -> ScratchFile {
+    let path = std::env::temp_dir().join(format!(
+        "velo-opus-{name}-{}.{}",
+        std::process::id(),
+        extension
+    ));
+    std::fs::write(&path, bytes).expect("the scratch file writes");
+    ScratchFile(path)
+}
+
+/// `tiny.m4a` with its `esds` object type byte patched from AAC (0x40) to
+/// AC-3 (0xA5): a codec symphonia's MP4 reader reports but velo ships no
+/// decoder for, and `decodable` answers false — the factory's symphonia arm
+/// must refuse exactly as it always has.
+fn ac3_m4a() -> Vec<u8> {
+    let mut bytes =
+        std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tiny.m4a"))
+            .expect("the committed fixture reads");
+    let needle: &[u8] = &[0x04, 0x80, 0x80, 0x80, 0x17, 0x40];
+    let at = bytes
+        .windows(needle.len())
+        .position(|window| window == needle)
+        .expect("tiny.m4a's esds decoder config descriptor");
+    let last = at + needle.len() - 1;
+    bytes[last] = 0xA5;
+    bytes
+}
+
+#[test]
+fn a_codec_that_is_not_decodable_still_reports_the_same_unsupported_message() {
+    let file = scratch_file("ac3", "m4a", &ac3_m4a());
+    let Err(error) = TrackSource::open(&file) else {
+        panic!("AC-3 must be refused");
+    };
+    match error {
+        AudioError::Unsupported(message) => assert_eq!(
+            message, "unsupported feature: core (codec): unsupported audio codec",
+            "the refusal must be symphonia's factory, unchanged"
+        ),
+        other => panic!("expected Unsupported, got {other:?}"),
     }
 }
