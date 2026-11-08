@@ -84,8 +84,7 @@ is English. Footer shows `● live` instead of a position and total.
 | T2 | S7 | worker | `src/radio/lists.rs`: PLS and M3U parse to the first playable entry | `f804a64` |
 | T3 | S1, S8 | worker | `src/radio/{client,directory}.rs`: Radio Browser client, indexes, station search, codec filter from symphonia features | `a0f946a` |
 | T4 | S5 | worker | `src/radio/store.rs`: atomic `radio.toml` for favourites, pins and hand-added stations | `654f348` |
-| T5 | S2, S3 | parent | stream engine: `MediaSource` over the HTTP body, queue entry `File \| Station`, live semantics; **blocked on the other session's T15 (symphonia 0.6)** | |
-| T6a | S9 | worker | `src/ui/radio.rs`: the view's state machine, sections, fuzzy filter and order card, hooked with 41 additive lines in `src/ui/mod.rs` | `9e3e835` |
+| T5 | S2, S3 | parent | stream engine: `MediaSource` over the HTTP body, queue entry `File \| Station`, live semantics; **blocked on the other session's T15 (symphonia 0.6)** | || T6a | S9 | worker | `src/ui/radio.rs`: the view's state machine, sections, fuzzy filter and order card, hooked with 41 additive lines in `src/ui/mod.rs` | `9e3e835` |
 | T6b | S9 | parent | wiring: `RadioStore` load, `country::detect`, directory fetch for countries/tags/stations, refresh, catalog handoff | |
 | T6c | S9, S3 | parent | playing a station and the `● live` footer; **needs T5**; also README `## Keys` and the help card | |
 | T7 | S5 | worker | country from the locale, asked once | `fc650a3` |
@@ -267,3 +266,33 @@ delegated it too wide.** The rule is to split at delegation time; T6a should hav
 
 **Slice 6** is T6a alone (`9e3e835`, 1439 lines) — recorded as oversized, with the
 review map above.
+
+**L12** — T15 landed on `main` (`b2187ad` + `38c775f`, symphonia 0.6.1, 444 tests
+in that branch) and `feat/radio` was rebased onto it: 13 commits replayed with
+zero conflicts, which is what the file split was for.
+
+- **The bump broke exactly one function.** `is_playable_codec` stopped compiling —
+  `CODEC_TYPE_*` became `codecs::audio::well_known::CODEC_ID_*`, `CodecType` became
+  `AudioCodecId` and `CodecRegistry::get_codec` became `get_audio_decoder`. One
+  function, one commit (`eca04c2`), nothing else in radio touched. That is the
+  whole payoff of keeping the symphonia knowledge behind that one name, and it is
+  worth remembering when T5 wants to call symphonia from somewhere else.
+- **Opus is still not compiled** in 0.6.1, so the table row still answers false and
+  T14 remains the thing that flips it.
+- **What T5 inherits from the peer's migration report** (all recorded before writing
+  a line): packet timestamps are now `i64` and may be **negative** (an MP3 starts at
+  `-delay`), so a stream source must not assume `u64`; `read_block` returns `None`
+  **only** at the end (`Ok(None)` from `next_packet` is EOF, not an error); the
+  gapless gate moved from the reader's `FormatOptions` to the decoder's
+  `AudioDecoderOptions`, which is convenient here because a live stream wants no
+  gapless; and `copy_to_vec_interleaved` resizes the destination, so each packet
+  needs a fresh `Vec` or the tail keeps stale samples.
+
+**T5 splits into three units at delegation time** (the lesson from T6a applied
+before, not after): **T5a** the audio seam in `src/audio/mod.rs` — open from a
+`MediaSource` with no extension hint and no gapless, tested against the existing
+MP3 fixture through a `Cursor`; **T5b** the HTTP stream source in
+`src/radio/stream.rs` — per-operation timeouts (never the JSON client's
+`timeout_global`), `Icy-MetaData: 1`, `Icy-Metaint` validation, HLS sniff after the
+wrapper unwrap; **T5c** the queue in `src/audio/output.rs` — `Entry::File \|
+Station`, resolver only for files, seek a no-op for stations, one retry then skip.
