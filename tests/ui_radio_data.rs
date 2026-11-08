@@ -24,9 +24,11 @@ use velo::ui::radio_data::{RadioData, RadioWire};
 struct Canned {
     calls: Mutex<Vec<String>>,
     countries: String,
+    states: String,
     tags: String,
     search: String,
     fail: bool,
+    fail_states: bool,
 }
 
 impl Canned {
@@ -34,14 +36,21 @@ impl Canned {
         Self {
             calls: Mutex::new(Vec::new()),
             countries: String::from("[]"),
+            states: String::from("[]"),
             tags: String::from("[]"),
             search: String::from("[]"),
             fail: false,
+            fail_states: false,
         }
     }
 
     fn countries(mut self, body: &str) -> Self {
         body.clone_into(&mut self.countries);
+        self
+    }
+
+    fn states(mut self, body: &str) -> Self {
+        body.clone_into(&mut self.states);
         self
     }
 
@@ -60,6 +69,13 @@ impl Canned {
         self
     }
 
+    /// Fails only `/states/` requests: the other endpoints answer, so a
+    /// test can pin what one failing index does to the rest.
+    fn failing_states(mut self) -> Self {
+        self.fail_states = true;
+        self
+    }
+
     fn calls(&self) -> Vec<String> {
         self.calls.lock().expect("call log").clone()
     }
@@ -68,13 +84,15 @@ impl Canned {
 impl Transport for Canned {
     fn get(&self, url: &str) -> Result<String, Error> {
         self.calls.lock().expect("call log").push(url.to_owned());
-        if self.fail {
+        if self.fail || (self.fail_states && url.contains("/states/")) {
             return Err(Error::Unreachable {
                 detail: "connection refused".to_owned(),
             });
         }
         if url.contains("/countries") {
             Ok(self.countries.clone())
+        } else if url.contains("/states/") {
+            Ok(self.states.clone())
         } else if url.contains("/tags") {
             Ok(self.tags.clone())
         } else if url.contains("/stations/search") {
@@ -165,7 +183,7 @@ fn settle(
         }
         std::thread::sleep(Duration::from_millis(5));
     }
-    panic!("the wiring never answered");
+    panic!("the wiring never answered, calls: {:?}", canned.calls());
 }
 
 // ---- lazy, not eager --------------------------------------------------------
@@ -429,6 +447,319 @@ fn stations_load_capped_at_200_and_non_http_urls_are_dropped() {
         !view.labels().iter().any(|label| label.contains("S999")),
         "the non-http station never loads, got: {:?}",
         view.labels().last()
+    );
+}
+
+// ---- the home country's regions (T6d, S5) ----------------------------------
+
+/// A wired loader over `dir`, with the store's country already answered
+/// `code`: the near-you row exists, so the home country is known.
+fn wired_with_country(canned: Arc<Canned>, dir: &TempDir, code: &str) -> RadioData<Shared> {
+    std::fs::write(dir.radio_toml(), format!("country = \"{code}\"\n"))
+        .expect("the answered store is written");
+    RadioData::new(
+        Some(Client::new(Shared(canned))),
+        Some(dir.radio_toml()),
+        None,
+    )
+}
+
+/// The bodies the region tests start from: two countries and two regions
+/// of the home one.
+fn region_canned() -> Canned {
+    Canned::new()
+        .countries(
+            r#"[{"name":"Norway","iso_3166_1":"NO","stationcount":9},
+                {"name":"Germany","iso_3166_1":"DE","stationcount":40}]"#,
+        )
+        .states(
+            r#"[{"name":"Oslo","country":"Norway","stationcount":4},
+                {"name":"Vestland","country":"Norway","stationcount":2}]"#,
+        )
+        .search(&stations_json(1))
+}
+
+#[test]
+fn entering_the_country_section_fetches_the_home_states_and_only_those() {
+    let dir = TempDir::new("home-states");
+    let canned = Arc::new(region_canned());
+    let mut data = wired_with_country(Arc::clone(&canned), &dir, "NO");
+    let mut view = data.view();
+
+    // Lazy even with a home country: opening the view and polling at the
+    // top asks for nothing.
+    for _ in 0..5 {
+        data.poll(&mut view);
+    }
+    assert!(
+        canned.calls().is_empty(),
+        "opening the view with a home country makes zero requests, got: {:?}",
+        canned.calls()
+    );
+
+    press(&mut view, KeyCode::Enter); // Browse all countries
+    settle(&mut data, &mut view, &canned, |_view, canned| {
+        canned.calls().iter().any(|url| url.contains("/states/"))
+    });
+
+    let calls = canned.calls();
+    assert_eq!(
+        calls.len(),
+        2,
+        "entering the section makes exactly two requests, got: {calls:?}"
+    );
+    assert!(calls[0].contains("/countries"), "got: {calls:?}");
+    assert!(
+        calls[1].contains("/states/NO/"),
+        "the states index is fetched for the home country, got: {calls:?}"
+    );
+
+    // Back at the top the regions sit with the places.
+    press(&mut view, KeyCode::Esc);
+    let labels = view.labels();
+    assert!(
+        labels.contains(&"Norway › Oslo".to_owned())
+            && labels.contains(&"Norway › Vestland".to_owned()),
+        "the home country's regions are rows at the top, got: {labels:?}"
+    );
+
+    // Another country never asks for its states.
+    press(&mut view, KeyCode::Enter); // Browse all countries (cached)
+    press(&mut view, KeyCode::Char('j')); // Germany
+    press(&mut view, KeyCode::Enter);
+    settle(&mut data, &mut view, &canned, |view, canned| {
+        !view.labels().is_empty()
+            && canned
+                .calls()
+                .iter()
+                .any(|url| url.contains("/stations/search"))
+    });
+    let search = canned
+        .calls()
+        .iter()
+        .find(|url| url.contains("/stations/search"))
+        .cloned()
+        .expect("Germany's stations load");
+    assert!(search.contains("countrycode=DE"), "got: {search}");
+    assert!(
+        !search.contains("state="),
+        "no region search for another country, got: {search}"
+    );
+    let calls = canned.calls();
+    let states: Vec<_> = calls
+        .iter()
+        .filter(|url| url.contains("/states/"))
+        .collect();
+    assert_eq!(
+        states.len(),
+        1,
+        "never a second states index, got: {calls:?}"
+    );
+    assert!(states[0].contains("/states/NO/"), "got: {calls:?}");
+}
+
+#[test]
+fn a_region_row_opens_that_region() {
+    let dir = TempDir::new("region-open");
+    let canned = Arc::new(region_canned());
+    let mut data = wired_with_country(Arc::clone(&canned), &dir, "NO");
+    let mut view = data.view();
+
+    press(&mut view, KeyCode::Enter); // Browse all countries: index + states
+    settle(&mut data, &mut view, &canned, |_view, canned| {
+        canned.calls().iter().any(|url| url.contains("/states/"))
+    });
+    press(&mut view, KeyCode::Esc); // top, the regions now show
+    press(&mut view, KeyCode::Char('j')); // past the near-you row
+    press(&mut view, KeyCode::Char('j')); // onto Norway › Oslo
+    press(&mut view, KeyCode::Enter);
+    settle(&mut data, &mut view, &canned, |view, canned| {
+        !view.labels().is_empty()
+            && canned
+                .calls()
+                .iter()
+                .any(|url| url.contains("/stations/search"))
+    });
+
+    assert_eq!(
+        view.place(),
+        &velo::ui::radio::Place::Country {
+            code: String::from("NO"),
+            name: String::from("Norway"),
+            state: String::from("Oslo"),
+        },
+        "the region row opens the region, got: {:?}",
+        view.place()
+    );
+    let search = canned
+        .calls()
+        .iter()
+        .find(|url| url.contains("/stations/search"))
+        .cloned()
+        .expect("the region loads its stations");
+    assert!(search.contains("countrycode=NO"), "got: {search}");
+    assert!(search.contains("state=Oslo"), "got: {search}");
+    assert!(search.contains("stateExact=true"), "got: {search}");
+    assert_eq!(
+        view.labels(),
+        ["S0 [128k] · NO"],
+        "the region's stations land in the view, got: {:?}",
+        view.labels()
+    );
+}
+
+#[test]
+fn f_on_a_region_pins_it_and_the_pin_survives_a_reload() {
+    let dir = TempDir::new("region-pin");
+    let canned = Arc::new(region_canned());
+    let mut data = wired_with_country(Arc::clone(&canned), &dir, "NO");
+    let mut view = data.view();
+
+    press(&mut view, KeyCode::Enter); // Browse all countries: index + states
+    settle(&mut data, &mut view, &canned, |_view, canned| {
+        canned.calls().iter().any(|url| url.contains("/states/"))
+    });
+    press(&mut view, KeyCode::Esc); // top
+    press(&mut view, KeyCode::Char('j')); // past the near-you row
+    press(&mut view, KeyCode::Char('j')); // onto Norway › Oslo
+    press(&mut view, KeyCode::Char('f')); // pin the region
+    data.poll(&mut view); // the save ask
+
+    let saved = std::fs::read_to_string(dir.radio_toml()).expect("the pin save created the file");
+    assert!(
+        saved.contains("[[pinned]]")
+            && saved.contains(r#"code = "NO""#)
+            && saved.contains(r#"name = "Norway""#)
+            && saved.contains(r#"state = "Oslo""#),
+        "the pin carries the region, got: {saved}"
+    );
+
+    // A restart: a fresh wiring over the same file shows the pinned
+    // region as its own row, and the row opens the region's stations.
+    let reloaded = RadioData::new(
+        Some(Client::new(Shared(Arc::clone(&canned)))),
+        Some(dir.radio_toml()),
+        None,
+    );
+    let mut view = reloaded.view();
+    let labels = view.labels();
+    assert!(
+        labels.contains(&"★ Norway · Oslo".to_owned()),
+        "the pinned region survives the reload, got: {labels:?}"
+    );
+    press(&mut view, KeyCode::Char('j')); // past the near-you row
+    press(&mut view, KeyCode::Char('j')); // onto ★ Norway · Oslo
+    press(&mut view, KeyCode::Enter);
+    settle(&mut data, &mut view, &canned, |_view, canned| {
+        canned
+            .calls()
+            .iter()
+            .any(|url| url.contains("/stations/search"))
+    });
+    let search = canned
+        .calls()
+        .iter()
+        .find(|url| url.contains("/stations/search"))
+        .cloned()
+        .expect("the pinned region loads its stations");
+    assert!(
+        search.contains("countrycode=NO")
+            && search.contains("state=Oslo")
+            && search.contains("stateExact=true"),
+        "the pinned region opens its region, got: {search}"
+    );
+}
+
+#[test]
+fn with_no_home_country_no_states_are_ever_requested() {
+    let canned = Arc::new(
+        Canned::new().countries(r#"[{"name":"Norway","iso_3166_1":"NO","stationcount":9}]"#),
+    );
+
+    // Declined: `country = "none"`.
+    let dir = TempDir::new("states-none");
+    std::fs::write(dir.radio_toml(), "country = \"none\"\n").expect("the decline is written");
+    let mut data = RadioData::new(
+        Some(Client::new(Shared(Arc::clone(&canned)))),
+        Some(dir.radio_toml()),
+        None,
+    );
+    let mut view = data.view();
+    press(&mut view, KeyCode::Enter); // Browse all countries
+    settle(&mut data, &mut view, &canned, |view, _canned| {
+        !view.labels().is_empty()
+    });
+    assert!(
+        !canned.calls().iter().any(|url| url.contains("/states/")),
+        "a declined country never fetches states, got: {:?}",
+        canned.calls()
+    );
+    press(&mut view, KeyCode::Esc);
+    assert!(
+        !view.labels().iter().any(|label| label.contains('›')),
+        "a declined country shows no region rows, got: {:?}",
+        view.labels()
+    );
+
+    // Never asked and nothing detected: the same silence.
+    let mut data = wired(Arc::clone(&canned));
+    let mut view = data.view();
+    press(&mut view, KeyCode::Enter);
+    settle(&mut data, &mut view, &canned, |view, _canned| {
+        !view.labels().is_empty()
+    });
+    assert!(
+        !canned.calls().iter().any(|url| url.contains("/states/")),
+        "no home country, no states request, got: {:?}",
+        canned.calls()
+    );
+    press(&mut view, KeyCode::Esc);
+    assert!(
+        !view.labels().iter().any(|label| label.contains('›')),
+        "no home country, no region rows, got: {:?}",
+        view.labels()
+    );
+}
+
+#[test]
+fn a_failing_states_request_reports_once_and_leaves_the_countries_usable() {
+    let dir = TempDir::new("states-fail");
+    let canned = Arc::new(
+        Canned::new()
+            .countries(r#"[{"name":"Norway","iso_3166_1":"NO","stationcount":9}]"#)
+            .failing_states(),
+    );
+    let mut data = wired_with_country(Arc::clone(&canned), &dir, "NO");
+    let mut view = data.view();
+
+    press(&mut view, KeyCode::Enter); // Browse all countries
+    settle(&mut data, &mut view, &canned, |_view, canned| {
+        canned.calls().len() == 2
+    });
+
+    let message = data
+        .take_message()
+        .expect("the states failure reaches the status line");
+    assert!(
+        message.contains("could not be reached"),
+        "the status names the failure, got: {message}"
+    );
+    assert_eq!(data.take_message(), None, "the states failure reports once");
+
+    assert_eq!(
+        view.labels(),
+        ["Norway"],
+        "the country list is still usable, got: {:?}",
+        view.labels()
+    );
+    for _ in 0..5 {
+        data.poll(&mut view);
+    }
+    assert_eq!(
+        canned.calls().len(),
+        2,
+        "the failure does not retry, got: {:?}",
+        canned.calls()
     );
 }
 

@@ -13,11 +13,12 @@
 //! engine around it comes later.
 //!
 //! The sections, in order and only when they have content: browse all
-//! countries, the user's own country (`Norway (near you)`), the pinned
-//! places (`★ Germany`), browse genres & tags, the hand-added stations, the
-//! favourites (`★ Name [codec] · CC`) and the loaded catalog
-//! (`Name [128k] · CC`), with stations the codec filter rejects marked so
-//! the user can tell before pressing enter.
+//! countries, the user's own country (`Norway (near you)`) with its regions
+//! once their index is fetched (T6d), the pinned places (`★ Germany`),
+//! browse genres & tags, the hand-added stations, the favourites
+//! (`★ Name [codec] · CC`) and the loaded catalog (`Name [128k] · CC`),
+//! with stations the codec filter rejects marked so the user can tell
+//! before pressing enter.
 //!
 //! Station identity is never raw string equality: marking goes through
 //! [`RadioStore`]'s toggles, which decide on [`station_key`] alone.
@@ -28,7 +29,7 @@ use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, ListState, Paragraph};
 
-use crate::radio::client::{Country, Order, Station, Tag};
+use crate::radio::client::{Country, Order, State, Station, Tag};
 use crate::radio::directory::is_playable_station;
 use crate::radio::store::{Favorite, Pinned, RadioStore};
 
@@ -111,6 +112,17 @@ pub enum RowKind {
         /// Display name.
         name: String,
     },
+    /// One region of the user's own country, from `/states/<home>/`
+    /// (T6d, S5). It opens the region's stations like a country does and
+    /// pins through [`Pinned`] with the region in `state`.
+    Region {
+        /// ISO 3166-1 code of the country the region is in.
+        code: String,
+        /// The country's display name.
+        name: String,
+        /// The region's name.
+        state: String,
+    },
     /// One tag of the index.
     Tag {
         /// The tag's name.
@@ -175,6 +187,9 @@ pub struct RadioView {
     store: RadioStore,
     /// The country index, as `/countries` answered.
     countries: Vec<Country>,
+    /// The user's own country's regions, as `/states/<home>/` answered
+    /// (T6d, S5).
+    states: Vec<State>,
     /// The tag index, as `/tags` answered.
     tags: Vec<Tag>,
     /// The user's own ISO 3166-1 code, when `country::detect` and the
@@ -227,6 +242,7 @@ impl RadioView {
         Self {
             store,
             countries,
+            states: Vec::new(),
             tags,
             own_country,
             catalog: Vec::new(),
@@ -271,6 +287,14 @@ impl RadioView {
     /// Replaces the tag index, as `/tags` answered (T6b).
     pub fn set_tags(&mut self, tags: Vec<Tag>) {
         self.tags = tags;
+        self.clamp();
+    }
+
+    /// Replaces the home country's state index, as `/states/<home>/`
+    /// answered (T6d). The rows appear at the top beside the places; an
+    /// empty answer is still an answer.
+    pub fn set_states(&mut self, states: Vec<State>) {
+        self.states = states;
         self.clamp();
     }
 
@@ -532,6 +556,7 @@ impl RadioView {
             RowKind::NearYou { code } | RowKind::Country { code, .. } => {
                 Some(self.country_place(&code, ""))
             }
+            RowKind::Region { code, name, state } => Some(Place::Country { code, name, state }),
             RowKind::Pinned {
                 code,
                 name: _,
@@ -665,7 +690,7 @@ impl RadioView {
                 });
                 self.dirty |= toggled.needs_save();
             }
-            RowKind::Pinned { code, name, state } => {
+            RowKind::Pinned { code, name, state } | RowKind::Region { code, name, state } => {
                 let toggled = self.store.toggle_pin(Pinned { code, name, state });
                 self.dirty |= toggled.needs_save();
             }
@@ -760,6 +785,27 @@ impl RadioView {
                 fact: String::new(),
                 kind: RowKind::NearYou { code },
             });
+        }
+        // The home country's regions, once `/states/<home>/` answered
+        // (T6d, S5): rows beside the places, each opening its region's
+        // stations and pinnable like a country. They sit right under the
+        // near-you row they belong to.
+        if self.own_country.is_some() {
+            for state in &self.states {
+                rows.push(Row {
+                    label: format!("{} › {}", state.country, state.name),
+                    fact: plural(
+                        usize::try_from(state.stationcount).unwrap_or(usize::MAX),
+                        "station",
+                        "stations",
+                    ),
+                    kind: RowKind::Region {
+                        code: self.own_country.clone().expect("just checked"),
+                        name: state.country.clone(),
+                        state: state.name.clone(),
+                    },
+                });
+            }
         }
         for pinned in &self.store.pinned {
             let label = if pinned.state.is_empty() {

@@ -13,9 +13,12 @@
 //! index when `Browse genres & tags` is entered, a place's stations when
 //! the place is opened — capped at [`crate::radio::directory::STATION_CAP`]
 //! through [`loadable_stations`] — and `Ctrl+R` re-requests only what the
-//! place on screen needs. An index already loaded is reused; a failed
-//! request becomes one status-line message, never a retry behind the
-//! user's back.
+//! place on screen needs. The home country's state index
+//! (`/states/<home>/`, T6d) loads beside the country index, for the home
+//! country only and never for another; with no home country — the question
+//! unanswered or declined — no states request is made at all. An index
+//! already loaded is reused; a failed request becomes one status-line
+//! message, never a retry behind the user's back.
 //!
 //! The preference store is the shell's responsibility here: the view marks
 //! through it, and a poll that sees a change saves it to `radio.toml`
@@ -30,7 +33,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 
 use crate::radio::client::{
-    self, Client, Country, HttpTransport, Order, Station, StationSearch, Tag, Transport,
+    self, Client, Country, HttpTransport, Order, State, Station, StationSearch, Tag, Transport,
 };
 use crate::radio::directory::loadable_stations;
 use crate::radio::store::RadioStore;
@@ -61,6 +64,8 @@ pub trait RadioWire {
 enum Outcome {
     /// The `/countries` index.
     Countries(Result<Vec<Country>, client::Error>),
+    /// The `/states/<home>/` index of the user's own country (T6d).
+    States(Result<Vec<State>, client::Error>),
     /// The `/tags` index.
     Tags(Result<Vec<Tag>, client::Error>),
     /// The stations of one place, capped by [`loadable_stations`].
@@ -127,6 +132,10 @@ fn place_key(place: &Place) -> Option<CatalogKey> {
 /// channel in flight. Build with [`RadioData::open`] for the shell or
 /// [`RadioData::new`] with an injected transport for the tests; hand it to
 /// the shell as a [`RadioWire`].
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the flags are independent facts: whether the store file was\n    readable, and whether each of the three indexes was already requested\n    this session; each one gates a different request or save"
+)]
 pub struct RadioData<T> {
     /// The directory client; `None` when the transport could not be built,
     /// in which case every request is skipped and the view still works.
@@ -144,6 +153,8 @@ pub struct RadioData<T> {
     detected: Option<String>,
     /// The `/countries` index, once loaded.
     countries: Vec<Country>,
+    /// The home country's `/states/<home>/` index, once loaded (T6d).
+    states: Vec<State>,
     /// The `/tags` index, once loaded.
     tags: Vec<Tag>,
     /// The stations of the one catalog slot, once loaded.
@@ -153,6 +164,8 @@ pub struct RadioData<T> {
     /// Whether `/countries` was already requested (or answered) this
     /// session: an empty answer is still an answer.
     countries_loaded: bool,
+    /// Whether `/states/<home>/` was already requested this session.
+    states_loaded: bool,
     /// Whether `/tags` was already requested this session.
     tags_loaded: bool,
     /// The request in flight, its answer still to be polled.
@@ -191,10 +204,12 @@ impl<T: Transport + Send + Sync + 'static> RadioData<T> {
             store,
             detected,
             countries: Vec::new(),
+            states: Vec::new(),
             tags: Vec::new(),
             catalog: Vec::new(),
             catalog_key: None,
             countries_loaded: false,
+            states_loaded: false,
             tags_loaded: false,
             pending: None,
             message,
@@ -224,6 +239,13 @@ impl<T: Transport + Send + Sync + 'static> RadioData<T> {
                 Ok(countries) => {
                     self.countries.clone_from(&countries);
                     view.set_countries(countries);
+                }
+                Err(error) => self.message = Some(format!("velo: {error}")),
+            },
+            Outcome::States(result) => match result {
+                Ok(states) => {
+                    self.states.clone_from(&states);
+                    view.set_states(states);
                 }
                 Err(error) => self.message = Some(format!("velo: {error}")),
             },
@@ -281,6 +303,23 @@ impl<T: Transport + Send + Sync + 'static> RadioData<T> {
                 });
                 self.pending = Some(receiver);
             }
+            // The home country's state index (T6d, S5), fetched beside the
+            // country index and only for the home country: the directory
+            // records a region for roughly 44% of stations, so the whole
+            // world's regions are not worth the request. With no home
+            // country — unanswered or declined — nothing changes.
+            Place::Countries if !self.states_loaded => {
+                let Some(home) = self.store.country.clone().filter(|code| code != "none") else {
+                    return;
+                };
+                self.states_loaded = true;
+                let client = Arc::clone(self.client.as_ref().expect("just checked"));
+                let (sender, receiver) = mpsc::channel();
+                thread::spawn(move || {
+                    let _ = sender.send(Outcome::States(client.states(&home)));
+                });
+                self.pending = Some(receiver);
+            }
             Place::Tags if !self.tags_loaded => {
                 self.tags_loaded = true;
                 let client = Arc::clone(self.client.as_ref().expect("just checked"));
@@ -322,7 +361,10 @@ impl<T: Transport + Send + Sync + 'static> RadioData<T> {
     fn refresh(&mut self, view: &mut RadioView) {
         match view.place() {
             Place::Top => return,
-            Place::Countries => self.countries_loaded = false,
+            Place::Countries => {
+                self.countries_loaded = false;
+                self.states_loaded = false;
+            }
             Place::Tags => self.tags_loaded = false,
             Place::Country { .. } | Place::Tag { .. } => self.catalog_key = None,
         }
@@ -346,6 +388,11 @@ impl<T: Transport + Send + Sync + 'static> RadioWire for RadioData<T> {
         view.show_browse_rows();
         if self.store.country.is_none() {
             view.ask_country(self.detected.clone());
+        }
+        // The regions of the home country, once their index is fetched
+        // (T6d): rows beside the places at the top.
+        if !self.states.is_empty() {
+            view.set_states(self.states.clone());
         }
         if !self.catalog.is_empty() {
             view.set_catalog(self.catalog.clone());
