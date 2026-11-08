@@ -59,7 +59,8 @@ use symphonia::core::io::ReadOnlySource;
 
 use super::icy::IcyReader;
 use super::lists::{self, ListsError};
-use crate::audio::{AudioError, TrackSource};
+use crate::audio::output::{StationOpener, StationSource};
+use crate::audio::{AudioError, TrackSource, TrackSpec};
 use crate::radio::client::USER_AGENT;
 
 /// The largest `Icy-Metaint` accepted: 64 KiB of audio per metadata block.
@@ -441,4 +442,38 @@ pub fn open(url: &str, timeouts: Timeouts) -> Result<StationStream, StreamError>
         })?;
 
     Ok(StationStream { track, state })
+}
+
+/// The queue's view of an opened station (T5c2a): the producer reads it
+/// exactly as it reads a file's `TrackSource`, with a `None` duration and
+/// no seek by contract (S3) and the demux's own title beside it (S4).
+impl StationSource for StationStream {
+    fn read_block(&mut self) -> Result<Option<Vec<f32>>, AudioError> {
+        self.track.read_block()
+    }
+
+    fn spec(&self) -> TrackSpec {
+        self.track.spec()
+    }
+
+    fn duration(&self) -> Option<Duration> {
+        self.track.duration()
+    }
+
+    fn title(&self) -> Option<String> {
+        StationStream::title(self)
+    }
+}
+
+/// The production opener for queue station entries (T5c2a): one GET through
+/// [`open`] with the default per-operation timeouts — see
+/// [`Timeouts::default`]. Tests inject their own [`StationOpener`] instead;
+/// that is the seam's point.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LiveOpener;
+
+impl StationOpener for LiveOpener {
+    fn open(&self, url: &str) -> Result<Box<dyn StationSource>, StreamError> {
+        open(url, Timeouts::default()).map(|stream| Box::new(stream) as Box<dyn StationSource>)
+    }
 }

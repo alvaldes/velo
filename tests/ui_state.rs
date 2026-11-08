@@ -372,14 +372,7 @@ fn a_on_an_album_appends_all_of_its_tracks_in_order() {
     let names: Vec<String> = app
         .queue()
         .iter()
-        .map(|entry| {
-            entry
-                .as_path()
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .into_owned()
-        })
+        .map(|entry| entry.label().into_owned())
         .collect();
     assert_eq!(names, ["01 - Dawn.wav", "02 - Later.wav"]);
     assert_eq!(app.status(), "velo: added 2 tracks");
@@ -406,14 +399,7 @@ fn d_removes_a_pending_entry_and_keeps_the_selection_inside_the_queue() {
     let names: Vec<String> = app
         .queue()
         .iter()
-        .map(|entry| {
-            entry
-                .as_path()
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .into_owned()
-        })
+        .map(|entry| entry.label().into_owned())
         .collect();
     assert_eq!(names, ["one.flac", "three.flac"]);
     assert_eq!(app.status(), "velo: removed two.flac");
@@ -432,14 +418,7 @@ fn k_then_j_moves_a_pending_entry_and_the_selection_moves_with_it() {
     let lifted: Vec<String> = app
         .queue()
         .iter()
-        .map(|entry| {
-            entry
-                .as_path()
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .into_owned()
-        })
+        .map(|entry| entry.label().into_owned())
         .collect();
     assert_eq!(lifted, ["one.flac", "three.flac", "two.flac"]);
     assert_eq!(
@@ -453,14 +432,7 @@ fn k_then_j_moves_a_pending_entry_and_the_selection_moves_with_it() {
     let dropped: Vec<String> = app
         .queue()
         .iter()
-        .map(|entry| {
-            entry
-                .as_path()
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .into_owned()
-        })
+        .map(|entry| entry.label().into_owned())
         .collect();
     assert_eq!(dropped, ["one.flac", "two.flac", "three.flac"]);
     assert_eq!(app.queue_selected(), 2);
@@ -647,7 +619,7 @@ fn a_skipped_track_is_announced_by_file_name_and_stays_until_the_next_update() {
     assert_eq!(app.status(), "");
 
     app.announce_failure(&TrackFailure {
-        path: PathBuf::from("/library/Artist/2019 - Harbor/02 - broken.wav"),
+        label: "02 - broken.wav".to_owned(),
         message: "unsupported format: not a container".to_owned(),
     });
     assert_eq!(
@@ -674,11 +646,11 @@ fn a_skipped_track_is_announced_by_file_name_and_stays_until_the_next_update() {
 fn a_newer_failure_replaces_the_previous_one() {
     let mut app = app_with_three_tracks();
     app.announce_failure(&TrackFailure {
-        path: PathBuf::from("/library/first.flac"),
+        label: "first.flac".to_owned(),
         message: "cannot read the file: no such file".to_owned(),
     });
     app.announce_failure(&TrackFailure {
-        path: PathBuf::from("/library/second.flac"),
+        label: "second.flac".to_owned(),
         message: "cannot decode the file: bad packet".to_owned(),
     });
     assert_eq!(
@@ -1170,7 +1142,7 @@ fn file_names(paths: &[PathBuf]) -> Vec<String> {
 fn queue_paths(queue: &[Entry]) -> Vec<PathBuf> {
     queue
         .iter()
-        .map(|entry| entry.as_path().to_path_buf())
+        .map(|entry| entry.as_path().expect("queue holds files").to_path_buf())
         .collect()
 }
 
@@ -1329,10 +1301,7 @@ fn a_appends_from_every_view() {
 
     act(&mut app, KeyCode::Char('3')); // Rising first
     act(&mut app, KeyCode::Char('a'));
-    assert_eq!(
-        app.queue().last().unwrap().as_path().file_name().unwrap(),
-        "01 - Rising.wav"
-    );
+    assert_eq!(app.queue().last().unwrap().label(), "01 - Rising.wav");
 }
 
 #[test]

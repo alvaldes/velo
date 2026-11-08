@@ -126,6 +126,9 @@ fn a_track_the_device_cannot_hold_is_skipped_not_fatal() {
     );
     assert!(samples.is_empty(), "it produced nothing to play");
     assert_eq!(failures.len(), 1, "but it was announced exactly once");
-    assert_eq!(failures[0].path, surround);
+    assert_eq!(
+        failures[0].label,
+        surround.file_name().unwrap().to_string_lossy().into_owned()
+    );
     let _ = std::fs::remove_file(&surround);
 }

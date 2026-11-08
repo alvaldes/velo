@@ -919,11 +919,7 @@ fn play(
     // A skip is not a failure — the album kept playing — but running to the end
     // without a word would hide a corrupt file, which is what T19 is about.
     for failure in &skipped {
-        let name = failure.path.file_name().map_or_else(
-            || failure.path.display().to_string(),
-            |name| name.to_string_lossy().into_owned(),
-        );
-        eprintln!("velo: skipped {name}: {}", failure.message);
+        eprintln!("velo: skipped {}: {}", failure.label, failure.message);
     }
     if underruns > 0 {
         eprintln!("velo: played with {underruns} underruns");

@@ -380,9 +380,13 @@ fn a_corrupt_track_mid_queue_is_skipped_without_silence_and_is_named() {
         "the drained stream must be the exact concatenation of the good tracks"
     );
 
-    // And the failure announces the file that broke, by its path.
+    // And the failure announces the file that broke, by the name the
+    // listener sees.
     assert_eq!(failures.len(), 1, "exactly one track failed: {failures:?}");
-    assert_eq!(failures[0].path, broken);
+    assert_eq!(
+        failures[0].label,
+        broken.file_name().unwrap().to_string_lossy().into_owned()
+    );
     assert!(!failures[0].message.is_empty(), "the failure says why");
 
     let _ = std::fs::remove_file(&good_a);

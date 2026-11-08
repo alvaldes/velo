@@ -6,6 +6,7 @@
 //! silence. No allocation, no locking, no logging, no decoding. Everything
 //! expensive happens on the producer thread or in the interface.
 
+use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
@@ -20,6 +21,7 @@ use super::replay_gain::Gain;
 use super::resample::{ChannelMap, RateConverter};
 use super::{AudioError, TrackSource, TrackSpec};
 use crate::config::ReplayGainMode;
+use crate::radio::stream::{LiveOpener, StreamError};
 
 /// Two seconds of audio in flight: long enough to survive a slow decode, short
 /// enough to keep pause and stop responsive.
@@ -42,8 +44,10 @@ const DRAIN_POLL: Duration = Duration::from_millis(20);
 /// an album, and it must not be silent either.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TrackFailure {
-    /// The track that could not be played.
-    pub path: PathBuf,
+    /// The failed entry, named exactly as the status line prints it: a
+    /// file's file name, a station's own name — never a URL, never a path
+    /// that would leak a hash-named cache file (T5c2a).
+    pub label: String,
     /// What went wrong, as the audio path reports it.
     pub message: String,
 }
@@ -303,14 +307,38 @@ impl StreamCell {
 pub enum Entry {
     /// A file on disk, possibly a remote one the resolver has yet to cache.
     File(PathBuf),
+    /// A live radio station: played as a stream from `url` as its bytes
+    /// arrive (S2), never downloaded, never resolved to a path.
+    Station {
+        /// The stream URL the directory listed (`url_resolved`).
+        url: String,
+        /// The station's own, user-facing name: what the queue displays
+        /// and what a failure message prints — never the URL.
+        name: String,
+    },
 }
 
 impl Entry {
     /// The path the entry stands for: the file's own, for [`Entry::File`].
+    /// A station has no path — this is `None`, never an invented or empty
+    /// one; its human label goes through [`Entry::label`].
     #[must_use]
-    pub fn as_path(&self) -> &Path {
+    pub fn as_path(&self) -> Option<&Path> {
         match self {
-            Self::File(path) => path.as_path(),
+            Self::File(path) => Some(path),
+            Self::Station { .. } => None,
+        }
+    }
+
+    /// The name a user reads for this entry, whichever variant it is: a
+    /// file's file name, a station's own name.
+    #[must_use]
+    pub fn label(&self) -> Cow<'_, str> {
+        match self {
+            Self::File(path) => path
+                .file_name()
+                .map_or_else(|| path.to_string_lossy(), std::ffi::OsStr::to_string_lossy),
+            Self::Station { name, .. } => Cow::Borrowed(name),
         }
     }
 }
@@ -349,9 +377,49 @@ pub trait PathResolver: Send + Sync {
     fn resolve(&self, path: &Path) -> Result<PathBuf, AudioError>;
 }
 
+/// One opened live station, as the producer reads it: the same surface a
+/// file's `TrackSource` answers, minus everything a stream cannot have — a
+/// duration is always `None` and a seek never happens (S3) — plus the title
+/// the station announces, which the interface shows (S4).
+pub trait StationSource: Send {
+    /// The next block of interleaved samples, or `None` at the end of the
+    /// stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AudioError`] when the body stalls past its read bound or
+    /// the decoder fails; the caller decides what follows — here, one
+    /// failure announcement and the next queue entry (the retry policy is
+    /// T5c2b).
+    fn read_block(&mut self) -> Result<Option<Vec<f32>>, AudioError>;
+
+    /// The format the station decodes at.
+    fn spec(&self) -> TrackSpec;
+
+    /// A live station never declares a duration: this is `None` by contract.
+    fn duration(&self) -> Option<Duration>;
+
+    /// The latest `StreamTitle`, or `None` before the first one arrives.
+    fn title(&self) -> Option<String>;
+}
+
+/// Opens a station URL into a [`StationSource`]. The seam that keeps tests
+/// off the network, in the same spirit as [`PathResolver`]: production goes
+/// through `radio::stream::open` with the default per-operation timeouts
+/// ([`LiveOpener`]); a test injects a fake over fixture bytes. Called once
+/// per station entry, when the producer reaches it.
+pub trait StationOpener: Send + Sync {
+    /// # Errors
+    ///
+    /// Fails when the station cannot be reached or its body does not
+    /// decode; the producer announces the failure and moves to the next
+    /// entry — one attempt; the retry-and-skip policy is T5c2b.
+    fn open(&self, url: &str) -> Result<Box<dyn StationSource>, StreamError>;
+}
+
 /// Where the producer is: the queue index and the delivered count at which the
 /// current track began. Only the producer writes it, only the UI reads it.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct Progress {
     start: usize,
     duration: Option<Duration>,
@@ -359,6 +427,9 @@ struct Progress {
     /// partway in. A repeat can bring the same index back, so the index alone
     /// cannot say it.
     first: bool,
+    /// The title a live station is announcing, or `None` for a file and
+    /// before a station's first `StreamTitle` (S4).
+    title: Option<String>,
 }
 
 /// The atomics the device callback reads and writes. Created once per player
@@ -515,21 +586,30 @@ impl Player {
         };
         let _ = len;
 
-        // The first entry is resolved here, at selection time, so a remote
-        // track is fetched once and then opened like any file (T12c); its
-        // failure is the error the caller reports, as for a missing file.
-        // The producer resolves every entry again when it reaches it — a hit
-        // costs no network. The resolver is consulted only for file entries:
-        // the dispatch, not a comment, is what makes that so.
-        let first_path = match first {
-            Entry::File(path) => match resolver.as_ref() {
-                Some(resolver) => resolver.resolve(&path)?,
-                None => path,
-            },
+        // The first entry is decided here, at selection time, so a bad first
+        // entry fails before a device is opened, and the format is known for
+        // the device to be built on (T12c). A file resolves through the
+        // resolver and opens; a station opens through the station opener —
+        // never the resolver, never a path — and the opened stream is handed
+        // to the producer, so a station is fetched once, never twice. The
+        // producer decides every entry again when it reaches it — a cache hit
+        // costs no network. The dispatch, not a comment, is what keeps the
+        // two seams apart.
+        let (track_spec, preopened) = match &first {
+            Entry::File(path) => {
+                let first_path = match resolver.as_ref() {
+                    Some(resolver) => resolver.resolve(path)?,
+                    None => path.clone(),
+                };
+                (TrackSource::open(&first_path)?.spec(), None)
+            }
+            Entry::Station { url, .. } => {
+                let source = LiveOpener
+                    .open(url)
+                    .map_err(|error| AudioError::Unsupported(error.to_string()))?;
+                (source.spec(), Some((url.clone(), source)))
+            }
         };
-        // Opening once up front means a missing or broken first file fails
-        // before a device is opened, and gives us the format to configure.
-        let track_spec = TrackSource::open(&first_path)?.spec();
         let offset_frames = duration_to_frames(offset, track_spec.sample_rate);
 
         let requested_bit_perfect = bit_perfect;
@@ -564,6 +644,7 @@ impl Player {
             start: 0,
             duration: None,
             first: true,
+            title: None,
         }));
         let failures = Arc::new(Mutex::new(VecDeque::new()));
         let repeat = Arc::new(RepeatCell::new(repeat));
@@ -611,6 +692,8 @@ impl Player {
                         gain_mode,
                         bit_perfect,
                         resolver,
+                        opener: None,
+                        preopen: preopened,
                     };
                     let shared = Shared {
                         stop: &stop,
@@ -772,10 +855,22 @@ impl Player {
     #[must_use]
     pub fn current_duration(&self) -> Option<Duration> {
         let progress = match self.progress.lock() {
-            Ok(progress) => *progress,
-            Err(poisoned) => *poisoned.into_inner(),
+            Ok(progress) => progress.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
         };
         progress.duration
+    }
+
+    /// The title the live station is announcing, when one plays and the
+    /// stream has published one (S4). `None` for a file, and between a
+    /// station's titles.
+    #[must_use]
+    pub fn current_title(&self) -> Option<String> {
+        let progress = match self.progress.lock() {
+            Ok(progress) => progress.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        progress.title
     }
 
     /// Moments where the device asked for samples the producer had not written
@@ -824,8 +919,8 @@ impl Player {
     #[must_use]
     pub fn position(&self) -> Duration {
         let progress = match self.progress.lock() {
-            Ok(progress) => *progress,
-            Err(poisoned) => *poisoned.into_inner(),
+            Ok(progress) => progress.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
         };
         let spec = self.cell.spec();
         let samples = elapsed_samples(
@@ -873,8 +968,16 @@ struct Sequence {
     /// stream swap; headless, it only moves the expected spec.
     bit_perfect: bool,
     /// Turns queue entries into files just before the producer opens them
-    /// (T12c); `None` means every entry already is a file.
+    /// (T12c); `None` means every file entry already is a local file.
     resolver: Option<Arc<dyn PathResolver>>,
+    /// Opens station entries just before the producer reaches them; `None`
+    /// means the production opener — one GET with the default per-operation
+    /// timeouts. Never asked about a file entry.
+    opener: Option<Arc<dyn StationOpener>>,
+    /// The first station, opened at selection time and handed over so it is
+    /// fetched once. The producer uses it only while the entry it reaches
+    /// still carries the same URL.
+    preopen: Option<(String, Box<dyn StationSource>)>,
 }
 
 /// What a sequence writes into: the ring of a running stream, or a headless
@@ -904,6 +1007,12 @@ trait SequenceSink {
     /// track was shorter than the preroll — starts anyway: a short track's
     /// samples must be heard (T17).
     fn after_turn(&mut self) {}
+
+    /// The progress a turn published: the duration when the decoder knows
+    /// it, and the title a live station is announcing. The device path
+    /// writes the same record where the player reads it; this is the
+    /// headless mirror a drain observes.
+    fn progress(&mut self, _duration: Option<Duration>, _title: Option<&str>) {}
 }
 
 /// Builds the device stream: the callback that drains the ring. Its whole job
@@ -1159,6 +1268,7 @@ struct FnSink<'a> {
     block: &'a mut dyn FnMut(&[f32]),
     failure: &'a mut dyn FnMut(TrackFailure),
     reopen: &'a mut dyn FnMut(TrackSpec) -> Result<TrackSpec, AudioError>,
+    progress: &'a mut dyn FnMut(Option<Duration>, Option<&str>),
 }
 
 impl SequenceSink for FnSink<'_> {
@@ -1173,6 +1283,10 @@ impl SequenceSink for FnSink<'_> {
     fn reopen_stream(&mut self, track: TrackSpec) -> Result<TrackSpec, AudioError> {
         (self.reopen)(track)
     }
+
+    fn progress(&mut self, duration: Option<Duration>, title: Option<&str>) {
+        (self.progress)(duration, title);
+    }
 }
 
 /// Copies one queue entry out with the queue's length, so the lock is held
@@ -1185,11 +1299,15 @@ fn queued_entry(queue: &Mutex<Vec<Entry>>, index: usize) -> (Option<Entry>, usiz
     }
 }
 
-/// A track failure record for the interface: the path it failed, and why.
-fn track_failure(path: &std::path::Path, error: &AudioError) -> TrackFailure {
+/// A track failure record for the interface: the entry as the listener
+/// sees it, and why. The label comes from the queue entry — so a failure
+/// that happens *after* resolution, while the cache file is open, still
+/// names the entry the user queued, never the hash-named cache file it
+/// opened (T12c, true here for every failure, not only resolution's).
+fn track_failure(label: &str, message: String) -> TrackFailure {
     TrackFailure {
-        path: path.to_path_buf(),
-        message: error.to_string(),
+        label: label.to_owned(),
+        message,
     }
 }
 
@@ -1211,6 +1329,8 @@ fn run_sequence(
         gain_mode,
         bit_perfect,
         resolver,
+        opener,
+        mut preopen,
     } = job;
     let mut expected = expected;
     let mut turn = TurnJob {
@@ -1237,15 +1357,35 @@ fn run_sequence(
         let (Some(entry), _) = queued_entry(&queue, turn.index) else {
             return Ok(());
         };
-        // The entry is resolved when the producer reaches it (T12c): a cache
-        // hit opens the file it is, a miss downloads first, and a failed
-        // download is announced and skipped like any other bad track (T19) —
-        // a network dying mid-album must not end the session.
-        let outcome = match resolve_entry(resolver.as_ref(), &entry) {
-            Ok(path) => play_turn(&entry, &path, &turn, &mut expected, shared, sink)?,
-            Err(error) => {
-                sink.failure(track_failure(entry.as_path(), &error));
-                Turn::Failed
+        // The entry is decided when the producer reaches it (T12c), by what
+        // it is: a file resolves through the resolver and opens from a path;
+        // a station opens through the station opener, never the resolver and
+        // never a path — the two seams never cross, the match's shape is what
+        // makes that so. A failure past the first turn is announced and
+        // skipped (T19); the first turn's failure is the sequence error the
+        // caller reports at selection time.
+        let label = entry.label().into_owned();
+        let outcome = match &entry {
+            Entry::File(path) => match resolve_entry(resolver.as_ref(), path) {
+                Ok(resolved) => play_turn(&label, &resolved, &turn, &mut expected, shared, sink)?,
+                Err(error) => {
+                    sink.failure(track_failure(&label, error.to_string()));
+                    Turn::Failed
+                }
+            },
+            Entry::Station { url, .. } => {
+                match station_source(&mut preopen, opener.as_ref(), url) {
+                    Ok(source) => {
+                        play_station_turn(&label, source, &turn, &mut expected, shared, sink)
+                    }
+                    Err(error) if turn.first => {
+                        return Err(AudioError::Unsupported(error.to_string()));
+                    }
+                    Err(error) => {
+                        sink.failure(track_failure(&label, error.to_string()));
+                        Turn::Failed
+                    }
+                }
             }
         };
         sink.after_turn();
@@ -1301,19 +1441,43 @@ enum Turn {
     Stopped,
 }
 
-/// Resolves one queue entry into the file the producer opens (T12c).
-/// Without a resolver every entry already is a file, which is today's
-/// behaviour. The resolver is consulted only for file entries — that is the
-/// match's shape, not a promise this comment makes.
+/// Resolves one *file* queue entry into the file the producer opens (T12c).
+/// Without a resolver every file entry already is a local file, which is
+/// today's behaviour. A station never reaches here: the dispatch on the
+/// entry, not a promise this comment makes, is what routes it to the station
+/// opener instead.
 fn resolve_entry(
     resolver: Option<&Arc<dyn PathResolver>>,
-    entry: &Entry,
+    path: &Path,
 ) -> Result<PathBuf, AudioError> {
-    match entry {
-        Entry::File(path) => match resolver {
-            Some(resolver) => resolver.resolve(path),
-            None => Ok(path.clone()),
-        },
+    match resolver {
+        Some(resolver) => resolver.resolve(path),
+        None => Ok(path.to_path_buf()),
+    }
+}
+
+/// The opener a sequence uses: the injected one, or the production opener —
+/// one GET with the default per-operation timeouts.
+fn station_opener(opener: Option<&Arc<dyn StationOpener>>) -> &dyn StationOpener {
+    static DEFAULT: LiveOpener = LiveOpener;
+    match opener {
+        Some(opener) => opener.as_ref(),
+        None => &DEFAULT,
+    }
+}
+
+/// The station source for `url`: the one opened at selection time, while the
+/// entry the producer reached still is that URL, otherwise a fresh open. A
+/// preopen that no longer matches is dropped — the queue may have moved
+/// under it.
+fn station_source(
+    preopen: &mut Option<(String, Box<dyn StationSource>)>,
+    opener: Option<&Arc<dyn StationOpener>>,
+    url: &str,
+) -> Result<Box<dyn StationSource>, StreamError> {
+    match preopen.take() {
+        Some((preopen_url, source)) if preopen_url == url => Ok(source),
+        _ => station_opener(opener).open(url),
     }
 }
 
@@ -1321,11 +1485,13 @@ fn resolve_entry(
 /// failing to open is the sequence error the interface already reports;
 /// every other failure is announced and costs this one track, so one bad file
 /// does not take the rest of the album with it (T19). Failures are named for
-/// the queue entry, so a skipped remote track reports the remote row and not
-/// the hash-named cached file (T12c); the samples, however, come from the
-/// resolved file — the cache — whose tags are the originals'.
+/// the queue entry — including the failures that happen after resolution,
+/// while the cache file is open — so a skipped remote track reports the
+/// remote row and never the hash-named cached file (T12c); a station is
+/// named for itself, the URL never shown (T5c2a). The samples, however,
+/// come from the resolved file — the cache — whose tags are the originals'.
 fn play_turn(
-    entry: &Entry,
+    label: &str,
     path: &Path,
     turn: &TurnJob,
     expected: &mut TrackSpec,
@@ -1341,7 +1507,7 @@ fn play_turn(
         Ok(source) => source,
         Err(error) if turn.first => return Err(error),
         Err(error) => {
-            sink.failure(track_failure(entry.as_path(), &error));
+            sink.failure(track_failure(label, error.to_string()));
             return Ok(Turn::Failed);
         }
     };
@@ -1352,16 +1518,15 @@ fn play_turn(
     shared.current.store(turn.index, Ordering::Release);
 
     // One write publishes every part, so a reader can never see a track
-    // without the point it began.
+    // without the point it began. A file has no title: whatever a previous
+    // station announced is cleared here.
     let record = Progress {
         start: shared.delivered.load(Ordering::Acquire),
         duration: source.duration(),
         first: turn.first,
+        title: None,
     };
-    match shared.progress.lock() {
-        Ok(mut slot) => *slot = record,
-        Err(poisoned) => *poisoned.into_inner() = record,
-    }
+    publish_progress(shared, sink, &record);
 
     let spec = source.spec();
     // Bit-perfect (T17): when the track's rate differs from the stream's, the
@@ -1379,7 +1544,7 @@ fn play_turn(
     let map = match ChannelMap::new(spec.channels, expected.channels) {
         Ok(map) => map,
         Err(error) => {
-            sink.failure(track_failure(entry.as_path(), &error));
+            sink.failure(track_failure(label, error.to_string()));
             return Ok(Turn::Failed);
         }
     };
@@ -1409,14 +1574,14 @@ fn play_turn(
             // A track that stops decoding costs itself, not the album: what it
             // decoded stays, the rest is skipped, the next one follows.
             Err(error) => {
-                sink.failure(track_failure(entry.as_path(), &error));
+                sink.failure(track_failure(label, error.to_string()));
                 return Ok(Turn::Failed);
             }
         };
         let mut resampled = match converter.convert(&map.apply(&block)) {
             Ok(resampled) => resampled,
             Err(error) => {
-                sink.failure(track_failure(entry.as_path(), &error));
+                sink.failure(track_failure(label, error.to_string()));
                 return Ok(Turn::Failed);
             }
         };
@@ -1432,7 +1597,7 @@ fn play_turn(
     let mut flushed = match converter.flush() {
         Ok(flushed) => flushed,
         Err(error) => {
-            sink.failure(track_failure(entry.as_path(), &error));
+            sink.failure(track_failure(label, error.to_string()));
             return Ok(Turn::Failed);
         }
     };
@@ -1442,6 +1607,143 @@ fn play_turn(
         sink.push_block(&flushed);
     }
     Ok(if heard { Turn::Played } else { Turn::Silent })
+}
+
+/// Plays one live station into the sink. A station is opened through the
+/// station opener — never the resolver, never a path — and plays as its
+/// bytes arrive. It has no duration, is never seeked (S3: the offset a seek
+/// passes is ignored), and skips `ReplayGain` and bit-perfect reopening
+/// (S3); its samples convert into the sequence's format exactly as a file's
+/// do, so it never pairs with a neighbour as a gapless join (S3). Its
+/// failure is announced for the station's own name and costs this one
+/// entry: one attempt, then the queue moves on (the retry policy is T5c2b).
+fn play_station_turn(
+    label: &str,
+    mut source: Box<dyn StationSource>,
+    turn: &TurnJob,
+    expected: &mut TrackSpec,
+    shared: &Shared<'_>,
+    sink: &mut dyn SequenceSink,
+) -> Turn {
+    // Announce which entry is being produced once it has opened, so a
+    // reader only ever sees an entry that is playing or about to — never
+    // one that is about to be skipped.
+    shared.current.store(turn.index, Ordering::Release);
+
+    // A station has no duration and nothing to seek within (S3); the title
+    // it announces is the progress the interface reads (S4).
+    let spec = source.spec();
+    let record = Progress {
+        start: shared.delivered.load(Ordering::Acquire),
+        duration: source.duration(),
+        first: turn.first,
+        title: source.title(),
+    };
+    publish_progress(shared, sink, &record);
+    let mut last_title = record.title.clone();
+
+    // A rate difference is converted away and a layout difference is mapped,
+    // exactly as for a file; bit-perfect never reopens the stream for a
+    // station (S3), so `expected` is left as it is.
+    let map = match ChannelMap::new(spec.channels, expected.channels) {
+        Ok(map) => map,
+        Err(error) => {
+            sink.failure(track_failure(label, error.to_string()));
+            return Turn::Failed;
+        }
+    };
+    let mapped_spec = TrackSpec {
+        sample_rate: spec.sample_rate,
+        channels: expected.channels,
+    };
+    let mut converter = match RateConverter::new(mapped_spec, *expected) {
+        Ok(converter) => converter,
+        Err(error) => {
+            sink.failure(track_failure(label, error.to_string()));
+            return Turn::Failed;
+        }
+    };
+
+    // ReplayGain is skipped for a station (S3): there is no file to read
+    // tags from, so the samples go through at unity gain.
+    let gain = Gain::identity();
+    let mut heard = false;
+    loop {
+        if shared.stop.load(Ordering::Relaxed) {
+            return Turn::Stopped;
+        }
+        let block = match source.read_block() {
+            Ok(Some(block)) => block,
+            Ok(None) => break,
+            // A station that stops decoding costs itself, not the queue:
+            // what it decoded stays, the next entry follows.
+            Err(error) => {
+                sink.failure(track_failure(label, error.to_string()));
+                return Turn::Failed;
+            }
+        };
+        let mut resampled = match converter.convert(&map.apply(&block)) {
+            Ok(resampled) => resampled,
+            Err(error) => {
+                sink.failure(track_failure(label, error.to_string()));
+                return Turn::Failed;
+            }
+        };
+        gain.apply(&mut resampled);
+        heard |= !resampled.is_empty();
+        sink.push_block(&resampled);
+        // What the station is announcing now is published when it changes,
+        // so a repeated title never repaints (S4).
+        let title = source.title();
+        if title != last_title {
+            publish_title(shared, sink, title.as_deref());
+            last_title = title;
+        }
+    }
+
+    // The resampler holds the tail back until it sees what follows, exactly
+    // as for a file: without the flush the station's last frames are lost.
+    let mut flushed = match converter.flush() {
+        Ok(flushed) => flushed,
+        Err(error) => {
+            sink.failure(track_failure(label, error.to_string()));
+            return Turn::Failed;
+        }
+    };
+    gain.apply(&mut flushed);
+    heard |= !flushed.is_empty();
+    if !flushed.is_empty() {
+        sink.push_block(&flushed);
+    }
+    if heard { Turn::Played } else { Turn::Silent }
+}
+
+/// Writes one progress record where the player reads it, and mirrors it to
+/// the headless sink. One write, so a reader never sees a record half
+/// updated.
+fn publish_progress(shared: &Shared<'_>, sink: &mut dyn SequenceSink, record: &Progress) {
+    match shared.progress.lock() {
+        Ok(mut slot) => *slot = record.clone(),
+        Err(poisoned) => *poisoned.into_inner() = record.clone(),
+    }
+    sink.progress(record.duration, record.title.as_deref());
+}
+
+/// Updates the published title when it changed, and mirrors it to the
+/// headless sink. One write, so a reader never sees a title half updated.
+fn publish_title(shared: &Shared<'_>, sink: &mut dyn SequenceSink, title: Option<&str>) {
+    let record = {
+        let mut slot = match shared.progress.lock() {
+            Ok(slot) => slot,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if slot.title.as_deref() == title {
+            return;
+        }
+        slot.title = title.map(str::to_owned);
+        slot.clone()
+    };
+    sink.progress(record.duration, record.title.as_deref());
 }
 
 /// Drains a queue the way the producer writes it, without a device: every
@@ -1507,6 +1809,8 @@ pub fn drain_headless_with_gain(
         gain_mode,
         bit_perfect: false,
         resolver: None,
+        opener: None,
+        preopen: None,
     };
     let mut refuse = |_: TrackSpec| -> Result<TrackSpec, AudioError> {
         unreachable!("only bit-perfect sequences reopen the stream")
@@ -1520,6 +1824,7 @@ pub fn drain_headless_with_gain(
             block: on_block,
             failure: on_failure,
             reopen: &mut refuse,
+            progress: &mut |_: Option<Duration>, _: Option<&str>| {},
         },
     )
 }
@@ -1557,6 +1862,8 @@ pub fn drain_headless_resolving(
         gain_mode,
         bit_perfect: false,
         resolver,
+        opener: None,
+        preopen: None,
     };
     let mut refuse = |_: TrackSpec| -> Result<TrackSpec, AudioError> {
         unreachable!("only bit-perfect sequences reopen the stream")
@@ -1570,6 +1877,62 @@ pub fn drain_headless_resolving(
             block: on_block,
             failure: on_failure,
             reopen: &mut refuse,
+            progress: &mut |_: Option<Duration>, _: Option<&str>| {},
+        },
+    )
+}
+
+/// [`drain_headless_resolving`] with the station opener beside the resolver
+/// (T5c2a): a station entry opens through `opener` when the loop reaches it
+/// and plays as a stream — never through the resolver, never a path — while
+/// a file entry resolves exactly as before. Every published progress record
+/// — the duration when known, the station's title when announced — goes to
+/// `on_progress`, which is how a headless test observes what the player
+/// exposes to the interface.
+///
+/// # Errors
+///
+/// The same errors as [`drain_headless`].
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the job, both seams and the three sinks are the whole contract\n    of the drain; bundling them would only hide what is shared"
+)]
+pub fn drain_headless_with_opener(
+    queue: SharedQueue,
+    start_track: usize,
+    offset_frames: u64,
+    expected: TrackSpec,
+    gain_mode: ReplayGainMode,
+    resolver: Option<Arc<dyn PathResolver>>,
+    opener: Option<Arc<dyn StationOpener>>,
+    stop: &AtomicBool,
+    on_block: &mut dyn FnMut(&[f32]),
+    on_failure: &mut dyn FnMut(TrackFailure),
+    on_progress: &mut dyn FnMut(Option<Duration>, Option<&str>),
+) -> Result<(), AudioError> {
+    let job = Sequence {
+        queue,
+        start_track,
+        offset_frames,
+        gain_mode,
+        bit_perfect: false,
+        resolver,
+        opener,
+        preopen: None,
+    };
+    let mut refuse = |_: TrackSpec| -> Result<TrackSpec, AudioError> {
+        unreachable!("only bit-perfect sequences reopen the stream")
+    };
+    drain(
+        job,
+        expected,
+        &RepeatCell::default(),
+        stop,
+        &mut FnSink {
+            block: on_block,
+            failure: on_failure,
+            reopen: &mut refuse,
+            progress: on_progress,
         },
     )
 }
@@ -1603,6 +1966,8 @@ pub fn drain_headless_repeating(
         gain_mode: ReplayGainMode::default(),
         bit_perfect: false,
         resolver: None,
+        opener: None,
+        preopen: None,
     };
     let mut refuse = |_: TrackSpec| -> Result<TrackSpec, AudioError> {
         unreachable!("only bit-perfect sequences reopen the stream")
@@ -1616,6 +1981,7 @@ pub fn drain_headless_repeating(
             block: on_block,
             failure: on_failure,
             reopen: &mut refuse,
+            progress: &mut |_: Option<Duration>, _: Option<&str>| {},
         },
     )
 }
@@ -1650,6 +2016,8 @@ pub fn drain_headless_bit_perfect(
         gain_mode,
         bit_perfect: true,
         resolver: None,
+        opener: None,
+        preopen: None,
     };
     let channels = expected.channels;
     let mut follow = move |track: TrackSpec| -> Result<TrackSpec, AudioError> {
@@ -1669,6 +2037,7 @@ pub fn drain_headless_bit_perfect(
             block: on_block,
             failure: on_failure,
             reopen: &mut follow,
+            progress: &mut |_: Option<Duration>, _: Option<&str>| {},
         },
     )
 }
@@ -1687,6 +2056,7 @@ fn drain(
         start: 0,
         duration: None,
         first: true,
+        title: None,
     });
     let shared = Shared {
         stop,

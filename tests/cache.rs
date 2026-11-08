@@ -661,9 +661,8 @@ fn a_failed_download_is_announced_once_and_the_next_local_track_still_plays() {
     assert_eq!(heard, as_f32(&local_pcm), "the local track still plays");
     assert_eq!(failures.len(), 1, "the failed download is announced once");
     assert_eq!(
-        failures[0].path,
-        PathBuf::from("subsonic://music.example.com/dead"),
-        "the announcement names the queue entry"
+        failures[0].label, "dead",
+        "the announcement names the failed entry as the listener sees it"
     );
     assert!(failures[0].message.contains("could not be reached"));
 }

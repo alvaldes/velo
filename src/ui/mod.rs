@@ -1316,16 +1316,15 @@ impl<'lib> App<'lib> {
         }
     }
 
-    /// Puts a skipped track into the status line: `velo: skipped <file name>:
-    /// <why>`. The message stays until the next status update — a play, a
-    /// seek or another failure — because a skipped track is not a sequence
-    /// error and nothing else has happened worth saying (T19).
+    /// Puts a skipped entry into the status line: `velo: skipped <label>:
+    /// <why>`. The label is exactly what the failure record carries — a
+    /// file's file name, a station's own name — so it is printed as is, with
+    /// no path to extract anything from (T5c2a). The message stays until the
+    /// next status update — a play, a seek or another failure — because a
+    /// skipped track is not a sequence error and nothing else has happened
+    /// worth saying (T19).
     pub fn announce_failure(&mut self, failure: &TrackFailure) {
-        let name = failure.path.file_name().map_or_else(
-            || failure.path.display().to_string(),
-            |name| name.to_string_lossy().to_string(),
-        );
-        self.status = format!("velo: skipped {name}: {}", failure.message);
+        self.status = format!("velo: skipped {}: {}", failure.label, failure.message);
     }
 
     /// Swaps the decoded cover when the track that is playing changes, and
@@ -2260,15 +2259,21 @@ impl<'lib> App<'lib> {
     /// block on a tall window, three rows on a short one, one row on a tiny
     /// one — the list below keeps its rows before the block keeps its air.
     fn draw_now_playing(&self, frame: &mut Frame, area: Rect) {
-        let (title, subtitle) = self.playing_path().map_or_else(
-            || {
-                (
-                    "nothing playing".to_owned(),
-                    "enter plays the selection".to_owned(),
-                )
-            },
-            |path| describe(path, self.known_tracks()),
-        );
+        // A station has no path to describe: its own name is the title, and
+        // its progress is the `live` footer (S3, wired in T6c).
+        let current = self
+            .player
+            .as_ref()
+            .and_then(|player| self.queue.get(player.current_index()))
+            .cloned();
+        let (title, subtitle) = match current {
+            Some(Entry::File(path)) => describe(&path, self.known_tracks()),
+            Some(Entry::Station { name, .. }) => (name, String::new()),
+            None => (
+                "nothing playing".to_owned(),
+                "enter plays the selection".to_owned(),
+            ),
+        };
         let title = Line::from(vec![
             Span::styled("♫ ", Style::new().fg(self.theme.accent)),
             Span::styled(title, Style::new().fg(self.theme.text).bold()),
@@ -2699,7 +2704,12 @@ impl<'lib> App<'lib> {
             .iter()
             .enumerate()
             .map(|(index, entry)| {
-                let (name, note) = describe(entry.as_path(), self.known_tracks());
+                // A station is named for itself, never resolved to a path:
+                // its own name is what the row shows.
+                let (name, note) = match entry {
+                    Entry::File(path) => describe(path, self.known_tracks()),
+                    Entry::Station { name, .. } => (name.clone(), String::new()),
+                };
                 ListItem::new(list_row(
                     ListRow {
                         playing: playing == Some(index),
@@ -2838,7 +2848,9 @@ impl<'lib> App<'lib> {
     /// marker has to find the playing row wherever a list shows whole tracks.
     fn playing_path(&self) -> Option<&std::path::Path> {
         let player = self.player.as_ref()?;
-        self.queue.get(player.current_index()).map(Entry::as_path)
+        self.queue
+            .get(player.current_index())
+            .and_then(Entry::as_path)
     }
 
     /// The length of the track that is playing: from the interface's own track
@@ -3383,7 +3395,7 @@ impl<'lib> App<'lib> {
             self.status = self.editable_queue_index(self.queue_selected).unwrap_err();
             return;
         };
-        let name = Self::file_name(self.queue[index].as_path());
+        let name = self.queue[index].label().into_owned();
         self.edit_queue(|queue| {
             queue.remove(index);
         });
@@ -3489,13 +3501,6 @@ impl<'lib> App<'lib> {
         let count = paths.len();
         self.edit_queue(|queue| queue.extend(paths.into_iter().map(Entry::from)));
         self.status = format!("velo: added {}", plural(count, "track", "tracks"));
-    }
-
-    fn file_name(path: &std::path::Path) -> String {
-        path.file_name().map_or_else(
-            || path.display().to_string(),
-            |name| name.to_string_lossy().into_owned(),
-        )
     }
 
     /// Moves the volume by `percent`, clamped to 0..=100.
@@ -3702,6 +3707,16 @@ impl<'lib> App<'lib> {
         let Some(player) = &self.player else {
             return;
         };
+        // A live station has no position to seek within (S3): the seek path
+        // says so instead of rebuilding the player — which would refetch the
+        // stream — and never reaches the rebuild below.
+        if matches!(
+            self.queue.get(player.current_index()),
+            Some(Entry::Station { .. })
+        ) {
+            "velo: nothing to seek in a live station".clone_into(&mut self.status);
+            return;
+        }
         let position = player.position();
         let duration = self.current_track_duration();
         let target = seek_target(position, delta_secs, duration);
