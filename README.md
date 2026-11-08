@@ -338,6 +338,12 @@ server is reported as unreachable — never as a credential problem.
 - Linux or macOS. Windows is untested.
 - To build from source on Linux, the ALSA development headers
   (`libasound2-dev` on Debian/Ubuntu); the audio output goes through cpal.
+- **Opus needs one of two things at build time**: `cmake` (used to build the
+  bundled libopus from source), or a system libopus that `pkg-config` can find
+  (`brew install opus`, `apt install libopus-dev`) — in which case that one is
+  linked statically and cmake is never called. Either way nothing is needed at
+  runtime. Without both, the build stops in `audiopus_sys` with a message about
+  cmake, which is the honest place for it to stop.
 - A terminal. The interface needs an interactive terminal and refuses to run
   otherwise.
 - Cover art is drawn when the terminal speaks the kitty, sixel or iTerm2
@@ -375,8 +381,12 @@ Honest list; none of these exist behind a flag:
 - Playlists.
 
 MP3, FLAC, M4A/AAC, OGG Vorbis, OGG Opus and WAV are what plays today, decoded
-with symphonia 0.6 (Opus through a statically linked libopus behind `audiopus`
-— no dynamic dependency). Sample rates are
+with symphonia 0.6 (Opus through a statically linked libopus behind `audiopus`,
+pinned exactly at `0.3.0-rc.0` because that is the version whose `audiopus_sys`
+builds libopus with cmake instead of autotools — an RC that does not drift is
+worth more than a stable version that needs `autoconf`, `automake` and
+`libtool` on every machine that installs this). No dynamic dependency. Sample
+rates are
 converted to your output device; channel layouts are not converted, except
 mono, which plays through every output channel — a layout that would need a
 real downmix (5.1 into stereo, say) is skipped with an announcement instead of
