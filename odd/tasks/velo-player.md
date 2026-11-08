@@ -420,3 +420,15 @@ Follow-ups left explicit: true peak (4× oversampling) instead of sample peak, a
 
 **The lesson I keep relearning in this project, written where it costs me next time**: an unquoted heredoc turned Markdown code spans into shell commands twice in one session — once injecting two hundred lines of ImageMagick help into this very file. When the text being written contains backticks, the heredoc must be quoted. The repair is an amend; the attention is cheaper.
 
+**L48** (T14's decoder half, in `$H`): Opus decodes, and one assumption of mine was wrong.
+
+`audiopus 0.2` (0.3 is a release candidate — not for a shipped dependency) over a **statically linked** libopus, confirmed with `otool`: zero dynamic dependencies. `decodable(id) -> bool` lives in the new module as the single answer to "can this player decode that codec", because a player and a radio stream that disagree about playable codecs is a bug that surfaces months later.
+
+**The assumption that died was mine**: I told the radio session that symphonia 0.6 ships no Opus support. Half right — no *decoder*, but its **Ogg reader does map Opus**: `OpusHead` into codec params, `OpusTags` into metadata, packet durations per RFC 6716. So the module consumes symphonia's packets and we own no Ogg page parser. Correcting a peer's information with the measurement is worth more than repeating the version of it that was true last week.
+
+**The round trip is measured, not shaped**: a 1 kHz sine at 0.5 comes back at **1000.00 Hz and −9.030 dB** against a reference of −9.031; stereo keeps its channels independent with the right one at 2 kHz. The frequency check counts rising zero crossings after the encoder's pre-skip — phase-free, FFT-free, and honest about being a lossy codec.
+
+**And the tests refused one of my rules, with a measurement.** I asked for "a truncated packet is an error". RFC 6716 defines a code-0 frame's length as *the rest of the packet*, so every prefix of a real 379-byte packet decodes — measured, not argued. The rule now states what the format actually guarantees (empty errors, a multi-frame packet whose table overruns its bytes errors, a truncated page is refused by the container) instead of what I assumed. A test that encodes my expectation rather than the format's contract is a test that will be wrong later and insist it is right.
+
+**What this does not do, deliberately**: it is not wired into `make_decoder` (a parallel session is extracting that factory), and the 312-sample pre-skip that symphonia reports as track delay is still untrimmed. The README says the decoder exists and is not yet reachable rather than claiming playback.
+
