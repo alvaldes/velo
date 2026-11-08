@@ -157,11 +157,14 @@ impl Priming {
 /// on 0.5.5 and 0.6.1), the priming is read from the container. When symphonia
 /// already owns the trim, [`TrackSource`] adds nothing: double-trimming is
 /// worse than not trimming.
-fn declared_priming(track: &Track, path: &Path, symphonia_built: bool) -> Option<Priming> {
+fn declared_priming(track: &Track, path: Option<&Path>, symphonia_built: bool) -> Option<Priming> {
     if track.delay.is_none() && track.padding.is_none() {
         // symphonia populates neither (isomp4): the priming lives in the
         // container, gated on `ftyp` so no other format's behaviour changes.
-        return mp4::read_priming(path).map(|priming| Priming {
+        // Only a file has a container to read — a stream has no bytes to seek
+        // back to, and its codec either declares the priming on the track or
+        // has none.
+        return path.and_then(mp4::read_priming).map(|priming| Priming {
             delay: priming.delay,
             padding: priming.padding,
         });
@@ -285,10 +288,22 @@ impl TrackSource {
         let (decoder, symphonia_built) = make_decoder(&audio_params, gapless)?;
 
         let declared = declared_spec(&audio_params);
-        // A stream has no file to read priming from and no container to
-        // declare it; symphonia's own trim is off (`gapless: false`), which is
-        // what a live stream wants twice over.
-        let priming = path.and_then(|path| declared_priming(track, path, symphonia_built));
+        // The pre-skip is a property of the codec, not of a file: Opus's
+        // OpusHead travels inside a live stream too, so the reader populates
+        // `track.delay` whether or not there is a path. It is normative
+        // (RFC 6716) and is trimmed in both cases. The encoder *padding* is a
+        // sequence concern — it only matters when something follows — so a
+        // station, which has no end to respect, does not carry it.
+        let priming = declared_priming(track, path, symphonia_built).map(|priming| {
+            if live {
+                Priming {
+                    delay: priming.delay,
+                    padding: 0,
+                }
+            } else {
+                priming
+            }
+        });
         // Only a delay the reader itself declared on the track is pre-spent on
         // its timeline (Opus, above); isomp4 declares none (T16 reads it from
         // the container) and its packets present from 0.

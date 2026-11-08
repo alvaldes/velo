@@ -560,3 +560,45 @@ fn a_codec_that_is_not_decodable_still_reports_the_same_unsupported_message() {
         other => panic!("expected Unsupported, got {other:?}"),
     }
 }
+
+#[test]
+fn a_live_opus_stream_trims_its_pre_skip_just_like_a_file() {
+    // The pre-skip is a property of the codec, not of a file: OpusHead travels
+    // inside a live stream, so the reader reports it on the track whether or
+    // not there is a path. Between an Opus station and an Opus file the only
+    // thing that may differ is where the decoder gets its bytes.
+    let packets = encode(1, &sine(1, 1000.0, 0.5));
+    let bytes = ogg_opus_file(1, &packets, pre_skip(1));
+
+    let path = std::env::temp_dir().join(format!("velo-opus-live-{}.opus", std::process::id()));
+    std::fs::write(&path, &bytes).expect("write the fixture");
+
+    let from_file = drain_track(TrackSource::open(&path).expect("the file opens"));
+    let from_stream = drain_track(
+        TrackSource::open_stream(Box::new(std::io::Cursor::new(bytes))).expect("the stream opens"),
+    );
+    let _ = std::fs::remove_file(&path);
+
+    assert!(
+        !from_stream.is_empty(),
+        "a live Opus stream must produce samples"
+    );
+    assert_eq!(
+        from_stream.len(),
+        from_file.len(),
+        "the stream and the file must deliver the same content length"
+    );
+    assert_eq!(
+        from_stream, from_file,
+        "pre-skip trimming must not depend on having a file"
+    );
+}
+
+/// Reads a whole track the way the producer does.
+fn drain_track(mut source: TrackSource) -> Vec<f32> {
+    let mut samples = Vec::new();
+    while let Some(block) = source.read_block().expect("the track decodes") {
+        samples.extend_from_slice(&block);
+    }
+    samples
+}
