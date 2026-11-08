@@ -343,7 +343,12 @@ server is reported as unreachable — never as a credential problem.
   (`brew install opus`, `apt install libopus-dev`) — in which case that one is
   linked statically and cmake is never called. Either way nothing is needed at
   runtime. Without both, the build stops in `audiopus_sys` with a message about
-  cmake, which is the honest place for it to stop.
+  cmake, which is the honest place for it to stop. **With CMake 4** (the current
+  release) the bundled libopus needs one more word, because its build files
+  predate CMake 3.5 and CMake 4 refuses those by default:
+  `CMAKE_POLICY_VERSION_MINIMUM=3.5 cargo install velo`. A clone of this
+  repository carries that setting in `.cargo/config.toml` already; a published
+  crate cannot, which is why it is written here.
 - A terminal. The interface needs an interactive terminal and refuses to run
   otherwise.
 - Cover art is drawn when the terminal speaks the kitty, sixel or iTerm2
