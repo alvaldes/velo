@@ -7,10 +7,10 @@
 //! for the place or tag currently loaded, and the cursor and filter of the
 //! focused list. It never touches the network — the caller loads what a
 //! section asks for (a country's stations, a tag's stations) and hands it
-//! back through [`RadioView::set_catalog`] — and it never plays anything:
-//! `enter` on a station only holds the selection, exposed through
-//! [`RadioView::selection`]. Wiring the directory client and the stream
-//! engine around it comes later.
+//! back through [`RadioView::set_catalog`] — and it never plays on its own:
+//! `enter` on a station answers [`RadioOutcome::Play`] and `a` answers
+//! [`RadioOutcome::Queue`], and the shell — which owns the queue and the
+//! player — carries them out (T6c).
 //!
 //! The sections, in order and only when they have content: browse all
 //! countries, the user's own country (`Norway (near you)`) with its regions
@@ -38,7 +38,7 @@ use super::theme::Theme;
 use super::{ListRow, centered, digits, draw_empty, list_row};
 
 /// What one key press asked the shell to do with the radio view.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RadioOutcome {
     /// The key moved radio state; the shell only redraws.
     Handled,
@@ -46,6 +46,23 @@ pub enum RadioOutcome {
     Close,
     /// `tab` left the radio for the queue.
     ToQueue,
+    /// `enter` on a playable station (T6c): the shell queues the station
+    /// and starts it, the way `enter` on a queue row plays from that row.
+    /// A station the codec filter rejects is never handed over (S8).
+    Play {
+        /// The stream URL the directory listed (`url_resolved`).
+        url: String,
+        /// The station's own, user-facing name.
+        name: String,
+    },
+    /// `a` on a playable station (T6c): the shell appends the station to
+    /// the queue without starting it, and the view stays open.
+    Queue {
+        /// The stream URL the directory listed (`url_resolved`).
+        url: String,
+        /// The station's own, user-facing name.
+        name: String,
+    },
     /// Not a radio key: the rest of the keymap may have it.
     Pass,
 }
@@ -441,10 +458,8 @@ impl RadioView {
                 self.select_last();
                 RadioOutcome::Handled
             }
-            KeyCode::Enter => {
-                self.enter();
-                RadioOutcome::Handled
-            }
+            KeyCode::Enter => self.enter(),
+            KeyCode::Char('a') => self.append_station(),
             KeyCode::Char('/') => {
                 self.typing = true;
                 RadioOutcome::Handled
@@ -544,12 +559,18 @@ impl RadioView {
     }
 
     /// Opens the highlighted section or row: a browse row opens its index, a
-    /// place row enters the place, a station row holds the selection and
-    /// changes nothing else — playing it is wired later.
-    pub fn enter(&mut self) {
+    /// place row enters the place, and a station row hands the station to
+    /// the shell to queue and play ([`RadioOutcome::Play`], T6c) — a station
+    /// the codec filter rejects is never handed over (S8). Nothing here
+    /// plays; the shell does.
+    #[must_use]
+    pub fn enter(&mut self) -> RadioOutcome {
         let Some(row) = self.selection() else {
-            return;
+            return RadioOutcome::Handled;
         };
+        if let Some((url, name)) = station_of_row(&row.kind) {
+            return RadioOutcome::Play { url, name };
+        }
         let next = match row.kind {
             RowKind::BrowseCountries => Some(Place::Countries),
             RowKind::BrowseTags => Some(Place::Tags),
@@ -575,6 +596,21 @@ impl RadioView {
             self.filter.clear();
             self.typing = false;
         }
+        RadioOutcome::Handled
+    }
+
+    /// `a` on the selected row: a playable station hands itself to the
+    /// shell to queue without starting and without leaving the view
+    /// ([`RadioOutcome::Queue`], T6c); any other row is consumed and
+    /// queues nothing.
+    fn append_station(&mut self) -> RadioOutcome {
+        let Some(row) = self.selection() else {
+            return RadioOutcome::Handled;
+        };
+        station_of_row(&row.kind).map_or(RadioOutcome::Handled, |(url, name)| RadioOutcome::Queue {
+            url,
+            name,
+        })
     }
 
     /// The place of one country, named from the index when it is there.
@@ -1013,6 +1049,24 @@ impl RadioView {
             ),
             box_area,
         );
+    }
+}
+
+/// The stream URL and name of a row when it is a station the codec filter
+/// lets play (T6c). A station the filter rejects never queues (S8): it is
+/// marked on screen instead. Hand-added stations and favourites were put
+/// there deliberately, so no filter stands between them and the queue.
+fn station_of_row(kind: &RowKind) -> Option<(String, String)> {
+    match kind {
+        RowKind::CatalogStation {
+            station,
+            playable: true,
+        } => Some((station.url_resolved.clone(), station.name.clone())),
+        RowKind::AddedStation { name, url } => Some((url.clone(), name.clone())),
+        RowKind::FavoriteStation { favorite } => {
+            Some((favorite.url.clone(), favorite.name.clone()))
+        }
+        _ => None,
     }
 }
 

@@ -141,6 +141,20 @@ impl BrowseBy {
     }
 }
 
+/// What the integration tests' fixture reports for the transport (T6c):
+/// the values a playing `Player` would answer. A reader consults it only
+/// where no player exists to answer, which in production is never.
+#[derive(Debug)]
+struct TransportFixture {
+    /// The position the clock shows.
+    position: Duration,
+    /// The total the clock shows, when the track declares one.
+    duration: Option<Duration>,
+    /// The ICY title a live station is announcing (S4), when one is
+    /// published.
+    title: Option<String>,
+}
+
 /// The floating prompt that asks for the library root when none is set.
 #[derive(Debug)]
 struct LibraryPrompt {
@@ -366,6 +380,12 @@ pub struct App<'lib> {
     /// The open radio view (T6a): `None` while only the library and the
     /// queue are on screen.
     radio: Option<radio::RadioView>,
+    /// The transport fixture the integration tests install (T6c): no test
+    /// can build a `Player` — building one opens an audio device — so the
+    /// tests stand in what a playing player would report. Production never
+    /// sets it, and every reader takes the real player first, so the player
+    /// stays the transport's only source of truth.
+    transport_fixture: Option<TransportFixture>,
     /// The radio's data wiring (T6b): the preference store and the
     /// directory requests, which run on a worker thread the tick polls.
     /// `None` until the first `R` opens the radio; built once, kept for
@@ -469,6 +489,7 @@ impl<'lib> App<'lib> {
             help: None,
             settings: None,
             radio: None,
+            transport_fixture: None,
             radio_wire: None,
             colors: ThemeColors::default(),
             library_setup: None,
@@ -534,6 +555,7 @@ impl<'lib> App<'lib> {
             help: None,
             settings: None,
             radio: None,
+            transport_fixture: None,
             radio_wire: None,
             colors: ThemeColors::default(),
             library_setup: None,
@@ -1232,6 +1254,42 @@ impl<'lib> App<'lib> {
         self.artwork_path = None;
     }
 
+    /// Sets the catalog of the open radio view (T6c): the integration
+    /// tests' hook, because no fixture can reach a station row through the
+    /// real wiring — that needs the directory. Production never calls this,
+    /// which is why it is hidden from the docs; the wiring sets the catalog
+    /// through [`radio_data::RadioWire::poll`] instead.
+    #[doc(hidden)]
+    pub fn show_radio_catalog(&mut self, stations: Vec<crate::radio::client::Station>) {
+        if let Some(view) = self.radio.as_mut() {
+            view.set_catalog(stations);
+        }
+    }
+
+    /// Stands in for a playing player (T6c), which no test can build —
+    /// building one opens an audio device: the entry becomes the queue the
+    /// transport reads, and the position, total and ICY title are held in
+    /// the fixture, exactly the shape a `Player` answers. The state fields
+    /// are set the way building a player sets them. Production never calls
+    /// this, which is why it is hidden from the docs.
+    #[doc(hidden)]
+    pub fn show_playing_for_tests(
+        &mut self,
+        entry: Entry,
+        position: Duration,
+        duration: Option<Duration>,
+        title: Option<String>,
+    ) {
+        self.queue = vec![entry];
+        self.playing = Some(Playback::Queue);
+        self.state = PlayState::Playing;
+        self.transport_fixture = Some(TransportFixture {
+            position,
+            duration,
+            title,
+        });
+    }
+
     /// Runs once per turn of the event loop — the same cadence as key
     /// polling — so the producer's announcements surface without a key
     /// press, the cover art follows the track it plays (T8), and the server
@@ -1703,6 +1761,20 @@ impl<'lib> App<'lib> {
             radio::RadioOutcome::ToQueue => {
                 self.radio = None;
                 self.view = View::Queue;
+                Some(Action::None)
+            }
+            radio::RadioOutcome::Play { url, name } => {
+                // The station joins the queue and plays from it (T6c): the
+                // queue is edited here, and the play action goes to the
+                // shell, which builds the player the way `enter` on a queue
+                // row does. The radio stays open.
+                self.edit_queue(|queue| queue.push(Entry::Station { url, name }));
+                let from = self.queue.len().saturating_sub(1);
+                Some(Action::PlayQueue { from })
+            }
+            radio::RadioOutcome::Queue { url, name } => {
+                self.edit_queue(|queue| queue.push(Entry::Station { url, name }));
+                self.status = format!("velo: added {}", plural(1, "track", "tracks"));
                 Some(Action::None)
             }
             radio::RadioOutcome::Pass => None,
@@ -2259,16 +2331,13 @@ impl<'lib> App<'lib> {
     /// block on a tall window, three rows on a short one, one row on a tiny
     /// one — the list below keeps its rows before the block keeps its air.
     fn draw_now_playing(&self, frame: &mut Frame, area: Rect) {
-        // A station has no path to describe: its own name is the title, and
-        // its progress is the `live` footer (S3, wired in T6c).
-        let current = self
-            .player
-            .as_ref()
-            .and_then(|player| self.queue.get(player.current_index()))
-            .cloned();
+        // A station has no path to describe: its ICY title is the title when
+        // the stream announces one, its own name otherwise, and its progress
+        // is the `live` footer (S3, T6c).
+        let current = self.playing_entry();
         let (title, subtitle) = match current {
-            Some(Entry::File(path)) => describe(&path, self.known_tracks()),
-            Some(Entry::Station { name, .. }) => (name, String::new()),
+            Some(Entry::File(path)) => describe(path, self.known_tracks()),
+            Some(Entry::Station { name, .. }) => (self.station_title(name), String::new()),
             None => (
                 "nothing playing".to_owned(),
                 "enter plays the selection".to_owned(),
@@ -2427,17 +2496,36 @@ impl<'lib> App<'lib> {
     }
 
     /// The position, and the length when it is known; a dim placeholder
-    /// when nothing plays.
+    /// when nothing plays. A live station has neither (S3): the transport
+    /// says so where a position and total would be.
     fn clock_spans(&self) -> Vec<Span<'static>> {
-        let Some(player) = &self.player else {
+        if matches!(self.playing_entry(), Some(Entry::Station { .. })) {
+            return vec![Span::styled("● live", Style::new().fg(self.theme.accent))];
+        }
+        let (position, total) = self.transport_time();
+        let Some(position) = position else {
             return vec![Span::styled("--:--", Style::new().fg(self.theme.dim))];
         };
-        let mut clock = mmss(player.position());
-        if let Some(total) = self.current_track_duration() {
+        let mut clock = mmss(position);
+        if let Some(total) = total {
             clock.push_str(" / ");
             clock.push_str(&mmss(total));
         }
         vec![Span::styled(clock, Style::new().fg(self.theme.accent))]
+    }
+
+    /// The position and total the clock shows, as the player reports them.
+    /// The tests' fixture answers where no player exists to answer; it is
+    /// never set in production, so the player stays the only source.
+    fn transport_time(&self) -> (Option<Duration>, Option<Duration>) {
+        if let Some(player) = &self.player {
+            return (Some(player.position()), self.current_track_duration());
+        }
+        self.transport_fixture
+            .as_ref()
+            .map_or((None, None), |fixture| {
+                (Some(fixture.position), fixture.duration)
+            })
     }
 
     /// How far into the track playback is, `0.0..=1.0`; `None` when nothing
@@ -2851,6 +2939,34 @@ impl<'lib> App<'lib> {
         self.queue
             .get(player.current_index())
             .and_then(Entry::as_path)
+    }
+
+    /// The queue entry the transport and the now-playing block read: the one
+    /// the player stands on (T6c). Nothing plays while the state is stopped,
+    /// and in production the running state and the player stand and fall
+    /// together — the fixture path (no player, state running) exists only
+    /// under [`App::show_playing_for_tests`], where the queue's head is the
+    /// entry.
+    fn playing_entry(&self) -> Option<&Entry> {
+        if self.state == PlayState::Stopped {
+            return None;
+        }
+        let index = self.player.as_ref().map_or(0, Player::current_index);
+        self.queue.get(index)
+    }
+
+    /// The title the playing station shows (S4): the ICY title the stream is
+    /// announcing when there is one, the station's own name otherwise. The
+    /// player publishes the title; the tests' fixture answers where no
+    /// player exists to answer (T6c) and is never set in production.
+    fn station_title(&self, name: &str) -> String {
+        if let Some(player) = &self.player {
+            return player.current_title().unwrap_or_else(|| name.to_owned());
+        }
+        self.transport_fixture
+            .as_ref()
+            .and_then(|fixture| fixture.title.clone())
+            .unwrap_or_else(|| name.to_owned())
     }
 
     /// The length of the track that is playing: from the interface's own track
@@ -3704,19 +3820,16 @@ impl<'lib> App<'lib> {
     /// delta, clamped to the track, then the player rebuilt from that offset
     /// (T6). A few milliseconds of silence are expected; a click is not.
     fn seek_by(&mut self, delta_secs: i64) {
-        let Some(player) = &self.player else {
-            return;
-        };
         // A live station has no position to seek within (S3): the seek path
         // says so instead of rebuilding the player — which would refetch the
         // stream — and never reaches the rebuild below.
-        if matches!(
-            self.queue.get(player.current_index()),
-            Some(Entry::Station { .. })
-        ) {
+        if matches!(self.playing_entry(), Some(Entry::Station { .. })) {
             "velo: nothing to seek in a live station".clone_into(&mut self.status);
             return;
         }
+        let Some(player) = &self.player else {
+            return;
+        };
         let position = player.position();
         let duration = self.current_track_duration();
         let target = seek_target(position, delta_secs, duration);

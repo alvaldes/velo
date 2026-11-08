@@ -2,16 +2,24 @@
 //!
 //! The state tests need no terminal and no network: the view is built from
 //! the same structs the client parses and the store persists, and every key
-//! rule is asserted through [`RadioView::key`]. The render test follows the
-//! `tests/ui_render.rs` pattern — a ratatui `TestBackend` at a fixed size,
-//! asserted on the buffer text. No playback is wired here: `enter` on a
-//! station only holds the selection.
+//! rule is asserted through [`RadioView::key`]. Playing is wired (T6c):
+//! `enter` on a station answers [`RadioOutcome::Play`] and `a` answers
+//! [`RadioOutcome::Queue`], and the shell tests drive those through the
+//! [`App`] the event loop drives, the play action returned but never
+//! applied — applying it would open an audio device. The render tests
+//! follow the `tests/ui_render.rs` pattern — a ratatui `TestBackend` at a
+//! fixed size, asserted on the buffer text.
 
+use std::path::PathBuf;
+use std::time::Duration;
+
+use velo::audio::output::Entry;
 use velo::radio::client::{Country, Order, Station, Tag};
 use velo::radio::store::{self, Favorite, Pinned, RadioStore};
 use velo::ui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use velo::ui::radio::{Place, RadioOutcome, RadioView, RowKind};
 use velo::ui::theme::Theme;
+use velo::ui::{Action, App};
 
 /// One directory station with the fields the view shows.
 fn station(name: &str, url: &str, codec: &str, bitrate: u32, code: &str) -> Station {
@@ -417,7 +425,7 @@ fn n_opens_the_country_index_from_anywhere() {
 }
 
 #[test]
-fn enter_on_a_station_holds_the_selection_and_does_nothing_else() {
+fn enter_and_a_on_an_unplayable_station_never_queue() {
     let mut view = view();
     press(&mut view, KeyCode::Char('G')); // last row: Hls One
     let selection = view.selection().expect("a row is selected");
@@ -428,9 +436,275 @@ fn enter_on_a_station_holds_the_selection_and_does_nothing_else() {
     assert!(!playable, "the directory rejected this station");
 
     let before = view.labels();
-    press(&mut view, KeyCode::Enter);
-    assert_eq!(view.labels(), before, "enter on a station changes nothing");
+    assert_eq!(
+        press(&mut view, KeyCode::Enter),
+        RadioOutcome::Handled,
+        "enter on an unplayable station queues nothing"
+    );
+    assert_eq!(
+        press(&mut view, KeyCode::Char('a')),
+        RadioOutcome::Handled,
+        "a on an unplayable station queues nothing"
+    );
+    assert_eq!(view.labels(), before, "the view is unchanged");
     assert_eq!(view.selection(), Some(selection), "the selection is held");
+}
+
+// ---- playing a station (T6c, S9, S3) ----------------------------------------
+
+#[test]
+fn enter_on_a_playable_station_asks_to_queue_and_play_it() {
+    let mut view = view();
+    press(&mut view, KeyCode::Char('G')); // last row: Hls One
+    press(&mut view, KeyCode::Char('k')); // up onto Nova
+    let outcome = press(&mut view, KeyCode::Enter);
+    assert_eq!(
+        outcome,
+        RadioOutcome::Play {
+            url: String::from("https://stream.example/nova.mp3"),
+            name: String::from("Nova"),
+        },
+        "enter hands the station to the shell to queue and play"
+    );
+    assert_eq!(view.place(), &Place::Top, "playing does not navigate");
+    assert_eq!(view.cursor(), 6, "the selection is held");
+}
+
+#[test]
+fn a_appends_a_station_without_starting_it() {
+    let mut view = view();
+    press(&mut view, KeyCode::Char('G'));
+    press(&mut view, KeyCode::Char('k'));
+    let outcome = press(&mut view, KeyCode::Char('a'));
+    assert_eq!(
+        outcome,
+        RadioOutcome::Queue {
+            url: String::from("https://stream.example/nova.mp3"),
+            name: String::from("Nova"),
+        },
+        "a hands the station to the shell to queue, not to play"
+    );
+    assert_eq!(view.place(), &Place::Top, "a does not leave the view");
+}
+
+#[test]
+fn a_hand_added_or_favourite_station_queues_too() {
+    let mut view = view();
+    press(&mut view, KeyCode::Char('G'));
+    press(&mut view, KeyCode::Char('k'));
+    press(&mut view, KeyCode::Char('k')); // ★ Jazz One
+    assert_eq!(
+        press(&mut view, KeyCode::Enter),
+        RadioOutcome::Play {
+            url: String::from("https://jazz.example/stream"),
+            name: String::from("Jazz One"),
+        },
+        "a favourite plays like any station"
+    );
+    press(&mut view, KeyCode::Char('k')); // Night FM
+    assert_eq!(
+        press(&mut view, KeyCode::Char('a')),
+        RadioOutcome::Queue {
+            url: String::from("http://night.example/live"),
+            name: String::from("Night FM"),
+        },
+        "a hand-added station queues like any station"
+    );
+}
+
+#[test]
+fn enter_on_a_tag_still_opens_its_stations() {
+    let mut view = view();
+    press(&mut view, KeyCode::Char('j'));
+    press(&mut view, KeyCode::Char('j'));
+    press(&mut view, KeyCode::Char('j')); // Browse genres & tags
+    press(&mut view, KeyCode::Enter); // into the tag index
+    assert_eq!(view.place(), &Place::Tags);
+    press(&mut view, KeyCode::Enter); // jazz
+    assert_eq!(
+        view.place(),
+        &Place::Tag {
+            name: String::from("jazz")
+        },
+        "enter on a tag still opens its stations"
+    );
+}
+
+// ---- the shell wiring (T6c): from the view into the queue --------------------
+
+fn key(code: KeyCode) -> KeyEvent {
+    KeyEvent::from(code)
+}
+
+/// One key press of the shell, its action applied — except a play, which
+/// would open an audio device: that one is returned, and the returned
+/// action is the proof the player was asked to start.
+fn shell(app: &mut App<'_>, code: KeyCode) -> Action {
+    let action = app.on_key(key(code));
+    if !matches!(action, Action::PlayQueue { .. }) {
+        app.apply(action);
+    }
+    action
+}
+
+/// The whole interface as one screen, the way the user sees it.
+fn app_screen(app: &App) -> String {
+    use velo::ui::ratatui::Terminal;
+    use velo::ui::ratatui::backend::TestBackend;
+    use velo::ui::ratatui::buffer::{Buffer, Cell};
+
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("a test terminal");
+    terminal
+        .draw(|frame| app.draw(frame))
+        .expect("the frame draws");
+    let buffer: &Buffer = terminal.backend().buffer();
+    let screen: String = buffer.content().iter().map(Cell::symbol).collect();
+    let characters: Vec<char> = screen.chars().collect();
+    characters
+        .chunks(80)
+        .map(|line| line.iter().collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The station the shell tests play. The transport tests use their own
+/// entry, whose name must differ from the ICY title it pretends to carry.
+fn nova() -> Entry {
+    Entry::Station {
+        url: String::from("https://stream.example/nova.mp3"),
+        name: String::from("Nova"),
+    }
+}
+
+#[test]
+fn enter_on_a_station_queues_it_and_asks_the_player_to_start() {
+    let mut app = App::new(Vec::new());
+    shell(&mut app, KeyCode::Char('R')); // the radio opens over its wiring
+    app.show_radio_catalog(vec![station(
+        "Nova",
+        "https://stream.example/nova.mp3",
+        "MP3",
+        128,
+        "NO",
+    )]);
+    shell(&mut app, KeyCode::Char('G')); // the last row: Nova
+
+    let action = shell(&mut app, KeyCode::Enter);
+    assert_eq!(
+        action,
+        Action::PlayQueue { from: 0 },
+        "the player was asked to start at the station"
+    );
+    assert_eq!(
+        app.queue(),
+        [nova()],
+        "the station went into the queue as an Entry::Station"
+    );
+}
+
+#[test]
+fn a_appends_to_the_queue_without_starting() {
+    let mut app = App::new(Vec::new());
+    shell(&mut app, KeyCode::Char('R'));
+    app.show_radio_catalog(vec![station(
+        "Nova",
+        "https://stream.example/nova.mp3",
+        "MP3",
+        128,
+        "NO",
+    )]);
+    shell(&mut app, KeyCode::Char('G'));
+
+    let action = shell(&mut app, KeyCode::Char('a'));
+    assert_eq!(action, Action::None, "appending asks nothing of the player");
+    assert_eq!(app.queue(), [nova()], "the station joined the queue");
+    assert_eq!(
+        app.status(),
+        "velo: added 1 track",
+        "the status line says what happened"
+    );
+}
+
+#[test]
+fn seeking_a_station_says_so_instead_of_moving() {
+    let mut app = App::new(Vec::new());
+    app.show_playing_for_tests(nova(), Duration::ZERO, None, None);
+
+    let action = app.on_key(key(KeyCode::Right));
+    assert_eq!(action, Action::Seek { delta_secs: 5 });
+    app.apply(action);
+    assert_eq!(
+        app.status(),
+        "velo: nothing to seek in a live station",
+        "the seek is refused, the way the audio layer refuses it"
+    );
+    assert_eq!(app.queue(), [nova()], "the seek moved nothing");
+}
+
+// ---- the transport reads a station as live (T6c, S3) ------------------------
+
+#[test]
+fn the_transport_shows_live_for_a_station_and_names_the_icy_title() {
+    let mut app = App::new(Vec::new());
+    app.show_playing_for_tests(
+        Entry::Station {
+            url: String::from("https://stream.example/nova.mp3"),
+            name: String::from("Radio Nova"),
+        },
+        Duration::ZERO,
+        None,
+        Some(String::from("Fleetwood Mac - Dreams")),
+    );
+    let screen = app_screen(&app);
+    assert!(
+        screen.contains("● live"),
+        "the clock says live where a position and total would be, got:\n{screen}"
+    );
+    assert!(
+        screen.contains("Fleetwood Mac - Dreams"),
+        "the ICY title is the now-playing title, got:\n{screen}"
+    );
+    assert!(
+        !screen.contains("Nova"),
+        "the station name yields to the ICY title, got:\n{screen}"
+    );
+}
+
+#[test]
+fn without_an_icy_title_the_station_name_is_the_title() {
+    let mut app = App::new(Vec::new());
+    app.show_playing_for_tests(
+        Entry::Station {
+            url: String::from("https://stream.example/nova.mp3"),
+            name: String::from("Radio Nova"),
+        },
+        Duration::ZERO,
+        None,
+        None,
+    );
+    let screen = app_screen(&app);
+    assert!(screen.contains("● live"), "still live, got:\n{screen}");
+    assert!(
+        screen.contains("Radio Nova"),
+        "the station name is the title, got:\n{screen}"
+    );
+}
+
+#[test]
+fn the_transport_shows_a_position_and_total_for_a_file() {
+    let mut app = App::new(Vec::new());
+    app.show_playing_for_tests(
+        Entry::File(PathBuf::from("/music/Tide/01 - Dawn.flac")),
+        Duration::from_secs(83),
+        Some(Duration::from_secs(296)),
+        None,
+    );
+    let screen = app_screen(&app);
+    assert!(
+        screen.contains("01:23 / 04:56"),
+        "a file shows its position and total, got:\n{screen}"
+    );
+    assert!(!screen.contains("● live"), "a file is not live");
 }
 
 // ---- the render -------------------------------------------------------------
