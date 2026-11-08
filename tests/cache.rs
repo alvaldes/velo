@@ -12,6 +12,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime};
 
 use velo::audio::output::{PathResolver, drain_headless_resolving};
 use velo::audio::{AudioError, TrackSpec};
@@ -273,6 +274,230 @@ fn an_unresolved_server_skips_its_tracks_and_keeps_local_ones() {
     assert!(error.to_string().contains("no subsonic secret found"));
     let local = Path::new("/music/Library/here.wav");
     assert_eq!(resolver.resolve(local).unwrap(), local.to_path_buf());
+}
+
+// ------------------------------------------------------------- the eviction
+
+/// Sets `path`'s modification time to `ago` seconds before now, so the tests
+/// control the eviction order without sleeping.
+fn backdate(path: &Path, seconds_ago: u64) {
+    let modified = SystemTime::now()
+        .checked_sub(Duration::from_secs(seconds_ago))
+        .expect("a time before now");
+    let file = fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap_or_else(|error| panic!("cannot open {}: {error}", path.display()));
+    file.set_times(std::fs::FileTimes::new().set_modified(modified))
+        .unwrap_or_else(|error| panic!("cannot backdate {}: {error}", path.display()));
+}
+
+/// Three cached files, oldest first, each 400 bytes, under a 1 000-byte cap:
+/// storing one more must evict the two oldest in modification-time order and
+/// leave the third and the fresh file in place (800 ≤ 1 000).
+#[test]
+fn pruning_removes_the_oldest_files_in_mtime_order_until_under_the_cap() {
+    let dir = temp_dir("prune-order");
+    let cache = Cache::new(dir).with_cap(1_000);
+    let url = |id: &str| format!("https://music.example.com/rest/stream?id={id}&format=raw");
+    let oldest = cache.path_for(&url("oldest"));
+    let middle = cache.path_for(&url("middle"));
+    let newer = cache.path_for(&url("newer"));
+    for path in [&oldest, &middle, &newer] {
+        fs::write(path, vec![0u8; 400]).unwrap();
+    }
+    backdate(&oldest, 30);
+    backdate(&middle, 20);
+    backdate(&newer, 10);
+
+    let fresh = cache
+        .ensure(&url("fresh"), || Ok(vec![0u8; 400]))
+        .expect("the store succeeds");
+
+    assert!(!oldest.exists(), "the oldest file is evicted first");
+    assert!(
+        !middle.exists(),
+        "then the second-oldest, until under the cap"
+    );
+    assert!(
+        newer.exists(),
+        "a newer file survives: eviction is by mtime"
+    );
+    assert!(fresh.exists(), "the file just stored survives");
+}
+
+/// Nothing evicts from a cache that is already under its cap — not the old
+/// files, not the file just stored.
+#[test]
+fn a_cache_under_its_cap_is_untouched() {
+    let dir = temp_dir("prune-quiet");
+    let cache = Cache::new(dir).with_cap(10_000);
+    let url = "https://music.example.com/rest/stream?id=quiet&format=raw";
+    let old = cache.path_for(url);
+    fs::write(&old, vec![7u8; 500]).unwrap();
+    backdate(&old, 60);
+
+    let fresh = cache
+        .ensure(
+            "https://music.example.com/rest/stream?id=fresh&format=raw",
+            || Ok(vec![0u8; 500]),
+        )
+        .expect("the store succeeds");
+
+    assert!(old.exists());
+    assert!(fresh.exists());
+    assert_eq!(fs::read(&old).unwrap(), vec![7u8; 500]);
+}
+
+/// The one file that may never be evicted is the one just stored: eviction
+/// that removed it would re-download it on the next play — a loop, not a
+/// policy. It survives even when it alone is larger than the cap.
+#[test]
+fn the_file_just_stored_survives_even_when_it_alone_exceeds_the_cap() {
+    let dir = temp_dir("prune-keep");
+    let cache = Cache::new(dir).with_cap(100);
+    let url = "https://music.example.com/rest/stream?id=old&format=raw";
+    let old = cache.path_for(url);
+    fs::write(&old, vec![0u8; 60]).unwrap();
+    backdate(&old, 60);
+
+    let fresh = cache
+        .ensure(
+            "https://music.example.com/rest/stream?id=big&format=raw",
+            || Ok(vec![9u8; 500]),
+        )
+        .expect("the store succeeds");
+
+    assert!(!old.exists(), "the older file is evicted");
+    assert!(
+        fresh.exists(),
+        "the file just stored is kept even over the cap"
+    );
+    assert_eq!(fs::read(&fresh).unwrap(), vec![9u8; 500]);
+}
+
+/// Eviction walks one flat directory and removes files only from it: a file
+/// beside the cache and a file inside a subdirectory of it must both survive
+/// a prune that runs.
+#[test]
+fn pruning_never_touches_anything_outside_the_cache_directory() {
+    let root = temp_dir("prune-scope");
+    let cache_dir = root.join("velo").join("subsonic");
+    let cache = Cache::new(cache_dir.clone()).with_cap(10);
+    fs::create_dir_all(&cache_dir).unwrap();
+    let sibling = root.join("velo").join("unrelated.txt");
+    fs::write(&sibling, b"keep me").unwrap();
+    let nested_dir = cache_dir.join("nested");
+    fs::create_dir_all(&nested_dir).unwrap();
+    let nested = nested_dir.join("nested-file");
+    fs::write(&nested, b"keep me too").unwrap();
+
+    let old = cache.path_for("https://music.example.com/rest/stream?id=old&format=raw");
+    fs::write(&old, vec![0u8; 60]).unwrap();
+    backdate(&old, 60);
+    let fresh = cache
+        .ensure(
+            "https://music.example.com/rest/stream?id=big&format=raw",
+            || Ok(vec![0u8; 500]),
+        )
+        .expect("the store succeeds");
+
+    assert!(!old.exists(), "the eviction ran");
+    assert!(fresh.exists());
+    assert!(
+        sibling.exists(),
+        "nothing outside the cache is ever removed"
+    );
+    assert!(
+        nested.exists(),
+        "only files directly in the cache are evicted"
+    );
+}
+
+// ------------------------------------------------------------------ cleaning
+
+/// `--cache-clean`'s engine: every file directly inside the directory goes,
+/// the count and the byte total are what was there, the directory survives,
+/// and a subdirectory with its contents is left alone.
+#[test]
+fn clean_removes_every_file_in_the_directory_and_counts_what_it_freed() {
+    let dir = temp_dir("clean");
+    fs::write(dir.join("a"), vec![0u8; 100]).unwrap();
+    fs::write(dir.join("b"), vec![0u8; 250]).unwrap();
+    fs::create_dir_all(dir.join("sub")).unwrap();
+    fs::write(dir.join("sub").join("c"), b"kept").unwrap();
+
+    let (files, bytes) = velo::subsonic::cache::clean(&dir);
+
+    assert_eq!(files, 2, "two files removed");
+    assert_eq!(bytes, 350, "exactly the bytes that were there");
+    assert!(dir.is_dir(), "the directory survives the cleaning");
+    let left: Vec<PathBuf> = fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .collect();
+    assert_eq!(left, vec![dir.join("sub")], "only the subdirectory is left");
+    assert!(dir.join("sub").join("c").exists());
+}
+
+/// Cleaning a cache that does not exist yet creates it — both caches must
+/// exist and be empty when `--cache-clean` ends.
+#[test]
+fn clean_creates_a_missing_cache_directory() {
+    let dir = temp_dir("clean-missing").join("velo").join("subsonic");
+    let (files, bytes) = velo::subsonic::cache::clean(&dir);
+    assert_eq!((files, bytes), (0, 0));
+    assert!(dir.is_dir());
+    assert!(fs::read_dir(&dir).unwrap().next().is_none());
+}
+
+// ------------------------------------------------------- the --cache-clean CLI
+
+/// The binary cleans both caches in one run: per-cache counts and bytes on
+/// stdout, exit 0, both directories still existing and empty, and the file a
+/// user happened to keep beside them untouched.
+#[test]
+fn cache_clean_empties_both_caches_reports_what_it_freed_and_exits_zero() {
+    let root = temp_dir("clean-binary");
+    let config = temp_dir("clean-binary-config");
+    let subsonic = root.join("velo").join("subsonic");
+    let covers = root.join("velo").join("covers");
+    fs::create_dir_all(&subsonic).unwrap();
+    fs::create_dir_all(&covers).unwrap();
+    fs::write(subsonic.join("one"), vec![0u8; 100]).unwrap();
+    fs::write(subsonic.join("two"), vec![0u8; 200]).unwrap();
+    fs::write(covers.join("img"), vec![0u8; 50]).unwrap();
+    let sibling = root.join("velo").join("unrelated.txt");
+    fs::write(&sibling, b"keep me").unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_velo"))
+        .arg("--cache-clean")
+        .env("XDG_CACHE_HOME", root.as_os_str())
+        .env("XDG_CONFIG_HOME", config.as_os_str())
+        .output()
+        .expect("the binary runs");
+
+    assert_eq!(output.status.code(), Some(0), "cleaning always succeeds");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("2 files"), "{stdout}");
+    assert!(stdout.contains("300 B"), "{stdout}");
+    assert!(stdout.contains("1 file"), "{stdout}");
+    assert!(stdout.contains("50 B"), "{stdout}");
+    assert!(stdout.contains("covers"), "{stdout}");
+    assert!(stdout.contains("subsonic"), "{stdout}");
+    for dir in [&subsonic, &covers] {
+        assert!(dir.is_dir(), "{} still exists", dir.display());
+        assert!(
+            fs::read_dir(dir).unwrap().next().is_none(),
+            "{} is empty",
+            dir.display()
+        );
+    }
+    assert!(
+        sibling.exists(),
+        "nothing outside the two caches is touched"
+    );
 }
 
 // ------------------------------------------------- playback through the cache

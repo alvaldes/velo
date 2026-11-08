@@ -254,8 +254,14 @@ not end the session.
 
 The cache lives at `$XDG_CACHE_HOME/velo/subsonic`, else
 `~/.cache/velo/subsonic`; each file is named after a hash of the track's
-stream URL. Nothing prunes it yet: every track you have played stays until
-you delete the directory yourself.
+stream URL. It is capped at 2 GiB: after each download, when the directory
+holds more than that, the oldest files (by modification time) are removed,
+whole files only, until it is under the cap again — the file that was just
+downloaded is never the one removed, so playing one enormous track cannot
+evict the very thing it is playing. The covers cache is capped the same way
+at 256 MiB. To empty both caches on demand, run `velo --cache-clean`: it
+prints, per cache, how many files and how much space it freed and touches
+nothing outside the two directories.
 
 ### Remote covers and scrobbling
 
@@ -291,8 +297,10 @@ The secret is resolved in this order: `api_key` in the table, then the
 `VELO_SUBSONIC_SECRET` environment variable, then the first line of the file
 `$XDG_CONFIG_HOME/velo/subsonic.key` (else `~/.config/velo/subsonic.key`),
 which you create yourself. When that file is readable by group or others,
-velo warns once on stderr and names the path and the mode — restrict it with
-`chmod 600`.
+velo warns and names the path and the mode — restrict it with `chmod 600`.
+The warning is said where you are looking: once, in the interface's status
+line, when velo starts with a Subsonic server configured (and again on
+stderr for `velo --subsonic-test` and `velo --sync`).
 
 The wire format is JSON; a server too old to answer JSON is reported as too
 old, never parsed as XML. When the server advertises the `apiKeyAuthentication`
@@ -336,10 +344,10 @@ Honest list; none of these exist behind a flag:
 - ReplayGain tag writing (reading and applying them is in: the `replay_gain`
   setting).
 - Subsonic/Navidrome, still early access: the connection, authentication,
-  `velo --subsonic-test`, `velo --sync`, cache-on-play playback, remote
-  covers and scrobbling all exist (see above). Nothing evicts either cache
-  yet, and streaming over HTTP ranges (playing before the whole track is on
-  disk) is a later optimisation.
+  `velo --subsonic-test`, `velo --sync`, `velo --cache-clean`, cache-on-play
+  playback with capped, self-pruning caches, remote covers and scrobbling
+  all exist (see above). Streaming over HTTP ranges (playing before the
+  whole track is on disk) is a later optimisation.
 - Opus — symphonia has no Opus decoder yet, so `.opus` files are rejected at
   probe time.
 - Playlists.

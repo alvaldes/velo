@@ -54,7 +54,15 @@ fn main() -> ExitCode {
         .map(|raw| config::expand_path(raw, home.as_deref().map(Path::new), &cwd));
 
     // The Subsonic probe needs no terminal and no library root, so it runs
-    // before both — it must work over ssh (T12a).
+    // before both — it must work over ssh (T12a). Cleaning the caches is the
+    // same kind of headless chore: env in, two directories cleaned, stdout
+    // out.
+    if cli.cache_clean {
+        return cache_clean(
+            std::env::var_os("XDG_CACHE_HOME").as_deref(),
+            home.as_deref(),
+        );
+    }
     if cli.subsonic_test {
         return subsonic_test(&settings, home.as_deref());
     }
@@ -99,6 +107,7 @@ fn main() -> ExitCode {
             seams.resolver,
             seams.covers,
             seams.scrobbler,
+            &seams.warnings,
         );
     }
 
@@ -127,6 +136,11 @@ struct SubsonicSeams {
     resolver: Option<Arc<dyn PathResolver>>,
     covers: Option<Arc<dyn CoverArt>>,
     scrobbler: Option<Arc<dyn Scrobbles>>,
+    /// The credential resolver's warnings — today, a group- or world-readable
+    /// `subsonic.key`. They ride to the interface so the status line can say
+    /// them once at launch, where the user is looking, instead of only inside
+    /// a skip reason when a download fails.
+    warnings: Vec<String>,
 }
 
 /// Builds the seams above from the user's settings. The environment values
@@ -148,6 +162,7 @@ fn subsonic_seams(
         resolver,
         covers: None,
         scrobbler: None,
+        warnings: Vec::new(),
     };
     let Some(server) = &settings.subsonic else {
         return without(None);
@@ -171,7 +186,9 @@ fn subsonic_seams(
             return without(Some(Arc::new(Unconfigured::new(error.to_string()))));
         }
     };
-    let Some(cache) = cache_dir(xdg_cache_home, home).map(Cache::new) else {
+    let Some(cache) =
+        cache_dir(xdg_cache_home, home).map(|dir| Cache::new(dir).with_cap(Cache::TRACK_CACHE_CAP))
+    else {
         // With no place for the caches there is nothing a remote track can
         // resolve to; the same sentence path as unconfigured credentials.
         return without(Some(Arc::new(Unconfigured::new(
@@ -206,6 +223,7 @@ fn subsonic_seams(
         resolver: Some(resolver),
         covers: Some(covers),
         scrobbler: Some(Arc::new(scrobbler)),
+        warnings: credentials.warnings,
     }
 }
 
@@ -216,6 +234,53 @@ fn user_settings(cli: &Cli, path: Option<&Path>) -> Result<Settings, config::Con
         Some(path) => Config::load_from(path).map(|file| file.merged(cli)),
         None => Ok(Config::default().merged(cli)),
     }
+}
+
+/// Empties both Subsonic caches and reports what each freed. The caches are
+/// the only two directories this reads: a sibling file beside them survives.
+/// Always exits 0 — cleaning succeeded, or there was nothing to clean.
+fn cache_clean(xdg_cache_home: Option<&OsStr>, home: Option<&OsStr>) -> ExitCode {
+    let Some(track_dir) = cache_dir(xdg_cache_home, home) else {
+        println!(
+            "no cache directory — neither XDG_CACHE_HOME nor HOME is usable; nothing to clean"
+        );
+        return ExitCode::SUCCESS;
+    };
+    let covers_dir = Cache::new(track_dir.clone()).covers_cache();
+    for (name, dir) in [
+        ("tracks", track_dir),
+        ("covers", covers_dir.dir().to_path_buf()),
+    ] {
+        let (files, bytes) = subsonic::cache::clean(&dir);
+        let unit = if files == 1 { "file" } else { "files" };
+        println!(
+            "{name} cache: removed {files} {unit}, freed {} — {}",
+            human_bytes(bytes),
+            dir.display()
+        );
+    }
+    ExitCode::SUCCESS
+}
+
+/// A byte count a person can read: whole bytes below 1 KiB, one decimal
+/// above it, up to GiB.
+fn human_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a cache holds far fewer bytes than f64 represents exactly"
+    )]
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= KIB && unit < 3 {
+        value /= KIB;
+        unit += 1;
+    }
+    let name = ["KiB", "MiB", "GiB"][unit - 1];
+    format!("{value:.1} {name}")
 }
 
 /// The help screen plus the usage-error exit code, for a file mode pointed
@@ -552,6 +617,7 @@ fn browse_interface(
     resolver: Option<Arc<dyn PathResolver>>,
     covers: Option<Arc<dyn CoverArt>>,
     scrobbler: Option<Arc<dyn Scrobbles>>,
+    warnings: &[String],
 ) -> ExitCode {
     if !std::io::stdout().is_terminal() {
         eprintln!("velo: the interface needs an interactive terminal");
@@ -581,6 +647,10 @@ fn browse_interface(
         // one, covers simply never arrive and nothing is ever sent.
         app.set_covers(covers);
         app.set_scrobbler(scrobbler);
+        // A credential warning — a `subsonic.key` the whole group can read —
+        // is said once, in the status line, at the start (T12c's debt): a
+        // warning that only surfaces inside a skip reason is no warning.
+        app.set_subsonic_warnings(warnings);
         match (&opened, root) {
             (Err(error), _) => app.index_unavailable(error.to_string()),
             (Ok(_), Some(root)) => {

@@ -100,6 +100,10 @@ Subsonic:
                                      (browse and search reach it; playback
                                      comes with the cache), print counts
                                      per source, then exit
+    velo --cache-clean           Empty both Subsonic caches (tracks and
+                                     covers), print per cache how many
+                                     files and how much space were freed,
+                                     then exit
 
 Interface keys: j/k move, enter open/play, tab switches to the queue view
     (a append, d remove, J/K move, enter play from there), / search, ←/→ or
@@ -161,6 +165,13 @@ pub struct Cli {
     /// Never runs automatically.
     #[arg(long)]
     pub sync: bool,
+
+    /// Remove every cached remote track and cover from both Subsonic caches
+    /// (the track cache and the covers cache), print per cache how many
+    /// files and how much space were freed, then exit. Nothing outside the
+    /// two cache directories is ever touched.
+    #[arg(long)]
+    pub cache_clean: bool,
 
     /// Library root to index or browse; overrides `library` in the config file.
     #[arg(long, value_name = "PATH")]

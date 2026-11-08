@@ -48,6 +48,15 @@ fn cli_with_no_flags() -> Cli {
     Cli::try_parse_from(["velo"]).unwrap_or_else(|error| panic!("parse failed: {error}"))
 }
 
+#[test]
+fn the_cli_parses_the_cache_clean_flag() {
+    let cli = Cli::try_parse_from(["velo", "--cache-clean"])
+        .unwrap_or_else(|error| panic!("parse failed: {error}"));
+    assert!(cli.cache_clean);
+    // It is a mode of its own: no files needed, no other mode implied.
+    assert!(!cli.info && !cli.play && !cli.index && !cli.sync && !cli.subsonic_test);
+}
+
 // ---------------------------------------------------------------- missing file
 
 #[test]

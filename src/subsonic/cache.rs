@@ -29,14 +29,23 @@
 //! producer reaches it**, so a cache hit costs no network and a failed
 //! download is a skip the producer announces — the queue continues (T19).
 //!
-//! The cache is never pruned: every track ever played stays until the user
-//! deletes the directory. Nothing in velo grows without bound on purpose;
-//! eviction is deliberately out of scope for T12c.
+//! The two caches are bounded. The track cache holds at most
+//! [`Cache::TRACK_CACHE_CAP`] (2 GiB) and the covers cache
+//! [`Cache::COVERS_CACHE_CAP`] (256 MiB). The cap is enforced **after** a
+//! successful store, never before: the whole directory is walked (one flat
+//! `read_dir`, no recursion — the caches are flat by construction), and when
+//! the total is over the cap, whole files are evicted least-recently-used by
+//! modification time until it is under again. The one file that may never be
+//! evicted is the one just stored — eviction that removed it would re-download
+//! it on the next play, a loop rather than a policy — so a single file larger
+//! than the cap is kept anyway. `velo --cache-clean` empties both caches on
+//! demand through [`cache::clean`].
 
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::SystemTime;
 
 use md5::{Digest as _, Md5};
 
@@ -120,14 +129,41 @@ fn as_audio_error(error: &Error) -> AudioError {
 #[derive(Debug, Clone)]
 pub struct Cache {
     dir: PathBuf,
+    /// The byte cap enforced after every store, when there is one: over it,
+    /// the oldest files (by modification time) are evicted, never the file
+    /// just stored. `None` leaves the cache unbounded — the shape tests use;
+    /// the binary bounds both caches.
+    cap: Option<u64>,
 }
 
 impl Cache {
+    /// The track cache's cap: 2 GiB of original bytes.
+    pub const TRACK_CACHE_CAP: u64 = 2 * 1024 * 1024 * 1024;
+    /// The covers cache's cap: 256 MiB of images.
+    pub const COVERS_CACHE_CAP: u64 = 256 * 1024 * 1024;
+
     /// A cache rooted at `dir` — [`cache_dir`] for the real one, a
-    /// throwaway directory for a test.
+    /// throwaway directory for a test. Unbounded until [`Cache::with_cap`]
+    /// bounds it.
     #[must_use]
     pub fn new(dir: PathBuf) -> Self {
-        Self { dir }
+        Self { dir, cap: None }
+    }
+
+    /// Bounds the cache: after every successful store, when the directory
+    /// holds more than `cap` bytes, the oldest files are evicted until it
+    /// does not — except the file just stored, which survives even when it
+    /// alone is over the cap.
+    #[must_use]
+    pub fn with_cap(mut self, cap: u64) -> Self {
+        self.cap = Some(cap);
+        self
+    }
+
+    /// The directory this cache stores into.
+    #[must_use]
+    pub fn dir(&self) -> &Path {
+        &self.dir
     }
 
     /// The file a stream URL caches into: the md5 of the stable URL, hex.
@@ -166,7 +202,9 @@ impl Cache {
     }
 
     /// Writes the fetched bytes into place: create the directory, write a
-    /// temporary sibling, rename it over the final name.
+    /// temporary sibling, rename it over the final name. The cap, when the
+    /// cache has one, is enforced after the rename — never on a failed
+    /// store, and never by evicting the file just written.
     fn store(&self, path: &Path, bytes: &[u8]) -> Result<(), Error> {
         fs::create_dir_all(&self.dir).map_err(|error| {
             Error::Config(format!(
@@ -186,19 +224,105 @@ impl Cache {
                 "cannot write the cached file {}: {error}",
                 path.display()
             ))
-        })
+        })?;
+        self.prune(path);
+        Ok(())
+    }
+
+    /// Enforces the cap after a successful store: one flat walk of the
+    /// directory (no recursion — the caches are flat by construction), and
+    /// when the total is over the cap, whole files are removed oldest-first
+    /// by modification time until it is under again. The file just stored is
+    /// never a candidate: it is what the next play needs, and removing it
+    /// would turn eviction into a re-download loop. A single file larger
+    /// than the cap is therefore kept. Files whose metadata cannot be read
+    /// are skipped, not guessed at. A walk or an eviction that fails is
+    /// silent: the cache is a cache, and an unpruned cache is still correct.
+    fn prune(&self, keep: &Path) {
+        let Some(cap) = self.cap else {
+            return;
+        };
+        let Ok(entries) = fs::read_dir(&self.dir) else {
+            return;
+        };
+        let mut files: Vec<(PathBuf, u64, SystemTime)> = Vec::new();
+        let mut total: u64 = 0;
+        for entry in entries.flatten() {
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if !metadata.is_file() {
+                continue;
+            }
+            total = total.saturating_add(metadata.len());
+            files.push((
+                entry.path(),
+                metadata.len(),
+                metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+            ));
+        }
+        if total <= cap {
+            return;
+        }
+        // Oldest first; the path breaks mtime ties so the order is stable.
+        files.sort_by(|a, b| (a.2, &a.0).cmp(&(b.2, &b.0)));
+        for (path, size, _) in files {
+            if total <= cap {
+                break;
+            }
+            if path == keep {
+                continue;
+            }
+            if fs::remove_file(&path).is_ok() {
+                total = total.saturating_sub(size);
+            }
+        }
     }
 
     /// The cache of cover art that sits beside this one: `$XDG_CACHE_HOME/
     /// velo/covers` (else `~/.cache/velo/covers`) when this is the track
     /// cache under `…/velo/subsonic`. Same rule, same stable-hash names, its
-    /// own directory — a cover never lands among the track bytes (T12d).
+    /// own directory — a cover never lands among the track bytes (T12d) —
+    /// and its own, smaller cap ([`Cache::COVERS_CACHE_CAP`]).
     #[must_use]
     pub fn covers_cache(&self) -> Self {
         Self {
             dir: self.dir.with_file_name("covers"),
+            cap: Some(Self::COVERS_CACHE_CAP),
         }
     }
+}
+
+/// Removes every file directly inside `dir` — the engine behind
+/// `velo --cache-clean`, called once per cache. The directory itself is
+/// created when it does not exist and never removed, files inside
+/// subdirectories are not touched, and a file that cannot be removed is
+/// skipped rather than reported as freed. Nothing outside `dir` is ever
+/// read or written. Answers how many files went and how many bytes they
+/// held.
+#[must_use]
+pub fn clean(dir: &Path) -> (usize, u64) {
+    if fs::create_dir_all(dir).is_err() {
+        return (0, 0);
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return (0, 0);
+    };
+    let mut files = 0;
+    let mut bytes = 0;
+    for entry in entries.flatten() {
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        if fs::remove_file(entry.path()).is_ok() {
+            files += 1;
+            bytes += metadata.len();
+        }
+    }
+    (files, bytes)
 }
 
 /// One more unique temporary name per call, so two downloads never race onto

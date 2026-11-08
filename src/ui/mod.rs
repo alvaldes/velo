@@ -412,6 +412,11 @@ pub struct App<'lib> {
     heard: Vec<f32>,
     /// How many bands the last frame had room for.
     spectrum_bands: std::cell::Cell<usize>,
+    /// The credential warning still to say (a group- or world-readable
+    /// `subsonic.key`, T12c's debt): delivered into the status line once, on
+    /// the first tick, then gone — a warning that repeats is noise, and one
+    /// that only surfaces inside a skip reason is no warning at all.
+    subsonic_warning: Option<String>,
 }
 
 impl<'lib> App<'lib> {
@@ -460,6 +465,7 @@ impl<'lib> App<'lib> {
             covers: None,
             pending_cover: None,
             scrobbles: None,
+            subsonic_warning: None,
             saved: Session::default(),
             saved_volume: crate::config::DEFAULT_VOLUME,
             library_root: None,
@@ -522,6 +528,7 @@ impl<'lib> App<'lib> {
             covers: None,
             pending_cover: None,
             scrobbles: None,
+            subsonic_warning: None,
             saved: Session::default(),
             saved_volume: crate::config::DEFAULT_VOLUME,
             library_root: None,
@@ -982,6 +989,14 @@ impl<'lib> App<'lib> {
         self.scrobbles = scrobbler.map(ScrobbleTracker::new);
     }
 
+    /// Takes the credential resolver's warnings — today, a group- or
+    /// world-readable `subsonic.key` (T12c's debt). Empty means the key file
+    /// is private (or no key file is in play) and the status line says
+    /// nothing. The warnings ride to the first tick, which says them once.
+    pub fn set_subsonic_warnings(&mut self, warnings: &[String]) {
+        self.subsonic_warning = (!warnings.is_empty()).then(|| warnings.join("; "));
+    }
+
     /// The launch with no `library` configured (T12c): with a Subsonic server
     /// configured, the synced index is the library — nothing is asked, and
     /// `/` reaches its search; with neither, one sentence says what to
@@ -1209,6 +1224,12 @@ impl<'lib> App<'lib> {
     /// learns what is playing (T12d). Without a player there is nothing to
     /// collect.
     pub fn tick(&mut self) {
+        // A credential warning is said once, here, where the user is looking
+        // — not only inside a skip reason when a download later fails. The
+        // `take` is the once: later ticks find nothing left to say.
+        if let Some(warning) = self.subsonic_warning.take() {
+            self.status = format!("velo: warning: {warning}");
+        }
         self.poll_cover();
         self.refresh_artwork();
         self.explain_hidden_art();

@@ -659,6 +659,52 @@ fn a_tick_without_a_player_changes_nothing() {
     assert_eq!(app.status(), "");
 }
 
+/// A group- or world-readable `subsonic.key` must be said where the user is
+/// looking — the status line, once, when the interface starts — not only
+/// when a download happens to fail (the T12c debt).
+#[test]
+fn a_readable_subsonic_key_file_warns_once_in_the_status_line() {
+    let mut app = App::browse(None);
+    app.set_subsonic_warnings(&[
+        "the subsonic key file /home/demo/.config/velo/subsonic.key is readable by group or \
+         others (mode 0644) — restrict it to you alone: chmod 600"
+            .to_owned(),
+    ]);
+
+    app.tick();
+    assert!(
+        app.status().contains(".config/velo/subsonic.key"),
+        "the warning names the path: {}",
+        app.status()
+    );
+    assert_eq!(
+        app.status().matches("subsonic.key").count(),
+        1,
+        "one message, not one per warning word"
+    );
+
+    // The warning is said once: ticks that bring nothing new must not repeat
+    // it, the same rule a skipped track's message obeys.
+    app.tick();
+    app.tick();
+    assert_eq!(
+        app.status().matches("subsonic.key").count(),
+        1,
+        "the warning must not repeat on later ticks"
+    );
+}
+
+/// A private (0600) key file resolves with no warning, so the status line
+/// stays empty — silence is the sign that nothing is wrong.
+#[test]
+fn a_private_key_file_produces_no_status_warning() {
+    let mut app = App::browse(None);
+    app.set_subsonic_warnings(&[]);
+
+    app.tick();
+    assert_eq!(app.status(), "", "no warning, no message");
+}
+
 #[test]
 fn enter_on_an_artist_shows_its_albums_and_esc_returns_to_the_artists() {
     let temp = TempLibrary::new("browse-artists");
