@@ -509,3 +509,12 @@ Three instances make it a class: **a comment that describes the environment is a
 
 The same reasoning is why the release verification stopped at "four builds compiled" and went one step further: downloading the artifact, checking its checksum and decoding a real file. **"It compiles" and "it works" are both claims; only one of them was tested.**
 
+**L56 — the changelog was regenerated, not edited (and that is why the entry vanished).** The human asked to remove `v0.10.1`'s entry along with its tag. Two hand-written options were available and both were worse:
+
+- **Delete the 0.10.1 section**: it held the whole campaign — Subsonic, ReplayGain, Opus, symphonia 0.6, the AAC priming — because `v0.9.0` is the tag before it. Deleting it would have erased the record of the release that actually shipped.
+- **Hand-merge the two sections**: correct in outcome, but it breaks the repo's own rule (`do not edit the version or the changelog by hand`), and a hand-merged changelog drifts the moment the next release is cut.
+
+**What was done instead**: delete the tag, then run the repository's own generator (`git cliff -o CHANGELOG.md`, no `--tag`). With `v0.10.1` gone, the last remaining tag is `v0.9.0`, so the generator attributes everything since then to **0.10.2** — the release that genuinely delivered it, because 0.10.1 never published anything — and leaves an `Unreleased` section for the post-tag documentation commits. Zero occurrences of 0.10.1 remain, the twenty-four entries survive under the release they belong to, and nobody edited a generated file by hand.
+
+One trap worth recording: `git cliff --tag v0.10.2` produces **two** `0.10.2` sections, because it labels the unreleased range with the tag as well. Running the generator *without* `--tag` is the correct form for "rewrite history after removing a tag"; `--tag` is for cutting a new release.
+
