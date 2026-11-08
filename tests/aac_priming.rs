@@ -415,6 +415,12 @@ fn an_mp3_still_relies_on_symphonias_own_trim() {
 fn fnv1a_quantised(samples: &[f32]) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for sample in samples {
+        // Clamped to ±1 and rounded before the cast, so the value is inside
+        // `i16` by construction; the lint cannot see through `clamp`.
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "clamped to +/-1 and rounded, so it fits i16"
+        )]
         let quantised = (sample.clamp(-1.0, 1.0) * 32_767.0).round() as i16;
         for byte in quantised.to_le_bytes() {
             hash ^= u64::from(byte);
