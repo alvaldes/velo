@@ -70,7 +70,7 @@ Root folder: `/Users/alvaldes/Music/Library` (L15). Metadata comes from tags fir
 | T12c | Cache-on-play: fetch the original bytes with `format=raw`, then play locally (keeps seek, gapless, bit-perfect) | S14 | pending | `05e6c76` |
 | T12d | Remote cover art via `getCoverArt` and scrobbling on track change | S14 | pending | `3662e85` |
 | T13 | ReplayGain tag writer | S15 | inline | `c006a62` |
-| T14 | Opus decode via a bundled `libopus` (`audiopus_sys`), keeping the single-binary promise | S5 | inline | — |
+| T14 | Opus decode via a bundled `libopus` (`audiopus_sys`), keeping the single-binary promise | S5 | inline | `a84a4ce` |
 | T15 | Evaluate the symphonia 0.6 API (`codecs::audio::AudioDecoder`, generic buffers) and migrate behind the existing tests | S5, S7 | inline | `b2187ad` |
 | T16 | Trim AAC/MP4 encoder priming: symphonia 0.5 does not populate `delay`/`padding` for isomp4, so an M4A join carries up to ~1024 frames of priming (read `iTunSMPB` or the `elst` edit list) | S7 | inline | `1e7e36d` |
 | T18a | Share the queue with the interface so edits reach the audio (proved by appending mid-track) | S11 | inline | `9ca9b4f` |
@@ -420,7 +420,7 @@ Follow-ups left explicit: true peak (4× oversampling) instead of sample peak, a
 
 **The lesson I keep relearning in this project, written where it costs me next time**: an unquoted heredoc turned Markdown code spans into shell commands twice in one session — once injecting two hundred lines of ImageMagick help into this very file. When the text being written contains backticks, the heredoc must be quoted. The repair is an amend; the attention is cheaper.
 
-**L48** (T14's decoder half, in `$H`): Opus decodes, and one assumption of mine was wrong.
+**L48** (T14's decoder half, in `a84a4ce`): Opus decodes, and one assumption of mine was wrong.
 
 `audiopus 0.2` (0.3 is a release candidate — not for a shipped dependency) over a **statically linked** libopus, confirmed with `otool`: zero dynamic dependencies. `decodable(id) -> bool` lives in the new module as the single answer to "can this player decode that codec", because a player and a radio stream that disagree about playable codecs is a bug that surfaces months later.
 
@@ -431,4 +431,28 @@ Follow-ups left explicit: true peak (4× oversampling) instead of sample peak, a
 **And the tests refused one of my rules, with a measurement.** I asked for "a truncated packet is an error". RFC 6716 defines a code-0 frame's length as *the rest of the packet*, so every prefix of a real 379-byte packet decodes — measured, not argued. The rule now states what the format actually guarantees (empty errors, a multi-frame packet whose table overruns its bytes errors, a truncated page is refused by the container) instead of what I assumed. A test that encodes my expectation rather than the format's contract is a test that will be wrong later and insist it is right.
 
 **What this does not do, deliberately**: it is not wired into `make_decoder` (a parallel session is extracting that factory), and the 312-sample pre-skip that symphonia reports as track delay is still untrimmed. The README says the decoder exists and is not yet reachable rather than claiming playback.
+
+**L49** (T14b, in `a84a4ce` — **the original v1 scope is complete**): Opus plays, and the pre-skip is trimmed.
+
+The decoder existed and nothing could reach it. One arm in `make_decoder` builds it when `decodable` answers true and falls through to symphonia otherwise — the factory stayed **the one mouth**, which is exactly why it was worth extracting *before* this task instead of after.
+
+**The pre-skip needed more than re-gating, and measuring said so.** symphonia's Ogg reader pre-spends the pre-skip on its presentation timeline, so the existing content window — addressed by `pts` — evaluated to **zero for every Opus packet**: it would never have trimmed anything, and the symptom would have been a faint warm-up at the head of every Opus file with a test suite insisting everything was fine. The window now addresses raw decoded frames through a `pts_shift` carrying the reader's declared delay. isomp4 declares none, so its behaviour is byte-identical; MP3's priming stays symphonia's, so the window never fires there.
+
+Measured on the test's own file: 48 kHz, 312 samples of pre-skip, duration **exactly 1.000 s** (48 312 − 312), first block 648 frames peaking at 0.5048 for a 0.5 sine, and the head that used to sit there measured **−60.4 dB** against −9.017 dB of content. The drained stream is sample-exact `raw[312..]`.
+
+**The regression test is pinned with a real non-decodable codec** — an M4A whose object type is patched to AC-3 — instead of a fake. A fake would have passed against a factory that had quietly learned to accept everything, which is the failure mode this test exists to catch.
+
+**Known limit, stated rather than hidden**: after a seek, symphonia populates no post-seek packet trims, so libopus's post-seek warm-up is not re-trimmed. Every codec shows that today; it is a follow-up, not a regression introduced here.
+
+**What "complete" means, precisely**: every item the human listed for v1 — formats, gapless, library index, browse and play, search, cover art, CLI and config, Subsonic, ReplayGain — is implemented, tested and committed. What remains is not scope: the cover rendering in a real terminal (owed since L34), the radio feature owned by the parallel session, and the small known limits recorded in L42/L48/L49.
+
+**L50** (a real bug, found by a peer's question, fixed in `b5c08ac`): a live Opus stream was not trimming its pre-skip.
+
+**The bug**: priming was gated on having a *path* (`path.and_then(declared_priming)`) because the isomp4 case reads it from the container. A stream has no path, so a live Opus station delivered its **312 samples of pre-skip** to the device. Measured, not reasoned: the same bytes as a stream produced **48000** samples against **47688** as a file — exactly the pre-skip, and the difference the failing test printed.
+
+**The distinction the fix encodes is the radio session's, and it is the standard's**: the pre-skip is **normative** (RFC 6716 — the decoder must discard it), while encoder padding is a compression artifact that only matters when something follows. So the pre-skip is trimmed whether or not there is a file; the padding is a sequence concern, and a live stream has no end to respect and does not carry it. `declared_priming` now takes `Option<&Path>`; only the container-reading branch needs one.
+
+**The test proves it by the strongest property available** — a live stream and the same bytes as a file must decode to the same samples — and it is honestly discriminating: stashed the fix, ran it, and it failed with the two numbers above.
+
+**Why this is worth a log entry of its own**: the defect lived in a path **no test covered** (the live stream), was introduced by a correct-looking gate, and was found by someone reasoning from the codec's contract instead of from our code. Three of the four things it cost were questions: *is the pre-skip the same as padding?* No. *Should a stream trim it?* Yes, always. *Does the trim depend on gapless?* It must not, or a future change to gaplessness drags the pre-skip with it. A peer reading the standard caught what my suite could not see.
 

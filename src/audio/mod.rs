@@ -108,6 +108,12 @@ pub struct TrackSource {
     /// The priming this track trims itself, when the container declares it and
     /// symphonia does not already trim it (T16).
     priming: Option<Priming>,
+    /// How much of the priming delay the reader pre-spent on its presentation
+    /// timeline, in frames. symphonia's Ogg reader presents the first Opus
+    /// packet at `pts = delay` — the pre-skip is spent before the first packet
+    /// begins (measured) — while isomp4 presents from 0. The content window
+    /// addresses raw decoded frames, so it subtracts what the reader spent.
+    pts_shift: u64,
     /// After a seek: the timestamp the decoded output must not start before.
     /// Packets read before it contribute only their frames from it onwards.
     skip_ts: Option<Timestamp>,
@@ -142,19 +148,34 @@ impl Priming {
 
 /// The priming a track must have trimmed, and by whom.
 ///
-/// symphonia populates the track's `delay`/`padding` and trims both itself
-/// when the decoder's `gapless` option is on (the MP3/LAME path). isomp4 does
-/// not, so there the priming is read from the container and trimmed here.
-/// When symphonia already owns the trim, [`TrackSource`] adds nothing:
-/// double-trimming is worse than not trimming.
-fn declared_priming(track: &Track, path: &Path) -> Option<Priming> {
-    if track.delay.is_some() || track.padding.is_some() {
+/// When symphonia's own decoder was built, it trims the packet trims its
+/// readers declare (the MP3/LAME path), so a priming symphonia populated on
+/// the track stays symphonia's — hands off. When the decoder is velo's own
+/// (Opus), symphonia's Ogg reader puts no trim on the packets (measured: the
+/// Opus packet parser reports zero discard), so the container-declared priming
+/// is trimmed here. When symphonia populates neither field (isomp4, measured
+/// on 0.5.5 and 0.6.1), the priming is read from the container. When symphonia
+/// already owns the trim, [`TrackSource`] adds nothing: double-trimming is
+/// worse than not trimming.
+fn declared_priming(track: &Track, path: Option<&Path>, symphonia_built: bool) -> Option<Priming> {
+    if track.delay.is_none() && track.padding.is_none() {
+        // symphonia populates neither (isomp4): the priming lives in the
+        // container, gated on `ftyp` so no other format's behaviour changes.
+        // Only a file has a container to read — a stream has no bytes to seek
+        // back to, and its codec either declares the priming on the track or
+        // has none.
+        return path.and_then(mp4::read_priming).map(|priming| Priming {
+            delay: priming.delay,
+            padding: priming.padding,
+        });
+    }
+    if symphonia_built {
         // symphonia populated and trims it (MP3's LAME tag) — hands off.
         return None;
     }
-    mp4::read_priming(path).map(|priming| Priming {
-        delay: priming.delay,
-        padding: priming.padding,
+    Some(Priming {
+        delay: u64::from(track.delay.unwrap_or(0)),
+        padding: u64::from(track.padding.unwrap_or(0)),
     })
 }
 
@@ -165,17 +186,30 @@ fn declared_priming(track: &Track, path: &Path) -> Option<Priming> {
 /// reader declares per packet, which is what makes an MP3 or AAC join silent.
 /// A live stream decodes with `gapless: false`: it declares no priming, and
 /// trimming a delay nobody declared would eat the first audible frames.
+///
+/// Opus is built by [`opus::SymphoniaDecoder`] (velo's own decoder over a
+/// statically linked libopus) whenever [`opus::decodable`] answers true — the
+/// one function that decides playability; everything else falls through to
+/// symphonia's registry exactly as before. The boolean half of the result
+/// records who built the decoder, because symphonia's own decoders trim the
+/// packet trims its readers declare while velo's own do not — [`TrackSource`]
+/// needs to know whether a container-declared priming is already handled.
 fn make_decoder(
     params: &AudioCodecParameters,
     gapless: bool,
-) -> Result<Box<dyn AudioDecoder>, AudioError> {
+) -> Result<(Box<dyn AudioDecoder>, bool), AudioError> {
     // `AudioDecoderOptions` is #[non_exhaustive] in symphonia 0.6, so the
     // struct-update form `..Default::default()` is refused across the crate
     // boundary; the builder is the same one decision.
     let options = AudioDecoderOptions::default().gapless(gapless);
-    symphonia::default::get_codecs()
+    if opus::decodable(params.codec) {
+        let decoder = opus::SymphoniaDecoder::try_new(params, options)?;
+        return Ok((Box::new(decoder), false));
+    }
+    let decoder = symphonia::default::get_codecs()
         .make_audio_decoder(params, &options)
-        .map_err(|error| AudioError::Unsupported(error.to_string()))
+        .map_err(|error| AudioError::Unsupported(error.to_string()))?;
+    Ok((decoder, true))
 }
 
 impl TrackSource {
@@ -251,13 +285,39 @@ impl TrackSource {
             .ok_or_else(|| AudioError::Unsupported(format!("{name} has no audio track")))?
             .clone();
 
-        let decoder = make_decoder(&audio_params, gapless)?;
+        let (decoder, symphonia_built) = make_decoder(&audio_params, gapless)?;
 
         let declared = declared_spec(&audio_params);
-        // A stream has no file to read priming from and no container to
-        // declare it; symphonia's own trim is off (`gapless: false`), which is
-        // what a live stream wants twice over.
-        let priming = path.and_then(|path| declared_priming(track, path));
+        // The pre-skip is a property of the codec, not of a file: Opus's
+        // OpusHead travels inside a live stream too, so the reader populates
+        // `track.delay` whether or not there is a path. It is normative
+        // (RFC 6716) and is trimmed in both cases. The encoder *padding* is a
+        // sequence concern — it only matters when something follows — so a
+        // station, which has no end to respect, does not carry it.
+        let priming = declared_priming(track, path, symphonia_built).map(|priming| {
+            if live {
+                Priming {
+                    delay: priming.delay,
+                    padding: 0,
+                }
+            } else {
+                priming
+            }
+        });
+        // Only a delay the reader itself declared on the track is pre-spent on
+        // its timeline (Opus, above); isomp4 declares none (T16 reads it from
+        // the container) and its packets present from 0.
+        let pts_shift = if priming.is_some() {
+            track.delay.map_or(0, |delay| {
+                declared.map_or(0, |spec| {
+                    track.time_base.map_or(0, |time_base| {
+                        ts_to_frames(u64::from(delay), time_base, spec.sample_rate)
+                    })
+                })
+            })
+        } else {
+            0
+        };
         // Copy what the track declares before the reader moves into the
         // source: in 0.6 the track's timing lives on `Track`, not in the codec
         // parameters. A live stream never reports a frame count even when a
@@ -281,6 +341,7 @@ impl TrackSource {
             time_base,
             n_frames,
             priming,
+            pts_shift,
             skip_ts: None,
         };
 
@@ -460,9 +521,12 @@ impl TrackSource {
             // What must not reach the output, in packet frames from the head:
             // a seek holds back everything before the timestamp it asked for,
             // and a container whose priming this source trims itself (isomp4,
-            // T16) hides its encoder warm-up and padding behind the window
-            // [delay, n_frames - padding) over the raw decoded stream. Both
-            // are addressed in raw frames, so the deeper one wins at the head.
+            // T16; Opus, T14b) hides its encoder warm-up and padding behind
+            // the window [delay, n_frames - padding) over the raw decoded
+            // stream. Both are addressed in raw frames, so the deeper one wins
+            // at the head. The raw position of a packet is its timestamp minus
+            // whatever presentation offset the reader pre-spent (Opus's
+            // pre-skip — see `pts_shift`).
             let mut head = 0usize;
             let mut tail = 0usize;
             let mut clear_skip = false;
@@ -491,13 +555,16 @@ impl TrackSource {
                 }
             }
             if let Some(priming) = self.priming {
-                let raw_start = self.time_base.map_or(0, |time_base| {
-                    ts_to_frames(
-                        packet.pts.get().max(0).unsigned_abs(),
-                        time_base,
-                        self.spec.sample_rate,
-                    )
-                });
+                let raw_start = self
+                    .time_base
+                    .map_or(0, |time_base| {
+                        ts_to_frames(
+                            packet.pts.get().max(0).unsigned_abs(),
+                            time_base,
+                            self.spec.sample_rate,
+                        )
+                    })
+                    .saturating_sub(self.pts_shift);
                 let raw_end = raw_start + packet_frames as u64;
                 let emit_start = raw_start.max(priming.delay);
                 let emit_end = self.n_frames.map_or(raw_end, |total| {
