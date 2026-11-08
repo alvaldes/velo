@@ -11,6 +11,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+pub mod mp4;
 pub mod output;
 pub mod replay_gain;
 pub mod resample;
@@ -100,8 +101,13 @@ pub struct TrackSource {
     /// The track's time base, which converts between frames and the timestamps
     /// a seek is expressed in.
     time_base: Option<TimeBase>,
-    /// The track's total frame count, when the container declares it.
+    /// The track's total frame count, when the container declares it. For a
+    /// container whose priming [`TrackSource`] trims itself (isomp4) this is
+    /// the raw count, priming included; content frames live inside it.
     n_frames: Option<u64>,
+    /// The priming this track trims itself, when the container declares it and
+    /// symphonia does not already trim it (T16).
+    priming: Option<Priming>,
     /// After a seek: the timestamp the decoded output must not start before.
     /// Packets read before it contribute only their frames from it onwards.
     skip_ts: Option<u64>,
@@ -117,6 +123,38 @@ fn declared_spec(params: &CodecParameters) -> Option<TrackSpec> {
     Some(TrackSpec {
         sample_rate,
         channels,
+    })
+}
+
+/// Encoder priming the container declares, in frames: warm-up before the first
+/// content frame, flush padding after the last one.
+#[derive(Clone, Copy, Default)]
+struct Priming {
+    delay: u64,
+    padding: u64,
+}
+
+impl Priming {
+    const fn frames(self) -> u64 {
+        self.delay + self.padding
+    }
+}
+
+/// The priming a track must have trimmed, and by whom.
+///
+/// symphonia populates `codec_params.delay`/`padding` and trims both itself
+/// when `enable_gapless` is on (the MP3/LAME path). isomp4 does not, so there
+/// the priming is read from the container and trimmed here. When symphonia
+/// already owns the trim, [`TrackSource`] adds nothing: double-trimming is
+/// worse than not trimming.
+fn declared_priming(codec_params: &CodecParameters, path: &Path) -> Option<Priming> {
+    if codec_params.delay.is_some() || codec_params.padding.is_some() {
+        // symphonia populated and trims it (MP3's LAME tag) — hands off.
+        return None;
+    }
+    mp4::read_priming(path).map(|priming| Priming {
+        delay: priming.delay,
+        padding: priming.padding,
     })
 }
 
@@ -161,6 +199,7 @@ impl TrackSource {
             .map_err(|error| AudioError::Unsupported(error.to_string()))?;
 
         let declared = declared_spec(&codec_params);
+        let priming = declared_priming(&codec_params, path);
         let mut source = Self {
             reader,
             decoder,
@@ -174,6 +213,7 @@ impl TrackSource {
             pending: None,
             time_base: codec_params.time_base,
             n_frames: codec_params.n_frames,
+            priming,
             skip_ts: None,
         };
 
@@ -195,6 +235,14 @@ impl TrackSource {
         self.spec
     }
 
+    /// How many content frames this track holds: the raw count minus the
+    /// priming this source trims itself. For a track symphonia trims (MP3) the
+    /// raw count is already the content count and this is just `n_frames`.
+    fn content_frames(&self) -> Option<u64> {
+        self.n_frames
+            .map(|total| total.saturating_sub(self.priming.map_or(0, Priming::frames)))
+    }
+
     /// Opens a file and positions it `offset_frames` from its first frame, as
     /// a seek does: the player is rebuilt from this offset, it never injects
     /// anything into a running engine (T6).
@@ -212,18 +260,22 @@ impl TrackSource {
         Ok(source)
     }
 
-    /// Positions the stream at `offset_frames` from the first frame.
+    /// Positions the stream at `offset_frames` from the first content frame.
+    ///
+    /// The offset is in content frames: what a listener counts. For a track
+    /// whose priming this source trims itself (isomp4, T16), content frame 0 is
+    /// raw frame `delay`, so the reader is aimed one priming deeper and the
+    /// head trim still applies to whatever precedes the target.
     fn seek_to_frames(&mut self, offset_frames: u64) {
         if offset_frames == 0 {
             return;
         }
 
-        let offset = self
-            .n_frames
-            .map_or(offset_frames, |total| offset_frames.min(total));
+        let content = self.content_frames();
+        let offset = content.map_or(offset_frames, |total| offset_frames.min(total));
 
         // Clamped to (or past) the end: the stream finishes before it starts.
-        if self.n_frames.is_some_and(|total| offset >= total) {
+        if content.is_some_and(|total| offset_frames >= total) {
             self.finished = true;
             self.pending = None;
             return;
@@ -236,7 +288,11 @@ impl TrackSource {
             self.pending = None;
             return;
         };
-        let ts = frames_to_ts(offset, time_base, self.spec.sample_rate);
+        let ts = frames_to_ts(
+            offset + self.priming.map_or(0, |priming| priming.delay),
+            time_base,
+            self.spec.sample_rate,
+        );
 
         // Audio decoded before the seek point must not reach the output.
         self.pending = None;
@@ -272,7 +328,7 @@ impl TrackSource {
     /// from the command line has nothing but what the decoder knows (T21).
     #[must_use]
     pub fn duration(&self) -> Option<Duration> {
-        let frames = self.n_frames?;
+        let frames = self.content_frames()?;
         let rate = u64::from(self.spec.sample_rate.max(1));
         Some(Duration::from_millis(frames.saturating_mul(1000) / rate))
     }
@@ -334,26 +390,61 @@ impl TrackSource {
             buffer.copy_interleaved_ref(decoded);
 
             let mut samples = buffer.samples().to_vec();
+            let packet_frames = samples.len() / usize::from(channels);
 
-            // A seek: hold back everything before the timestamp it asked for.
+            // What must not reach the output, in packet frames from the head:
+            // a seek holds back everything before the timestamp it asked for,
+            // and a container whose priming this source trims itself (isomp4,
+            // T16) hides its encoder warm-up and padding behind the window
+            // [delay, n_frames - padding) over the raw decoded stream. Both
+            // are addressed in raw frames, so the deeper one wins at the head.
+            let mut head = 0usize;
+            let mut tail = 0usize;
+            let mut clear_skip = false;
             if let Some(skip_ts) = self.skip_ts {
-                let channels = usize::from(self.spec.channels);
                 let drop_ts = skip_ts.saturating_sub(packet.ts());
                 let drop_frames = self.time_base.map_or(0, |time_base| {
                     ts_to_frames(drop_ts, time_base, self.spec.sample_rate)
                 });
-                let packet_frames = samples.len() / channels;
                 let drop = usize::try_from(drop_frames).unwrap_or(usize::MAX);
                 if drop == 0 {
-                    self.skip_ts = None;
+                    clear_skip = true;
                 } else if drop < packet_frames {
-                    samples.drain(..drop * channels);
-                    self.skip_ts = None;
+                    head = drop;
+                    clear_skip = true;
                 } else {
                     // The whole packet lies before the seek target; the next
                     // one starts closer to it.
                     continue;
                 }
+            }
+            if let Some(priming) = self.priming {
+                let raw_start = self.time_base.map_or(0, |time_base| {
+                    ts_to_frames(packet.ts(), time_base, self.spec.sample_rate)
+                });
+                let raw_end = raw_start + packet_frames as u64;
+                let emit_start = raw_start.max(priming.delay);
+                let emit_end = self.n_frames.map_or(raw_end, |total| {
+                    raw_end.min(total.saturating_sub(priming.padding))
+                });
+                let window_head = usize::try_from(emit_start - raw_start)
+                    .unwrap_or(packet_frames)
+                    .min(packet_frames);
+                let window_tail = usize::try_from(raw_end - emit_end)
+                    .unwrap_or(packet_frames)
+                    .min(packet_frames);
+                head = head.max(window_head);
+                tail = window_tail;
+            }
+            if clear_skip {
+                self.skip_ts = None;
+            }
+            if head > 0 {
+                samples.drain(..head.min(packet_frames) * usize::from(channels));
+            }
+            if tail > 0 {
+                let keep = packet_frames.saturating_sub(head + tail);
+                samples.truncate(keep * usize::from(channels));
             }
 
             // A packet that decodes to nothing must not surface as an empty

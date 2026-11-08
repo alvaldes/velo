@@ -350,6 +350,12 @@ mono, which plays through every output channel — a layout that would need a
 real downmix (5.1 into stereo, say) is skipped with an announcement instead of
 being silently averaged away.
 
+Gapless joins trim what the encoder inserted, so a seam carries music only: for
+MP3 the LAME tag's delay and padding are honoured, and for M4A/AAC — where
+symphonia 0.5 reports neither — the priming is read from the container itself
+(the `elst` edit list, or an `iTunSMPB` tag when one is present) and trimmed.
+Durations and seeks count content frames, not the raw encoded frames.
+
 With `bit_perfect = true` in the config, sample rates are not converted
 either: the device is reopened at each track's own rate, so the decoder's
 samples reach it unmodified. ReplayGain is skipped and the volume is pinned
