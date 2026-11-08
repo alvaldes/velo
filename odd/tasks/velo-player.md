@@ -405,3 +405,18 @@ Follow-ups left explicit: true peak (4× oversampling) instead of sample peak, a
 
 **A small lesson about delegation**: the worker that did this stopped at the one line it could not touch and *said so* — the CLI still built its tags from the sample peak, so the feature would have measured beautifully and reached no user. Wiring that line is what turned a measurement into a behaviour. A report that names what it could not finish is worth more than one that claims completion.
 
+**L47 — where the project stands, measured (written while waiting on a decision).**
+
+**Done and in `main`**: formats, gapless, library index from tags (schema **v3**: `source`, `remote_id`, `cover_id`), browse by artist/album/track/genre, fuzzy search, cover art that never fakes itself, an editable queue, transport with seek and a clock that counts the right unit, broken tracks skipped and named, mono playing into stereo, Subsonic end to end (client, index rows, cache-on-play, remote covers, scrobbling), ReplayGain read **and now measured and written**, AAC/MP4 priming trimmed, symphonia on **0.6.1**, `clap` with a strict config, README/LICENSE/CI/release, and `cargo install` measured working. 24 suites, 469 tests, clippy 0, fmt clean.
+
+**The one thing missing from the original scope is Opus (T14)**, and the decision that was blocking it was the price of a C dependency. Measuring it settled the question better than arguing: no `symphonia-codec-opus` exists for 0.6 (only pcm, vorbis, aac, adpcm), `audiopus_sys` builds libopus **1.6.1** statically in **3.1 s** cold-release, the linked binary grew by **~400 KB** on an 8.9 MB binary, and `otool` shows **no dynamic linkage** — zero runtime dependency. A worry of three seconds is not a reason to leave a format out.
+
+**Coordination with the parallel radio session (01a1b812)**, recorded because a future session will inherit it:
+- They own `src/radio/**` and `odd/tasks/radio.md`; T14 owns `src/audio/mod.rs` **after** their T5a lands. They own `src/audio/output.rs` for T5c (typed queue: `enum Entry { File(PathBuf), Station(..) }`, resolver consulted only for `File`). I do not touch it.
+- **The single mouth for building a decoder** is `open_decoder(params: &AudioCodecParameters, gapless: bool) -> Result<Box<dyn AudioDecoder>, AudioError>`, being extracted in their T5a. `open`/`open_at` pass `gapless: true`; a station passes `false`. T14 adds Opus as **one arm** there, and `decodable(codec)` must live beside it — two copies of the decoder factory would let the player and the radio stream disagree about which codecs are playable, and that is a bug that surfaces months later.
+- Their question "does the visual cover check edit `src/ui/mod.rs`?" was answered honestly: it does not, **unless** the human reports the cover missing, in which case I touch only `draw_artwork`/`pane`/`refresh_artwork` and warn them first.
+
+**Two things owed by a human, both older than this entry**: the cover rendering in a real Kitty/Sixel/iTerm2 terminal (owed since L34, and the diagnostic sentence already exists to say *why* it hides), and a `velo --replaygain-scan <folder>` on the real library to judge whether the LUFS numbers match what they hear.
+
+**The lesson I keep relearning in this project, written where it costs me next time**: an unquoted heredoc turned Markdown code spans into shell commands twice in one session — once injecting two hundred lines of ImageMagick help into this very file. When the text being written contains backticks, the heredoc must be quoted. The repair is an amend; the attention is cheaper.
+
