@@ -152,9 +152,14 @@ fn settle(
     canned: &Canned,
     done: impl Fn(&RadioView, &Canned) -> bool,
 ) {
+    // Waiting only for the request to be recorded races the answer: the
+    // transport records the call the moment the worker thread starts, while
+    // the reply still has to come back through the channel and be polled in.
+    // Under a loaded suite that gap is wide enough to panic on a missing
+    // message, so the loader must also be idle before `done` means anything.
     for _ in 0..400 {
         data.poll(view);
-        if done(view, canned) {
+        if !data.loading() && done(view, canned) {
             return;
         }
         std::thread::sleep(Duration::from_millis(5));
