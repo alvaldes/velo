@@ -474,3 +474,11 @@ The area is famous for breaking priming, so the regression is pinned mechanicall
 
 **Reported and deliberately not implemented**: libopus would benefit from seeking a packet early and discarding more, trading a short reconvergence for exactness at the landing. That is a change to seek *semantics*, not a bug fix — and after the f-string and heredoc incidents of this session, adding an unrequested semantic change under the banner of a bug fix would be the same mistake in a different costume.
 
+**L53 — operational notes worth keeping (nothing here is a defect).**
+
+**The worker harness can die without starting.** The parallel radio session reported two delegations killed by worker timeout, the second one *before the model started*. Every unit of the audio/subsonic work in this session was delegated and none failed, so this is a real but intermittent failure mode rather than a broken tool. What it changes is planning, not code: **a large delegated unit should have a cheap inline path**, and "the worker died" must never be read as "the code is wrong". A future session seeing a half-applied task should check whether the delegated process ever ran before diagnosing the change.
+
+**Cross-session citations go stale in minutes, not days.** Twice in this session a peer and I cited the same line with different contents because each message described the tree at the moment it was written: `make_decoder` existed or did not, `queued_entry` was path-concrete or retyped, `main` carried the radio branch or did not. The rule that came out of it: **cite a line with the commit you read it at**, or say you have not re-read it. It cost four rounds of "verified on my side" that could have been one.
+
+**Where the project stands**: the original v1 scope is complete and green (25 suites, 482 tests, clippy 0), the cover renders in the human's Ghostty (L51), and no known audio defect remains — AAC priming, Opus pre-skip (file *and* live) and the post-seek shift are all closed with measurements and discriminating tests. The radio feature is the parallel session's and is not blocked on this one; the only shared seam left is `queued_entry`, already retyped on their side.
+
