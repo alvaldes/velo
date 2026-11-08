@@ -403,3 +403,32 @@ pre-existing suite passing unmodified.
 **Log order note**: entries are appended as they happen; L13 and L14 were written in
 the reverse order of their numbers because L13's content (the 0.6.1 API facts)
 arrived after L14 was already recorded. Numbers, not positions, are the order.
+
+**L17** — T5b1 closed (`a077642`, `src/radio/stream.rs` ~260 lines and
+8 tests: **582 green across 33 binaries**, clippy clean). A station URL now becomes a
+playing `StationStream`: one GET with `Icy-MetaData: 1` sent before the body, the
+`Icy-Metaint` interval validated, the body demuxed by `icy.rs`, wrapped in
+`ReadOnlySource` and handed to `TrackSource::open_stream`.
+
+- **The timeouts are the point.** Three knobs and no others: `timeout_connect` and
+  `timeout_recv_response` (both finite one-shots — headers do end) plus
+  `timeout_per_read`, which ureq restarts on every body read. `timeout_global`,
+  `timeout_per_call` and `timeout_recv_body` are total budgets over a body that never
+  ends, so they are set nowhere and the module doc says why.
+- **`Body::into_reader()` after `into_parts()`**, not `as_reader()`: the latter borrows
+  a response that `open()` drops, and the seam needs a `'static` reader.
+- **Title publication is a mirror, not a second parser.** The demux is boxed inside
+  `TrackSource`, unreachable from the UI, so `Observed` copies `title`/`title_seq` out
+  of the demux's own accessors after each read, into an `Arc<Mutex<…>>` (uncontended,
+  once per 1024-frame block). No metadata is parsed twice.
+- **`Icy-Metaint` boundaries**: absent means passthrough with no error; `0`, a
+  non-number and anything past 64 KiB are rejected with the offending value IN the
+  error, because "invalid metaint" alone tells a user nothing. 65536 stays legal.
+- **Two test-side facts worth keeping.** ureq lowercases header names on the wire, so
+  the request assertion is case-insensitive (the header was always sent). And the
+  stalled-read test has to declare a `Content-Length` larger than the bytes it sends:
+  ureq's `LimitReader` otherwise answers EOF from its own bookkeeping and the stalled
+  socket is never touched — a test that would have proven nothing.
+- Wrapper playlists and HLS are **not** here by design: such a body fails as
+  `NotAudio` and T5b2 resolves or rejects it. ureq is declared `3.1` in `Cargo.toml`
+  but resolves to 3.5.1; the three knobs exist in both.
