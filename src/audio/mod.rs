@@ -184,8 +184,13 @@ fn declared_priming(track: &Track, path: Option<&Path>, symphonia_built: bool) -
 /// The only place where `AudioDecoderOptions` is decided. Files decode with
 /// the default `gapless: true` — the decoder trims the delay and padding the
 /// reader declares per packet, which is what makes an MP3 or AAC join silent.
-/// A live stream decodes with `gapless: false`: it declares no priming, and
-/// trimming a delay nobody declared would eat the first audible frames.
+/// A live stream decodes with `gapless: false`, which drops the trim of
+/// **encoder padding** — a station owes nobody a gapless join — but not the
+/// trim of a **normative** pre-skip. An Opus stream carries its `OpusHead`
+/// inside the body, so the delay that declares is content-neutralising rather
+/// than padding, and [`TrackSource`] still removes it: keeping those two apart
+/// is why a live stream and the same bytes as a file decode to the same
+/// samples.
 ///
 /// Opus is built by [`opus::SymphoniaDecoder`] (velo's own decoder over a
 /// statically linked libopus) whenever [`opus::decodable`] answers true — the
@@ -237,7 +242,9 @@ impl TrackSource {
     /// seekable and never reports a duration, even when a tag inside the body
     /// declares a frame count; the sample-format mismatch rule of a gapless
     /// sequence does not apply, because a station can only enter the queue on
-    /// its own, never as a sequence member.
+    /// its own, never as a sequence member. Encoder padding is not trimmed
+    /// here, but a codec's normative pre-skip still is — see
+    /// [`make_decoder`]'s note on why those are different things.
     ///
     /// # Errors
     ///
