@@ -72,7 +72,7 @@ Root folder: `/Users/alvaldes/Music/Library` (L15). Metadata comes from tags fir
 | T13 | ReplayGain tag writer | S15 | inline | — |
 | T14 | Opus decode via a bundled `libopus` (`audiopus_sys`), keeping the single-binary promise | S5 | inline | — |
 | T15 | Evaluate the symphonia 0.6 API (`codecs::audio::AudioDecoder`, generic buffers) and migrate behind the existing tests | S5, S7 | inline | — |
-| T16 | Trim AAC/MP4 encoder priming: symphonia 0.5 does not populate `delay`/`padding` for isomp4, so an M4A join carries up to ~1024 frames of priming (read `iTunSMPB` or the `elst` edit list) | S7 | inline | — |
+| T16 | Trim AAC/MP4 encoder priming: symphonia 0.5 does not populate `delay`/`padding` for isomp4, so an M4A join carries up to ~1024 frames of priming (read `iTunSMPB` or the `elst` edit list) | S7 | inline | `1e7e36d` |
 | T18a | Share the queue with the interface so edits reach the audio (proved by appending mid-track) | S11 | inline | `9ca9b4f` |
 | T18b | Queue view and keys: `Tab` to switch, `a` append, `d` remove, `J`/`K` move, refusals in the status line | S11 | inline | `e43c02b` |
 | T19 | Report a track that fails mid-queue instead of playing silence to the end | S7, S8 | worker `gentle-ai-worker` | `207dc0f` |
@@ -350,4 +350,16 @@ Scrobbling sends `submission=false` when a remote track starts and `submission=t
 Against the demo server: 501 synced rows, **every one carrying a cover id**, and a real `getCoverArt` answering with an 88 KB 600×600 JPEG.
 
 **What the whole remote feature cost, in order**: a client that explains its failures (T12a), rows in the index so search and browsing did not fork (T12b), a cache so the audio path never learned about networks (T12c), and the two niceties that make it feel like the local library (T12d). Four tasks, four mergeable units, and the one part still owed is the one no test can give: **seeing the cover in a real terminal**, which has been owed since L34.
+
+**L42** (T16 closed in `1e7e36d`): the AAC priming, and the value of measuring before believing a note.
+
+The task file had claimed since the beginning that symphonia 0.5 does not populate `delay`/`padding` for isomp4. Believing it would have been reasonable; measuring it was better, and the measurement was **worse than the note**: for the committed fixture, `delay` and `padding` are both `None`, the container declares 14 254 frames, and the decoder emits **14 336** — a whole packet more. Nothing trimmed either end: 1 024 priming frames at the head plus 82 over-produced frames at the tail. And the priming is **not silent** — RMS 0.0029 against the first content packet's 0.0601 — so a join was a low-level smear, exactly the artifact the gapless work exists to prevent.
+
+The fix reads the MP4 the way every gapless player reads it: `iTunSMPB` when present (it states delay and padding), otherwise the audio track's `elst` media time. A small focused box reader, **gated on `ftyp`** so no other format's behaviour can change, bounded and panic-free on truncated input. The trim is a window over the decoded stream addressed by **packet timestamp**, so it survives a seek and merges with the existing skip instead of stacking on it — and when symphonia *does* populate the pair (MP3, via the LAME tag), velo adds nothing. A control test pins that, because double-trimming is worse than not trimming.
+
+Duration and seek now count **content frames**: the fixture reports 300 ms rather than 323, which is the length a listener would measure.
+
+**The method is the lesson.** Two of the ten tests passed immediately — the ones that pin what symphonia actually does — and that is what made the other eight meaningful. A test that only encodes the fix would have hidden the fact that the decoder was emitting a packet more than the container promised.
+
+Verified on a real file from the human's library as well: `--info` reports 187.48 s and `--play` exits clean.
 
