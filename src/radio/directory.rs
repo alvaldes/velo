@@ -13,7 +13,6 @@
 //!   it without touching any other file.
 
 use crate::radio::client::Station;
-use symphonia::core::codecs::CodecType;
 
 /// At most this many stations load per place, replacing the queue.
 pub const STATION_CAP: usize = 200;
@@ -60,29 +59,27 @@ fn absolute_http(url: &str) -> bool {
 /// that names the codec.
 #[must_use]
 pub fn is_playable_codec(codec: &str) -> bool {
-    use symphonia::core::codecs::{
-        CODEC_TYPE_AAC, CODEC_TYPE_FLAC, CODEC_TYPE_MP3, CODEC_TYPE_OPUS, CODEC_TYPE_VORBIS,
-    };
+    use symphonia::core::codecs::audio::{AudioCodecId, well_known};
 
-    const SPELLINGS: &[(&str, CodecType)] = &[
-        ("mp3", CODEC_TYPE_MP3),
-        ("aac", CODEC_TYPE_AAC),
-        ("aac+", CODEC_TYPE_AAC),
-        ("ogg", CODEC_TYPE_VORBIS),
-        ("vorbis", CODEC_TYPE_VORBIS),
-        ("flac", CODEC_TYPE_FLAC),
-        ("opus", CODEC_TYPE_OPUS),
+    const SPELLINGS: &[(&str, AudioCodecId)] = &[
+        ("mp3", well_known::CODEC_ID_MP3),
+        ("aac", well_known::CODEC_ID_AAC),
+        ("aac+", well_known::CODEC_ID_AAC),
+        ("ogg", well_known::CODEC_ID_VORBIS),
+        ("vorbis", well_known::CODEC_ID_VORBIS),
+        ("flac", well_known::CODEC_ID_FLAC),
+        ("opus", well_known::CODEC_ID_OPUS),
     ];
 
     let registry = symphonia::default::get_codecs();
     let mut recognised = false;
     for part in codec.split(',') {
         let spelling = part.trim().to_ascii_lowercase();
-        let Some((_, codec_type)) = SPELLINGS.iter().find(|(name, _)| *name == spelling) else {
+        let Some((_, codec_id)) = SPELLINGS.iter().find(|(name, _)| *name == spelling) else {
             continue;
         };
         recognised = true;
-        if registry.get_codec(*codec_type).is_some() {
+        if registry.get_audio_decoder(*codec_id).is_some() {
             return true;
         }
     }
