@@ -1,0 +1,35 @@
+name: Feature request
+description: Something velo should do and does not.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        velo is deliberately small: one binary, no daemon, no server. A request
+        that keeps it that way is much more likely to land than one that does not.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem you have
+      description: Describe the situation, not the solution. What are you trying to do that velo makes hard?
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you would like it to do
+      description: If you have a shape in mind — a key, a flag, a screen — say it.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you do today instead
+      description: Another player, a script, a manual step. This tells us how much the gap costs.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I looked for an existing request covering this.
+          required: true
+        - label: This fits one binary with no daemon and no server.
+          required: true
