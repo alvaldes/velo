@@ -51,10 +51,16 @@ impl fmt::Display for Error {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Unreachable { detail } => {
-                write!(formatter, "the station directory could not be reached: {detail}")
+                write!(
+                    formatter,
+                    "the station directory could not be reached: {detail}"
+                )
             }
             Self::Malformed { detail } => {
-                write!(formatter, "the station directory answered malformed JSON: {detail}")
+                write!(
+                    formatter,
+                    "the station directory answered malformed JSON: {detail}"
+                )
             }
         }
     }

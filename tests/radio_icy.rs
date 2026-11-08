@@ -14,8 +14,7 @@ fn raw_block(audio: &[u8], meta: &[u8]) -> Vec<u8> {
     assert_eq!(meta.len() % 16, 0, "test helper expects padded metadata");
     let mut out = audio.to_vec();
     out.push(
-        u8::try_from(meta.len() / 16)
-            .expect("test fixtures never exceed 255 metadata chunks"),
+        u8::try_from(meta.len() / 16).expect("test fixtures never exceed 255 metadata chunks"),
     );
     out.extend_from_slice(meta);
     out
@@ -154,11 +153,7 @@ fn the_maximum_metadata_block_is_accepted() {
     // L = 255 -> 4080 metadata bytes, exactly the sane bound.
     let mut meta = b"StreamTitle='Big';".to_vec();
     meta.resize(4080, 0);
-    let stream = [
-        raw_block(&audio(4, 1), &meta),
-        raw_block(&audio(4, 2), &[]),
-    ]
-    .concat();
+    let stream = [raw_block(&audio(4, 1), &meta), raw_block(&audio(4, 2), &[])].concat();
     let mut reader = IcyReader::new(Cursor::new(stream), Some(4));
     assert_eq!(read_all(&mut reader).unwrap().len(), 8);
     assert_eq!(reader.title(), Some("Big"));

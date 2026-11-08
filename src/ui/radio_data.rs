@@ -25,8 +25,8 @@
 //! `y` stores the locale's country, `n` stores `none`, both save at once.
 
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 
 use crate::radio::client::{
@@ -309,9 +309,7 @@ impl<T: Transport + Send + Sync + 'static> RadioData<T> {
         let search = key.search(order);
         let (sender, receiver) = mpsc::channel();
         thread::spawn(move || {
-            let result = client
-                .search_stations(&search)
-                .map(loadable_stations);
+            let result = client.search_stations(&search).map(loadable_stations);
             let _ = sender.send(Outcome::Stations { key, result });
         });
         self.pending = Some(receiver);
@@ -336,11 +334,7 @@ impl<T: Transport + Send + Sync + 'static> RadioWire for RadioData<T> {
     fn view(&self) -> RadioView {
         // The stored country decides the row: a code is the near-you row,
         // `none` declined it, `None` was never asked (S5).
-        let own_country = self
-            .store
-            .country
-            .clone()
-            .filter(|code| code != "none");
+        let own_country = self.store.country.clone().filter(|code| code != "none");
         let mut view = RadioView::new(
             self.store.clone(),
             self.countries.clone(),

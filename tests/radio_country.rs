@@ -93,7 +93,11 @@ fn territory_with_a_digit_has_no_country() {
 #[test]
 fn detect_walks_lc_all_then_lc_messages_then_lang() {
     // LC_ALL wins over both others.
-    let env = env_of(&[("LC_ALL", "es_AR.UTF-8"), ("LC_MESSAGES", "de_DE"), ("LANG", "en_US")]);
+    let env = env_of(&[
+        ("LC_ALL", "es_AR.UTF-8"),
+        ("LC_MESSAGES", "de_DE"),
+        ("LANG", "en_US"),
+    ]);
     assert_eq!(detect(env), Some("AR".to_string()));
 }
 

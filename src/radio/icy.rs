@@ -20,16 +20,15 @@ use std::io::{self, Read};
 /// exist in the wild) or when the title is empty.
 #[must_use]
 pub fn parse_stream_title(payload: &[u8]) -> Option<&str> {
-    let end = payload.iter().position(|&b| b == 0).unwrap_or(payload.len());
+    let end = payload
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(payload.len());
     let text = std::str::from_utf8(&payload[..end]).ok()?;
     let value = &text[text.find("StreamTitle=")? + "StreamTitle=".len()..];
     let value = value.strip_prefix('\'')?;
     let title = &value[..value.find('\'')?];
-    if title.is_empty() {
-        None
-    } else {
-        Some(title)
-    }
+    if title.is_empty() { None } else { Some(title) }
 }
 
 /// A [`Read`] adapter that removes ICY metadata blocks from a live stream.

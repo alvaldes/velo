@@ -24,13 +24,19 @@ const NCS_CHILL_URL: &str = "https://radio.cliamp.stream/ncs-chill/stream";
 
 #[test]
 fn pls_with_lf_lines_returns_the_first_entry() {
-    assert_eq!(unwrap_station(NCS_CHILL_PLS.as_bytes()), Ok(NCS_CHILL_URL.to_string()));
+    assert_eq!(
+        unwrap_station(NCS_CHILL_PLS.as_bytes()),
+        Ok(NCS_CHILL_URL.to_string())
+    );
 }
 
 #[test]
 fn pls_with_crlf_lines_returns_the_first_entry() {
     let body = NCS_CHILL_PLS.replace('\n', "\r\n");
-    assert_eq!(unwrap_station(body.as_bytes()), Ok(NCS_CHILL_URL.to_string()));
+    assert_eq!(
+        unwrap_station(body.as_bytes()),
+        Ok(NCS_CHILL_URL.to_string())
+    );
 }
 
 #[test]
@@ -52,7 +58,10 @@ File2=https://example.org/second
 Title2=Second
 Length2=-1
 ";
-    assert_eq!(unwrap_station(body.as_bytes()), Ok("https://example.org/first".to_string()));
+    assert_eq!(
+        unwrap_station(body.as_bytes()),
+        Ok("https://example.org/first".to_string())
+    );
 }
 
 #[test]
@@ -65,7 +74,10 @@ file1=https://example.org/stream
 title1=Some Station
 length1=-1
 ";
-    assert_eq!(unwrap_station(body.as_bytes()), Ok("https://example.org/stream".to_string()));
+    assert_eq!(
+        unwrap_station(body.as_bytes()),
+        Ok("https://example.org/stream".to_string())
+    );
 }
 
 #[test]
@@ -89,7 +101,10 @@ https://radio.cliamp.stream/ncs-chill/stream
 #EXTINF:-1,Other
 https://example.org/other
 ";
-    assert_eq!(unwrap_station(body.as_bytes()), Ok(NCS_CHILL_URL.to_string()));
+    assert_eq!(
+        unwrap_station(body.as_bytes()),
+        Ok(NCS_CHILL_URL.to_string())
+    );
 }
 
 #[test]
@@ -101,7 +116,10 @@ fn m3u_tolerates_bom_comments_and_blank_lines() {
 #EXTINF:-1,NCS Chill
 https://radio.cliamp.stream/ncs-chill/stream
 ";
-    assert_eq!(unwrap_station(body.as_bytes()), Ok(NCS_CHILL_URL.to_string()));
+    assert_eq!(
+        unwrap_station(body.as_bytes()),
+        Ok(NCS_CHILL_URL.to_string())
+    );
 }
 
 #[test]
@@ -113,7 +131,10 @@ ftp://example.org/stream
 #EXTINF:-1,Good source
 https://example.org/good
 ";
-    assert_eq!(unwrap_station(body.as_bytes()), Ok("https://example.org/good".to_string()));
+    assert_eq!(
+        unwrap_station(body.as_bytes()),
+        Ok("https://example.org/good".to_string())
+    );
 }
 
 #[test]

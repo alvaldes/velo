@@ -147,9 +147,14 @@ impl fmt::Display for StreamError {
             }
             Self::BadStatus { status } => write!(formatter, "the station answered HTTP {status}"),
             Self::BadMetaint { value } => {
-                write!(formatter, "the station sent an unusable Icy-Metaint: {value}")
+                write!(
+                    formatter,
+                    "the station sent an unusable Icy-Metaint: {value}"
+                )
             }
-            Self::NotAudio { detail } => write!(formatter, "the station body is not audio: {detail}"),
+            Self::NotAudio { detail } => {
+                write!(formatter, "the station body is not audio: {detail}")
+            }
             Self::Hls => write!(
                 formatter,
                 "the station body is an HLS manifest: its .ts segments cannot be decoded"
@@ -280,7 +285,9 @@ fn fetch(
 
     let status = response.status();
     if status != 200 {
-        return Err(StreamError::BadStatus { status: status.as_u16() });
+        return Err(StreamError::BadStatus {
+            status: status.as_u16(),
+        });
     }
 
     // Icecast sends the header lowercase; the header map lookup is
@@ -355,9 +362,9 @@ fn sniff<R: Read>(
 fn map_lists(error: &ListsError) -> StreamError {
     match error {
         ListsError::Hls => StreamError::Hls,
-        ListsError::NoStream | ListsError::NotAPlaylist => {
-            StreamError::NotAudio { detail: error.to_string() }
-        }
+        ListsError::NoStream | ListsError::NotAPlaylist => StreamError::NotAudio {
+            detail: error.to_string(),
+        },
     }
 }
 

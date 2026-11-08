@@ -91,12 +91,19 @@ fn file_priming(path: &Path) -> (u64, u64) {
     let mut hint = symphonia::core::formats::probe::Hint::new();
     hint.with_extension("mp3");
     let mut reader = symphonia::default::get_probe()
-        .probe(&hint, mss, FormatOptions::default(), MetadataOptions::default())
+        .probe(
+            &hint,
+            mss,
+            FormatOptions::default(),
+            MetadataOptions::default(),
+        )
         .expect("the fixture probes");
     let mut delay = None;
     let mut padding = None;
     for _ in 0..100 {
-        let track = reader.default_track(TrackType::Audio).expect("an audio track");
+        let track = reader
+            .default_track(TrackType::Audio)
+            .expect("an audio track");
         delay = track.delay;
         padding = track.padding;
         if delay.is_some() && padding.is_some() {
@@ -106,7 +113,10 @@ fn file_priming(path: &Path) -> (u64, u64) {
             break;
         }
     }
-    (u64::from(delay.unwrap_or(0)), u64::from(padding.unwrap_or(0)))
+    (
+        u64::from(delay.unwrap_or(0)),
+        u64::from(padding.unwrap_or(0)),
+    )
 }
 
 #[test]

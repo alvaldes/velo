@@ -117,7 +117,8 @@ struct TempDir(PathBuf);
 
 impl TempDir {
     fn new(tag: &str) -> Self {
-        let path = std::env::temp_dir().join(format!("velo-radio-data-{}-{tag}", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("velo-radio-data-{}-{tag}", std::process::id()));
         std::fs::create_dir_all(&path).expect("the temp directory is created");
         Self(path)
     }
@@ -240,18 +241,25 @@ fn entering_the_country_section_loads_the_index_once() {
 
 #[test]
 fn entering_a_place_searches_with_the_country_code() {
-    let canned = Arc::new(Canned::new().countries(
-        r#"[{"name":"Norway","iso_3166_1":"NO","stationcount":2}]"#,
-    ).search(&stations_json(2)));
+    let canned = Arc::new(
+        Canned::new()
+            .countries(r#"[{"name":"Norway","iso_3166_1":"NO","stationcount":2}]"#)
+            .search(&stations_json(2)),
+    );
     let mut data = wired(Arc::clone(&canned));
     let mut view = data.view();
 
     press(&mut view, KeyCode::Enter); // Browse all countries
-    settle(&mut data, &mut view, &canned, |view, _canned| !view.labels().is_empty());
+    settle(&mut data, &mut view, &canned, |view, _canned| {
+        !view.labels().is_empty()
+    });
     press(&mut view, KeyCode::Enter); // Norway
     settle(&mut data, &mut view, &canned, |view, canned| {
         !view.labels().is_empty()
-            && canned.calls().iter().any(|url| url.contains("/stations/search"))
+            && canned
+                .calls()
+                .iter()
+                .any(|url| url.contains("/stations/search"))
     });
 
     let calls = canned.calls();
@@ -343,7 +351,9 @@ fn ctrl_r_rerequests_only_what_the_current_place_needs() {
     // Back in the section it re-requests exactly the index.
     press(&mut view, KeyCode::Enter);
     let _ = view.key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
-    settle(&mut data, &mut view, &canned, |_view, canned| canned.calls().len() == 2);
+    settle(&mut data, &mut view, &canned, |_view, canned| {
+        canned.calls().len() == 2
+    });
     assert!(
         canned.calls()[1].contains("/countries"),
         "the refresh re-requests the current place's index, got: {:?}",
@@ -374,7 +384,11 @@ fn a_failing_transport_reports_and_leaves_the_view_usable() {
     // loop behind the user's back.
     press(&mut view, KeyCode::Char('j'));
     assert!(view.back(), "the view still answers navigation");
-    assert_eq!(view.place(), &velo::ui::radio::Place::Top, "back at the sections");
+    assert_eq!(
+        view.place(),
+        &velo::ui::radio::Place::Top,
+        "back at the sections"
+    );
     for _ in 0..5 {
         data.poll(&mut view);
     }
@@ -402,9 +416,13 @@ fn stations_load_capped_at_200_and_non_http_urls_are_dropped() {
     let mut view = data.view();
 
     press(&mut view, KeyCode::Enter); // Browse all countries
-    settle(&mut data, &mut view, &canned, |view, _canned| !view.labels().is_empty());
+    settle(&mut data, &mut view, &canned, |view, _canned| {
+        !view.labels().is_empty()
+    });
     press(&mut view, KeyCode::Enter); // Norway
-    settle(&mut data, &mut view, &canned, |view, _canned| view.labels().len() == 200);
+    settle(&mut data, &mut view, &canned, |view, _canned| {
+        view.labels().len() == 200
+    });
 
     assert_eq!(view.labels().len(), 200, "the cap holds");
     assert!(
@@ -448,7 +466,9 @@ fn a_corrupt_store_is_reported_and_never_overwritten() {
 
     // Even a mutation afterwards must not write over what was never read.
     press(&mut view, KeyCode::Enter); // countries load fine
-    settle(&mut data, &mut view, &canned, |view, _canned| !view.labels().is_empty());
+    settle(&mut data, &mut view, &canned, |view, _canned| {
+        !view.labels().is_empty()
+    });
     press(&mut view, KeyCode::Char('f')); // pin Norway
     data.poll(&mut view);
     assert_eq!(
@@ -474,9 +494,13 @@ fn a_successful_favourite_save_creates_the_file() {
     let mut view = data.view();
 
     press(&mut view, KeyCode::Enter); // Browse all countries
-    settle(&mut data, &mut view, &canned, |view, _canned| !view.labels().is_empty());
+    settle(&mut data, &mut view, &canned, |view, _canned| {
+        !view.labels().is_empty()
+    });
     press(&mut view, KeyCode::Enter); // Norway's stations
-    settle(&mut data, &mut view, &canned, |view, _canned| view.labels().len() == 1);
+    settle(&mut data, &mut view, &canned, |view, _canned| {
+        view.labels().len() == 1
+    });
 
     press(&mut view, KeyCode::Char('f')); // favourite S0
     data.poll(&mut view);
@@ -503,7 +527,8 @@ fn y_answers_the_country_question_and_n_declines_it() {
     );
     let mut view = data.view();
     assert_eq!(
-        view.labels()[1], "Use my location",
+        view.labels()[1],
+        "Use my location",
         "the unasked question is one row, got: {:?}",
         view.labels()
     );

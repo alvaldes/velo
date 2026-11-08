@@ -164,12 +164,10 @@ fn enter_on_a_country_opens_its_stations() {
     );
     assert_eq!(view.labels(), ["Norway", "Germany"], "the index is listed");
     assert!(
-        view.labels()
+        view.labels().iter().all(|label| view
+            .visible_rows()
             .iter()
-            .all(|label| view
-                .visible_rows()
-                .iter()
-                .any(|row| &row.label == label && row.fact.contains("stations"))),
+            .any(|row| &row.label == label && row.fact.contains("stations"))),
         "every country says how many stations it has"
     );
 
@@ -386,10 +384,7 @@ fn ctrl_r_asks_for_a_refresh_exactly_once() {
         view.take_refresh_request(),
         "ctrl-r asks the caller for a refresh"
     );
-    assert!(
-        !view.take_refresh_request(),
-        "the ask is consumed once"
-    );
+    assert!(!view.take_refresh_request(), "the ask is consumed once");
 }
 
 #[test]
@@ -414,7 +409,11 @@ fn n_opens_the_country_index_from_anywhere() {
     view.back();
     assert_eq!(view.place(), &Place::Countries);
     view.back();
-    assert_eq!(view.place(), &Place::Top, "back at last returns to the start");
+    assert_eq!(
+        view.place(),
+        &Place::Top,
+        "back at last returns to the start"
+    );
 }
 
 #[test]
@@ -437,9 +436,9 @@ fn enter_on_a_station_holds_the_selection_and_does_nothing_else() {
 // ---- the render -------------------------------------------------------------
 
 fn screen(view: &RadioView) -> String {
+    use velo::ui::ratatui::Terminal;
     use velo::ui::ratatui::backend::TestBackend;
     use velo::ui::ratatui::buffer::{Buffer, Cell};
-    use velo::ui::ratatui::Terminal;
 
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("a test terminal");
     terminal
@@ -482,10 +481,9 @@ fn the_radio_list_draws_its_sections_and_lights_the_selected_row() {
         .lines()
         .position(|line| line.contains("1. Browse all countries"))
         .expect("the first row is on screen");
-    let mut terminal = velo::ui::ratatui::Terminal::new(velo::ui::ratatui::backend::TestBackend::new(
-        80, 24,
-    ))
-    .expect("a test terminal");
+    let mut terminal =
+        velo::ui::ratatui::Terminal::new(velo::ui::ratatui::backend::TestBackend::new(80, 24))
+            .expect("a test terminal");
     terminal
         .draw(|frame| view.render(frame, frame.area(), &Theme::default()))
         .expect("the frame draws");

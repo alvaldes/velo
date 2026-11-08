@@ -253,8 +253,10 @@ fn a_stream_without_metaint_is_pure_passthrough() {
 fn a_metaint_of_zero_or_beyond_64k_is_rejected_naming_the_value() {
     let plain = std::fs::read(fixture()).expect("the fixture is readable");
     for value in ["0", "65537", "not-a-number"] {
-        let (url, _requests) =
-            served(ok_head(&format!("icy-metaint: {value}\r\n"), plain.len()), plain.clone());
+        let (url, _requests) = served(
+            ok_head(&format!("icy-metaint: {value}\r\n"), plain.len()),
+            plain.clone(),
+        );
         let error = stream::open(&url, timeouts())
             .expect_err("an unusable metaint must be refused, not decoded");
         let StreamError::BadMetaint { value: named } = error else {
@@ -273,7 +275,10 @@ fn a_non_200_status_is_an_error_naming_it() {
     let (url, _requests) = served(head.to_owned(), Vec::new());
 
     let error = stream::open(&url, timeouts()).expect_err("404 is not a station");
-    assert!(matches!(error, StreamError::BadStatus { status: 404 }), "got: {error:?}");
+    assert!(
+        matches!(error, StreamError::BadStatus { status: 404 }),
+        "got: {error:?}"
+    );
 }
 
 #[test]
@@ -285,7 +290,10 @@ fn a_body_that_is_neither_audio_nor_a_playlist_is_rejected() {
     let (url, _requests) = served(ok_head("", junk.len()), junk);
 
     let error = stream::open(&url, timeouts()).expect_err("junk is not audio");
-    assert!(matches!(error, StreamError::NotAudio { .. }), "got: {error:?}");
+    assert!(
+        matches!(error, StreamError::NotAudio { .. }),
+        "got: {error:?}"
+    );
 }
 
 // ------------------------------------------------------------------ wrappers (T5b2)
@@ -324,7 +332,9 @@ impl CountingServer {
         let seen = Arc::clone(&requests);
         let done = Arc::clone(&stop);
         std::thread::spawn(move || {
-            listener.set_nonblocking(true).expect("the listener goes nonblocking");
+            listener
+                .set_nonblocking(true)
+                .expect("the listener goes nonblocking");
             while !done.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((mut connection, _)) => {
@@ -333,7 +343,9 @@ impl CountingServer {
                         // return `WouldBlock` before the request bytes
                         // arrive — which must look like "wait", never like
                         // EOF. Back to blocking before reading.
-                        connection.set_nonblocking(false).expect("the connection blocks");
+                        connection
+                            .set_nonblocking(false)
+                            .expect("the connection blocks");
                         // Read until the request headers are complete: one
                         // `read` can return a partial request under load,
                         // and a truncated path would answer a spurious 404.
@@ -353,10 +365,13 @@ impl CountingServer {
                             .and_then(|line| line.split_whitespace().nth(1))
                             .unwrap_or("")
                             .to_string();
-                        seen.lock().expect("the request log is uncontended").push(path.clone());
-                        if let Some((head, body)) = routes.get(&path).map(|(head, body)| {
-                            (head.as_bytes().to_vec(), body.clone())
-                        }) {
+                        seen.lock()
+                            .expect("the request log is uncontended")
+                            .push(path.clone());
+                        if let Some((head, body)) = routes
+                            .get(&path)
+                            .map(|(head, body)| (head.as_bytes().to_vec(), body.clone()))
+                        {
                             connection
                                 .write_all(&head)
                                 .and_then(|()| connection.write_all(&body))
@@ -374,7 +389,11 @@ impl CountingServer {
             }
         });
 
-        Self { url: base, requests, stop }
+        Self {
+            url: base,
+            requests,
+            stop,
+        }
     }
 
     /// The full URL of one route on this server.
@@ -384,7 +403,10 @@ impl CountingServer {
 
     /// The recorded request paths, in arrival order.
     fn paths(&self) -> Vec<String> {
-        self.requests.lock().expect("the request log is uncontended").clone()
+        self.requests
+            .lock()
+            .expect("the request log is uncontended")
+            .clone()
     }
 
     /// Waits until at least `n` requests have arrived.
@@ -418,7 +440,11 @@ fn a_pls_wrapper_resolves_to_its_stream_and_plays() {
                 String::new(),
                 format!("[playlist]\r\nNumberOfEntries=1\r\nFile1={base}/audio\r\n").into_bytes(),
             ),
-            ("/audio".to_owned(), "icy-metaint: 8192\r\n".to_owned(), wrapped),
+            (
+                "/audio".to_owned(),
+                "icy-metaint: 8192\r\n".to_owned(),
+                wrapped,
+            ),
         ]
     });
 
@@ -426,8 +452,16 @@ fn a_pls_wrapper_resolves_to_its_stream_and_plays() {
         .expect("the wrapper resolves to real audio");
     let samples = drain(&mut station);
 
-    assert_eq!(samples, reference(&plain), "the resolved stream decodes exactly the audio");
-    assert_eq!(station.title().as_deref(), Some(STREAM_TITLE), "the title arrives");
+    assert_eq!(
+        samples,
+        reference(&plain),
+        "the resolved stream decodes exactly the audio"
+    );
+    assert_eq!(
+        station.title().as_deref(),
+        Some(STREAM_TITLE),
+        "the title arrives"
+    );
     server.wait_for(2);
     assert_eq!(
         server.paths(),
@@ -446,7 +480,11 @@ fn an_m3u_wrapper_resolves_to_its_stream_and_plays() {
                 String::new(),
                 format!("#EXTM3U\r\n#EXTINF:-1,Fela Kuti\r\n{base}/audio\r\n").into_bytes(),
             ),
-            ("/audio".to_owned(), "icy-metaint: 8192\r\n".to_owned(), wrapped),
+            (
+                "/audio".to_owned(),
+                "icy-metaint: 8192\r\n".to_owned(),
+                wrapped,
+            ),
         ]
     });
 
@@ -454,8 +492,16 @@ fn an_m3u_wrapper_resolves_to_its_stream_and_plays() {
         .expect("the wrapper resolves to real audio");
     let samples = drain(&mut station);
 
-    assert_eq!(samples, reference(&plain), "the resolved stream decodes exactly the audio");
-    assert_eq!(station.title().as_deref(), Some(STREAM_TITLE), "the title arrives");
+    assert_eq!(
+        samples,
+        reference(&plain),
+        "the resolved stream decodes exactly the audio"
+    );
+    assert_eq!(
+        station.title().as_deref(),
+        Some(STREAM_TITLE),
+        "the title arrives"
+    );
     server.wait_for(2);
     assert_eq!(
         server.paths(),
@@ -471,10 +517,8 @@ fn an_hls_manifest_fails_by_name_without_fetching_a_segment() {
             (
                 "/stream.m3u8".to_owned(),
                 String::new(),
-                format!(
-                    "#EXTM3U\r\n#EXT-X-STREAM-INF:BANDWIDTH=128000\r\n{base}/seg0.ts\r\n"
-                )
-                .into_bytes(),
+                format!("#EXTM3U\r\n#EXT-X-STREAM-INF:BANDWIDTH=128000\r\n{base}/seg0.ts\r\n")
+                    .into_bytes(),
             ),
             // Registered so a stray fetch answers 200 instead of 404 —
             // only the recorded paths can prove it never happens.
@@ -486,7 +530,10 @@ fn an_hls_manifest_fails_by_name_without_fetching_a_segment() {
         .expect_err("an HLS manifest cannot be played by this decoder");
 
     assert!(matches!(error, StreamError::Hls), "got: {error:?}");
-    assert!(error.to_string().contains("HLS"), "the error names HLS: {error}");
+    assert!(
+        error.to_string().contains("HLS"),
+        "the error names HLS: {error}"
+    );
     CountingServer::settle();
     assert_eq!(
         server.paths(),
@@ -510,7 +557,11 @@ fn a_wrapper_pointing_at_another_wrapper_is_a_bounded_error() {
                 String::new(),
                 format!("#EXTM3U\r\n{base}/audio\r\n").into_bytes(),
             ),
-            ("/audio".to_owned(), "icy-metaint: 8192\r\n".to_owned(), audio_parts().1),
+            (
+                "/audio".to_owned(),
+                "icy-metaint: 8192\r\n".to_owned(),
+                audio_parts().1,
+            ),
         ]
     });
 
@@ -521,8 +572,14 @@ fn a_wrapper_pointing_at_another_wrapper_is_a_bounded_error() {
     let StreamError::NotAudio { detail } = error else {
         panic!("expected NotAudio, got: {error:?}");
     };
-    assert!(detail.contains("another wrapper"), "the error says so: {detail}");
-    assert!(elapsed < HANG_BOUND, "one level only: the open took {elapsed:?}");
+    assert!(
+        detail.contains("another wrapper"),
+        "the error says so: {detail}"
+    );
+    assert!(
+        elapsed < HANG_BOUND,
+        "one level only: the open took {elapsed:?}"
+    );
     CountingServer::settle();
     assert_eq!(
         server.paths(),
@@ -541,8 +598,12 @@ fn a_wrapper_with_an_unparsable_body_is_not_audio_never_a_panic() {
         )]
     });
 
-    let error = stream::open(&server.url("/junk"), wrapper_timeouts()).expect_err("junk is not audio");
-    assert!(matches!(error, StreamError::NotAudio { .. }), "got: {error:?}");
+    let error =
+        stream::open(&server.url("/junk"), wrapper_timeouts()).expect_err("junk is not audio");
+    assert!(
+        matches!(error, StreamError::NotAudio { .. }),
+        "got: {error:?}"
+    );
 }
 
 #[test]
@@ -560,7 +621,10 @@ fn a_wrapper_with_no_playable_entry_maps_to_a_named_error() {
     let StreamError::NotAudio { detail } = error else {
         panic!("expected NotAudio, got: {error:?}");
     };
-    assert!(detail.contains("no playable"), "the mapped reason is named: {detail}");
+    assert!(
+        detail.contains("no playable"),
+        "the mapped reason is named: {detail}"
+    );
 }
 
 // ------------------------------------------------------------------ timeouts
@@ -587,10 +651,7 @@ fn a_stalled_read_gives_up_within_the_read_bound() {
     // The head declares more than the server will ever send, so after the
     // buffered bytes are consumed the socket must be read again — and it
     // has nothing: the per-read bound, not a total deadline, must fire.
-    let head = ok_head(
-        "icy-metaint: 8192\r\n",
-        wrapped.len() + 4096,
-    );
+    let head = ok_head("icy-metaint: 8192\r\n", wrapped.len() + 4096);
     let url = served_partially(head, wrapped);
 
     let start = Instant::now();
@@ -608,7 +669,10 @@ fn a_stalled_read_gives_up_within_the_read_bound() {
     };
     let elapsed = start.elapsed();
 
-    assert!(outcome.is_err(), "a stalled body must end in an error, not a clean end");
+    assert!(
+        outcome.is_err(),
+        "a stalled body must end in an error, not a clean end"
+    );
     assert!(played > 0, "the buffered prefix must have played first");
     assert!(
         elapsed < HANG_BOUND,

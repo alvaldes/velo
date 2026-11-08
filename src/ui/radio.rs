@@ -532,7 +532,11 @@ impl RadioView {
             RowKind::NearYou { code } | RowKind::Country { code, .. } => {
                 Some(self.country_place(&code, ""))
             }
-            RowKind::Pinned { code, name: _, state } => Some(self.country_place(&code, &state)),
+            RowKind::Pinned {
+                code,
+                name: _,
+                state,
+            } => Some(self.country_place(&code, &state)),
             RowKind::Tag { name } => Some(Place::Tag { name }),
             RowKind::CatalogStation { .. }
             | RowKind::AddedStation { .. }
@@ -665,7 +669,9 @@ impl RadioView {
                 let toggled = self.store.toggle_pin(Pinned { code, name, state });
                 self.dirty |= toggled.needs_save();
             }
-            RowKind::BrowseCountries | RowKind::BrowseTags | RowKind::Tag { .. }
+            RowKind::BrowseCountries
+            | RowKind::BrowseTags
+            | RowKind::Tag { .. }
             | RowKind::AskCountry { .. } => {}
         }
     }
@@ -858,10 +864,7 @@ impl RadioView {
     /// standard list styling, and the order overlay centred over it while it
     /// is open. Nothing outside `area` is touched.
     pub fn render(&self, frame: &mut ratatui::Frame, area: Rect, theme: &Theme) {
-        frame.render_widget(
-            Block::new().style(Style::new().bg(theme.background)),
-            area,
-        );
+        frame.render_widget(Block::new().style(Style::new().bg(theme.background)), area);
         let [header_area, list_area] =
             Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
 
@@ -1001,5 +1004,7 @@ fn station_facts(station: &Station) -> String {
 /// haystack, in order — `ger` finds `★ Germany`, `nv` finds `Nova`.
 fn fuzzy(needle: &str, haystack: &str) -> bool {
     let mut characters = haystack.chars();
-    needle.chars().all(|wanted| characters.any(|seen| seen == wanted))
+    needle
+        .chars()
+        .all(|wanted| characters.any(|seen| seen == wanted))
 }

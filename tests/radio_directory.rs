@@ -136,7 +136,9 @@ fn every_order_reverses_except_name_and_random() {
         };
         let _ = client.search_stations(&search);
         let expected = if reverse {
-            format!("{BASE}/stations/search?limit=200&offset=0&order={param}&reverse=true&hidebroken=true")
+            format!(
+                "{BASE}/stations/search?limit=200&offset=0&order={param}&reverse=true&hidebroken=true"
+            )
         } else {
             format!("{BASE}/stations/search?limit=200&offset=0&order={param}&hidebroken=true")
         };
@@ -174,10 +176,12 @@ fn query_values_are_percent_encoded() {
         ..StationSearch::default()
     };
     let _ = client.search_stations(&search);
-    assert!(client
-        .transport
-        .last_url()
-        .contains("&name=big%20%26%20blue"));
+    assert!(
+        client
+            .transport
+            .last_url()
+            .contains("&name=big%20%26%20blue")
+    );
 }
 
 #[test]
@@ -190,12 +194,20 @@ fn offset_and_limit_override_the_defaults() {
         ..StationSearch::default()
     };
     let _ = client.search_stations(&search);
-    assert!(client.transport.last_url().contains("?limit=50&offset=400&"));
+    assert!(
+        client
+            .transport
+            .last_url()
+            .contains("?limit=50&offset=400&")
+    );
 }
 
 #[test]
 fn the_user_agent_is_velo_and_the_crate_version() {
-    assert_eq!(client::USER_AGENT, concat!("velo/", env!("CARGO_PKG_VERSION")));
+    assert_eq!(
+        client::USER_AGENT,
+        concat!("velo/", env!("CARGO_PKG_VERSION"))
+    );
 }
 
 // --- The index endpoints --------------------------------------------------
@@ -245,10 +257,15 @@ fn tags_are_parsed_from_the_pinned_url() {
 fn a_station_search_maps_the_wire_fields() {
     let recorder = Recorder::serving(STATIONS_JSON);
     let client = Client::new(recorder);
-    let stations = client.search_stations(&StationSearch::default()).expect("stations parse");
+    let stations = client
+        .search_stations(&StationSearch::default())
+        .expect("stations parse");
     assert_eq!(stations.len(), 2);
     assert_eq!(stations[0].name, "Radio Nova");
-    assert_eq!(stations[0].url_resolved, "https://stream.example.com/nova.mp3");
+    assert_eq!(
+        stations[0].url_resolved,
+        "https://stream.example.com/nova.mp3"
+    );
     assert_eq!(stations[0].country, "Norway");
     assert_eq!(stations[0].countrycode, "NO");
     assert_eq!(stations[0].state, "Oslo");
@@ -272,7 +289,9 @@ fn malformed_json_is_an_error_not_a_panic() {
 fn an_empty_array_is_zero_stations() {
     let recorder = Recorder::serving("[]");
     let client = Client::new(recorder);
-    let stations = client.search_stations(&StationSearch::default()).expect("empty array");
+    let stations = client
+        .search_stations(&StationSearch::default())
+        .expect("empty array");
     assert_eq!(stations, [] as [velo::radio::client::Station; 0]);
 }
 
@@ -286,7 +305,9 @@ fn a_station_with_an_empty_url_resolved_is_skipped() {
         station_json("Good", "https://stream.example.com/good")
     ));
     let client = Client::new(recorder);
-    let parsed = client.search_stations(&StationSearch::default()).expect("parse");
+    let parsed = client
+        .search_stations(&StationSearch::default())
+        .expect("parse");
     let loadable = loadable_stations(parsed);
     assert_eq!(loadable.len(), 1);
     assert_eq!(loadable[0].name, "Good");
@@ -300,7 +321,9 @@ fn a_station_with_a_relative_url_is_skipped() {
         station_json("Good", "http://stream.example.com/good")
     ));
     let client = Client::new(recorder);
-    let parsed = client.search_stations(&StationSearch::default()).expect("parse");
+    let parsed = client
+        .search_stations(&StationSearch::default())
+        .expect("parse");
     let loadable = loadable_stations(parsed);
     assert_eq!(loadable.len(), 1);
     assert_eq!(loadable[0].name, "Good");
@@ -314,7 +337,9 @@ fn a_non_http_scheme_is_skipped() {
         station_json("Good", "https://stream.example.com/good")
     ));
     let client = Client::new(recorder);
-    let parsed = client.search_stations(&StationSearch::default()).expect("parse");
+    let parsed = client
+        .search_stations(&StationSearch::default())
+        .expect("parse");
     let loadable = loadable_stations(parsed);
     assert_eq!(loadable.len(), 1);
     assert_eq!(loadable[0].name, "Good");
@@ -323,11 +348,18 @@ fn a_non_http_scheme_is_skipped() {
 #[test]
 fn at_most_two_hundred_stations_load() {
     let stations: Vec<String> = (0..201)
-        .map(|index| station_json(&format!("Station {index}"), "https://stream.example.com/live"))
+        .map(|index| {
+            station_json(
+                &format!("Station {index}"),
+                "https://stream.example.com/live",
+            )
+        })
         .collect();
     let recorder = Recorder::serving(&format!("[{}]", stations.join(",")));
     let client = Client::new(recorder);
-    let parsed = client.search_stations(&StationSearch::default()).expect("parse");
+    let parsed = client
+        .search_stations(&StationSearch::default())
+        .expect("parse");
     assert_eq!(parsed.len(), 201);
     let loadable = loadable_stations(parsed);
     assert_eq!(loadable.len(), 200);

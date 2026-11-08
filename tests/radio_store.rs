@@ -10,9 +10,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use velo::radio::store::{
-    Favorite, Pinned, RadioStore, Station, StoreError, Toggled, station_key,
-};
+use velo::radio::store::{Favorite, Pinned, RadioStore, Station, StoreError, Toggled, station_key};
 
 // ------------------------------------------------------------- infrastructure
 
@@ -21,8 +19,8 @@ struct Scratch(PathBuf);
 
 impl Scratch {
     fn new(name: &str) -> Self {
-        let dir = std::env::temp_dir()
-            .join(format!("velo-radio-store-{name}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("velo-radio-store-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         Self(dir)
@@ -103,7 +101,11 @@ fn country_none_round_trips_and_stays_distinguishable_from_absent() {
     RadioStore::default().save(&never_asked.file()).unwrap();
     assert_eq!(RadioStore::load(&never_asked.file()).unwrap().country, None);
     // And the absent one really does not carry the key:
-    assert!(!fs::read_to_string(never_asked.file()).unwrap().contains("country"));
+    assert!(
+        !fs::read_to_string(never_asked.file())
+            .unwrap()
+            .contains("country")
+    );
 }
 
 // ------------------------------------------------------------------ deduping
@@ -249,7 +251,10 @@ era = \"2026\"
     let store = RadioStore::load(&scratch.file()).unwrap();
     assert_eq!(store.country, Some("NO".to_owned()));
     assert_eq!(store.favorite.len(), 1);
-    assert_eq!(store.favorite[0].url, "https://stream.radioparadise.com/aac-320");
+    assert_eq!(
+        store.favorite[0].url,
+        "https://stream.radioparadise.com/aac-320"
+    );
     assert_eq!(store.station.len(), 1);
 }
 
@@ -264,7 +269,10 @@ fn the_station_key_normalises_the_five_shapes() {
     assert_eq!(station_key("https://stream.example:443/Stream"), base);
     assert_eq!(station_key("https://stream.example/Stream/"), base);
     // The http default port goes too, but nothing else flattens:
-    assert_eq!(station_key("http://a.example:80/s"), station_key("http://a.example/s"));
+    assert_eq!(
+        station_key("http://a.example:80/s"),
+        station_key("http://a.example/s")
+    );
     assert_ne!(base, station_key("https://stream.example/other"));
     assert_ne!(base, station_key("https://stream.example:8080/Stream"));
     assert_ne!(base, station_key("http://stream.example/Stream"));

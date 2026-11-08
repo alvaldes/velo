@@ -42,8 +42,10 @@ pub fn from_locale(locale: &str) -> Option<String> {
 /// production caller passes `|key| std::env::var(key).ok()`.
 #[must_use]
 pub fn detect(env: impl Fn(&str) -> Option<String>) -> Option<String> {
-    ["LC_ALL", "LC_MESSAGES", "LANG"].into_iter().find_map(|key| {
-        let locale = env(key)?;
-        from_locale(&locale)
-    })
+    ["LC_ALL", "LC_MESSAGES", "LANG"]
+        .into_iter()
+        .find_map(|key| {
+            let locale = env(key)?;
+            from_locale(&locale)
+        })
 }

@@ -48,7 +48,9 @@ fn is_playable(line: &str) -> bool {
 /// (`[playlist]`, `#EXTM3U`, `File<n>=`, `http` URLs) is ASCII and survives
 /// the substitution.
 fn text(body: &[u8]) -> std::borrow::Cow<'_, str> {
-    let body = body.strip_prefix([0xEF, 0xBB, 0xBF].as_slice()).unwrap_or(body);
+    let body = body
+        .strip_prefix([0xEF, 0xBB, 0xBF].as_slice())
+        .unwrap_or(body);
     String::from_utf8_lossy(body)
 }
 
