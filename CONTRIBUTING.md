@@ -16,6 +16,14 @@ Platform dependencies, needed to build and to run the tests:
 | Linux | `libasound2-dev`, `cmake`, a C compiler | `cpal` needs ALSA headers; `audiopus_sys` builds libopus from source |
 | macOS | Xcode command line tools, `cmake` | CoreAudio; libopus is built by `cmake` |
 
+Releases are built for four targets by `cross`, and its container does **not**
+ship the ALSA headers or `cmake`: that is what `Cross.toml` is for, and its
+`pre-build` installs them. A comment in `release.yml` once claimed the container
+already had them, and a release failed because of it
+([run 42519251288](https://github.com/alvaldes/velo/actions/runs/42519251288)) —
+so the claim lives here, next to the file that resolves it, instead of in a
+second version of the story that can go stale again.
+
 ## The commands we run
 
 ```sh
