@@ -607,3 +607,28 @@ small and verified.
 T6c (play-from-the-view, `● live` footer, README `## Keys` + help card) and T6d
 (`/states` so a region can be pinned). T5d — the manual check against a real station —
 is the gate for calling the engine done, and it needs the human's ears.
+
+**L24** — T6d closed (`e4a8031`, three files: 16 tests in `ui_radio_data`, **620 green across 35
+binaries**). S5's "pinned countries/**regions**" is whole now: the client always knew how
+to ask for `/states/<country>/` and `Pinned` always carried a `state`, but nothing ever
+fetched the index, so a region could be neither reached nor pinned. Countries worked;
+regions did not.
+
+- **Home country only, and only on demand.** The states index is requested when the
+  countries section is entered, behind `/countries` in the single in-flight slot, and
+  never for any other country: the directory records a region for ~44% of stations, so
+  the rest of the world's regions are not worth a request. With `country = "none"` or
+  unset there is no request, no row and no prompt — the opt-in stays opt-in.
+- **A region row is a place like any other**: it opens `Place::Country { code, name,
+  state }`, the search carries `countrycode` + `state` + `stateExact`, and `f` pins it
+  through the same `Pinned` arm as a country. A pinned region survives a restart.
+- **The deliberate trade**: region rows appear at the top only after the countries
+  section was entered once (or `Ctrl+R` there), because the top of the view must stay
+  request-free. Recorded here so nobody "fixes" it into an eager fetch later.
+
+**On verification, disclosed**: this unit could not be gated by the full-tree
+`clippy --all-targets` + `fmt --check` because a concurrent worker was mid-edit in
+`src/audio/output.rs` (`unused variable: station_retry_delay`). Its own surfaces were
+verified for both, its 16 tests and the whole suite pass, and the full gate is re-run at
+the next commit boundary. That is the price of two writers in one tree, and the price is
+paid in verification order, not in correctness of the code committed here.
