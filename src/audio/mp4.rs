@@ -1,11 +1,12 @@
 //! MP4 container priming (T16).
 //!
 //! An AAC encoder emits `delay` warm-up frames before the music and `padding`
-//! flush frames after it. symphonia 0.5's isomp4 reader never populates
-//! `codec_params.delay`/`padding` (unlike its MP3 reader, which trims both when
-//! `enable_gapless` is on), so an M4A join carries the previous track's warm-up
-//! into the seam. This module reads the priming the container declares so
-//! [`crate::audio::TrackSource`] can trim it where symphonia would.
+//! flush frames after it. symphonia's isomp4 reader has never populated the
+//! track's `delay`/`padding` (re-measured on 0.6.1; unlike its MP3 reader,
+//! which trims both when the decoder's `gapless` option is on), so an M4A join
+//! carries the previous track's warm-up into the seam. This module reads the
+//! priming the container declares so [`crate::audio::TrackSource`] can trim it
+//! where symphonia would.
 //!
 //! Two sources, in this order of trust:
 //!

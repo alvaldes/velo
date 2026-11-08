@@ -7,7 +7,6 @@
 
 use std::fmt;
 use std::fs::File;
-use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -19,14 +18,13 @@ pub mod spectrum;
 
 pub use output::{GainRamp, Player, seek_target, skip_target};
 
-use symphonia::core::audio::SampleBuffer;
-use symphonia::core::codecs::{CodecParameters, Decoder, DecoderOptions};
+use symphonia::core::codecs::audio::{AudioCodecParameters, AudioDecoder, AudioDecoderOptions};
 use symphonia::core::errors::Error as SymphoniaError;
-use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
+use symphonia::core::formats::probe::Hint;
+use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo, Track, TrackType};
 use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::core::meta::MetadataOptions;
-use symphonia::core::probe::Hint;
-use symphonia::core::units::TimeBase;
+use symphonia::core::units::{TimeBase, Timestamp};
 
 /// Frames produced per block by [`TrackSource::read_block`].
 pub const BLOCK_FRAMES: usize = 1024;
@@ -91,7 +89,7 @@ impl std::error::Error for AudioError {
 /// in the middle of a sequence, where it would be heard as a gap.
 pub struct TrackSource {
     reader: Box<dyn FormatReader>,
-    decoder: Box<dyn Decoder>,
+    decoder: Box<dyn AudioDecoder>,
     track_id: u32,
     spec: TrackSpec,
     finished: bool,
@@ -110,16 +108,16 @@ pub struct TrackSource {
     priming: Option<Priming>,
     /// After a seek: the timestamp the decoded output must not start before.
     /// Packets read before it contribute only their frames from it onwards.
-    skip_ts: Option<u64>,
+    skip_ts: Option<Timestamp>,
 }
 
 /// The sample format a container declares, when it declares one at all.
 ///
 /// An M4A/AAC track does not: the channel layout only exists inside the audio
 /// specific config, which the decoder parses from the first packet.
-fn declared_spec(params: &CodecParameters) -> Option<TrackSpec> {
+fn declared_spec(params: &AudioCodecParameters) -> Option<TrackSpec> {
     let sample_rate = params.sample_rate?;
-    let channels = u16::try_from(params.channels?.count()).ok()?;
+    let channels = u16::try_from(params.channels.as_ref()?.count()).ok()?;
     Some(TrackSpec {
         sample_rate,
         channels,
@@ -142,13 +140,13 @@ impl Priming {
 
 /// The priming a track must have trimmed, and by whom.
 ///
-/// symphonia populates `codec_params.delay`/`padding` and trims both itself
-/// when `enable_gapless` is on (the MP3/LAME path). isomp4 does not, so there
-/// the priming is read from the container and trimmed here. When symphonia
-/// already owns the trim, [`TrackSource`] adds nothing: double-trimming is
-/// worse than not trimming.
-fn declared_priming(codec_params: &CodecParameters, path: &Path) -> Option<Priming> {
-    if codec_params.delay.is_some() || codec_params.padding.is_some() {
+/// symphonia populates the track's `delay`/`padding` and trims both itself
+/// when the decoder's `gapless` option is on (the MP3/LAME path). isomp4 does
+/// not, so there the priming is read from the container and trimmed here.
+/// When symphonia already owns the trim, [`TrackSource`] adds nothing:
+/// double-trimming is worse than not trimming.
+fn declared_priming(track: &Track, path: &Path) -> Option<Priming> {
+    if track.delay.is_some() || track.padding.is_some() {
         // symphonia populated and trims it (MP3's LAME tag) — hands off.
         return None;
     }
@@ -175,31 +173,46 @@ impl TrackSource {
             hint.with_extension(extension);
         }
 
-        let format_options = FormatOptions {
-            // Trims encoder delay and padding where the container declares them,
-            // which is what makes an MP3 or AAC join silent in the first place.
-            enable_gapless: true,
-            ..FormatOptions::default()
-        };
-
         let probed = symphonia::default::get_probe()
-            .format(&hint, stream, &format_options, &MetadataOptions::default())
+            .probe(
+                &hint,
+                stream,
+                FormatOptions::default(),
+                MetadataOptions::default(),
+            )
             .map_err(|error| AudioError::Unsupported(error.to_string()))?;
 
-        let reader = probed.format;
-        let (track_id, codec_params) = {
-            let track = reader.default_track().ok_or_else(|| {
+        let reader = probed;
+        let track = reader.default_track(TrackType::Audio).ok_or_else(|| {
+            AudioError::Unsupported(format!("{} has no audio track", path.display()))
+        })?;
+
+        // symphonia 0.6 moved the gapless trim from the format reader's
+        // options into the decoder's: with the default `gapless: true`, the
+        // decoder trims the delay and padding the reader declares per packet —
+        // what 0.5 did through `FormatOptions::enable_gapless`. That is what
+        // makes an MP3 or AAC join silent in the first place.
+        let decoder_options = AudioDecoderOptions::default();
+
+        let audio_params = track
+            .codec_params
+            .as_ref()
+            .and_then(symphonia::core::codecs::CodecParameters::audio)
+            .ok_or_else(|| {
                 AudioError::Unsupported(format!("{} has no audio track", path.display()))
-            })?;
-            (track.id, track.codec_params.clone())
-        };
+            })?
+            .clone();
 
         let decoder = symphonia::default::get_codecs()
-            .make(&codec_params, &DecoderOptions::default())
+            .make_audio_decoder(&audio_params, &decoder_options)
             .map_err(|error| AudioError::Unsupported(error.to_string()))?;
 
-        let declared = declared_spec(&codec_params);
-        let priming = declared_priming(&codec_params, path);
+        let declared = declared_spec(&audio_params);
+        let priming = declared_priming(track, path);
+        // Copy what the track declares before the reader moves into the
+        // source: in 0.6 the track's timing lives on `Track`, not in the codec
+        // parameters.
+        let (track_id, time_base, n_frames) = (track.id, track.time_base, track.num_frames);
         let mut source = Self {
             reader,
             decoder,
@@ -211,8 +224,8 @@ impl TrackSource {
             }),
             finished: false,
             pending: None,
-            time_base: codec_params.time_base,
-            n_frames: codec_params.n_frames,
+            time_base,
+            n_frames,
             priming,
             skip_ts: None,
         };
@@ -298,7 +311,7 @@ impl TrackSource {
         self.pending = None;
         match self.reader.seek(
             SeekMode::Accurate,
-            SeekTo::TimeStamp {
+            SeekTo::Timestamp {
                 ts,
                 track_id: self.track_id,
             },
@@ -357,19 +370,17 @@ impl TrackSource {
 
         loop {
             let packet = match self.reader.next_packet() {
-                Ok(packet) => packet,
-                Err(SymphoniaError::IoError(error)) if error.kind() == ErrorKind::UnexpectedEof => {
-                    self.finished = true;
-                    return Ok(None);
-                }
-                Err(SymphoniaError::ResetRequired) => {
+                Ok(Some(packet)) => packet,
+                // End of media, or the track list changed: both are the end
+                // of this stream.
+                Ok(None) | Err(SymphoniaError::ResetRequired) => {
                     self.finished = true;
                     return Ok(None);
                 }
                 Err(error) => return Err(AudioError::Decode(error.to_string())),
             };
 
-            if packet.track_id() != self.track_id {
+            if packet.track_id != self.track_id {
                 continue;
             }
 
@@ -378,18 +389,18 @@ impl TrackSource {
                 .decode(&packet)
                 .map_err(|error| AudioError::Decode(error.to_string()))?;
 
-            let signal = *decoded.spec();
-            let channels = u16::try_from(signal.channels.count())
+            let signal = decoded.spec().clone();
+            let channels = u16::try_from(signal.channels().count())
                 .map_err(|_| AudioError::Unsupported("too many channels".to_owned()))?;
             self.spec = TrackSpec {
-                sample_rate: signal.rate,
+                sample_rate: signal.rate(),
                 channels,
             };
 
-            let mut buffer = SampleBuffer::<f32>::new(decoded.capacity() as u64, signal);
-            buffer.copy_interleaved_ref(decoded);
-
-            let mut samples = buffer.samples().to_vec();
+            // The generic buffer ref carries whatever integer or float format
+            // the codec produced; this converts and interleaves it into f32.
+            let mut samples = Vec::with_capacity(decoded.samples_interleaved());
+            decoded.copy_to_vec_interleaved::<f32>(&mut samples);
             let packet_frames = samples.len() / usize::from(channels);
 
             // What must not reach the output, in packet frames from the head:
@@ -402,7 +413,14 @@ impl TrackSource {
             let mut tail = 0usize;
             let mut clear_skip = false;
             if let Some(skip_ts) = self.skip_ts {
-                let drop_ts = skip_ts.saturating_sub(packet.ts());
+                // How far the packet's start lies before the seek target, in
+                // timebase ticks; saturates at or below zero once the packet
+                // starts at or after it.
+                let drop_ts = skip_ts
+                    .saturating_delta(packet.pts)
+                    .get()
+                    .max(0)
+                    .unsigned_abs();
                 let drop_frames = self.time_base.map_or(0, |time_base| {
                     ts_to_frames(drop_ts, time_base, self.spec.sample_rate)
                 });
@@ -420,7 +438,11 @@ impl TrackSource {
             }
             if let Some(priming) = self.priming {
                 let raw_start = self.time_base.map_or(0, |time_base| {
-                    ts_to_frames(packet.ts(), time_base, self.spec.sample_rate)
+                    ts_to_frames(
+                        packet.pts.get().max(0).unsigned_abs(),
+                        time_base,
+                        self.spec.sample_rate,
+                    )
                 });
                 let raw_end = raw_start + packet_frames as u64;
                 let emit_start = raw_start.max(priming.delay);
@@ -456,17 +478,23 @@ impl TrackSource {
     }
 }
 
-/// Converts a span of track timestamps into decoded frames.
+/// Converts a span of track timestamps (timebase ticks) into decoded frames.
+/// A negative timestamp contributes no frames.
 fn ts_to_frames(ts: u64, time_base: TimeBase, sample_rate: u32) -> u64 {
-    let frames = u128::from(ts) * u128::from(time_base.numer) * u128::from(sample_rate.max(1));
-    u64::try_from(frames / u128::from(time_base.denom)).unwrap_or(u64::MAX)
+    let frames = u128::from(ts)
+        * u128::from(time_base.numer.get())
+        * u128::from(u64::from(sample_rate.max(1)));
+    u64::try_from(frames / u128::from(time_base.denom.get())).unwrap_or(u64::MAX)
 }
 
 /// Converts decoded frames into a track timestamp for [`TrackSource::seek_to_frames`].
-fn frames_to_ts(frames: u64, time_base: TimeBase, sample_rate: u32) -> u64 {
-    let ts = u128::from(frames) * u128::from(time_base.denom);
-    let rate = u128::from(sample_rate.max(1)) * u128::from(time_base.numer);
-    u64::try_from(ts / rate).unwrap_or(u64::MAX)
+fn frames_to_ts(frames: u64, time_base: TimeBase, sample_rate: u32) -> Timestamp {
+    let ts = u128::from(frames) * u128::from(time_base.denom.get());
+    let rate = u128::from(u64::from(sample_rate.max(1))) * u128::from(time_base.numer.get());
+    u64::try_from(ts / rate)
+        .ok()
+        .and_then(|ts| i64::try_from(ts).ok())
+        .map_or(Timestamp::MAX, Timestamp::new)
 }
 
 /// Drains several tracks as one continuous stream, as the gapless path must.

@@ -34,7 +34,7 @@ serde = { version = "1", features = ["derive"] }
 # impl for usize breaks inference in existing tests (`assert_eq!(…, [])`)
 # and would force edits this task may not make.
 miniserde = "0.1.46"
-symphonia = { version = "0.5", features = ["mp3", "aac", "flac", "vorbis", "ogg", "wav", "isomp4"] }
+symphonia = { version = "0.6", features = ["mp3", "aac", "flac", "vorbis", "ogg", "wav", "isomp4"] }
 toml = "0.9"
 # One blocking GET at a time fits the player's synchronous shape; rustls for
 # TLS instead of the platform store keeps the build self-contained.

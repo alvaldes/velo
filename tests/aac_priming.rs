@@ -2,10 +2,12 @@
 //!
 //! An AAC encoder emits its first `delay` frames as encoder warm-up and its
 //! last `padding` frames as flush padding. Containers declare both: MP3 via the
-//! LAME tag (symphonia reads it and trims when `enable_gapless` is on), MP4 via
+//! LAME tag (symphonia reads it and trims when the decoder's `gapless` option
+//! is on), MP4 via
 //! an `elst` edit whose `media_time` is the delay, or an explicit `iTunSMPB`
-//! tag. symphonia 0.5's isomp4 reader does neither: the priming reaches the
-//! decoded stream, where an M4A join hears it as a click or a smear at the seam.
+//! tag. symphonia's isomp4 reader does neither (measured on 0.5.5 and again
+//! on 0.6.1): the priming reaches the decoded stream, where an M4A join hears
+//! it as a click or a smear at the seam.
 //!
 //! These tests pin, against the committed fixtures:
 //!
@@ -28,13 +30,11 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use symphonia::core::audio::SampleBuffer;
-use symphonia::core::codecs::DecoderOptions;
-use symphonia::core::errors::Error as SymphoniaError;
-use symphonia::core::formats::FormatOptions;
+use symphonia::core::codecs::audio::AudioDecoderOptions;
+use symphonia::core::formats::probe::Hint;
+use symphonia::core::formats::{FormatOptions, TrackType};
 use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::core::meta::MetadataOptions;
-use symphonia::core::probe::Hint;
 
 use velo::audio::TrackSource;
 
@@ -47,11 +47,12 @@ fn fixture(name: &str) -> PathBuf {
 /// What symphonia itself produces for a file, without any of `velo`'s code in
 /// between: the ground truth every test here compares against.
 struct RawDecode {
-    /// `codec_params.delay` as symphonia reports it.
+    /// The audio track's `delay` as symphonia reports it (0.6 moved this from
+    /// the codec parameters onto the track).
     delay: Option<u32>,
-    /// `codec_params.padding` as symphonia reports it.
+    /// The audio track's `padding` as symphonia reports it.
     padding: Option<u32>,
-    /// `codec_params.n_frames` as symphonia reports it.
+    /// The audio track's `num_frames` as symphonia reports it.
     n_frames: Option<u64>,
     /// Every decoded frame, interleaved.
     samples: Vec<f32>,
@@ -71,50 +72,53 @@ fn raw_decode(path: &Path) -> RawDecode {
     );
 
     let probed = symphonia::default::get_probe()
-        .format(
+        .probe(
             &hint,
             stream,
-            &FormatOptions {
-                enable_gapless: true,
-                ..FormatOptions::default()
-            },
-            &MetadataOptions::default(),
+            FormatOptions::default(),
+            MetadataOptions::default(),
         )
         .expect("the fixture probes");
 
-    let mut reader = probed.format;
+    let mut reader = probed;
     let track = reader
-        .default_track()
+        .default_track(TrackType::Audio)
         .expect("the fixture has a default track");
-    let params = track.codec_params.clone();
+    let params = track
+        .codec_params
+        .as_ref()
+        .and_then(symphonia::core::codecs::CodecParameters::audio)
+        .expect("the fixture has an audio track")
+        .clone();
     let mut decoder = symphonia::default::get_codecs()
-        .make(&params, &DecoderOptions::default())
+        .make_audio_decoder(&params, &AudioDecoderOptions::default())
         .expect("the fixture decodes");
     let track_id = track.id;
+    // 0.6 reports priming and length on the track, not the codec parameters.
+    let (delay, padding, n_frames) = (track.delay, track.padding, track.num_frames);
 
     let mut samples = Vec::new();
     let mut channels = 0usize;
     loop {
         let packet = match reader.next_packet() {
-            Ok(packet) => packet,
-            Err(SymphoniaError::IoError(_)) => break,
+            Ok(Some(packet)) => packet,
+            Ok(None) => break,
             Err(error) => panic!("unexpected decode error: {error}"),
         };
-        if packet.track_id() != track_id {
+        if packet.track_id != track_id {
             continue;
         }
         let decoded_packet = decoder.decode(&packet).expect("a packet decodes");
-        channels = decoded_packet.spec().channels.count();
-        let mut buffer =
-            SampleBuffer::<f32>::new(decoded_packet.capacity() as u64, *decoded_packet.spec());
-        buffer.copy_interleaved_ref(decoded_packet);
-        samples.extend_from_slice(buffer.samples());
+        channels = decoded_packet.spec().channels().count();
+        let mut buffer = Vec::with_capacity(decoded_packet.samples_interleaved());
+        decoded_packet.copy_to_vec_interleaved::<f32>(&mut buffer);
+        samples.extend_from_slice(&buffer);
     }
 
     RawDecode {
-        delay: params.delay,
-        padding: params.padding,
-        n_frames: params.n_frames,
+        delay,
+        padding,
+        n_frames,
         samples,
         channels,
     }
@@ -168,11 +172,13 @@ fn measurement_symphonia_reports_no_priming_for_isomp4() {
 
     // Verbatim answer of the measurement, pinned so a symphonia upgrade that
     // starts trimming is caught here instead of double-trimmed in TrackSource:
-    //   codec_params.delay   = None
-    //   codec_params.padding = None
-    //   codec_params.n_frames = 14254 = 13 x 1024 + 942 (the stts table, raw
+    //   track.delay      = None
+    //   track.padding    = None
+    //   track.num_frames = 14254 = 13 x 1024 + 942 (the stts table, raw
     //   frames including priming; the elst edit says playback starts at 1024)
-    //   decoded frames       = 14254, i.e. n_frames: the priming stays in
+    //   decoded frames   = 14254, i.e. num_frames: the priming stays in
+    // Measured verbatim on symphonia 0.5.5 and re-measured verbatim on 0.6.1:
+    // the isomp4 reader still populates neither, so velo's own window stays.
     assert!(
         raw.delay.is_none(),
         "symphonia populates delay for isomp4?!"
@@ -374,7 +380,8 @@ fn itunsmpb_duration_matches_the_declared_window() {
 #[test]
 fn an_mp3_still_relies_on_symphonias_own_trim() {
     // The MP3 fixture's LAME tag is honoured by symphonia itself (delay/padding
-    // populated and packets trimmed when enable_gapless is on). velo must not
+    // populated by the reader, packets trimmed by the decoder when its
+    // `gapless` option is on). velo must not
     // add a second trim: the MP3 decodes to exactly its LAME-declared length.
     let path = fixture("silence-then-tone.mp3");
     let raw = raw_decode(&path);

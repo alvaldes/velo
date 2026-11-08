@@ -352,7 +352,8 @@ Honest list; none of these exist behind a flag:
   probe time.
 - Playlists.
 
-MP3, FLAC, M4A/AAC, OGG Vorbis and WAV are what plays today. Sample rates are
+MP3, FLAC, M4A/AAC, OGG Vorbis and WAV are what plays today, decoded with
+symphonia 0.6. Sample rates are
 converted to your output device; channel layouts are not converted, except
 mono, which plays through every output channel — a layout that would need a
 real downmix (5.1 into stereo, say) is skipped with an announcement instead of
@@ -360,7 +361,8 @@ being silently averaged away.
 
 Gapless joins trim what the encoder inserted, so a seam carries music only: for
 MP3 the LAME tag's delay and padding are honoured, and for M4A/AAC — where
-symphonia 0.5 reports neither — the priming is read from the container itself
+symphonia reports neither, measured on 0.5.5 and 0.6.1 alike — the priming is
+read from the container itself
 (the `elst` edit list, or an `iTunSMPB` tag when one is present) and trimmed.
 Durations and seeks count content frames, not the raw encoded frames.
 

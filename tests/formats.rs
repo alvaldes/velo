@@ -54,8 +54,9 @@ fn an_aac_track_decodes_every_frame_it_reports() {
 
     // 0.3s in exact integer arithmetic: no float rounding to argue about.
     let expected = spec.sample_rate as usize * 3 / 10;
-    // symphonia 0.5 does not trim the AAC encoder priming for isomp4 (tracked as
-    // T16), so a short file decodes slightly long. What this test pins is that
+    // symphonia does not trim the AAC encoder priming for isomp4 (measured on
+    // 0.5.5 and 0.6.1; trimmed by velo's own window, see tests/aac_priming.rs),
+    // so a short file decodes slightly long. What this test pins is that
     // every frame decodes exactly once and that no block splits a frame.
     let tolerance = spec.sample_rate as usize / 10;
     assert!(
