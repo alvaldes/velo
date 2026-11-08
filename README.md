@@ -1,5 +1,7 @@
 # velo
 
+[![CI](https://github.com/alvaldes/velo/actions/workflows/ci.yml/badge.svg)](https://github.com/alvaldes/velo/actions/workflows/ci.yml)
+
 A single-binary music player for your terminal: point it at your music folder,
 and it indexes your library from your files' own tags, browses by artist,
 album, track or genre, plays gaplessly, and renders cover art — all from one
@@ -401,6 +403,22 @@ different rates; consecutive tracks that share a rate stay one continuous
 stream, and channel layouts still map the way they do without the setting.
 When the device has no output at a track's rate, velo falls back to
 converting and says so once — a track is never lost to bit-perfect mode.
+
+## Contributing
+
+Two commands get you from a clone to a running binary, and the third checks your
+change the way CI will:
+
+```sh
+cargo build --release
+./target/release/velo ~/Music
+cargo fmt --all -- --check && cargo clippy --all-targets -- -D warnings && cargo test
+```
+
+`CONTRIBUTING.md` has the platform dependencies, the commit convention, and what
+a reviewable slice looks like. Bug reports and feature requests have templates;
+a report that includes your platform, your terminal and `velo --info` is worth
+ten without them.
 
 ## License
 
