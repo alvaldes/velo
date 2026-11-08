@@ -1,14 +1,11 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## Unreleased
+
+### Documentation
+- The cross container has neither ALSA headers nor cmake, and Cross.toml says so (#2)
 ## [0.10.2] - 2026-11-08
-
-### Fixes
-- **ci:** Install alsa headers and cmake in the cross container
-
-### Maintenance
-- Repo hygiene — contributing guide, issue templates, CI build deps (#1)
-## [0.10.1] - 2026-11-08
 
 ### Features
 - **audio:** Bit-perfect playback reopens the stream per track T17
@@ -29,6 +26,7 @@ Every release of velo, newest first, generated from its Conventional Commits.
 - **audio:** A seek does not emit the codec's warm-up
 - **build:** Build libopus with cmake, not autotools
 - **build:** Tell CMake 4 the policy floor audiopus_sys needs
+- **ci:** Install alsa headers and cmake in the cross container
 
 ### Tests
 - **aac:** Pin the content, not the float bits, in the priming baseline
@@ -36,6 +34,7 @@ Every release of velo, newest first, generated from its Conventional Commits.
 ### Maintenance
 - **deps:** Migrate to symphonia 0.6.1 T15
 - **release:** Make the release buildable by hand, and fix the artifact path
+- Repo hygiene — contributing guide, issue templates, CI build deps (#1)
 
 ### Merge
 - Bit-perfect (T17) into main
