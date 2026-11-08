@@ -22,7 +22,7 @@ use symphonia::core::codecs::audio::{AudioCodecParameters, AudioDecoder, AudioDe
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo, Track, TrackType};
-use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
+use symphonia::core::io::{MediaSource, MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::units::{TimeBase, Timestamp};
 
@@ -156,6 +156,26 @@ fn declared_priming(track: &Track, path: &Path) -> Option<Priming> {
     })
 }
 
+/// Builds the one decoder for a track's codec parameters.
+///
+/// The only place where `AudioDecoderOptions` is decided. Files decode with
+/// the default `gapless: true` — the decoder trims the delay and padding the
+/// reader declares per packet, which is what makes an MP3 or AAC join silent.
+/// A live stream decodes with `gapless: false`: it declares no priming, and
+/// trimming a delay nobody declared would eat the first audible frames.
+fn make_decoder(
+    params: &AudioCodecParameters,
+    gapless: bool,
+) -> Result<Box<dyn AudioDecoder>, AudioError> {
+    // `AudioDecoderOptions` is #[non_exhaustive] in symphonia 0.6, so the
+    // struct-update form `..Default::default()` is refused across the crate
+    // boundary; the builder is the same one decision.
+    let options = AudioDecoderOptions::default().gapless(gapless);
+    symphonia::default::get_codecs()
+        .make_audio_decoder(params, &options)
+        .map_err(|error| AudioError::Unsupported(error.to_string()))
+}
+
 impl TrackSource {
     /// Opens a file and reads its stream format without decoding audio yet.
     ///
@@ -166,16 +186,54 @@ impl TrackSource {
     /// and [`AudioError::Decode`] when the first packet fails to decode.
     pub fn open(path: &Path) -> Result<Self, AudioError> {
         let file = File::open(path).map_err(AudioError::Io)?;
-        let stream = MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default());
-
         let mut hint = Hint::new();
         if let Some(extension) = path.extension().and_then(std::ffi::OsStr::to_str) {
             hint.with_extension(extension);
         }
+        let stream = MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default());
+        Self::build(stream, &hint, true, Some(path), false)
+    }
+
+    /// Opens a live stream for decoding as its bytes arrive.
+    ///
+    /// The source is probed with an empty hint — a stream has no extension —
+    /// so recognition falls back to content sniffing alone. It is never
+    /// seekable and never reports a duration, even when a tag inside the body
+    /// declares a frame count; the sample-format mismatch rule of a gapless
+    /// sequence does not apply, because a station can only enter the queue on
+    /// its own, never as a sequence member.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AudioError::Unsupported`] when the container or codec is not
+    /// recognised from the bytes read so far, and [`AudioError::Decode`] when
+    /// the first packet fails to decode.
+    pub fn open_stream(source: Box<dyn MediaSource>) -> Result<Self, AudioError> {
+        let stream = MediaSourceStream::new(source, MediaSourceStreamOptions::default());
+        Self::build(stream, &Hint::new(), false, None, true)
+    }
+
+    /// Probes, builds the decoder and resolves the sample format, shared by
+    /// the file and stream entries. `gapless` is decided by the caller; a file
+    /// path additionally enables reading the container's own priming.
+    fn build(
+        // Both entries hand over a `'static` source — an owned `File` or an
+        // owned `Box<dyn MediaSource>` — and the probed reader borrows the
+        // stream for its whole life, so the lifetime is pinned here.
+        stream: MediaSourceStream<'static>,
+        hint: &Hint,
+        gapless: bool,
+        path: Option<&Path>,
+        live: bool,
+    ) -> Result<Self, AudioError> {
+        let name = path.map_or_else(
+            || "stream".to_owned(),
+            |path| path.display().to_string(),
+        );
 
         let probed = symphonia::default::get_probe()
             .probe(
-                &hint,
+                hint,
                 stream,
                 FormatOptions::default(),
                 MetadataOptions::default(),
@@ -184,35 +242,31 @@ impl TrackSource {
 
         let reader = probed;
         let track = reader.default_track(TrackType::Audio).ok_or_else(|| {
-            AudioError::Unsupported(format!("{} has no audio track", path.display()))
+            AudioError::Unsupported(format!("{name} has no audio track"))
         })?;
-
-        // symphonia 0.6 moved the gapless trim from the format reader's
-        // options into the decoder's: with the default `gapless: true`, the
-        // decoder trims the delay and padding the reader declares per packet —
-        // what 0.5 did through `FormatOptions::enable_gapless`. That is what
-        // makes an MP3 or AAC join silent in the first place.
-        let decoder_options = AudioDecoderOptions::default();
 
         let audio_params = track
             .codec_params
             .as_ref()
             .and_then(symphonia::core::codecs::CodecParameters::audio)
             .ok_or_else(|| {
-                AudioError::Unsupported(format!("{} has no audio track", path.display()))
+                AudioError::Unsupported(format!("{name} has no audio track"))
             })?
             .clone();
 
-        let decoder = symphonia::default::get_codecs()
-            .make_audio_decoder(&audio_params, &decoder_options)
-            .map_err(|error| AudioError::Unsupported(error.to_string()))?;
+        let decoder = make_decoder(&audio_params, gapless)?;
 
         let declared = declared_spec(&audio_params);
-        let priming = declared_priming(track, path);
+        // A stream has no file to read priming from and no container to
+        // declare it; symphonia's own trim is off (`gapless: false`), which is
+        // what a live stream wants twice over.
+        let priming = path.and_then(|path| declared_priming(track, path));
         // Copy what the track declares before the reader moves into the
         // source: in 0.6 the track's timing lives on `Track`, not in the codec
-        // parameters.
-        let (track_id, time_base, n_frames) = (track.id, track.time_base, track.num_frames);
+        // parameters. A live stream never reports a frame count even when a
+        // tag declares one — a station has no duration and never seeks (S2).
+        let (track_id, time_base, n_frames) =
+            (track.id, track.time_base, if live { None } else { track.num_frames });
         let mut source = Self {
             reader,
             decoder,
@@ -234,7 +288,7 @@ impl TrackSource {
             // The device must be configured before the first sample plays, so
             // the format has to be resolved now rather than at playback time.
             let first = source.decode_next()?.ok_or_else(|| {
-                AudioError::Unsupported(format!("{} has no playable audio", path.display()))
+                AudioError::Unsupported(format!("{name} has no playable audio"))
             })?;
             source.pending = Some(first);
         }
