@@ -456,3 +456,9 @@ Measured on the test's own file: 48 kHz, 312 samples of pre-skip, duration **exa
 
 **Why this is worth a log entry of its own**: the defect lived in a path **no test covered** (the live stream), was introduced by a correct-looking gate, and was found by someone reasoning from the codec's contract instead of from our code. Three of the four things it cost were questions: *is the pre-skip the same as padding?* No. *Should a stream trim it?* Yes, always. *Does the trim depend on gapless?* It must not, or a future change to gaplessness drags the pre-skip with it. A peer reading the standard caught what my suite could not see.
 
+**L51 — the cover renders (the oldest debt, closed by the human).** L34 left one thing owed that no test could give: seeing a cover as pixels in a real terminal. Reported confirmed in **Ghostty**, with the art working — so the path from "a protocol was detected and the size allows a pane" through to a drawn image is now verified end to end, by the only instrument that could verify it.
+
+What that closes, precisely: the protocol detection, the 100×28 threshold, the quarter-width rule, the once-per-track decode, the "never fake it with half-blocks" decision, and the diagnostic that says *why* it hides (T8b) — all of it now has both a test and a human's eyes behind it.
+
+And it frees `src/ui/mod.rs` completely: the radio session had been holding its radio view back in case the cover needed `draw_artwork`/`pane` surgery. It does not. That file is theirs, with no reservation left.
+
