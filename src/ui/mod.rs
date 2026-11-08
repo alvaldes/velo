@@ -17,6 +17,8 @@
 pub mod artwork;
 pub mod complete;
 pub mod indexing;
+pub mod radio;
+pub mod radio_data;
 pub mod search;
 pub mod shuffle;
 pub mod theme;
@@ -361,6 +363,14 @@ pub struct App<'lib> {
     help: Option<Help>,
     /// The settings card while it is open: its cursor and its scroll (S6).
     settings: Option<SettingsCard>,
+    /// The open radio view (T6a): `None` while only the library and the
+    /// queue are on screen.
+    radio: Option<radio::RadioView>,
+    /// The radio's data wiring (T6b): the preference store and the
+    /// directory requests, which run on a worker thread the tick polls.
+    /// `None` until the first `R` opens the radio; built once, kept for
+    /// the session so loaded indexes survive closing the view.
+    radio_wire: Option<Box<dyn radio_data::RadioWire>>,
     /// The palette as the `[theme]` table wrote it (S4): what the settings
     /// card rebuilds with one role replaced when a colour is cycled.
     colors: ThemeColors,
@@ -458,6 +468,8 @@ impl<'lib> App<'lib> {
             protocol: RefCell::new(None),
             help: None,
             settings: None,
+            radio: None,
+            radio_wire: None,
             colors: ThemeColors::default(),
             library_setup: None,
             config_file: None,
@@ -521,6 +533,8 @@ impl<'lib> App<'lib> {
             protocol: RefCell::new(None),
             help: None,
             settings: None,
+            radio: None,
+            radio_wire: None,
             colors: ThemeColors::default(),
             library_setup: None,
             config_file: None,
@@ -1230,6 +1244,10 @@ impl<'lib> App<'lib> {
         if let Some(warning) = self.subsonic_warning.take() {
             self.status = format!("velo: warning: {warning}");
         }
+        // The radio wiring (T6b) turns once per tick too: a finished
+        // directory request lands without a key press, and an in-flight
+        // one says `⟳ loading…` on the status line.
+        self.radio_poll();
         self.poll_cover();
         self.refresh_artwork();
         self.explain_hidden_art();
@@ -1548,6 +1566,13 @@ impl<'lib> App<'lib> {
         if self.help.is_some() {
             return self.on_help_key(event.code);
         }
+        // The radio view (T6a) owns its keys while it is open; the keys it
+        // does not claim still reach the lists and the transport.
+        if self.radio.is_some()
+            && let Some(action) = self.radio_key(event)
+        {
+            return action;
+        }
 
         match event.code {
             KeyCode::Char('j') | KeyCode::Down => {
@@ -1628,6 +1653,22 @@ impl<'lib> App<'lib> {
                 self.settings = Some(SettingsCard::default());
                 Action::None
             }
+            // The radio view (T6a): `R` opens it closed, and its own key
+            // handler closes it again once it is open. T6b opens it over
+            // its wiring: the store and the country load at once (one
+            // small file read, no network), the directory follows lazily
+            // as the sections are entered.
+            KeyCode::Char('R') => {
+                let wire = self.radio_wire.get_or_insert_with(|| {
+                    let store_path = self
+                        .config_file
+                        .as_ref()
+                        .map(|config| config.with_file_name("radio.toml"));
+                    Box::new(radio_data::RadioData::open(store_path))
+                });
+                self.radio = Some(wire.view());
+                Action::None
+            }
             KeyCode::Char('/') if self.library.is_some() => {
                 self.open_search();
                 Action::None
@@ -1642,6 +1683,47 @@ impl<'lib> App<'lib> {
             }
             KeyCode::Char('q') => Action::Quit,
             _ => Action::None,
+        }
+    }
+
+    /// The keys the open radio view owns (T6a); `None` lets the key fall
+    /// through to the rest of the keymap.
+    fn radio_key(&mut self, event: ratatui::crossterm::event::KeyEvent) -> Option<Action> {
+        let outcome = self.radio.as_mut()?.key(event);
+        // The wiring follows every key at once (T6b): a mutation saves,
+        // an entered section starts its request. Nothing here blocks: a
+        // request runs on its own thread and lands through the tick, the
+        // way the library index does.
+        self.radio_poll();
+        match outcome {
+            radio::RadioOutcome::Handled => Some(Action::None),
+            radio::RadioOutcome::Close => {
+                self.radio = None;
+                Some(Action::None)
+            }
+            radio::RadioOutcome::ToQueue => {
+                self.radio = None;
+                self.view = View::Queue;
+                Some(Action::None)
+            }
+            radio::RadioOutcome::Pass => None,
+        }
+    }
+
+    /// Runs one turn of the radio wiring (T6b): collects finished
+    /// requests, starts the ones the view's place needs, saves store
+    /// mutations, and reports progress and failures on the status line.
+    /// Never blocks — the request runs on a worker thread and lands
+    /// through a channel, the pattern the library index uses.
+    fn radio_poll(&mut self) {
+        let Some((wire, view)) = self.radio_wire.as_mut().zip(self.radio.as_mut()) else {
+            return;
+        };
+        wire.poll(view);
+        if let Some(message) = wire.take_message() {
+            self.status = message;
+        } else if wire.loading() {
+            self.status = String::from("⟳ loading…");
         }
     }
 
@@ -2098,6 +2180,10 @@ impl<'lib> App<'lib> {
         self.draw_now_playing(frame, now);
         self.draw_header(frame, header);
         self.draw_body(frame, body);
+        // The radio view (T6a) replaces the list, not the block above it.
+        if let Some(view) = &self.radio {
+            view.render(frame, body, &self.theme);
+        }
         self.draw_footer(frame, footer);
         self.draw_artwork(frame, pane);
         if let Some(help) = &self.help {
