@@ -602,3 +602,248 @@ fn drain_track(mut source: TrackSource) -> Vec<f32> {
     }
     samples
 }
+
+// --- measurement probe (run by hand: `cargo test --test opus -- --ignored
+// --nocapture probe_opus_seek`) --------------------------------------------
+
+fn fnv1a(samples: &[f32]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for sample in samples {
+        for byte in sample.to_le_bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    hash
+}
+
+fn probe_rms_db(samples: &[f32]) -> f64 {
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "window lengths are far below f64's exact integer range"
+    )]
+    let count = samples.len().max(1) as f64;
+    let power = samples
+        .iter()
+        .map(|s| f64::from(*s) * f64::from(*s))
+        .sum::<f64>()
+        / count;
+    10.0 * power.log10()
+}
+
+fn probe_peak(samples: &[f32]) -> f32 {
+    samples.iter().fold(0.0_f32, |acc, s| acc.max(s.abs()))
+}
+
+/// Compares a seeked drain against the continuous drain from the same offset
+/// and prints the shape of the disagreement.
+fn probe_compare(
+    label: &str,
+    continuous: &[f32],
+    seeked: &[f32],
+    offset_frames: usize,
+    channels: u16,
+) {
+    let stride = usize::from(channels);
+    let expected = &continuous[offset_frames * stride..];
+    println!(
+        "{label}: seeked {} frames, continuous from offset {} frames ({} samples)",
+        seeked.len() / stride,
+        offset_frames,
+        expected.len()
+    );
+    if seeked.len() != expected.len() {
+        println!(
+            "{label}: LENGTH MISMATCH: seeked {} vs expected {} samples",
+            seeked.len(),
+            expected.len()
+        );
+    }
+    let common = seeked.len().min(expected.len());
+    let diffs: Vec<f32> = (0..common).map(|i| seeked[i] - expected[i]).collect();
+    let first_bad = diffs.iter().position(|d| d.abs() > 1e-3).unwrap_or(common);
+    let bad_frames = diffs
+        .chunks(stride)
+        .filter(|frame| frame.iter().any(|d| d.abs() > 1e-3))
+        .count();
+    let last_bad = diffs
+        .iter()
+        .rposition(|d| d.abs() > 1e-3)
+        .map_or(first_bad, |last| last / stride);
+    println!(
+        "{label}: first differing frame {first_bad}, last {last_bad}, {bad_frames} frames differ \
+         (>1e-3) of {}",
+        common / stride
+    );
+    if bad_frames > 0 {
+        let wrong = &diffs[(first_bad * stride)..((last_bad + 1) * stride)];
+        let wanted = &expected[(first_bad * stride)..((last_bad + 1) * stride)];
+        println!(
+            "{label}: wrong region: diff RMS {:.2} dB, diff peak {:.4}; the content that should be \
+             there measures RMS {:.2} dB, peak {:.4}",
+            probe_rms_db(wrong),
+            probe_peak(wrong),
+            probe_rms_db(wanted),
+            probe_peak(wanted)
+        );
+    }
+}
+
+#[test]
+#[ignore = "measurement probe: cargo test --test opus -- --ignored --nocapture probe_opus_seek"]
+fn probe_opus_seek_warmup() {
+    let packets = encode(1, &sine(1, 1000.0, 0.5));
+    let file = ogg_opus_file(1, &packets, pre_skip(1));
+    let scratch = scratch_file("probe", "opus", &file);
+
+    let continuous = drain_track(TrackSource::open(&scratch).expect("open"));
+    println!(
+        "continuous drain: {} frames (1 s of content = 48 000 expected)",
+        continuous.len()
+    );
+
+    for offset in [0usize, 960, 24_000, 24_123, 47_000] {
+        let seeked = drain_track(
+            TrackSource::open_at(&scratch, u64::try_from(offset).expect("small")).expect("open_at"),
+        );
+        probe_compare(
+            &format!("seek to {offset}"),
+            &continuous,
+            &seeked,
+            offset,
+            1,
+        );
+    }
+
+    // Profile the disagreement packet by packet, to see how long the
+    // post-seek decoder state takes to reconverge.
+    for offset in [24_000usize, 47_000] {
+        let seeked = drain_track(
+            TrackSource::open_at(&scratch, u64::try_from(offset).expect("small")).expect("open_at"),
+        );
+        let expected = &continuous[offset..];
+        let common = seeked.len().min(expected.len());
+        println!("profile for seek to {offset} (RMS of the difference per 960-frame packet):");
+        for (index, chunk) in seeked[..common].chunks(960).enumerate() {
+            let wanted = &expected[index * 960..index * 960 + chunk.len()];
+            let diffs: Vec<f32> = chunk.iter().zip(wanted).map(|(a, b)| a - b).collect();
+            let worst = diffs.iter().fold(0.0_f32, |acc, d| acc.max(d.abs()));
+            println!(
+                "  packet {index:2}: diff RMS {:7.2} dB, worst {:.4}",
+                probe_rms_db(&diffs),
+                worst
+            );
+        }
+    }
+
+    // Seek to frame 0 must be byte-identical to open (no double trim).
+    let at_zero = drain_track(TrackSource::open_at(&scratch, 0).expect("open_at 0"));
+    println!(
+        "seek to 0 identical to open: {} (len {} vs {}, fnv {:016x} vs {:016x})",
+        at_zero == continuous,
+        at_zero.len(),
+        continuous.len(),
+        fnv1a(&at_zero),
+        fnv1a(&continuous)
+    );
+}
+
+// --- the seek (L49's known limit) ------------------------------------------
+//
+// After a seek, `open_at` resets the decoder and symphonia populates no
+// post-seek packet trims — so libopus re-ran its normative pre-skip and the
+// warm-up was emitted after every seek. Measured before the fix: the seeked
+// stream was the continuous decode shifted 312 frames (the declared delay)
+// early — 312 frames longer, every frame misaligned, diff RMS −3.01 dB (the
+// exact antiphase signature of a 312-sample shift at 1 kHz) against content
+// at −9.03 dB, peak 1.005 against 0.503.
+//
+// What the codec contract justifies asserting afterwards: Opus promises no
+// sample-exact decode across a decoder reset. Its own seek precision is the
+// decoder state's reconvergence — measured at −6 dB per 20 ms packet, from a
+// bounded landing deviation down to float noise within ~300 ms. So these
+// tests pin alignment (bounded deviation everywhere, no shift) and
+// reconvergence (below audibility well inside half a second), not sample
+// equality at the landing.
+
+/// The worst absolute sample difference between two interleaved streams.
+fn worst_difference(got: &[f32], want: &[f32]) -> f32 {
+    got.iter()
+        .zip(want)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0_f32, f32::max)
+}
+
+#[test]
+fn a_seek_into_an_opus_file_lands_on_the_continuous_decode() {
+    let packets = encode(1, &sine(1, 1000.0, 0.5));
+    let file = ogg_opus_file(1, &packets, pre_skip(1));
+    let scratch = scratch_file("seek", "opus", &file);
+
+    let continuous = drain_track(TrackSource::open(&scratch).expect("the file opens"));
+    let offset = 24_000usize;
+    let seeked = drain_track(TrackSource::open_at(&scratch, 24_000).expect("the seek opens"));
+
+    // The seek loses no content frames and emits none extra: the stream from
+    // the offset is exactly as long as the continuous decode from there.
+    // (Before the fix it was 312 samples — the declared delay — longer.)
+    assert_eq!(
+        seeked.len(),
+        continuous.len() - offset,
+        "the seeked stream is the continuous decode from the offset, frame for frame"
+    );
+
+    let expected = &continuous[offset..];
+    // Aligned, not shifted: even at the landing, where the reset decoder's
+    // state transient is loudest, no sample runs away (before the fix the
+    // difference peaked at 1.005 — two half-scale sines in antiphase).
+    let worst_all = worst_difference(&seeked, expected);
+    assert!(
+        worst_all < 0.35,
+        "the seeked stream must track the continuous decode, worst {worst_all}"
+    );
+    // The transient decays: five packets in, it is at the −40 dB edge of
+    // audibility (measured worst 0.014); ten packets in, float noise
+    // (measured 0.0004). A seek that re-emitted warm-up would never decay.
+    let worst_five_packets = worst_difference(&seeked[5 * 960..], &expected[5 * 960..]);
+    assert!(
+        worst_five_packets < 0.02,
+        "the reset decoder must reconverge: worst at five packets {worst_five_packets}"
+    );
+    let worst_ten_packets = worst_difference(&seeked[10 * 960..], &expected[10 * 960..]);
+    assert!(
+        worst_ten_packets < 0.005,
+        "the reset decoder must reconverge: worst at ten packets {worst_ten_packets}"
+    );
+}
+
+#[test]
+fn a_seek_discards_exactly_the_declared_delay_no_more_no_less() {
+    let packets = encode(1, &sine(1, 1000.0, 0.5));
+    let file = ogg_opus_file(1, &packets, pre_skip(1));
+    let scratch = scratch_file("discard", "opus", &file);
+    let continuous = drain_track(TrackSource::open(&scratch).expect("the file opens"));
+
+    // Seek to frame 0 never resets, so the file-start priming is applied
+    // exactly once: byte-identical to `open`, no double trim.
+    let at_zero = drain_track(TrackSource::open_at(&scratch, 0).expect("the seek opens"));
+    assert_eq!(
+        at_zero, continuous,
+        "a seek to frame 0 must behave exactly like open"
+    );
+
+    // A seek near the end must not lose content frames either: the remaining
+    // 688 frames are the continuous decode's remaining 688.
+    let at_end = drain_track(TrackSource::open_at(&scratch, 47_000).expect("the seek opens"));
+    assert_eq!(
+        at_end.len(),
+        continuous.len() - 47_000,
+        "the tail after a late seek is exactly the remaining content"
+    );
+    let expected = &continuous[47_000..];
+    let worst = worst_difference(&at_end, expected);
+    assert!(
+        worst < 0.35,
+        "the late-seek tail tracks the continuous decode, worst {worst}"
+    );
+}

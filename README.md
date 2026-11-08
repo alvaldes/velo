@@ -387,7 +387,10 @@ MP3 the LAME tag's delay and padding are honoured, and for M4A/AAC — where
 symphonia reports neither, measured on 0.5.5 and 0.6.1 alike — the priming is
 read from the container itself
 (the `elst` edit list, or an `iTunSMPB` tag when one is present) and trimmed.
-Durations and seeks count content frames, not the raw encoded frames.
+Durations and seeks count content frames, not the raw encoded frames. A seek
+also discards the codec's own declared warm-up after the jump — for Opus, the
+normative pre-skip (RFC 7845) that the decoder re-runs after a reset — so the
+stream resumes with the music, not the decoder's re-priming.
 
 With `bit_perfect = true` in the config, sample rates are not converted
 either: the device is reopened at each track's own rate, so the decoder's

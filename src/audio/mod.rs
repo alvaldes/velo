@@ -117,6 +117,18 @@ pub struct TrackSource {
     /// After a seek: the timestamp the decoded output must not start before.
     /// Packets read before it contribute only their frames from it onwards.
     skip_ts: Option<Timestamp>,
+    /// The warm-up the codec itself declares, in frames: the delay on the
+    /// track (`track.delay`). Opus's pre-skip is normative (RFC 7845) and
+    /// libopus re-runs it after every decoder reset; symphonia's own decoders
+    /// own their post-reset delay handling (measured: a seeked MP3 aligns
+    /// exactly, nothing to discard — discarding there would remove content
+    /// frames), and a codec that declares nothing gets nothing discarded.
+    codec_warmup: u64,
+    /// After a seek's `decoder.reset()`: warm-up frames still owed by the
+    /// next decoded packets' heads. Usually spent on the first packet;
+    /// whatever does not fit carries into the next one, so the stream is
+    /// never shifted.
+    post_reset_warmup: u64,
 }
 
 /// The sample format a container declares, when it declares one at all.
@@ -318,6 +330,23 @@ impl TrackSource {
         } else {
             0
         };
+        // The decoder-reset warm-up is the delay the codec itself declares on
+        // the track — Opus's normative pre-skip (L42/L49/L50 priming work;
+        // L49's known limit: after a seek, libopus re-runs it and it used to
+        // be emitted). It is *not* the container-read priming (isomp4 declares
+        // no delay and its seeked decode needs no discard) and it is *not*
+        // symphonia's business (its decoders align after a reset; measured).
+        let codec_warmup = if symphonia_built {
+            0
+        } else {
+            track.delay.map_or(0, |delay| {
+                declared.map_or(0, |spec| {
+                    track.time_base.map_or(0, |time_base| {
+                        ts_to_frames(u64::from(delay), time_base, spec.sample_rate)
+                    })
+                })
+            })
+        };
         // Copy what the track declares before the reader moves into the
         // source: in 0.6 the track's timing lives on `Track`, not in the codec
         // parameters. A live stream never reports a frame count even when a
@@ -343,6 +372,8 @@ impl TrackSource {
             priming,
             pts_shift,
             skip_ts: None,
+            codec_warmup,
+            post_reset_warmup: 0,
         };
 
         if declared.is_none() {
@@ -439,6 +470,11 @@ impl TrackSource {
                 // the decoder keeps cross-packet state (an MP3 bit reservoir,
                 // say) that a seek invalidates.
                 self.decoder.reset();
+                // A reset re-primes the codec's own warm-up (libopus re-runs
+                // its normative pre-skip), so the first packets after the
+                // reset owe its discard from their heads — exactly the
+                // declared delay, once, and nothing more (L49's known limit).
+                self.post_reset_warmup = self.codec_warmup;
             }
             Err(_) => {
                 // The reader refused the seek — an offset past the end of a
@@ -551,6 +587,24 @@ impl TrackSource {
                 } else {
                     // The whole packet lies before the seek target; the next
                     // one starts closer to it.
+                    continue;
+                }
+            }
+            // The warm-up the reset re-primed is spent from the heads of the
+            // packets that follow, on top of the seek's own drop: those frames
+            // are decoder re-priming, not content, so dropping them lines the
+            // first content frame after the seek up with the continuous decode
+            // and shifts nothing. A seek to frame 0 never resets, so it never
+            // re-applies the file-start priming here.
+            if self.post_reset_warmup > 0 {
+                let room = packet_frames - head;
+                let warm = usize::try_from(self.post_reset_warmup).unwrap_or(usize::MAX);
+                let spent = warm.min(room);
+                head += spent;
+                self.post_reset_warmup -= u64::try_from(spent).unwrap_or(0);
+                if head >= packet_frames {
+                    // The drop plus the warm-up consumed the whole packet;
+                    // whatever is still owed comes out of the next one.
                     continue;
                 }
             }
