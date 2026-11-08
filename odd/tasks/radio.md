@@ -432,3 +432,31 @@ playing `StationStream`: one GET with `Icy-MetaData: 1` sent before the body, th
 - Wrapper playlists and HLS are **not** here by design: such a body fails as
   `NotAudio` and T5b2 resolves or rejects it. ureq is declared `3.1` in `Cargo.toml`
   but resolves to 3.5.1; the three knobs exist in both.
+
+**L18** — T5b2 closed (`fee6def`, 14 tests in `radio_stream`: **588 green across 33
+binaries**, twice, clippy clean). A station whose URL is a one-entry `.pls`/`.m3u`
+now plays instead of dying as `NotAudio`, which was a message that told a user
+nothing.
+
+- **Bounded inspection, no lost byte.** The first 16 KiB of the body are read into
+  a buffer for sniffing and then chained back with `Cursor::new(prefix).chain(body)`
+  when the body turns out to be audio. Discarding the prefix would have decapitated
+  the first frames — the classic way a station "plays but crackles".
+- **One level, proven by counting.** The resolved URL is requested exactly once
+  (`["/station.pls", "/audio"]`); a nested wrapper is `["/one.pls", "/two.m3u"]` and
+  never `/audio`; an HLS manifest records `["/stream.m3u8"]` and **no** segment,
+  with a `/seg0.ts` route registered so a stray fetch would have answered 200.
+  Counting beats asserting.
+- **HLS fails before anything decodes**, with its own `StreamError::Hls`, instead of
+  symphonia's "no suitable format reader found" — the RED output shows that exact
+  string, which is what a user would have read.
+- **A required test rewrite, disclosed**: the T5b1 test that asserted "not audio" used
+  an M3U pointing at `http://example.com`. Under this change that body resolves by
+  design, so the test would have fired a **real network request**. It now feeds junk
+  bytes and keeps the same invariant; the wrapper case is covered properly by the new
+  tests.
+- **A real platform flake, found and fixed**: on macOS a socket accepted from a
+  non-blocking listener inherits `O_NONBLOCK`, so the test server read an empty
+  request and answered 404 before the request arrived. Fixed test-side
+  (`set_nonblocking(false)` after accept, read until headers) and confirmed with ten
+  consecutive full-suite runs. Worth remembering for any future fake server here.
