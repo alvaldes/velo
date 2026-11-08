@@ -51,9 +51,12 @@ jobs:
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
 
-      # aarch64 Linux is cross-built on the ubuntu x86_64 runner with `cross`:
-      # its glibc image carries the aarch64 toolchain and the ALSA headers
-      # cpal links against, so one tool covers both halves of the job.
+      # aarch64 Linux is cross-built on the ubuntu x86_64 runner with `cross`.
+      # The cross image carries the aarch64 toolchain, but NOT the ALSA headers
+      # or cmake the dependencies need — run 42519251288 (v0.10.1) died in
+      # alsa-sys with "No package 'alsa' found". Cross.toml's pre-build hook
+      # installs libasound2-dev and cmake inside the container before any
+      # build script runs, so no extra step is needed here.
       - name: Install cross (aarch64 Linux cross-build)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         uses: taiki-e/install-action@v2
