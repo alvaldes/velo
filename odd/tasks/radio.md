@@ -85,7 +85,9 @@ is English. Footer shows `● live` instead of a position and total.
 | T3 | S1, S8 | worker | `src/radio/{client,directory}.rs`: Radio Browser client, indexes, station search, codec filter from symphonia features | `a0f946a` |
 | T4 | S5 | worker | `src/radio/store.rs`: atomic `radio.toml` for favourites, pins and hand-added stations | `654f348` |
 | T5 | S2, S3 | parent | stream engine: `MediaSource` over the HTTP body, queue entry `File \| Station`, live semantics; **blocked on the other session's T15 (symphonia 0.6)** | |
-| T6 | S9 | parent | radio view in `src/ui/mod.rs`; **serialised with the other session's artwork work** | |
+| T6a | S9 | worker | `src/ui/radio.rs`: the view's state machine, sections, fuzzy filter and order card, hooked with 41 additive lines in `src/ui/mod.rs` | `9e3e835` |
+| T6b | S9 | parent | wiring: `RadioStore` load, `country::detect`, directory fetch for countries/tags/stations, refresh, catalog handoff | |
+| T6c | S9, S3 | parent | playing a station and the `● live` footer; **needs T5**; also README `## Keys` and the help card | |
 | T7 | S5 | worker | country from the locale, asked once | `fc650a3` |
 
 ## Log
@@ -224,9 +226,44 @@ A curated `TZ`→country table remains possible as **T7b** if a real case appear
 it is not worth untested guessing now.
 
 **Slice 5** is T7 alone (`fc650a3`, 199 lines), back inside the review slice.
+**Status of the cross-session pair.** T5 (the stream engine) still waits for the
+other session's T15 (symphonia 0.6) so the `MediaSource` seam is not written
+against 0.5 and rewritten. That session has since committed T16 (`main` moved to
+`1e7e36d`), ceded `src/audio/output.rs`, released `src/ui/mod.rs`, and — at the
+human's request — moved T15 ahead of its ReplayGain writer, so the wait is now a
+single migration rather than a hidden queue.
 
-**Status of the blocked pair.** T5 (the stream engine) waits for the other
-session's T15 (symphonia 0.6) so the `MediaSource` seam is not written against
-0.5 and rewritten; T6 (the radio view) waits for that session to finish its
-artwork check so two writers do not touch `src/ui/mod.rs`. `main` is still at
-`46ca28a` with T16 uncommitted, so neither has landed yet.
+**L11** — T6a closed (`9e3e835`, 1439 lines: 13 tests, 510 green in the whole
+suite, clippy `-D warnings` clean). The peer released `src/ui/mod.rs` — its
+artwork check is look-and-confirm and it will warn before touching
+`draw_artwork`/`pane`/`refresh_artwork` — so the view went ahead while T15 is
+being migrated.
+
+- **The view is a new module on purpose.** Almost everything is in
+  `src/ui/radio.rs` (888 lines), and `src/ui/mod.rs` took 41 purely additive lines:
+  one module declaration, one `Option<RadioView>` field with its two initialisers,
+  an early key dispatch that is inert while the view is closed, one `R` arm, one
+  outcome-mapping function, and one draw call over the body area. Nothing in
+  `draw_artwork`, `pane` or `refresh_artwork`.
+- **This is the biggest slice of the feature and the honest record is that I
+delegated it too wide.** The rule is to split at delegation time; T6a should have
+  been two tasks (state machine, then render and overlay). It is not split now
+  because the cost moved: the file is written and green, and cutting it would
+  churn more than it saves. The reviewer gets a map instead — read the 41-line
+  `src/ui/mod.rs` diff first (that is the risk to existing behaviour), then the
+  state machine in `radio.rs`, then treat `render` as mechanical.
+- **Decisions taken during review:** `o` opens the order card while radio is
+  open and stays the settings card when it is closed (documented dual meaning);
+  favourite rows show the codec, not a bitrate, because `store::Favorite` has no
+  bitrate — only catalog rows have one; hand-added stations and favourites are
+  top-level rows rather than sub-levels; `tab` leaves radio for the queue.
+- **The view opens empty today, deliberately.** `R` creates `RadioView::empty()`:
+  static browse rows, no indexes, no store, no catalog. Nothing fakes data and
+  `enter` on a station only holds the selection. That is why the rest of the UI
+  work splits: **T6b** wires the store, the country, the directory and the
+  refresh; **T6c** plays a station, draws `● live`, and updates the README `## Keys`
+  and the help card — both of which the worker correctly flagged as unreachable
+  from its surfaces and therefore still undocumented.
+
+**Slice 6** is T6a alone (`9e3e835`, 1439 lines) — recorded as oversized, with the
+review map above.
