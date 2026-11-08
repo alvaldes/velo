@@ -515,3 +515,25 @@ is the proof, and the one new test is the mechanism T5c2 will rely on.
   construction-only.
 - Known and intended: `Entry::as_path()` cannot survive a `Station`; T5c2 widens the
   consumers rather than faking a path.
+
+**L21** — `main` synchronised (5964afb, the merge) and the doc corrected (`3763ee9`): **604
+green across 34 binaries**, clippy and `fmt --check` clean, and `radio_seam` — the
+ICY-wrapped MP3 — still passes.
+
+- **The merge brought T14b with zero conflicts**, and `build()` needed no work from
+  me: T14b adapted its own call site to `make_decoder` returning `(decoder,
+  symphonia_built)` and threaded the boolean into `declared_priming`. The
+  `merge-tree` prediction ("git will not ask you for anything") was right about git
+  and, this time, also about the compiler; it was still the wrong thing to trust, and
+  `cargo test` was the check that mattered.
+- **The fix that came out of my question is in and does what it promised**: for a
+  live stream the encoder padding is kept out of the trim while the normative Opus
+  pre-skip is still removed, because `OpusHead` travels inside the body. The
+  peer proved its test discriminates by stashing the fix and watching it fail by
+  exactly 312 samples (48000 vs 47688) — a test that only runs after the fix proves
+  nothing.
+- **My own comment was the last lie in the file** and it is now corrected: it claimed
+  a live stream "declares no priming", which stopped being true the moment the
+  pre-skip was fixed. A comment that describes the old behaviour with the authority of
+  sitting next to the code is worse than no comment, and this is the second time in
+  this feature that a doc outlived its truth.
