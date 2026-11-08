@@ -1,14 +1,14 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
-## [0.10.1] - 2026-11-08
+## [0.10.2] - 2026-11-08
 
 ### Fixes
-- **build:** Tell CMake 4 the policy floor audiopus_sys needs
+- **ci:** Install alsa headers and cmake in the cross container
 
 ### Maintenance
-- **release:** Make the release buildable by hand, and fix the artifact path
-## [0.10.0] - 2026-11-08
+- Repo hygiene — contributing guide, issue templates, CI build deps (#1)
+## [0.10.1] - 2026-11-08
 
 ### Features
 - **audio:** Bit-perfect playback reopens the stream per track T17
@@ -28,12 +28,14 @@ Every release of velo, newest first, generated from its Conventional Commits.
 - **audio:** A live Opus stream trims its pre-skip too
 - **audio:** A seek does not emit the codec's warm-up
 - **build:** Build libopus with cmake, not autotools
+- **build:** Tell CMake 4 the policy floor audiopus_sys needs
 
 ### Tests
 - **aac:** Pin the content, not the float bits, in the priming baseline
 
 ### Maintenance
 - **deps:** Migrate to symphonia 0.6.1 T15
+- **release:** Make the release buildable by hand, and fix the artifact path
 
 ### Merge
 - Bit-perfect (T17) into main
