@@ -632,3 +632,31 @@ regions did not.
 verified for both, its 16 tests and the whole suite pass, and the full gate is re-run at
 the next commit boundary. That is the price of two writers in one tree, and the price is
 paid in verification order, not in correctness of the code committed here.
+
+**L25** — T5c2b closed (`fbe75b5`, two files: 12 tests in `radio_queue`, **622 green across
+35 binaries**, clippy `--all-targets` and `fmt --check` clean, first time all three gates
+ran on the same tree). A live station gets exactly one retry before the queue moves on.
+
+- **The policy is data, not a hidden behaviour.** `Retry { attempts, delay }` with
+  `NONE` (one attempt, no wait) as the default and `ONCE` (two attempts, 2 s) requested
+  explicitly by production. That split came from the other session's review, and it is
+  why the opener stays a pure closure and the sleep is a real no-op in tests instead of
+  a promise they have to believe.
+- **The budget is per turn, not per episode** — the bug neither of us had seen. An opener
+  that answers `Ok` and a stream that dies 200 ms later would loop forever under a
+  per-episode counter, because every successful reopen restored the budget. It is spent
+  per failure and restored **only by audio actually emitted**; "the open worked" is not
+  progress.
+- **Three tests make the rule falsifiable**: always-`Ok` opener with a first `read` that
+  always fails ends in `Turn::Failed` with exactly **two** opens; two "audio then failure"
+  episodes take **three** opens; and a retry neither resets the turn nor repaints the
+  title (a `None` after a reopen means "not announced yet", not "the title went away").
+- **Disclosed, and the only unobserved evidence in this feature**: the RED for the last
+  two tests is argued against the previous shape (a single `retried` flag), not observed —
+  they were written once the final shape existed. Everything else was seen failing first.
+- Deviations kept: `#[expect(clippy::too_many_arguments)]` at eight parameters, matching
+  the five functions in the file that already do; the five test-support drains build
+  `Sequence` with `Retry::NONE` (no `src/` caller), production asks for `ONCE`; and the
+  failure message shown after an exhausted budget is the last error, not a composition.
+
+**Slice 10** is T5c2b alone (`fbe75b5`), ~300 lines across two files — inside the slice.
