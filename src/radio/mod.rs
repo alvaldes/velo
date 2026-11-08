@@ -7,3 +7,4 @@ pub mod directory;
 pub mod icy;
 pub mod lists;
 pub mod store;
+pub mod stream;
