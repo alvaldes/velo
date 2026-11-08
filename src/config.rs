@@ -104,6 +104,14 @@ Subsonic:
                                      covers), print per cache how many
                                      files and how much space were freed,
                                      then exit
+ReplayGain:
+    velo --replaygain-scan <file>...   Measure each file (all files in one
+                                     invocation are one album) and print the
+                                     ReplayGain tags velo would write — a dry
+                                     run; nothing is ever written
+    velo --replaygain-scan --apply <file>...
+                                 Write those tags into the files, keeping
+                                     every tag they already carry
 
 Interface keys: j/k move, enter open/play, tab switches to the queue view
     (a append, d remove, J/K move, enter play from there), / search, ←/→ or
@@ -172,6 +180,18 @@ pub struct Cli {
     /// two cache directories is ever touched.
     #[arg(long)]
     pub cache_clean: bool,
+
+    /// Measure EBU R128 loudness for each file (every file in one invocation
+    /// is one album) and print the `ReplayGain` tags velo would write — a dry
+    /// run: nothing is ever written without `--apply` (T13).
+    #[arg(long)]
+    pub replaygain_scan: bool,
+
+    /// With `--replaygain-scan`: write the measured `ReplayGain` tags into the
+    /// files, preserving every tag they already carry. Without the scan this
+    /// is a usage error; no other velo command ever writes to a music file.
+    #[arg(long, requires = "replaygain_scan")]
+    pub apply: bool,
 
     /// Library root to index or browse; overrides `library` in the config file.
     #[arg(long, value_name = "PATH")]

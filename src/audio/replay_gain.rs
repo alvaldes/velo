@@ -19,8 +19,9 @@
 
 use std::path::Path;
 
-use lofty::file::TaggedFileExt;
-use lofty::tag::ItemKey;
+use lofty::config::WriteOptions;
+use lofty::file::{AudioFile as _, TaggedFileExt};
+use lofty::tag::{ItemKey, Tag};
 
 use crate::config::ReplayGainMode;
 
@@ -185,4 +186,76 @@ fn read_loudness(path: &Path) -> Option<Loudness> {
             .get_string(ItemKey::ReplayGainAlbumPeak)
             .and_then(parse_peak),
     })
+}
+
+// ---- writing the tags (T13) -------------------------------------------------
+
+/// The `ReplayGain` values one file's tags get, as `velo --replaygain-scan`
+/// computes them: track values from that file's own measurement, album values
+/// from the whole invocation's pooled one.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GainTags {
+    /// `REPLAYGAIN_TRACK_GAIN`, in dB.
+    pub track_gain_db: f64,
+    /// `REPLAYGAIN_TRACK_PEAK`, linear.
+    pub track_peak: f32,
+    /// `REPLAYGAIN_ALBUM_GAIN`, in dB.
+    pub album_gain_db: f64,
+    /// `REPLAYGAIN_ALBUM_PEAK`, linear.
+    pub album_peak: f32,
+}
+
+/// A `ReplayGain` dB value as the `ReplayGain` 2.0 spec writes it: two decimal
+/// places, an explicit sign and a `dB` unit — `-7.35 dB`, `+2.00 dB`.
+#[must_use]
+pub fn format_gain_db(db: f64) -> String {
+    format!("{db:+.2} dB")
+}
+
+/// A `ReplayGain` peak as six decimal places, linear: `0.500000`.
+#[must_use]
+pub fn format_peak(peak: f32) -> String {
+    format!("{peak:.6}")
+}
+
+/// Writes the four `ReplayGain` tags into `path`'s existing tag.
+///
+/// The write goes through lofty and preserves everything the file already
+/// carries: the tag is opened in place (`primary_tag`, else the first one) and
+/// every other item — artist, title, comments, cover art — rides along to the
+/// save untouched. Only the four `ReplayGain` keys are inserted (replacing any
+/// older values). A file with no tag at all gets one of its format's primary
+/// type.
+///
+/// # Errors
+///
+/// The file cannot be read or written — a missing file, an unsupported format,
+/// or a read-only file. Nothing is half-written: the tag is saved in one
+/// lofty call, and a failed save leaves the caller to report the file.
+pub fn write_tags(path: &Path, tags: &GainTags) -> Result<(), String> {
+    let mut tagged = lofty::read_from_path(path).map_err(|error| error.to_string())?;
+    if tagged.primary_tag_mut().is_none() && tagged.first_tag_mut().is_none() {
+        tagged.insert_tag(Tag::new(tagged.file_type().primary_tag_type()));
+    }
+    let Some(tag) = (match tagged.primary_tag_mut() {
+        Some(tag) => Some(tag),
+        None => tagged.first_tag_mut(),
+    }) else {
+        // The file type accepts no tag lofty can write; refusing beats a
+        // silent success that wrote nothing.
+        return Err(format!("{} accepts no writable tag", path.display()));
+    };
+    tag.insert_text(
+        ItemKey::ReplayGainTrackGain,
+        format_gain_db(tags.track_gain_db),
+    );
+    tag.insert_text(ItemKey::ReplayGainTrackPeak, format_peak(tags.track_peak));
+    tag.insert_text(
+        ItemKey::ReplayGainAlbumGain,
+        format_gain_db(tags.album_gain_db),
+    );
+    tag.insert_text(ItemKey::ReplayGainAlbumPeak, format_peak(tags.album_peak));
+    tagged
+        .save_to_path(path, WriteOptions::default())
+        .map_err(|error| error.to_string())
 }
