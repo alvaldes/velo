@@ -69,7 +69,7 @@ Root folder: `/Users/alvaldes/Music/Library` (L15). Metadata comes from tags fir
 | T12b | Sync the remote library into the index as rows with a `source` column; search over them | S14 | worker (clone) | `b2eef0b` |
 | T12c | Cache-on-play: fetch the original bytes with `format=raw`, then play locally (keeps seek, gapless, bit-perfect) | S14 | pending | `05e6c76` |
 | T12d | Remote cover art via `getCoverArt` and scrobbling on track change | S14 | pending | `3662e85` |
-| T13 | ReplayGain tag writer | S15 | inline | — |
+| T13 | ReplayGain tag writer | S15 | inline | `c006a62` |
 | T14 | Opus decode via a bundled `libopus` (`audiopus_sys`), keeping the single-binary promise | S5 | inline | — |
 | T15 | Evaluate the symphonia 0.6 API (`codecs::audio::AudioDecoder`, generic buffers) and migrate behind the existing tests | S5, S7 | inline | `b2187ad` |
 | T16 | Trim AAC/MP4 encoder priming: symphonia 0.5 does not populate `delay`/`padding` for isomp4, so an M4A join carries up to ~1024 frames of priming (read `iTunSMPB` or the `elst` edit list) | S7 | inline | `1e7e36d` |
@@ -382,4 +382,16 @@ The surface was **17 references** and the 444-test suite was the differential, s
 **`TrackSource`'s public shape did not change, deliberately.** The parallel radio session is building a seam on it, and T15 existed partly so they build it once instead of twice. Sequencing across sessions is a design decision, not a courtesy.
 
 symphonia 0.6.1 still ships no Opus decoder, so T14 stands exactly as written.
+
+**L45** (T13 closed in `c006a62`): ReplayGain measured and written, and the safety was the design.
+
+The metering follows the standards instead of approximating them: the two K-weighting biquads re-derived per sample rate from BS.1770-4's analog parameters, 400 ms blocks at 75 % overlap, absolute gate at −70 LUFS, relative gate at −10 LU. Album gain is a **second measurement pooling every file's blocks**, never an average of per-track numbers — averaging is what album gain exists to avoid.
+
+**The anchors are known answers**: a 1 kHz sine at −20 dBFS integrates to −20 LUFS within 0.1, and that works for a reason worth stating — K-weighting is +0.70 dB at 1 kHz, which cancels the −0.691 offset in the formula almost exactly. The 48 kHz coefficients are pinned to the standard's own table, because a filter copied from a blog is a filter nobody can defend later.
+
+**Everything about the command follows from "this writes to somebody's files".** The default is read-only: `--replaygain-scan` measures and prints what it *would* write, and the file is untouched — verified byte for byte on a real track. `--apply` is refused without the scan, so nobody writes tags by accident. Writing preserves every existing tag, proved by a round trip carrying artist, title, comment, genre and a cover picture through unchanged: **destroying a user's tags is worse than not writing at all.** Per file the report says `ok`, `skipped (no audio)` or `failed (reason)`, and one bad file never stops the run.
+
+A real track from the library measured **−10.74 dB** of gain with a **peak of 1.10** — a master already running hot, which the reader's clipping cap (L33) keeps from being amplified into distortion. The two halves of ReplayGain finally meet: measure it here, respect it there.
+
+Follow-ups left explicit: true peak (4× oversampling) instead of sample peak, and round trips on real MP3/FLAC/M4A files rather than the hand-built WAVs the tests use — the lofty path is the same, but "the same path" is not a measurement.
 
