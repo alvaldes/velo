@@ -17,6 +17,7 @@
 pub mod artwork;
 pub mod complete;
 pub mod indexing;
+pub mod radio;
 pub mod search;
 pub mod shuffle;
 pub mod theme;
@@ -361,6 +362,9 @@ pub struct App<'lib> {
     help: Option<Help>,
     /// The settings card while it is open: its cursor and its scroll (S6).
     settings: Option<SettingsCard>,
+    /// The open radio view (T6a): `None` while only the library and the
+    /// queue are on screen.
+    radio: Option<radio::RadioView>,
     /// The palette as the `[theme]` table wrote it (S4): what the settings
     /// card rebuilds with one role replaced when a colour is cycled.
     colors: ThemeColors,
@@ -458,6 +462,7 @@ impl<'lib> App<'lib> {
             protocol: RefCell::new(None),
             help: None,
             settings: None,
+            radio: None,
             colors: ThemeColors::default(),
             library_setup: None,
             config_file: None,
@@ -521,6 +526,7 @@ impl<'lib> App<'lib> {
             protocol: RefCell::new(None),
             help: None,
             settings: None,
+            radio: None,
             colors: ThemeColors::default(),
             library_setup: None,
             config_file: None,
@@ -1548,6 +1554,13 @@ impl<'lib> App<'lib> {
         if self.help.is_some() {
             return self.on_help_key(event.code);
         }
+        // The radio view (T6a) owns its keys while it is open; the keys it
+        // does not claim still reach the lists and the transport.
+        if self.radio.is_some()
+            && let Some(action) = self.radio_key(event)
+        {
+            return action;
+        }
 
         match event.code {
             KeyCode::Char('j') | KeyCode::Down => {
@@ -1628,6 +1641,12 @@ impl<'lib> App<'lib> {
                 self.settings = Some(SettingsCard::default());
                 Action::None
             }
+            // The radio view (T6a): `R` opens it closed, and its own key
+            // handler closes it again once it is open.
+            KeyCode::Char('R') => {
+                self.radio = Some(radio::RadioView::empty());
+                Action::None
+            }
             KeyCode::Char('/') if self.library.is_some() => {
                 self.open_search();
                 Action::None
@@ -1642,6 +1661,24 @@ impl<'lib> App<'lib> {
             }
             KeyCode::Char('q') => Action::Quit,
             _ => Action::None,
+        }
+    }
+
+    /// The keys the open radio view owns (T6a); `None` lets the key fall
+    /// through to the rest of the keymap.
+    fn radio_key(&mut self, event: ratatui::crossterm::event::KeyEvent) -> Option<Action> {
+        match self.radio.as_mut()?.key(event) {
+            radio::RadioOutcome::Handled => Some(Action::None),
+            radio::RadioOutcome::Close => {
+                self.radio = None;
+                Some(Action::None)
+            }
+            radio::RadioOutcome::ToQueue => {
+                self.radio = None;
+                self.view = View::Queue;
+                Some(Action::None)
+            }
+            radio::RadioOutcome::Pass => None,
         }
     }
 
@@ -2098,6 +2135,10 @@ impl<'lib> App<'lib> {
         self.draw_now_playing(frame, now);
         self.draw_header(frame, header);
         self.draw_body(frame, body);
+        // The radio view (T6a) replaces the list, not the block above it.
+        if let Some(view) = &self.radio {
+            view.render(frame, body, &self.theme);
+        }
         self.draw_footer(frame, footer);
         self.draw_artwork(frame, pane);
         if let Some(help) = &self.help {
