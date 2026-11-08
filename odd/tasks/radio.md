@@ -660,3 +660,30 @@ ran on the same tree). A live station gets exactly one retry before the queue mo
   failure message shown after an exhausted budget is the last error, not a composition.
 
 **Slice 10** is T5c2b alone (`fbe75b5`), ~300 lines across two files — inside the slice.
+
+**L26** — T6c-i closed (`260c62b`, three files: 23 tests in `ui_radio`, **632 green across 35
+binaries**, and the three gates — test, `clippy --all-targets`, `fmt` — each with its own
+exit code). A station chosen in the radio view now reaches the queue and plays, which was
+the last unwired seam of the feature.
+
+- **The call path, for whoever reads it next**: `enter` → `RadioView::key` → `enter()` →
+  `selection()` → `station_of_row` → `RadioOutcome::Play { url, name }` →
+  `App::radio_key` pushes `Entry::Station` through `edit_queue` → `Action::PlayQueue { from }`
+  → the same `start_stream` a library queue row takes → the producer's `Station` arm →
+  `LiveOpener`. No second way into the engine.
+- **A station reads as live**: the clock row says `● live` in the accent with no position,
+  no total and no filled bar (the duration is `None`, by contract from `open_stream`), the
+  now-playing block prefers the player's ICY title and falls back to the station name, and
+  `seek` refuses with the message the audio layer already used. A file's row is untouched.
+- **A deliberate behaviour change**: `a` while the radio view is open is now consumed by
+  the view on every row (it appends a station), where it used to fall through to the
+  library's append. Recorded because it is the kind of change a reviewer should meet in a
+  commit message and not by surprise.
+- **One design judgement to inspect**: no test can hold a `Player` (it opens a device), so
+  the transport tests drive two `#[doc(hidden)]` hooks (`show_radio_catalog`,
+  `show_playing_for_tests` + `TransportFixture`) that stand in the values a real player
+  reports. Production never sets the fixture and every reader asks the real player first —
+  the seam is test-only, but it is a seam, so it is named here rather than buried.
+- The help card and the README were left untouched on purpose: they are T6c-ii, which is
+  documentation, and it comes after the feature is merged with `main` so the text is
+  written once against the final state.
