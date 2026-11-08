@@ -12,10 +12,6 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
-    # audiopus_sys builds libopus from its own CMakeLists, which declares a
-    # minimum CMake older than 4.x accepts; the escape hatch is documented.
-    env:
-      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
