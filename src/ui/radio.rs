@@ -83,6 +83,13 @@ pub enum RowKind {
     BrowseCountries,
     /// `Browse genres & tags`.
     BrowseTags,
+    /// `Use my location`: the country question, shown while the store has
+    /// no answer. `y` on the row stores the detected country, `n` stores
+    /// the decline; no modal of its own (T6b, S5).
+    AskCountry {
+        /// The ISO 3166-1 code the locale yields, stored on `y`.
+        code: String,
+    },
     /// The user's own country.
     NearYou {
         /// ISO 3166-1 code.
@@ -156,6 +163,10 @@ const ORDER_ROWS: [(&str, Order); 5] = [
 /// The radio view. Build it with [`RadioView::new`] over the loaded indexes
 /// and the preference store, or [`RadioView::empty`] when nothing is loaded
 /// yet; the sections appear only when they have content.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the flags are independent facts of the view: whether the filter\n    is being typed, whether the wired view wants its browse rows before\n    their indexes load, whether the store changed since the last save ask,\n    and whether ctrl-r asked for a refresh; bundling them would obscure each"
+)]
 #[derive(Debug)]
 pub struct RadioView {
     /// The station preferences: favourites, pins, hand-added stations and
@@ -188,6 +199,16 @@ pub struct RadioView {
     order: Order,
     /// The order overlay's cursor while it is open; `None` when it is not.
     order_card: Option<usize>,
+    /// Whether the two browse rows show before their indexes load: the
+    /// wired view wants them from the start (T6b); the bare constructors
+    /// keep the sections appearing only with content.
+    browse_rows: bool,
+    /// The country the locale yields, while the store has no answer: the
+    /// `Use my location` row stands on it (S5, T6b).
+    country_ask: Option<String>,
+    /// Whether the store changed since the last save ask: the wiring reads
+    /// this and persists the file.
+    dirty: bool,
     /// Whether `ctrl-r` asked the caller for a fresh directory, not yet
     /// taken.
     refresh_wanted: bool,
@@ -216,6 +237,9 @@ impl RadioView {
             typing: false,
             order: Order::default(),
             order_card: None,
+            browse_rows: false,
+            country_ask: None,
+            dirty: false,
             refresh_wanted: false,
         }
     }
@@ -234,6 +258,40 @@ impl RadioView {
     pub fn set_catalog(&mut self, stations: Vec<Station>) {
         self.catalog = stations;
         self.clamp();
+    }
+
+    /// Replaces the country index, as `/countries` answered (T6b). An
+    /// empty answer is still an answer: the section stays, its count says
+    /// zero.
+    pub fn set_countries(&mut self, countries: Vec<Country>) {
+        self.countries = countries;
+        self.clamp();
+    }
+
+    /// Replaces the tag index, as `/tags` answered (T6b).
+    pub fn set_tags(&mut self, tags: Vec<Tag>) {
+        self.tags = tags;
+        self.clamp();
+    }
+
+    /// Shows the two browse rows before their indexes load, so the
+    /// sections can be entered and the loading can start lazily (T6b).
+    pub fn show_browse_rows(&mut self) {
+        self.browse_rows = true;
+    }
+
+    /// Sets the country the locale yields while the store has no answer
+    /// (S5, T6b). `Some` shows the one `Use my location` row, answered
+    /// with `y`/`n` right on it; `None` — the locale yields no country —
+    /// shows no row and nothing else is gated on it.
+    pub fn ask_country(&mut self, detected: Option<String>) {
+        self.country_ask = detected;
+    }
+
+    /// Whether the store changed since the last save ask, taking the ask:
+    /// the wiring saves the file when this answers true (T6b).
+    pub fn take_dirty(&mut self) -> bool {
+        std::mem::take(&mut self.dirty)
     }
 
     /// Where the view stands.
@@ -375,6 +433,10 @@ impl RadioView {
                 self.open_countries();
                 RadioOutcome::Handled
             }
+            KeyCode::Char('y' | 'n') if self.on_ask_row() => {
+                self.answer_country(event.code == KeyCode::Char('y'));
+                RadioOutcome::Handled
+            }
             KeyCode::Char('o') => {
                 self.open_order();
                 RadioOutcome::Handled
@@ -474,7 +536,8 @@ impl RadioView {
             RowKind::Tag { name } => Some(Place::Tag { name }),
             RowKind::CatalogStation { .. }
             | RowKind::AddedStation { .. }
-            | RowKind::FavoriteStation { .. } => None,
+            | RowKind::FavoriteStation { .. }
+            | RowKind::AskCountry { .. } => None,
         };
         if let Some(place) = next {
             self.stack.push(self.place.clone());
@@ -535,45 +598,75 @@ impl RadioView {
         self.order_card = Some(cursor);
     }
 
+    /// Answers the country question on the selected `Use my location` row:
+    /// `y` stores the locale's country, `n` stores the decline. Either
+    /// answer marks the store for saving; the row then becomes the
+    /// near-you row, or goes away (T6b, S5).
+    fn answer_country(&mut self, yes: bool) {
+        let Some(code) = self.country_ask.take() else {
+            return;
+        };
+        if yes {
+            self.own_country = Some(code.clone());
+            self.store.country = Some(code);
+        } else {
+            self.store.country = Some(String::from("none"));
+        }
+        self.dirty = true;
+    }
+
+    /// Whether the cursor stands on the `Use my location` row.
+    fn on_ask_row(&self) -> bool {
+        self.selection()
+            .is_some_and(|row| matches!(row.kind, RowKind::AskCountry { .. }))
+    }
+
     /// `f` on the selected row: a station toggles its favourite, a place
     /// toggles its pin, a browse row and a tag do nothing. Both toggles
-    /// decide on the station key, never on the URL as written.
+    /// decide on the station key, never on the URL as written. Every
+    /// change marks the store for saving (T6b).
     pub fn toggle_mark(&mut self) {
         let Some(row) = self.selection() else {
             return;
         };
         match row.kind {
             RowKind::CatalogStation { station, .. } => {
-                self.store.toggle_favorite(Favorite {
+                let toggled = self.store.toggle_favorite(Favorite {
                     name: station.name,
                     url: station.url_resolved,
                     countrycode: station.countrycode,
                     codec: station.codec,
                 });
+                self.dirty |= toggled.needs_save();
             }
             RowKind::AddedStation { name, url } => {
-                self.store.toggle_favorite(Favorite {
+                let toggled = self.store.toggle_favorite(Favorite {
                     name,
                     url,
                     countrycode: String::new(),
                     codec: String::new(),
                 });
+                self.dirty |= toggled.needs_save();
             }
             RowKind::FavoriteStation { favorite } => {
-                self.store.toggle_favorite(favorite);
+                let toggled = self.store.toggle_favorite(favorite);
+                self.dirty |= toggled.needs_save();
             }
             RowKind::NearYou { code } | RowKind::Country { code, .. } => {
                 let name = self.country_name(&code);
-                self.store.toggle_pin(Pinned {
+                let toggled = self.store.toggle_pin(Pinned {
                     code,
                     name,
                     state: String::new(),
                 });
+                self.dirty |= toggled.needs_save();
             }
             RowKind::Pinned { code, name, state } => {
-                self.store.toggle_pin(Pinned { code, name, state });
+                let toggled = self.store.toggle_pin(Pinned { code, name, state });
+                self.dirty |= toggled.needs_save();
             }
-            RowKind::BrowseCountries | RowKind::BrowseTags | RowKind::Tag { .. } => {}
+            RowKind::BrowseCountries | RowKind::BrowseTags | RowKind::Tag { .. }
+            | RowKind::AskCountry { .. } => {}
         }
     }
 
@@ -628,11 +721,30 @@ impl RadioView {
     /// directly, in the order the layout fixed.
     fn top_rows(&self) -> Vec<Row> {
         let mut rows = Vec::new();
-        if !self.countries.is_empty() {
+        // The browse rows belong to the sections, not to their content:
+        // the wired view shows them before the indexes load, so entering
+        // one can start the load (T6b).
+        if self.browse_rows || !self.countries.is_empty() {
+            let fact = if self.countries.is_empty() {
+                String::new()
+            } else {
+                plural(self.countries.len(), "country", "countries")
+            };
             rows.push(Row {
                 label: "Browse all countries".to_owned(),
-                fact: plural(self.countries.len(), "country", "countries"),
+                fact,
                 kind: RowKind::BrowseCountries,
+            });
+        }
+        // The country question takes the near-you row's place while it is
+        // unanswered: one row, answered with `y`/`n` right on it (T6b, S5).
+        if self.store.country.is_none()
+            && let Some(code) = self.country_ask.clone()
+        {
+            rows.push(Row {
+                label: "Use my location".to_owned(),
+                fact: String::new(),
+                kind: RowKind::AskCountry { code },
             });
         }
         if let Some(code) = self.own_country.clone() {
@@ -659,10 +771,15 @@ impl RadioView {
                 },
             });
         }
-        if !self.tags.is_empty() {
+        if self.browse_rows || !self.tags.is_empty() {
+            let fact = if self.tags.is_empty() {
+                String::new()
+            } else {
+                plural(self.tags.len(), "tag", "tags")
+            };
             rows.push(Row {
                 label: "Browse genres & tags".to_owned(),
-                fact: plural(self.tags.len(), "tag", "tags"),
+                fact,
                 kind: RowKind::BrowseTags,
             });
         }
