@@ -395,3 +395,13 @@ A real track from the library measured **−10.74 dB** of gain with a **peak of 
 
 Follow-ups left explicit: true peak (4× oversampling) instead of sample peak, and round trips on real MP3/FLAC/M4A files rather than the hand-built WAVs the tests use — the lofty path is the same, but "the same path" is not a measurement.
 
+**L46** (the two limits of T13, closed in `387dd53`): true peak and real-format round trips.
+
+**True peak is now the peak.** The signal is oversampled 4× with the interpolating filter **ITU-R BS.1770-4 Annex 2** specifies — the standard's own 48-tap, four-phase table, transcribed with each phase's printed DC sum pinned by a unit test — and the largest absolute value of that oversampled signal is what gets written. The motivating case is the Annex's own: a full-scale sine at a quarter of the sample rate reports a sample peak of 0.99997 and a true peak of **1.4277**. A peak under-reported by 3 dB is a clipping cap that lets a track clip, which is the whole reason the cap exists.
+
+**The convincing number came from a real file, not a synthetic one**: the same track from the library reported a sample peak of `1.102890` before and `1.116036` after. The user-facing behaviour moved by exactly the inter-sample overshoot the feature exists to catch — a change you can point at.
+
+**Round trips stopped being an assumption.** MP3 and M4A fixtures are copied to scratch, tagged, read back through the reader the player uses, and every pre-existing item is asserted to survive **by name**. FLAC and Ogg cannot be tested honestly — no fixture, and neither `lofty` nor `symphonia` can encode one without a new dependency — so those tests are **absent rather than faked**. "The same lofty path" was never a measurement, and now the two formats that can be measured are.
+
+**A small lesson about delegation**: the worker that did this stopped at the one line it could not touch and *said so* — the CLI still built its tags from the sample peak, so the feature would have measured beautifully and reached no user. Wiring that line is what turned a measurement into a behaviour. A report that names what it could not finish is worth more than one that claims completion.
+
