@@ -570,3 +570,40 @@ and plays.
 **Slice 9** is T5c2a alone (`e2f31dc`): oversized at ~1000 lines across nine files, recorded
 as such. It is one behaviour (a station in the queue) but it carries a type change and a
 struct rename; if review wants smaller, the rename is separable in the history by file.
+
+**L23 — T5c2b was not started, and the reason is tooling, not design.** Two attempts
+were delegated and both timed out: the first stalled while exploring and wrote nothing;
+the second never received a model run event at all. The tree was verified clean after
+each (`git status` empty, `HEAD` unchanged), so there is nothing to revert and nothing
+half-done.
+
+Decided not to implement it inline in this session: the unit needs plumbing at **three**
+open sites in `src/audio/output.rs` (~1900 lines) — the first-entry open at the player
+constructor (`LiveOpener.open` around line 606), the producer's per-entry dispatch
+(around line 1376), and the read-error arm inside `play_station_turn` (around line 1690)
+— plus a delay that has to reach all three and an eleventh parameter on
+`drain_headless_with_opener`. That is precisely the kind of edit that goes wrong at the
+tail of a long context, and the whole feature's value so far came from doing these
+small and verified.
+
+**Design sketch for whoever resumes, so it is not re-derived:**
+
+- The policy: a station gets **exactly one** retry after an injectable delay (2 s in
+  production), then the queue advances with a `TrackFailure` naming the station. Files
+  never retry.
+- Open failures: a small helper `open_station_retrying(opener, url, delay)` used at both
+  open sites.
+- Read failures: hand `play_station_turn` a **reopen closure** that already contains
+  the sleep, so the read-error arm reassigns `source` and continues instead of failing;
+  the converter, gain and title state stay as they are. One extra parameter, no new
+  timer.
+- No silence watchdog: T5b1's per-read timeout already turns a stall into an error, and
+  two overlapping timeout mechanisms produce the bug where the inner one fires and the
+  outer one lies about why.
+- The delay must be settable from tests without wall-clock sleeping, which means it
+  travels from the caller, not from a constant read deep in the file.
+
+**Not part of T5c2b but owed by the plan** (both small, both listed in the task table):
+T6c (play-from-the-view, `● live` footer, README `## Keys` + help card) and T6d
+(`/states` so a region can be pinned). T5d — the manual check against a real station —
+is the gate for calling the engine done, and it needs the human's ears.
