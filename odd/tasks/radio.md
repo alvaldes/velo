@@ -45,8 +45,11 @@ passthrough.
 stations, deduplicated by station URL, written whole and atomically (write +
 rename). Never rewritten after a failed read. `config.toml` is untouched:
 `set_value`/`remove_value` edit it line by line and cannot carry arrays of tables.
-Country is opt-in: `TZ`, then `/etc/localtime`, then `/etc/timezone`, then
-locale; no geo-IP; stored as `country = "NO"` or `country = "none"`.
+Country is opt-in and read from the **locale alone** — `LC_ALL`, then
+`LC_MESSAGES`, then `LANG` — with no geo-IP and no timezone: a timezone gives a
+city and would need an untested timezone→country table, so it is not consulted.
+Stored as `country = "NO"` or `country = "none"`; when nothing yields a country
+there is no "near you" row and nothing else in the feature is gated on it.
 
 **S6 — A station's identity is the URL the directory listed.**
 Normalised only in scheme case, host case, default port and trailing slash.
@@ -83,7 +86,7 @@ is English. Footer shows `● live` instead of a position and total.
 | T4 | S5 | worker | `src/radio/store.rs`: atomic `radio.toml` for favourites, pins and hand-added stations | `654f348` |
 | T5 | S2, S3 | parent | stream engine: `MediaSource` over the HTTP body, queue entry `File \| Station`, live semantics; **blocked on the other session's T15 (symphonia 0.6)** | |
 | T6 | S9 | parent | radio view in `src/ui/mod.rs`; **serialised with the other session's artwork work** | |
-| T7 | S5 | worker | country from TZ/locale, asked once | |
+| T7 | S5 | worker | country from the locale, asked once | `fc650a3` |
 
 ## Log
 
@@ -205,3 +208,25 @@ through `create_new` + `rename`.
 same reason: one behaviour (the preferences file) pinned by one test file.
 **T7 is small by design; if anything here grows past ~400 lines it gets split at
 delegation time.**
+
+**L10** — T7 closed (`fc650a3`, 199 lines in three files: 21 tests, 497 green in
+the whole suite, clippy `-D warnings` clean). **S5 was rewritten: the timezone step
+is gone.** Decision 8 said "`TZ`, then `/etc/localtime`, then `/etc/timezone`, then
+locale", taking CLIAMP's order; a timezone yields a *city*, and turning a city into
+an ISO code needs a timezone→country database, which without a dependency is a
+hand-maintained table of hundreds of rows that no test would cover. A wrong "near
+you" row is worse than no row, so the country now comes from the locale alone,
+which carries it directly, and the code is validated against the directory's
+`/countries` by the caller. The worker flagged that S5 still claimed the old path
+while implementing the narrowed one — correct call, and this entry is the fix.
+
+A curated `TZ`→country table remains possible as **T7b** if a real case appears;
+it is not worth untested guessing now.
+
+**Slice 5** is T7 alone (`fc650a3`, 199 lines), back inside the review slice.
+
+**Status of the blocked pair.** T5 (the stream engine) waits for the other
+session's T15 (symphonia 0.6) so the `MediaSource` seam is not written against
+0.5 and rewritten; T6 (the radio view) waits for that session to finish its
+artwork check so two writers do not touch `src/ui/mod.rs`. `main` is still at
+`46ca28a` with T16 uncommitted, so neither has landed yet.
