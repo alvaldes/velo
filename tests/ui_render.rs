@@ -1152,12 +1152,52 @@ fn help_at_80x14(app: &App) -> String {
 }
 
 /// The help card open on `app`, drawn at 80×40: tall enough for every row.
+fn help_at_80x20(app: &App) -> String {
+    screen_at(app, 80, 20)
+}
+
 fn help_at_80x40(app: &App) -> String {
     screen_at(app, 80, 40)
 }
 
 /// The rows the help card covers on `screen`: its two borders, the lines
 /// between them and nothing else.
+/// The range the help card declares, e.g. `1–12 of 29` → `(1, 12, 29)`.
+///
+/// The card is not the only place the screen says " of " — a label can too
+/// ("shuffle what is left of the queue"), so every occurrence is tried and only
+/// the one shaped like a range answers.
+fn position_range(screen: &str) -> Option<(usize, usize, usize)> {
+    for line in screen.lines() {
+        let mut rest = line;
+        while let Some((head, tail)) = rest.split_once(" of ") {
+            let total: String = tail.chars().take_while(char::is_ascii_digit).collect();
+            if let Some((first, last)) = head.rsplit_once('\u{2013}') {
+                let first: String = first
+                    .chars()
+                    .rev()
+                    .take_while(char::is_ascii_digit)
+                    .collect::<String>()
+                    .chars()
+                    .rev()
+                    .collect();
+                if let (Ok(first), Ok(last), Ok(total)) =
+                    (first.parse(), last.trim().parse(), total.parse())
+                {
+                    return Some((first, last, total));
+                }
+            }
+            rest = tail;
+        }
+    }
+    None
+}
+
+/// The total the help card declares, if it declares one at all.
+fn position_total(screen: &str) -> Option<usize> {
+    position_range(screen).map(|(_, _, total)| total)
+}
+
 fn help_card_height(screen: &str) -> usize {
     const TITLE: [char; 6] = ['╭', ' ', 'k', 'e', 'y', 's'];
     let lines: Vec<Vec<char>> = screen.lines().map(|line| line.chars().collect()).collect();
@@ -1228,56 +1268,65 @@ fn the_help_card_keeps_its_height_while_the_filter_narrows_it() {
 fn the_help_scrolls_with_j_k_and_jumps_with_g_and_shift_g() {
     let mut app = App::new(tracks(&["one.flac"]));
     press(&mut app, KeyCode::Char('?'));
-    let screen = help_at_80x14(&app);
-    assert!(
-        screen.contains("1–12 of 25"),
-        "where the card is:\n{screen}"
-    );
+    // The card is taller than the terminal here, so it scrolls and says where it
+    // is. Nothing below pins how many rows it has or how many fit: those are the
+    // card's business, and a section added to it must not fail this test.
+    let screen = help_at_80x20(&app);
+    let Some((first, last, total)) = position_range(&screen) else {
+        panic!("a scrolling card says where it is:\n{screen}");
+    };
+    assert_eq!(first, 1, "it starts at the top:\n{screen}");
+    assert!(last < total, "and it does not fit:\n{screen}");
     assert!(screen.contains("j / Down"), "{screen}");
     assert!(!screen.contains("quit"), "the last row is below:\n{screen}");
 
     press(&mut app, KeyCode::Char('j'));
-    let screen = help_at_80x14(&app);
-    assert!(screen.contains("2–13 of 25"), "{screen}");
-    assert!(
-        !screen.contains("j / Down"),
-        "the first row scrolled off:\n{screen}"
-    );
-
-    press(&mut app, KeyCode::Down);
-    assert!(help_at_80x14(&app).contains("3–14 of 25"));
-    press(&mut app, KeyCode::Char('k'));
-    press(&mut app, KeyCode::Up);
-    press(&mut app, KeyCode::Up);
-    assert!(
-        help_at_80x14(&app).contains("1–12 of 25"),
-        "k stops at the top"
+    let screen = help_at_80x20(&app);
+    assert_eq!(
+        position_range(&screen),
+        Some((2, last + 1, total)),
+        "one row down moves the window by one:\n{screen}"
     );
 
     press(&mut app, KeyCode::Char('G'));
-    let screen = help_at_80x14(&app);
-    assert!(screen.contains("14–25 of 25"), "{screen}");
+    let screen = help_at_80x20(&app);
+    assert_eq!(
+        position_range(&screen),
+        Some((total - last + 1, total, total)),
+        "G lands on the end:\n{screen}"
+    );
     assert!(screen.contains("quit"), "{screen}");
     press(&mut app, KeyCode::Char('j'));
-    assert!(
-        help_at_80x14(&app).contains("14–25 of 25"),
+    assert_eq!(
+        position_range(&help_at_80x20(&app)),
+        Some((total - last + 1, total, total)),
         "j stops at the end"
     );
 
     press(&mut app, KeyCode::Char('g'));
-    assert!(help_at_80x14(&app).contains("1–12 of 25"));
+    let screen = help_at_80x20(&app);
+    assert_eq!(
+        position_range(&screen),
+        Some((1, last, total)),
+        "g returns to the top:\n{screen}"
+    );
 }
 
 #[test]
 fn a_help_that_fits_shows_no_position() {
     let mut app = App::new(tracks(&["one.flac"]));
     press(&mut app, KeyCode::Char('?'));
-    let screen = screen_at(&app, 80, 30);
+    // Tall enough for the whole card: the property is "no position line when the
+    // whole table fits", not "the table has 25 rows".
+    let screen = screen_at(&app, 80, 40);
     assert!(
         screen.contains("quit") && screen.contains("j / Down"),
         "{screen}"
     );
-    assert!(!screen.contains(" of 25"), "{screen}");
+    assert!(
+        position_total(&screen).is_none(),
+        "a card that fits shows no position line:\n{screen}"
+    );
 }
 
 #[test]

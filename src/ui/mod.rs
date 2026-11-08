@@ -4265,7 +4265,7 @@ fn mmss(duration: Duration) -> String {
 }
 
 /// Every row of the help card: the key, then what it does.
-const HELP_ROWS: [(&str, &str); 25] = [
+const HELP_ROWS: [(&str, &str); 29] = [
     ("j / Down", "move down"),
     ("k / Up", "move up"),
     ("g", "first track"),
@@ -4293,6 +4293,10 @@ const HELP_ROWS: [(&str, &str); 25] = [
     ("a", "add the selection to the queue"),
     ("d", "remove from the queue"),
     ("J / K", "move it down / up"),
+    ("R", "radio: the directory, your favourites, your stations"),
+    ("f", "in radio: favourite a station, pin a place"),
+    ("N", "in radio: the country list"),
+    ("ctrl+r", "in radio: refetch the place you are in"),
     ("q", "quit"),
 ];
 

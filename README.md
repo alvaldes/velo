@@ -65,6 +65,10 @@ Every key below is what the code does today.
 | `enter` (queue view) | Play the queue from the selected entry |
 | `?` | Help card: `j`/`k` (or `↓`/`↑`) scroll it and `g`/`G` jump to its ends; `/` filters it by key or description (`enter` keeps the filter, `esc` clears it, a second `esc` or `?` closes the help). The card keeps its full size however few rows the filter leaves, and every other key waits until it closes — `q` and `space` included |
 | `o` | Settings card: everything in `config.toml` — replay gain, repeat, shuffle, the seven `[theme]` colours, the six `[ui]` switches and the library folder (the volume is not a row: it stays on `+`/`-`). `j`/`k` (or `↓`/`↑`) move between the settings (the `sound`/`theme`/`screen`/`library` headers are never focused), `g`/`G` jump to the ends, `enter` or `←`/`→` step the focused row (colours cycle a short preset list, the `folder` row opens the library prompt), `esc` closes — and every other key waits until it does, `q` and `space` included |
+| `R` | Radio view: the Radio Browser directory, your favourites and your own stations |
+| `f` (radio view) | Favourite the selected station, or pin the selected country or region |
+| `N` (radio view) | The country list, with your own country first when it knows it |
+| `ctrl+r` (radio view) | Refetch the directory for the place you are in: the country list, a region's stations or a tag's |
 | `q` | Quit |
 
 While a search is open, every printable key types into the query,
@@ -122,6 +126,47 @@ velo --info song.flac          # format, frame count, length
 velo song.flac song.mp3        # open the interface over them
 velo --play song.flac song.mp3 # play and exit when finished
 ```
+
+## Radio
+
+Press `R` for internet radio: the [Radio Browser](https://www.radio-browser.info/)
+directory — about 58,000 stations across 241 countries — plus the stations you add
+yourself. It is a source beside your library and your Subsonic servers, not a
+replacement for either.
+
+Browse by country (your own first, and its regions when the directory records
+them), by the community's genres and tags, or search a name. Every list can be
+ordered by votes, listeners, trend, name or nothing at all, and a place brings at
+most 200 stations — the directory's catalogue is not something you scroll.
+
+A station is a **live stream**, so it differs from a file in ways the interface
+says out loud: there is no position and no total, the clock row reads `● live`,
+`←` and `→` refuse instead of pretending, and the title comes from the station's
+own ICY metadata (`StreamTitle`) rather than from tags. A stream that fails — a
+cut, a timeout, a station that answers with a playlist instead of audio — gets
+exactly one retry before the queue moves on, and a station never joins the next
+track as a gapless pair. A playlist wrapper (`.pls`, `.m3u`) is resolved one level
+deep; an HLS manifest is refused with its own message before anything tries to
+decode it, because its `.ts` segments are not audio this player can play.
+
+Stations are **not** in the library index: they are not scanned, not searched with
+`/` from the library, and they never appear in the artist, album or genre views.
+Your favourites, your pinned places and your own stations live in
+`~/.config/velo/radio.toml`, deduplicated by URL and written atomically, so a bad
+edit in `config.toml` cannot take them with it. A URL that is already a favourite
+is unmarked by pressing `f` again, however it is spelled (`https://A.example/stream`
+and `https://a.example:443/stream/` are the same station).
+
+The country used for "near you" is **opt-in**: velo offers the question once, reads
+it from your locale (`LC_ALL`, `LC_MESSAGES`, `LANG`) and nothing else — no geo-IP,
+no location service, and a `n` leaves the feature off for good. It is a
+convenience for finding your own country in a list of 241, not a gate: the country
+browser, the pins and the catalogue work the same either way.
+
+What it does not do: no radius search around your location (the directory records
+coordinates for about 12% of stations, so such a search would silently hide most of
+the catalogue), no scrobbling to a remote account, and no station art — the
+directory has none per station.
 
 ## ReplayGain
 
