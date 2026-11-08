@@ -1,6 +1,13 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.10.1] - 2026-11-08
+
+### Fixes
+- **build:** Tell CMake 4 the policy floor audiopus_sys needs
+
+### Maintenance
+- **release:** Make the release buildable by hand, and fix the artifact path
 ## [0.10.0] - 2026-11-08
 
 ### Features

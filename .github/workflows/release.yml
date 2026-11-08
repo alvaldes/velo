@@ -4,12 +4,21 @@ on:
   push:
     tags:
       - "v*"
+  # A tag push is the normal path. This exists because the first release had to
+  # be built by hand: the push trigger never reached GitHub for it, and a
+  # release that cannot be re-run is a release that cannot be repaired.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build, e.g. v0.10.1"
+        required: true
 
 permissions:
   contents: write
 
 env:
-  TAG: ${{ github.ref_name }}
+  # A tag push sets ref_name; a manual run passes the tag explicitly.
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
 
 jobs:
   build:
@@ -31,6 +40,8 @@ jobs:
       CMAKE_POLICY_VERSION_MINIMUM: "3.5"
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -71,7 +82,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
-          path: velo-${{ github.ref_name }}-${{ matrix.target }}.tar.gz*
+          path: velo-${{ env.TAG }}-${{ matrix.target }}.tar.gz*
 
   release:
     needs: build
