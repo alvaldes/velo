@@ -462,3 +462,15 @@ What that closes, precisely: the protocol detection, the 100×28 threshold, the 
 
 And it frees `src/ui/mod.rs` completely: the radio session had been holding its radio view back in case the cover needed `draw_artwork`/`pane` surgery. It does not. That file is theirs, with no reservation left.
 
+**L52** (the last known audio defect, closed in `b5c08ac`..`HEAD`): a seek no longer emits the codec's warm-up, and the measurement changed what the defect *was*.
+
+L49 had described it as "the warm-up is not re-trimmed after a seek", which sounds cosmetic. Measuring it first turned it into a correctness bug: seeking into an Ogg Opus file emitted **312 extra frames at the head**, and therefore **every one of the following 23 664 samples was in the wrong place** — diff RMS **−3.23 dB** against content at −9.03, peak **1.005** against 0.5034, which is the antiphase signature of a misalignment, not of noise. A "warm-up blip" and a "whole stream shifted" are the same sentence until somebody measures.
+
+The fix discards exactly **the delay the codec declares** (RFC 7845 for Opus), once, from the heads of the packets that follow the decoder reset, carrying the debt across packet boundaries so the stream is never shifted and never loses content. No constant appears anywhere: a codec that declares no delay gets nothing discarded.
+
+**And symphonia's own decoders were measured before being touched** — MP3 and AAC show no shift at all, so they were left alone. The temptation to "fix" all codecs symmetrically would have removed content frames from two formats that were already right.
+
+The area is famous for breaking priming, so the regression is pinned mechanically: the FNV-1a of `open` on **all four committed fixtures** is identical before and after. The file-start trim, the isomp4 window and the live-stream pre-skip are provably untouched by a change to the seek path.
+
+**Reported and deliberately not implemented**: libopus would benefit from seeking a packet early and discarding more, trading a short reconvergence for exactness at the landing. That is a change to seek *semantics*, not a bug fix — and after the f-string and heredoc incidents of this session, adding an unrequested semantic change under the banner of a bug fix would be the same mistake in a different costume.
+
