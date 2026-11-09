@@ -64,55 +64,15 @@ fn main() -> ExitCode {
         return ExitCode::from(1);
     }
 
-    // The Subsonic probe needs no terminal and no library root, so it runs
-    // before both — it must work over ssh (T12a). Cleaning the caches is the
-    // same kind of headless chore: env in, two directories cleaned, stdout
-    // out.
-    if cli.cache_clean {
-        return cache_clean(
-            std::env::var_os("XDG_CACHE_HOME").as_deref(),
-            home.as_deref(),
-        );
-    }
-    if cli.subsonic_test {
-        return subsonic_test(&settings, home.as_deref());
-    }
-    // The sync needs no terminal either — it runs over ssh like the probe.
-    if cli.sync {
-        return sync_library(&settings, home.as_deref());
-    }
-    // The ReplayGain scan is the same kind of headless chore: files in, a
-    // report out, and nothing written unless `--apply` was passed (T13).
-    if cli.replaygain_scan {
-        if cli.files.is_empty() {
-            return usage_help();
-        }
-        return replaygain_scan(&cli.files, cli.apply);
-    }
-    // `bit_perfect` is resolved and carried in `settings`; the audio path
-    // and the interface read it (T17).
-    if cli.index {
-        let Some(root) = library else {
-            let file = config_file.as_deref().map_or_else(
-                || "the config file".to_owned(),
-                |path| path.display().to_string(),
-            );
-            eprintln!(
-                "velo: no library to index — set `library` in {file} or pass --library <PATH>"
-            );
-            return ExitCode::from(2);
-        };
-        return index_library(&root);
-    }
-
-    // The history subcommand is the same kind of headless chore as
-    // `--cache-clean`: no terminal, no library, works over ssh.
-    if let Some(Command::History { json, action }) = &cli.command {
-        return history_command(
-            config_file.as_deref(),
-            *json,
-            matches!(action, Some(HistoryAction::Clear)),
-        );
+    // Every headless one-shot mode, in the order the help documents them.
+    if let Some(code) = one_shot(
+        &cli,
+        &settings,
+        home.as_deref(),
+        config_file.as_deref(),
+        library.as_deref(),
+    ) {
+        return code;
     }
 
     if cli.files.is_empty() {
@@ -258,6 +218,69 @@ fn subsonic_seams(
 
 /// Resolves the user's settings: the config file at `path` (a missing file is
 /// normal and silent) merged under the command line.
+/// Every headless one-shot mode, in the order the help documents them: each
+/// needs no terminal and no library root (the probes and the chores must work
+/// over ssh), and each answers `Some` with the exit code the process ends
+/// with. `None` means no one-shot was asked for, so the caller goes on into a
+/// file mode or the interface. This order is the precedence the `--help` text
+/// documents; the two live together on purpose.
+fn one_shot(
+    cli: &Cli,
+    settings: &Settings,
+    home: Option<&OsStr>,
+    config_file: Option<&Path>,
+    library: Option<&Path>,
+) -> Option<ExitCode> {
+    if cli.cache_clean {
+        return Some(cache_clean(
+            std::env::var_os("XDG_CACHE_HOME").as_deref(),
+            home,
+        ));
+    }
+    if cli.subsonic_test {
+        return Some(subsonic_test(settings, home));
+    }
+    // The station probe is headless the same way: one URL in, a report out.
+    if let Some(url) = &cli.radio_test {
+        return Some(radio_test(url));
+    }
+    if cli.sync {
+        return Some(sync_library(settings, home));
+    }
+    // Files in, a report out, and nothing written unless `--apply` was passed.
+    if cli.replaygain_scan {
+        if cli.files.is_empty() {
+            return Some(usage_help());
+        }
+        return Some(replaygain_scan(&cli.files, cli.apply));
+    }
+    // `bit_perfect` is resolved and carried in `settings`; the audio path and
+    // the interface read it.
+    if cli.index {
+        let Some(root) = library else {
+            let file = config_file.map_or_else(
+                || "the config file".to_owned(),
+                |path| path.display().to_string(),
+            );
+            eprintln!(
+                "velo: no library to index — set `library` in {file} or pass --library <PATH>"
+            );
+            return Some(ExitCode::from(2));
+        };
+        return Some(index_library(root));
+    }
+    // The history subcommand is the same kind of headless chore: no terminal,
+    // no library, works over ssh.
+    if let Some(Command::History { json, action }) = &cli.command {
+        return Some(history_command(
+            config_file,
+            *json,
+            matches!(action, Some(HistoryAction::Clear)),
+        ));
+    }
+    None
+}
+
 fn user_settings(cli: &Cli, path: Option<&Path>) -> Result<Settings, config::ConfigError> {
     match path {
         Some(path) => Config::load_from(path).map(|file| file.merged(cli)),
@@ -288,6 +311,89 @@ fn cache_clean(xdg_cache_home: Option<&OsStr>, home: Option<&OsStr>) -> ExitCode
             dir.display()
         );
     }
+    ExitCode::SUCCESS
+}
+
+/// How much audio the station probe decodes before it reports: long enough
+/// that a broken demux or a wrong codec shows up, short enough that the
+/// probe answers at once.
+const RADIO_TEST_SECONDS: usize = 2;
+
+/// Answers "can I listen to this station?" (issue #13) in the shape and tone
+/// of [`subsonic_test`]: plain fact lines on stdout, exit 0 when the URL
+/// plays end to end, and on any failure one `velo: ` line on stderr with
+/// exit 1 — a report half-printed would be worse than a reason.
+fn radio_test(url: &str) -> ExitCode {
+    let (mut stream, probe) =
+        match velo::radio::stream::probe(url, velo::radio::stream::Timeouts::default()) {
+            Ok(opened) => opened,
+            Err(error) => {
+                eprintln!("velo: {error}");
+                return ExitCode::FAILURE;
+            }
+        };
+
+    // The decode probe: the first seconds, read exactly as the player reads
+    // them — the same blocks, the same demux. A station that answers with
+    // headers but no audio is not playable, whatever its headers say.
+    let spec = stream.spec();
+    let target = RADIO_TEST_SECONDS
+        .saturating_mul(usize::try_from(spec.sample_rate).unwrap_or(0))
+        .saturating_mul(usize::from(spec.channels));
+    let channels = usize::from(spec.channels).max(1);
+    let mut frames = 0_usize;
+    loop {
+        match stream.read_block() {
+            Ok(Some(block)) => {
+                frames += block.len() / channels;
+                if frames * channels >= target {
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(error) => {
+                eprintln!("velo: {error}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    if frames == 0 {
+        eprintln!("velo: the station decoded no audio");
+        return ExitCode::FAILURE;
+    }
+
+    // The report, in the order the issue lists its facts (S2).
+    println!("url: {url}");
+    println!(
+        "wrapper: {}",
+        probe.resolved_url.as_deref().unwrap_or("none")
+    );
+    if probe.redirects.is_empty() {
+        println!("redirects: none");
+    } else {
+        for hop in &probe.redirects {
+            println!("redirect: {hop}");
+        }
+    }
+    println!(
+        "content-type: {}",
+        probe.content_type.as_deref().unwrap_or("none")
+    );
+    if let Some(metaint) = probe.metaint {
+        println!("icy-metaint: {metaint}");
+    }
+    let codec = stream.codec_name().unwrap_or("unknown");
+    println!("codec: {codec} — this build can play it");
+    // A station's frame count stays far below the exact integer range of f64.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a decode probe holds fewer frames than f64 represents exactly"
+    )]
+    let seconds = frames as f64 / f64::from(spec.sample_rate);
+    println!(
+        "decode: {seconds:.1} s, {} Hz, {} ch",
+        spec.sample_rate, spec.channels
+    );
     ExitCode::SUCCESS
 }
 

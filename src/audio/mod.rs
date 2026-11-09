@@ -94,6 +94,9 @@ pub struct TrackSource {
     decoder: Box<dyn AudioDecoder>,
     track_id: u32,
     spec: TrackSpec,
+    /// The codec the container or probe declared: what [`TrackSource::codec_name`]
+    /// names for the one-shot reports. Never read by the playback path.
+    codec: symphonia::core::codecs::audio::AudioCodecId,
     finished: bool,
     /// A block decoded by [`TrackSource::open`] to learn the sample format of a
     /// container that does not declare it; it must be played first.
@@ -372,6 +375,7 @@ impl TrackSource {
                 sample_rate: 0,
                 channels: 0,
             }),
+            codec: audio_params.codec,
             finished: false,
             pending: None,
             time_base,
@@ -399,6 +403,23 @@ impl TrackSource {
     #[must_use]
     pub const fn spec(&self) -> TrackSpec {
         self.spec
+    }
+
+    /// The name of the codec this track decodes, when it is one of the
+    /// formats a report can name in words — symphonia's own spelling of an
+    /// id is a hex code nobody reads. `None` for anything else (issue #13).
+    #[must_use]
+    pub fn codec_name(&self) -> Option<&'static str> {
+        use symphonia::core::codecs::audio::well_known;
+        match self.codec {
+            well_known::CODEC_ID_MP3 => Some("mp3"),
+            well_known::CODEC_ID_AAC => Some("aac"),
+            well_known::CODEC_ID_VORBIS => Some("vorbis"),
+            well_known::CODEC_ID_FLAC => Some("flac"),
+            well_known::CODEC_ID_OPUS => Some("opus"),
+            well_known::CODEC_ID_ALAC => Some("alac"),
+            _ => None,
+        }
     }
 
     /// How many content frames this track holds: the raw count minus the
