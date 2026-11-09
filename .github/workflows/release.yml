@@ -47,9 +47,11 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: Install ALSA development headers (native Linux build)
+      # ALSA is what cpal links against; libdbus is what souvlaki's `use_dbus`
+      # backend needs, and the v0.28.0-v0.30.0 tags still pull it.
+      - name: Install the system headers the Linux build needs (native)
         if: matrix.target == 'x86_64-unknown-linux-gnu'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libdbus-1-dev
 
       # aarch64 Linux is cross-built on the ubuntu x86_64 runner with `cross`.
       # The cross image carries the aarch64 toolchain, but NOT the ALSA headers
