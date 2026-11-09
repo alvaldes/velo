@@ -853,16 +853,20 @@ impl<'lib> App<'lib> {
     }
 
     /// Opens the source the sources screen's cursor is on (issue #3): the
-    /// library comes back with the tab the session saved, the radio opens
-    /// over its wiring.
+    /// library always lands on the library (issue #27) — the saved tab is
+    /// the queue's half of the round trip, not the library's address — and
+    /// with no library configured, the prompt asks for its path, the same
+    /// card `L` opens.
     fn open_source(&mut self) -> Action {
         match self.sources.current() {
             sources::Source::Library => {
-                self.view = if self.saved.view == View::Queue {
-                    View::Queue
-                } else {
-                    View::Library
-                };
+                self.view = View::Library;
+                if self.library.is_none()
+                    && self.refresh.root.is_none()
+                    && !self.library_prompt_open()
+                {
+                    self.ask_for_library(self.config_file.clone());
+                }
                 Action::None
             }
             sources::Source::Radio => self.open_radio(),
@@ -1703,7 +1707,7 @@ impl<'lib> App<'lib> {
         reason = "the keymap is one match read top to bottom; the overlays' keys live in their own handlers"
     )]
     pub fn on_key(&mut self, event: ratatui::crossterm::event::KeyEvent) -> Action {
-        use ratatui::crossterm::event::KeyCode;
+        use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 
         // An open search owns almost every key: `j`/`k` move through the
         // results, printable characters type in, `Esc` cancels. The browse
@@ -1811,7 +1815,10 @@ impl<'lib> App<'lib> {
             KeyCode::Char('u') if !matches!(self.position, Position::Files) => {
                 self.ask_to_reindex()
             }
-            KeyCode::Char('r') => {
+            // `ctrl+r` is the radio's refresh (issue #25): the keymap must
+            // not collapse the modified key into the plain arm, so a
+            // `ctrl`-modified `r` never cycles the repeat.
+            KeyCode::Char('r') if !event.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.repeat = self.repeat.next();
                 Action::SetRepeat(self.repeat)
             }
@@ -2455,8 +2462,15 @@ impl<'lib> App<'lib> {
             Block::new().style(Style::new().bg(self.theme.background)),
             area,
         );
-        let tab = |label: &'static str, view: View| {
-            if self.view == view {
+        // `tab` is one round trip between the sources screen and the queue
+        // (issue #26): the strip names both. `sources` is lit anywhere
+        // inside it — on the sources screen, inside the local library and
+        // under the radio view, which is drawn over both — and the queue is
+        // lit only when it is the screen.
+        let inside_sources = matches!(self.view, View::Sources | View::Library)
+            || (self.radio.is_some() && self.view != View::Queue);
+        let tab = |label: &'static str, lit: bool| {
+            if lit {
                 Span::styled(label, Style::new().fg(self.theme.accent).bold())
             } else {
                 Span::styled(label, Style::new().fg(self.theme.dim))
@@ -2464,9 +2478,9 @@ impl<'lib> App<'lib> {
         };
         let mut tabs = Line::from(vec![
             Span::raw(" "),
-            tab("library", View::Library),
+            tab("sources", inside_sources),
             Span::raw("  "),
-            tab("queue", View::Queue),
+            tab("queue", self.view == View::Queue),
         ]);
         // A background index is announced where it is always in view, and
         // goes away when it ends (library-refresh T3).

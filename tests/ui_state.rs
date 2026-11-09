@@ -10,7 +10,7 @@ use lofty::prelude::*;
 use lofty::tag::{Tag, TagType};
 use velo::audio::output::{Entry, TrackFailure};
 use velo::library::Library;
-use velo::ui::crossterm::event::{KeyCode, KeyEvent};
+use velo::ui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use velo::ui::indexing::Indexer;
 use velo::ui::{Action, App, BrowseBy, Level, View};
 
@@ -186,6 +186,60 @@ fn r_cycles_repeat_through_off_all_and_one() {
     assert_eq!(
         app.on_key(key(KeyCode::Char('r'))),
         Action::SetRepeat(Repeat::Off)
+    );
+}
+
+/// S13 (issue #25): the keymap never collapses `ctrl+r` into `r` — on the
+/// queue it does nothing, and the repeat it left untouched advances by one
+/// step only.
+#[test]
+fn ctrl_r_does_not_cycle_repeat_on_the_queue() {
+    use velo::audio::output::Repeat;
+    let mut app = app_with_three_tracks();
+    assert_eq!(
+        app.on_key(key(KeyCode::Char('r'))),
+        Action::SetRepeat(Repeat::All)
+    );
+
+    assert_eq!(app.on_key(key(KeyCode::Tab)), Action::None); // onto the queue
+    let ctrl_r = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL);
+    assert_eq!(
+        app.on_key(ctrl_r),
+        Action::None,
+        "ctrl+r does nothing on the queue"
+    );
+
+    assert_eq!(app.on_key(key(KeyCode::Tab)), Action::None);
+    assert_eq!(
+        app.on_key(key(KeyCode::Char('r'))),
+        Action::SetRepeat(Repeat::One),
+        "the repeat the ctrl+r left alone advances one step, not two"
+    );
+}
+
+/// S13 (issue #25): the radio's own `ctrl+r` keeps reaching the radio when
+/// the radio view has focus — no repeat action comes back — and `r` alone
+/// still cycles repeat while the radio is open.
+#[test]
+fn ctrl_r_in_the_radio_view_is_the_radio_s_and_r_alone_still_cycles_repeat() {
+    use velo::audio::output::Repeat;
+    let mut app = App::browse(None);
+    app.set_library_root(Some(PathBuf::from("/music"))); // a configured library opens no prompt
+    app.open_sources();
+    press(&mut app, KeyCode::Char('j')); // onto Radio
+    press(&mut app, KeyCode::Enter);
+    assert!(app.radio_open());
+
+    let ctrl_r = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL);
+    assert_eq!(
+        app.on_key(ctrl_r),
+        Action::None,
+        "the radio keeps its ctrl+r; nothing cycles the repeat"
+    );
+    assert_eq!(
+        app.on_key(key(KeyCode::Char('r'))),
+        Action::SetRepeat(Repeat::All),
+        "`r` alone still cycles repeat while the radio is open"
     );
 }
 

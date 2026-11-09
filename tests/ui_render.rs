@@ -143,7 +143,7 @@ fn the_window_is_framed_and_its_title_bar_names_the_views_and_the_app() {
 
     assert!(lines[0].starts_with('╭') && lines[0].ends_with('╮'));
     assert!(lines[23].starts_with('╰') && lines[23].ends_with('╯'));
-    for expected in ["library", "queue", "V E L O"] {
+    for expected in ["sources", "queue", "V E L O"] {
         assert!(
             lines[1].contains(expected),
             "the title bar shows {expected:?}, got: {}",
@@ -159,14 +159,49 @@ fn the_title_bar_lights_the_view_that_tab_switches_to() {
     let theme = Theme::default();
 
     let mut app = App::new(tracks(&["one.flac"]));
-    let library_x = 3; // "│ library  queue": the `l` of library
+    let sources_x = 3; // "│ sources  queue": the `s` of sources
     let queue_x = 12; // the `q` of queue
-    assert_eq!(cell_at(&app, library_x, 1).fg, theme.accent);
+    assert_eq!(cell_at(&app, sources_x, 1).fg, theme.accent);
     assert_eq!(cell_at(&app, queue_x, 1).fg, theme.dim);
 
     press(&mut app, KeyCode::Tab);
-    assert_eq!(cell_at(&app, library_x, 1).fg, theme.dim);
+    assert_eq!(cell_at(&app, sources_x, 1).fg, theme.dim);
     assert_eq!(cell_at(&app, queue_x, 1).fg, theme.accent);
+}
+
+/// S11 (issue #26): the strip names the round trip — `sources` and `queue` —
+/// and `sources` is lit anywhere inside the sources screen: on it, inside
+/// the local library and under the radio view, which is drawn over both.
+#[test]
+fn the_title_bar_lights_sources_anywhere_inside_it_and_the_queue_on_the_queue() {
+    use velo::ui::theme::Theme;
+
+    let theme = Theme::default();
+    let sources_x = 3; // "│ sources  queue": the `s` of sources
+    let queue_x = 12; // the `q` of queue
+
+    // The launch sits on the library, which lives inside Local library.
+    let mut app = App::browse(None);
+    app.set_library_root(Some(std::path::PathBuf::from("/music")));
+    assert_eq!(cell_at(&app, sources_x, 1).fg, theme.accent);
+    assert_eq!(cell_at(&app, queue_x, 1).fg, theme.dim);
+
+    // The sources screen itself.
+    app.open_sources();
+    assert_eq!(cell_at(&app, sources_x, 1).fg, theme.accent);
+
+    // The queue is the other half of the round trip.
+    press(&mut app, KeyCode::Tab);
+    assert_eq!(cell_at(&app, sources_x, 1).fg, theme.dim);
+    assert_eq!(cell_at(&app, queue_x, 1).fg, theme.accent);
+
+    // Back on the sources screen, the radio drawn over it stays inside it.
+    press(&mut app, KeyCode::Tab);
+    press(&mut app, KeyCode::Char('j')); // onto Radio
+    press(&mut app, KeyCode::Enter);
+    assert!(app.radio_open());
+    assert_eq!(cell_at(&app, sources_x, 1).fg, theme.accent);
+    assert_eq!(cell_at(&app, queue_x, 1).fg, theme.dim);
 }
 
 // ---- the now-playing block (ui-redesign T2, S1, S4) ------------------------
@@ -841,7 +876,7 @@ fn the_queue_view_draws_the_queued_file_names_and_empty_state() {
 /// the `ReplayGain` mode beside the volume).
 const SCREEN_WITHOUT_COVER_ART: &str = concat!(
     "╭──────────────────────────────────────────────────────────────────────────────╮\n",
-    "│ library  queue                                                       V E L O │\n",
+    "│ sources  queue                                                       V E L O │\n",
     "│ ♫ nothing playing                                                            │\n",
     "│ enter plays the selection                                                    │\n",
     "│                                                                              │\n",
@@ -1434,7 +1469,7 @@ fn hiding_the_top_bar_gives_its_row_to_the_content() {
     assert!(lines[0].starts_with('╭') && lines[0].ends_with('╮'));
     assert!(lines[23].starts_with('╰') && lines[23].ends_with('╯'));
     assert!(
-        !screen.contains("V E L O") && !screen.contains("library  queue"),
+        !screen.contains("V E L O") && !screen.contains("sources  queue"),
         "the tabs and the wordmark are gone, got:\n{screen}"
     );
     assert!(
