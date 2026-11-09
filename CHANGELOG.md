@@ -1,6 +1,10 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.27.0] - 2026-11-09
+
+### Features
+- **playlists:** Save, name and reorder a queue that outlives the session
 ## [0.26.0] - 2026-11-09
 
 ### Features
