@@ -1872,6 +1872,19 @@ impl<'lib> App<'lib> {
                 BrowseBy::from_key(key).map_or(Action::None, Action::Browse)
             }
             KeyCode::Char(' ') => Action::TogglePause,
+            // The second seek gear (issue #6): shift on an arrow, which a
+            // terminal does report as a modifier, unlike a character key that
+            // arrives already shifted. `,` and `.` carry the same pair as the
+            // characters shift produces, for both the layouts that need no
+            // shift to type them and the terminals that drop the modifier.
+            KeyCode::Left if event.modifiers.contains(KeyModifiers::SHIFT) => {
+                Action::Seek { delta_secs: -30 }
+            }
+            KeyCode::Right if event.modifiers.contains(KeyModifiers::SHIFT) => {
+                Action::Seek { delta_secs: 30 }
+            }
+            KeyCode::Char('<') => Action::Seek { delta_secs: -30 },
+            KeyCode::Char('>') => Action::Seek { delta_secs: 30 },
             // The plain keys keep the coarse five points; the brackets are the
             // fine gear, a point a press (issue #16). Shift cannot carry it: a
             // terminal sends the shifted *character*, and on a US layout
@@ -4677,8 +4690,8 @@ const HELP_ROWS: [(&str, &str); 30] = [
         "search the whole library; in radio: filter what is loaded",
     ),
     ("space", "pause / resume"),
-    ("← / →", "seek 5 s back / forward"),
-    (", / .", "seek 5 s back / forward"),
+    ("← / →", "seek 5 s back / forward; shift: 30 s"),
+    (", / .", "seek 5 s back / forward; < / >: 30 s"),
     ("n / p", "next / previous track"),
     ("s", "shuffle what is left of the queue"),
     ("r", "repeat: off, all, one"),

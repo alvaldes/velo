@@ -52,7 +52,7 @@ Every key below is what the code does today.
 | `1` `2` `3` `4` | Library view: artists (artist → album → track), every album, every track, genres |
 | `/` | Fuzzy search the whole library (`lofi` finds `Lo-Fi Scientists`) |
 | `space` | Pause / resume |
-| `←` / `→` (or `,` / `.`) | Seek 5 s back / forward |
+| `←` / `→` (or `,` / `.`) | Seek 5 s back / forward; with `shift` on the arrow (or `<` / `>` on the comma keys) 30 s |
 | `n` / `p` | Next track / previous track — `p` restarts a track already 3 s in |
 | `s` | Shuffle what is left of the queue; again to put it back in order |
 | `r` | Repeat: off → all (the queue again) → one (the track again) |

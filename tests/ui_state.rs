@@ -2552,3 +2552,49 @@ fn a_launch_with_only_a_subsonic_server_asks_for_no_folder() {
     );
     assert_eq!(app.status(), "");
 }
+
+#[test]
+fn the_second_seek_gear_moves_thirty_seconds_and_the_plain_keys_keep_five() {
+    let mut app = app_with_three_tracks();
+
+    assert_eq!(
+        app.on_key(key(KeyCode::Left)),
+        Action::Seek { delta_secs: -5 }
+    );
+    assert_eq!(
+        app.on_key(key(KeyCode::Right)),
+        Action::Seek { delta_secs: 5 }
+    );
+    assert_eq!(
+        app.on_key(key(KeyCode::Char(','))),
+        Action::Seek { delta_secs: -5 }
+    );
+    assert_eq!(
+        app.on_key(key(KeyCode::Char('.'))),
+        Action::Seek { delta_secs: 5 }
+    );
+
+    // Shift on an arrow is a modifier a terminal reports, so the coarse gear
+    // rides on the same key.
+    let shift_left = KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT);
+    let shift_right = KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT);
+    assert_eq!(
+        app.on_key(shift_left),
+        Action::Seek { delta_secs: -30 }
+    );
+    assert_eq!(
+        app.on_key(shift_right),
+        Action::Seek { delta_secs: 30 }
+    );
+
+    // A character key arrives already shifted, so the pair shift produces
+    // carries the coarse gear for the comma keys.
+    assert_eq!(
+        app.on_key(key(KeyCode::Char('<'))),
+        Action::Seek { delta_secs: -30 }
+    );
+    assert_eq!(
+        app.on_key(key(KeyCode::Char('>'))),
+        Action::Seek { delta_secs: 30 }
+    );
+}
