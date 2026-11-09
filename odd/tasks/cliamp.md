@@ -60,16 +60,31 @@ station with no songs.
 | T1 | S2, S3, S5 | parent | expand a multi-entry wrapper into a finite list when a configured station opens; rows and playback as tracks; the refusal line | |
 | T2 | S1, S4 | parent | the live/finite distinction pinned end to end (transport, queue, marker) and the docs | |
 
-## Open at lane start (not decided yet)
+## Live re-check (2026-11-09, authorized by the human)
 
-- **How a song is played**: cache it first like Subsonic (`PathResolver` + cache) or stream
-  the finite remote file with ranges. Caching reuses what exists and is testable; streaming
-  avoids the disk copy but needs a remote finite source in the audio path.
-- **Whether the songs list is one level or a queue**: the note says "playlist de archivos
-  finitos", so a level whose `enter` plays from that row onwards, like an album.
-- **Re-verify the service before implementing** (authorized): `/stations`, `/streams.m3u`,
-  `/<id>/tracks.m3u`, a channel's headers, and that no auth is needed today. The note's
-  facts are two days old; the logbook's own rule is to trust the live answer.
+Verified against the running service, not the note: no credential anywhere.
+
+- `/streams.m3u` — 955 B, `audio/x-mpegurl`, 15 channels as `#EXTINF:-1,Name` plus
+  `https://radio.cliamp.stream/<id>/stream`.
+- `/stations` — `{"stations":[{"id","name","description","genre","stream","tracks","tracks_url"}]}`,
+  3457 B. `tracks` is the channel's song count.
+- `/<id>/tracks` — JSON `{"station","name","count","tracks":[{"id","title","artist","album",
+  "filename","url"}]}`; `lofi` reports 120.
+- `/<id>/tracks.m3u` — 12.7 KB, `#EXTINF:-1,"Artist - Title"` plus `/<id>/tracks/<id>`.
+- One song — `audio/mpeg`, `Content-Length`, **`Accept-Ranges: bytes`**, and
+  `Range: bytes=0-1023` answers **206 Partial Content**. **No duration is declared
+  anywhere**; `Content-Disposition` carries the filename.
+- One live channel — `audio/mpeg`, `Icy-Br: 128`, `Icy-Genre`, `Icy-Logo`,
+  `Icy-Metaint: 8192`, no `Content-Length`, `Cache-Control: no-cache`.
+
+## Open at lane start (the human's decision)
+
+- **How a song is played**: cache it first through the existing Subsonic-style
+  `PathResolver` (reuses what exists, seek works on the local copy, `--cache-clean`
+  already covers it) or stream the finite remote file with byte ranges (no copy on
+  disk, but the audio path needs a remote finite source). Not decided yet.
+- **Whether the songs list is one level or a queue**: settled by the note — "playlist de
+  archivos finitos", so a level whose `enter` plays from that row onwards, like an album.
 
 ## Log
 
