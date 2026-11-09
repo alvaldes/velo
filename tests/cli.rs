@@ -529,9 +529,9 @@ fn velo_history_json_prints_the_same_order_as_one_array() {
     assert_eq!(
         stdout,
         concat!(
-            "[{\"path\":\"/music/Tide/01 - Nightfall.flac\",\"played_at\":1762668000,",
+            "[{\"path\":\"/music/Tide/01 - Nightfall.flac\",\"kind\":\"file\",\"played_at\":1762668000,",
             "\"artist\":\"Tide\",\"title\":\"Nightfall\"},",
-            "{\"path\":\"/music/other/02 - Bare.flac\",\"played_at\":1762660000}]\n"
+            "{\"path\":\"/music/other/02 - Bare.flac\",\"kind\":\"file\",\"played_at\":1762660000}]\n"
         )
     );
     assert_eq!(stderr, "");

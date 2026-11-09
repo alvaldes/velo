@@ -47,6 +47,21 @@ The screen reads the same file the shell prints, and a track played on the
 screen is the entry at the top of the file. A history longer than the cap is
 trimmed on write, oldest first.
 
+**S6 — A station that begins playing is recorded too (issue #33).**
+> en el recent played no salen los radios pero eso porque, si se puede no? y
+> estaria muy bien que saliera ahi
+
+A station beginning records one entry like a track does: its stream URL is
+the identity — two writings of one station (`https://Stream.example:443/x`
+and `https://stream.example/x`) are one entry, the radio store's
+`station_key` decides — and its own name is the title, with no artist and
+no album. The file says `kind = "station"` where a track says
+`kind = "file"`; an entry written before the key existed loads as a track.
+The `Recently played` screen lists the station beside the tracks, in the
+same newest-first order, with the note `radio`; `enter` on it plays the
+live stream through the same route the radio view uses, and `a` queues it
+without starting anything.
+
 ## Slices
 
 One commit per independently reviewable step, each green on its own:
@@ -54,7 +69,8 @@ One commit per independently reviewable step, each green on its own:
 1. the history file and its format (`src/history.rs`), nothing wired into it;
 2. the interface recording every beginning into it, nothing to read it with;
 3. the shell reading it: `velo history`, `--json`, `clear`;
-4. the `Recently played` screen, which reads the same file.
+4. the `Recently played` screen, which reads the same file;
+5. stations in the history and on the screen (issue #33).
 
 ## Tasks
 
@@ -62,6 +78,7 @@ One commit per independently reviewable step, each green on its own:
 |:--|:--|:--|:--|:--|
 | T1 | S1, S2, S3, S5 | parent | `src/history.rs` (TOML, cap, dedupe, atomic save), the `App` write hook, and the `history` subcommand: plain, `--json`, `clear` | `29caaa5`, `dea7f33`, `03ca99a` |
 | T2 | S4, S5 | parent | `Recently played` in `Sources`: the level, its rows, playing marker, and the docs | `1624e20` |
+| T3 | S6 | parent | the file learns the station `kind` and dedupes on the entry's identity, the tick records a station beginning, the screen lists stations beside the tracks, and the docs | |
 
 ## Log
 
@@ -83,3 +100,8 @@ from the file, and `history_tick` turns an empty field into an absent one — so
 replaying an entry from the screen cannot write back metadata the file did not
 have. The playing marker stays untested by construction: `playing_path()` needs
 a real player and no TUI test has one.
+
+**L4** — T3, the human's words, verbatim: "en el recent played no salen los
+radios pero eso porque, si se puede no? y estaria muy bien que saliera ahi"
+— so a station beginning is recorded like a track's, and `Recently played`
+lists stations beside the tracks.
