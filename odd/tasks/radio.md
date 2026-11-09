@@ -770,3 +770,19 @@ empty store), and never over a file that is already there — the human's call:
 `history.toml` is deliberately not one of them: it appears when the first track
 does, because an empty history says nothing.
 
+
+**L31** — issue #35: with the radio open on a short list — no favourites, or
+a place whose stations have not arrived — the screen kept showing the header
+and the last rows of whatever was underneath: `▸─ Sources  [5 sources]` above
+the radio's own header, and the source list's rows beneath the radio's rows.
+The cause: `App::draw` drew the current screen's header and body first and
+then let `RadioView::render` paint over the body, and the default theme's
+background is the terminal's own (`reset`) — a background that is the
+terminal's own covers nothing, so every cell the radio left empty kept what
+was drawn before. The rule now is that **the radio owns the body while it is
+on screen**: `draw_body` draws nothing and `draw_header` does not title the
+screen when `radio_on_screen()` is true. The radio does not paint an opaque
+background of its own — with `background = "reset"` there is no colour to
+paint, and the fix belongs where the wrong thing was drawn. The queue keeps
+its own rule (issue #23): when the queue is on screen, the queue is the body
+and the radio draws nothing.

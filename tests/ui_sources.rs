@@ -21,11 +21,55 @@ fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::from(code)
 }
 
+/// The whole interface as one screen, the way the user sees it.
+fn screen_of(app: &App) -> String {
+    use velo::ui::ratatui::Terminal;
+    use velo::ui::ratatui::backend::TestBackend;
+    use velo::ui::ratatui::buffer::{Buffer, Cell};
+
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("a test terminal");
+    terminal
+        .draw(|frame| app.draw(frame))
+        .expect("the frame draws");
+    let buffer: &Buffer = terminal.backend().buffer();
+    let screen: String = buffer.content().iter().map(Cell::symbol).collect();
+    let characters: Vec<char> = screen.chars().collect();
+    characters
+        .chunks(80)
+        .map(|line| line.iter().collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// One key press, its action applied.
 fn press(app: &mut App<'_>, code: KeyCode) -> Action {
     let action = app.on_key(key(code));
     app.apply(action);
     action
+}
+
+/// Issue #35's control: with the radio closed, the sources screen renders
+/// its own header and all five rows — the fix that lets the radio own the
+/// body must not take the screen away from the sources themselves.
+#[test]
+fn the_sources_screen_renders_its_header_and_all_five_rows() {
+    let mut app = app();
+    app.open_sources();
+
+    let screen = screen_of(&app);
+    assert!(
+        screen.contains("▸─ Sources"),
+        "the header names the screen, got:\n{screen}"
+    );
+    for row in [
+        "Local library",
+        "Radio",
+        "Recently played",
+        "Favourites",
+        "Playlists",
+    ] {
+        assert!(screen.contains(row), "the row is on screen, got:\n{screen}");
+    }
 }
 
 /// S1, S2: the first screen lists what velo can play, with the cursor

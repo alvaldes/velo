@@ -4214,6 +4214,14 @@ impl<'lib> App<'lib> {
     /// the active one lit, as in
     /// `▸─ artists  albums  tracks  genres   Tide › Harbor  [12 tracks]`.
     fn draw_header(&self, frame: &mut Frame, area: Rect) {
+        // The radio view owns the body while it is on screen (issue #35) and
+        // draws its own header line inside it, so this header must not title
+        // the screen over it: the default theme's background is the
+        // terminal's own, and a background that is the terminal's own covers
+        // nothing — the line drawn here would stay visible above the radio.
+        if self.radio_on_screen() {
+            return;
+        }
         if self.search.is_none()
             && self.view == View::Library
             && !matches!(self.position, Position::Files)
@@ -4321,6 +4329,14 @@ impl<'lib> App<'lib> {
     /// The list the keys act on — the search results, the queue or the
     /// library level — or the sentence an empty one says about itself.
     fn draw_body(&self, frame: &mut Frame, area: Rect) {
+        // The radio view owns the body while it is on screen (issue #35): it
+        // renders over this exact area, and the default theme's background is
+        // the terminal's own — a background that is the terminal's own covers
+        // nothing — so the list drawn here would keep showing through around
+        // the radio's rows.
+        if self.radio_on_screen() {
+            return;
+        }
         let width = area.width;
         let (rows, selected) = if self.search.is_some() {
             if self.search_results.is_empty() {

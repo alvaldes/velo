@@ -2479,6 +2479,114 @@ fn the_shell_marks_no_radio_row_for_a_file_or_for_silence() {
     );
 }
 
+// ---- the radio owns the body it is drawn over (issue #35) --------------------
+
+/// With the radio open over the sources screen, the screen holds the radio's
+/// own header and rows and none of the sources screen's: the radio replaces
+/// the body, and the default theme's background is the terminal's own, so
+/// whatever the app drew before it stays visible around its rows.
+#[test]
+fn the_radio_open_over_the_sources_screen_hides_the_sources_screen() {
+    let mut app = App::browse(None);
+    app.set_radio_wire(Box::new(RadioData::<HttpTransport>::new(None, None, None)));
+    app.open_sources();
+    shell(&mut app, KeyCode::Char('R')); // the radio opens over the sources
+
+    let screen = app_screen(&app);
+    assert!(
+        screen.contains("▸─ Radio"),
+        "the radio's own header is on screen, got:\n{screen}"
+    );
+    assert!(
+        screen.contains("Browse all countries") && screen.contains("Browse genres & tags"),
+        "the radio's section rows are on screen, got:\n{screen}"
+    );
+    for leftover in [
+        "Sources",
+        "Local library",
+        "Favourites",
+        "Playlists",
+        "Recently played",
+    ] {
+        assert!(
+            !screen.contains(leftover),
+            "the screen under the radio shows through, got:\n{screen}"
+        );
+    }
+}
+
+/// The same rule for a place whose catalog has not arrived: the tag place
+/// shows its own header and its empty sentence only — no row of the screen
+/// the radio was opened over keeps showing beneath it.
+#[test]
+fn a_tag_place_with_no_answer_yet_leaves_no_source_rows_behind() {
+    let mut app = App::browse(None);
+    app.set_radio_wire(Box::new(RadioData::<HttpTransport>::new(None, None, None)));
+    app.open_sources();
+    shell(&mut app, KeyCode::Char('R'));
+    let jazz = Place::Tag {
+        name: String::from("jazz"),
+    };
+    app.show_radio_catalog(jazz, Vec::new()); // no stations have arrived
+
+    let screen = app_screen(&app);
+    assert!(
+        screen.contains("▸─ Radio › jazz"),
+        "the radio's own header names the place, got:\n{screen}"
+    );
+    assert!(
+        screen.contains("no stations here"),
+        "the empty place says so, got:\n{screen}"
+    );
+    for leftover in [
+        "Sources",
+        "Local library",
+        "Favourites",
+        "Playlists",
+        "Recently played",
+    ] {
+        assert!(
+            !screen.contains(leftover),
+            "the screen under the radio shows through, got:\n{screen}"
+        );
+    }
+}
+
+/// The queue keeps its own rule (issue #23): with the queue on screen the
+/// queue is the body — its header, its rows — and the radio, open but asleep
+/// underneath, draws nothing.
+#[test]
+fn the_queue_on_screen_with_the_radio_open_still_draws_the_queue() {
+    let mut app = App::new(Vec::new());
+    app.set_radio_wire(Box::new(RadioData::<HttpTransport>::new(None, None, None)));
+    shell(&mut app, KeyCode::Char('R'));
+    app.show_radio_catalog(
+        norway(),
+        vec![station(
+            "Nova",
+            "https://stream.example/nova.mp3",
+            "MP3",
+            128,
+            "NO",
+        )],
+    );
+    shell(&mut app, KeyCode::Tab); // the queue is the screen now
+
+    let screen = app_screen(&app);
+    assert!(
+        screen.contains("▸─ Queue"),
+        "the queue's own header is on screen, got:\n{screen}"
+    );
+    assert!(
+        screen.contains("nothing queued"),
+        "the queue's body is the queue's, got:\n{screen}"
+    );
+    assert!(
+        !screen.contains("Nova [128k] · NO"),
+        "the radio draws nothing while the queue is on screen, got:\n{screen}"
+    );
+}
+
 #[test]
 fn the_help_card_covers_the_radio_view_it_is_opened_over() {
     let mut app = App::new(Vec::new());
