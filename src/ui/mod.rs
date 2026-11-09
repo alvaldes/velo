@@ -202,6 +202,16 @@ struct LibrarySetup {
     prompt: Option<LibraryPrompt>,
 }
 
+/// The recently played file (issue #5), as the interface holds it between
+/// ticks. `seen` is the path written last: the tick sees the same entry on
+/// every frame (a pause, a seek that rebuilds the player), so only a change
+/// of path counts as a beginning.
+#[derive(Debug, Default)]
+struct Recent {
+    entries: crate::history::History,
+    seen: Option<String>,
+}
+
 /// Refreshing the index (library-refresh T3): which folder `u` re-indexes
 /// and which one is being indexed right now.
 #[derive(Debug, Default)]
@@ -494,6 +504,9 @@ pub struct App<'lib> {
     /// The config file a library chosen with `L` is saved to, and the file
     /// every persisted value is written to (S2).
     config_file: Option<PathBuf>,
+    /// The recently played file (issue #5): loaded once from beside the
+    /// config file, recorded into when a track begins.
+    recent: Recent,
     /// Turns queue entries into files just before the producer opens them
     /// (T12c): the remote rows' `subsonic://…` entries resolve through the
     /// subsonic cache. `None` (a local-only launch) means every entry already
@@ -594,6 +607,7 @@ impl<'lib> App<'lib> {
             seek_prompt: None,
             library_setup: None,
             config_file: None,
+            recent: Recent::default(),
             resolver: None,
             covers: None,
             pending_cover: None,
@@ -666,6 +680,7 @@ impl<'lib> App<'lib> {
             seek_prompt: None,
             library_setup: None,
             config_file: None,
+            recent: Recent::default(),
             resolver: None,
             covers: None,
             pending_cover: None,
@@ -1163,8 +1178,17 @@ impl<'lib> App<'lib> {
         });
     }
 
-    /// The config file a library chosen later with `L` is saved to.
+    /// The config file a library chosen later with `L` is saved to, and the
+    /// file the history lives beside (issue #5): the history is loaded here,
+    /// eagerly, so a missing or corrupt file leaves an empty history — the
+    /// interface never complains about it.
     pub fn set_config_file(&mut self, config_file: Option<PathBuf>) {
+        self.recent = Recent::default();
+        if let Some(path) = &config_file
+            && let Ok(history) = crate::history::History::load(&crate::history::path_beside(path))
+        {
+            self.recent.entries = history;
+        }
         self.config_file = config_file;
     }
 
@@ -1520,7 +1544,8 @@ impl<'lib> App<'lib> {
             Some(player) => (player.position(), self.current_track_duration()),
             None => (Duration::ZERO, None),
         };
-        self.scrobble_tick(path, position, duration);
+        self.scrobble_tick(path.clone(), position, duration);
+        self.history_tick(path);
         let Some(player) = &self.player else {
             return;
         };
@@ -1554,6 +1579,58 @@ impl<'lib> App<'lib> {
         if let Some(tracker) = self.scrobbles.as_mut() {
             tracker.on_tick(path.as_deref(), position, duration);
         }
+    }
+
+    /// One history write per beginning (issue #5): a path the tick has not
+    /// seen as the playing one is a beginning, and every beginning records
+    /// one entry — the same path moves to the top instead of duplicating —
+    /// and saves the file atomically. A history that cannot be written is
+    /// lost, not fatal: the save is best effort, and a tick with no path
+    /// (nothing playing) forgets what it saw, so the next beginning of the
+    /// same path counts again. Production calls this from [`App::tick`];
+    /// the tests drive it headlessly.
+    #[doc(hidden)]
+    pub fn history_tick(&mut self, path: Option<PathBuf>) {
+        let Some(path) = path else {
+            self.recent.seen = None;
+            return;
+        };
+        let text = path.to_string_lossy().into_owned();
+        if self.recent.seen.as_deref() == Some(text.as_str()) {
+            return;
+        }
+        let Some(config_file) = self.config_file.clone() else {
+            return;
+        };
+        // What the index can say about the path: everything, when it is a
+        // library row; nothing, when it is a file the queue opened cold.
+        let (artist, album, title) = self.known_tracks().find(|track| track.path == path).map_or(
+            (None, None, None),
+            |track| {
+                (
+                    Some(track.artist.clone()),
+                    Some(track.album.clone()),
+                    Some(track.title.clone()),
+                )
+            },
+        );
+        let file = crate::history::path_beside(&config_file);
+        self.recent.entries.record(crate::history::Entry {
+            path: text.clone(),
+            played_at: crate::history::now_unix(),
+            artist,
+            album,
+            title,
+        });
+        self.recent.seen = Some(text);
+        let _ = self.recent.entries.save(&file);
+    }
+
+    /// The recently played entries, newest first (issue #5): the same list
+    /// the history file holds, for the `Recently played` screen to read.
+    #[must_use]
+    pub fn recently_played(&self) -> &[crate::history::Entry] {
+        &self.recent.entries.entry
     }
 
     /// Collects a remote cover that finished arriving (T12d): the fetch ran
