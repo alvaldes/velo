@@ -46,7 +46,7 @@ Every key below is what the code does today.
 |:--|:--|
 | `j` / `↓`, `k` / `↑` | Move down / up |
 | `g` / `G` | First / last row |
-| `enter` (sources) | Open the source under the cursor: `Local library`, `Radio`, `Recently played` or `Favourites` |
+| `enter` (sources) | Open the source under the cursor: `Local library`, `Radio`, `Recently played`, `Favourites` or `Playlists` |
 | `enter` (library) | Open an artist, album or genre; play from the selected track onwards through the list it is in |
 | `esc` / `backspace` | Back one level; from the top of the library, or when the radio closes, back to `Sources`. Closes the help overlay |
 | `1` `2` `3` `4` | Library view: artists (artist → album → track), every album, every track, genres |
@@ -63,8 +63,10 @@ Every key below is what the code does today.
 | `+` / `-` | Volume up / down, 5% at a time; `[` / `]` move it a single point for the levels in between |
 | `tab` | One round trip: to the queue, and back to the screen you left — `Sources`, the library at its level, or the radio view with the place you were inside |
 | `a` | Append the selection to the queue — a track, or every track of an album or genre |
-| `d` | Remove the selected entry from the queue (queue view) |
-| `J` / `K` | Move the selected entry down / up (queue view) |
+| `d` | Remove the selected entry from the queue (queue view); delete the playlist under the cursor, said in the status line (`Playlists` names list) |
+| `J` / `K` | Move the selected entry down / up (queue view); move the selected track down / up inside a playlist's track list, saved to `library.toml` at once |
+| `S` | In the queue view: save the queue as a new playlist — a prompt asks for the name, `enter` saves, `esc` cancels, a taken name is refused in the card. On a track of the library: append that track to a playlist chosen from a small overlay of the saved names (`enter` applies, `esc` cancels) |
+| `e` | On a playlist in the `Playlists` names list: rename it with a prompt, opened with the name as it stands; `esc` cancels |
 | `enter` (queue view) | Play the queue from the selected entry |
 | `?` | Help card: `j`/`k` (or `↓`/`↑`) scroll it and `g`/`G` jump to its ends; `/` filters it by key or description (`enter` keeps the filter, `esc` clears it, a second `esc` or `?` closes the help). The card keeps its full size however few rows the filter leaves, and every other key waits until it closes — `q` and `space` included |
 | `o` | Settings card: everything in `config.toml` — replay gain, repeat, shuffle, the theme (with a preview before it applies, issue #10), the seven `[theme]` colours, the six `[ui]` switches and the library folder (the volume is not a row: it stays on `+`/`-`). `j`/`k` (or `↓`/`↑`) move between the settings (the `sound`/`theme`/`screen`/`library` headers are never focused), `g`/`G` jump to the ends, `enter` or `←`/`→` step the focused row (colours cycle a short preset list, the `theme` row previews with `←`/`→` and applies with `enter`, the `folder` row opens the library prompt), `esc` closes — and every other key waits until it does, `q` and `space` included |
@@ -88,11 +90,16 @@ plays leaves it for the first track of the queue — the stations you lined up f
 the evening stay put — and when the queue holds no track, one status line says
 so and the station keeps playing.
 
-The first screen is `Sources`: `Local library`, `Radio`, `Recently played` and `Favourites`, with
+The first screen is `Sources`: `Local library`, `Radio`, `Recently played`, `Favourites` and `Playlists`, with
 the cursor already on the library. `Recently played` lists what `velo history`
 reports — the history file's entries, newest first — and its rows play and queue
 like any track. `Favourites` lists the tracks you marked with `f`, each showing
-its `★`, playable and queueable exactly like any other track list. `esc` walks
+its `★`, playable and queueable exactly like any other track list. `Playlists`
+lists your saved playlists by name with their track counts; `enter` on a name
+opens its tracks in order, playable and queueable like any other list, and
+playlists are created from the queue with `S`, appended to with `S` on a track,
+reordered with `J`/`K`, renamed with `e` and deleted with `d` — everything
+written to `library.toml` as it happens, so the names outlive the process. `esc` walks
 back one level at a time; the top of the
 library and the radio both land there, and a radio opened with `R` from the
 library comes back to the library — the way out is always the way in. A
@@ -576,7 +583,9 @@ Honest list; none of these exist behind a flag:
   playback with capped, self-pruning caches, remote covers and scrobbling
   all exist (see above). Streaming over HTTP ranges (playing before the
   whole track is on disk) is a later optimisation.
-- Playlists.
+- Playlists: saved, named and reordered in `library.toml` now (see
+  `Playlists` under the keys); a playlist editor beyond `d`/`e`/`J`/`K` is
+  not here yet.
 
 MP3, FLAC, M4A/AAC, OGG Vorbis, OGG Opus and WAV are what plays today, decoded
 with symphonia 0.6 (Opus through a statically linked libopus behind `audiopus`,

@@ -29,8 +29,8 @@ fn press(app: &mut App<'_>, code: KeyCode) -> Action {
 }
 
 /// S1, S2: the first screen lists what velo can play, with the cursor
-/// already on the first row. `Favourites` (issue #7) is last, so `j` from
-/// the top still lands on `Radio`.
+/// already on the first row. `Favourites` (issue #7) and `Playlists`
+/// (issue #4) are last, so `j` from the top still lands on `Radio`.
 #[test]
 fn the_sources_screen_names_the_sources_with_the_cursor_on_the_first() {
     let mut app = app();
@@ -39,7 +39,13 @@ fn the_sources_screen_names_the_sources_with_the_cursor_on_the_first() {
     assert_eq!(app.view(), View::Sources);
     assert_eq!(
         app.sources_labels(),
-        ["Local library", "Radio", "Recently played", "Favourites"]
+        [
+            "Local library",
+            "Radio",
+            "Recently played",
+            "Favourites",
+            "Playlists"
+        ]
     );
     assert_eq!(
         app.sources_selected(),
@@ -63,13 +69,15 @@ fn the_source_cursor_moves_with_the_list_keys_and_clamps() {
     press(&mut app, KeyCode::Char('j'));
     assert_eq!(app.sources_selected(), 2);
     press(&mut app, KeyCode::Char('j'));
-    assert_eq!(app.sources_selected(), 3, "Favourites is the last source");
-    press(&mut app, KeyCode::Char('j'));
-    assert_eq!(app.sources_selected(), 3, "j stops at the last source");
-    press(&mut app, KeyCode::Char('k'));
-    assert_eq!(app.sources_selected(), 2);
-    press(&mut app, KeyCode::Char('G'));
     assert_eq!(app.sources_selected(), 3);
+    press(&mut app, KeyCode::Char('j'));
+    assert_eq!(app.sources_selected(), 4, "Playlists is the last source");
+    press(&mut app, KeyCode::Char('j'));
+    assert_eq!(app.sources_selected(), 4, "j stops at the last source");
+    press(&mut app, KeyCode::Char('k'));
+    assert_eq!(app.sources_selected(), 3);
+    press(&mut app, KeyCode::Char('G'));
+    assert_eq!(app.sources_selected(), 4);
     press(&mut app, KeyCode::Char('g'));
     assert_eq!(app.sources_selected(), 0);
 }

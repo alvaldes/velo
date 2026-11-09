@@ -15,16 +15,21 @@ pub enum Source {
     RecentlyPlayed,
     /// The saved store's favourites (issue #7): the tracks the user marked.
     Favourites,
+    /// The saved store's playlists (issue #4): the named lists that outlive
+    /// the process.
+    Playlists,
 }
 
 impl Source {
     /// Every source, in the order the first screen shows them (S2).
-    /// `Favourites` is last, so `j` from the top still lands on `Radio`.
-    pub const ALL: [Self; 4] = [
+    /// `Favourites` and `Playlists` are last, so `j` from the top still
+    /// lands on `Radio`.
+    pub const ALL: [Self; 5] = [
         Self::Library,
         Self::Radio,
         Self::RecentlyPlayed,
         Self::Favourites,
+        Self::Playlists,
     ];
 
     /// The row's label, spelled as the issue names it (S2).
@@ -35,6 +40,7 @@ impl Source {
             Self::Radio => "Radio",
             Self::RecentlyPlayed => "Recently played",
             Self::Favourites => "Favourites",
+            Self::Playlists => "Playlists",
         }
     }
 }

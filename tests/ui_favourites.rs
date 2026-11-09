@@ -353,18 +353,25 @@ fn an_unmarked_track_shows_no_star() {
 
 // ---- S4: the list ------------------------------------------------------------
 
-/// `Sources` gains `Favourites`, last — after `Recently played`, so `j` from
-/// the top still lands on `Radio`.
+/// `Sources` gains `Favourites` after `Recently played`, so `j` from
+/// the top still lands on `Radio` — and `Playlists` (issue #4) is the row
+/// after it.
 #[test]
-fn favourites_is_the_last_source_and_j_from_the_top_still_lands_on_radio() {
+fn favourites_is_before_the_last_source_and_j_from_the_top_still_lands_on_radio() {
     let temp = TempLibrary::new("sources");
     let mut app = app(&temp);
     app.open_sources();
 
     assert_eq!(
         app.sources_labels(),
-        ["Local library", "Radio", "Recently played", "Favourites"],
-        "Favourites is last"
+        [
+            "Local library",
+            "Radio",
+            "Recently played",
+            "Favourites",
+            "Playlists"
+        ],
+        "Playlists is last, Favourites before it"
     );
     press(&mut app, KeyCode::Char('j'));
     assert_eq!(
@@ -392,7 +399,8 @@ fn opening_favourites_lists_the_marked_tracks() {
     press(&mut app, KeyCode::Char('3'));
     mark(&mut app);
     app.open_sources();
-    press(&mut app, KeyCode::Char('G')); // onto Favourites, the last row
+    press(&mut app, KeyCode::Char('G')); // the last row: Playlists
+    press(&mut app, KeyCode::Char('k')); // up onto Favourites
     press(&mut app, KeyCode::Enter);
 
     assert_eq!(app.view(), View::Library);
@@ -432,6 +440,7 @@ fn enter_plays_and_a_queues_a_favourite_row() {
     mark(&mut app);
     app.open_sources();
     press(&mut app, KeyCode::Char('G'));
+    press(&mut app, KeyCode::Char('k')); // up onto Favourites
     press(&mut app, KeyCode::Enter);
 
     assert_eq!(
@@ -465,6 +474,7 @@ fn esc_returns_to_sources() {
     mark(&mut app);
     app.open_sources();
     press(&mut app, KeyCode::Char('G'));
+    press(&mut app, KeyCode::Char('k')); // up onto Favourites
     press(&mut app, KeyCode::Enter);
     assert_eq!(app.level(), Some(Level::Favourites));
 
@@ -486,6 +496,7 @@ fn an_empty_store_opens_an_empty_list_that_says_so() {
     let mut app = app(&temp);
     app.open_sources();
     press(&mut app, KeyCode::Char('G'));
+    press(&mut app, KeyCode::Char('k')); // up onto Favourites
     press(&mut app, KeyCode::Enter);
 
     assert_eq!(app.level(), Some(Level::Favourites));
@@ -514,6 +525,7 @@ fn the_list_reads_the_store_anew_every_time_it_opens() {
     mark(&mut app); // 02
     app.open_sources();
     press(&mut app, KeyCode::Char('G'));
+    press(&mut app, KeyCode::Char('k')); // up onto Favourites
     press(&mut app, KeyCode::Enter);
     assert_eq!(app.favourite_rows().len(), 2);
 
@@ -526,6 +538,7 @@ fn the_list_reads_the_store_anew_every_time_it_opens() {
     mark(&mut app); // unmark 01
     app.open_sources();
     press(&mut app, KeyCode::Char('G'));
+    press(&mut app, KeyCode::Char('k')); // up onto Favourites
     press(&mut app, KeyCode::Enter);
 
     assert_eq!(

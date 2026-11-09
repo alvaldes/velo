@@ -157,6 +157,12 @@ impl fmt::Display for SavedError {
     }
 }
 
+/// Why a playlist could not be saved or renamed (issue #4): the name is
+/// already taken. The store refuses and stores nothing; the interface says
+/// so — never a silent merge, never a duplicate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DuplicateName;
+
 /// The durable list of what the user marked, as the file holds it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -256,6 +262,86 @@ impl Saved {
             true
         }
     }
+
+    /// The saved playlist called `name`, compared verbatim: no trimming, no
+    /// case folding — the name is the identity, the way a favourite's path
+    /// is.
+    #[must_use]
+    pub fn playlist(&self, name: &str) -> Option<&Playlist> {
+        self.playlist.iter().find(|saved| saved.name == name)
+    }
+
+    /// Saves a new playlist (issue #4, S1): a name and its tracks, in
+    /// order. A name that is already saved is refused with
+    /// [`DuplicateName`] — never a silent merge, never a duplicate.
+    ///
+    /// # Errors
+    /// [`DuplicateName`] when a playlist called `name` is already stored;
+    /// nothing is written in that case.
+    pub fn save_playlist(&mut self, name: &str, tracks: Vec<String>) -> Result<(), DuplicateName> {
+        if self.playlist(name).is_some() {
+            return Err(DuplicateName);
+        }
+        self.playlist.push(Playlist {
+            name: name.to_owned(),
+            track: tracks,
+        });
+        Ok(())
+    }
+
+    /// Appends one track to the end of the named playlist (issue #4, S3).
+    /// An unknown name appends nothing: the interface chooses what to say,
+    /// the store never invents a playlist.
+    pub fn append_to_playlist(&mut self, name: &str, path: &str) {
+        if let Some(playlist) = self.playlist.iter_mut().find(|saved| saved.name == name) {
+            playlist.track.push(path.to_owned());
+        }
+    }
+
+    /// Renames the named playlist (issue #4, S5), keeping its tracks and its
+    /// place in the file. A new name another playlist holds is refused with
+    /// [`DuplicateName`]; renaming to its own name changes nothing.
+    ///
+    /// # Errors
+    /// [`DuplicateName`] when another playlist is already called `new`;
+    /// nothing is written in that case.
+    pub fn rename_playlist(&mut self, old: &str, new: &str) -> Result<(), DuplicateName> {
+        let Some(index) = self.playlist.iter().position(|saved| saved.name == old) else {
+            return Ok(());
+        };
+        if new != old && self.playlist(new).is_some() {
+            return Err(DuplicateName);
+        }
+        new.clone_into(&mut self.playlist[index].name);
+        Ok(())
+    }
+
+    /// Removes the named playlist (issue #4, S5); answers whether it was
+    /// there.
+    pub fn delete_playlist(&mut self, name: &str) -> bool {
+        let Some(index) = self.playlist.iter().position(|saved| saved.name == name) else {
+            return false;
+        };
+        self.playlist.remove(index);
+        true
+    }
+
+    /// Moves track `index` of the named playlist down one (`delta` 1) or up
+    /// one (`delta` -1) by swapping it with its neighbour (issue #4, S4);
+    /// answers the row's new index, or `None` when the move lands outside
+    /// the list, the index is out of bounds, or the name is unknown. A
+    /// refused move changes nothing.
+    #[must_use]
+    pub fn move_in_playlist(&mut self, name: &str, index: usize, delta: i64) -> Option<usize> {
+        let playlist = self.playlist.iter_mut().find(|saved| saved.name == name)?;
+        let target = i64::try_from(index).ok()?.checked_add(delta)?;
+        let target = usize::try_from(target).ok()?;
+        if target >= playlist.track.len() {
+            return None;
+        }
+        playlist.track.swap(index, target);
+        Some(target)
+    }
 }
 
 #[cfg(test)]
@@ -281,6 +367,172 @@ mod tests {
         assert_eq!(
             Saved::load(&dir.join("library.toml")).unwrap(),
             Saved::default()
+        );
+    }
+
+    #[test]
+    fn a_second_playlist_with_a_taken_name_is_refused_never_merged() {
+        let mut saved = Saved::default();
+        saved
+            .save_playlist("Noche", vec![String::from("/music/a.flac")])
+            .unwrap();
+
+        assert_eq!(
+            saved.save_playlist("Noche", vec![String::from("/music/b.flac")]),
+            Err(DuplicateName),
+            "the second save with the same name is refused"
+        );
+        assert_eq!(saved.playlist.len(), 1, "no duplicate is stored");
+        assert_eq!(
+            saved.playlist[0].track,
+            [String::from("/music/a.flac")],
+            "the first playlist's tracks are not merged into"
+        );
+    }
+
+    #[test]
+    fn a_saved_playlist_is_found_by_its_name_verbatim() {
+        let mut saved = Saved::default();
+        saved
+            .save_playlist("Noche", vec![String::from("/music/a.flac")])
+            .unwrap();
+
+        assert_eq!(saved.playlist("Noche").map(|p| p.track.len()), Some(1));
+        assert_eq!(saved.playlist("noche"), None, "no case folding");
+        assert_eq!(saved.playlist("Missing"), None);
+    }
+
+    #[test]
+    fn append_adds_a_track_to_the_end_of_the_named_playlist() {
+        let mut saved = Saved::default();
+        saved
+            .save_playlist("Noche", vec![String::from("/music/a.flac")])
+            .unwrap();
+
+        saved.append_to_playlist("Noche", "/music/b.flac");
+        assert_eq!(
+            saved.playlist("Noche").unwrap().track,
+            [String::from("/music/a.flac"), String::from("/music/b.flac")],
+            "the track lands at the end"
+        );
+        // An unknown name is a quiet nothing: the interface chooses what to
+        // say, the store never invents a playlist.
+        saved.append_to_playlist("Missing", "/music/c.flac");
+        assert_eq!(saved.playlist.len(), 1);
+    }
+
+    #[test]
+    fn rename_keeps_the_tracks_and_the_place_and_refuses_a_taken_name() {
+        let mut saved = Saved::default();
+        saved
+            .save_playlist("Noche", vec![String::from("/music/a.flac")])
+            .unwrap();
+        saved
+            .save_playlist("Dia", vec![String::from("/music/b.flac")])
+            .unwrap();
+
+        assert_eq!(
+            saved.rename_playlist("Noche", "Dia"),
+            Err(DuplicateName),
+            "renaming onto a taken name is refused"
+        );
+        saved.rename_playlist("Noche", "Fiesta").unwrap();
+        assert_eq!(saved.playlist("Noche"), None);
+        assert_eq!(
+            saved.playlist("Fiesta").unwrap().track,
+            [String::from("/music/a.flac")],
+            "the tracks follow the rename"
+        );
+        assert_eq!(
+            saved.playlist[0].name, "Fiesta",
+            "the playlist keeps its place in the file"
+        );
+    }
+
+    #[test]
+    fn renaming_to_its_own_name_changes_nothing() {
+        let mut saved = Saved::default();
+        saved
+            .save_playlist("Noche", vec![String::from("/music/a.flac")])
+            .unwrap();
+
+        saved.rename_playlist("Noche", "Noche").unwrap();
+        assert_eq!(saved.playlist.len(), 1);
+        assert_eq!(saved.playlist[0].name, "Noche");
+    }
+
+    #[test]
+    fn delete_removes_the_named_playlist_and_answers_whether_it_was_there() {
+        let mut saved = Saved::default();
+        saved
+            .save_playlist("Noche", vec![String::from("/music/a.flac")])
+            .unwrap();
+
+        assert!(saved.delete_playlist("Noche"), "the name was there");
+        assert_eq!(saved.playlist.len(), 0);
+        assert!(!saved.delete_playlist("Noche"), "gone is gone");
+    }
+
+    #[test]
+    fn move_swaps_a_track_with_its_neighbour_and_answers_the_new_index() {
+        let mut saved = Saved::default();
+        saved
+            .save_playlist(
+                "Noche",
+                vec![
+                    String::from("/music/a.flac"),
+                    String::from("/music/b.flac"),
+                    String::from("/music/c.flac"),
+                ],
+            )
+            .unwrap();
+
+        assert_eq!(
+            saved.move_in_playlist("Noche", 0, 1),
+            Some(1),
+            "J moves down one"
+        );
+        assert_eq!(
+            saved.playlist("Noche").unwrap().track,
+            [
+                String::from("/music/b.flac"),
+                String::from("/music/a.flac"),
+                String::from("/music/c.flac")
+            ]
+        );
+        assert_eq!(
+            saved.move_in_playlist("Noche", 1, -1),
+            Some(0),
+            "K moves up one"
+        );
+        assert_eq!(
+            saved.playlist("Noche").unwrap().track,
+            [
+                String::from("/music/a.flac"),
+                String::from("/music/b.flac"),
+                String::from("/music/c.flac")
+            ]
+        );
+        assert_eq!(
+            saved.move_in_playlist("Noche", 2, 1),
+            None,
+            "moving past the end is refused"
+        );
+        assert_eq!(
+            saved.move_in_playlist("Noche", 0, -1),
+            None,
+            "moving above the start is refused"
+        );
+        assert_eq!(saved.move_in_playlist("Noche", 3, 1), None);
+        assert_eq!(
+            saved.move_in_playlist("Missing", 0, 1),
+            None,
+            "no playlist, no move"
+        );
+        assert_eq!(
+            saved.playlist("Noche").unwrap().track.len(),
+            3,
+            "a refused move changed nothing"
         );
     }
 
