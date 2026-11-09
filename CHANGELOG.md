@@ -1,6 +1,10 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.16.0] - 2026-11-09
+
+### Features
+- **radio:** The directory host comes from the config
 ## [0.15.0] - 2026-11-09
 
 ### Features
