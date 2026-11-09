@@ -48,6 +48,10 @@ fn main() -> ExitCode {
         if let Err(error) = velo::radio::store::write_template_if_missing(&radio_file) {
             eprintln!("velo: cannot write {}: {error}", radio_file.display());
         }
+        let library_file = velo::saved::path_beside(config_file);
+        if let Err(error) = velo::saved::write_default_library(&library_file) {
+            eprintln!("velo: cannot write {}: {error}", library_file.display());
+        }
     }
     let settings = match user_settings(&cli, config_file.as_deref()) {
         Ok(settings) => settings,

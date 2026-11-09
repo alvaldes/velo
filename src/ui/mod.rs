@@ -255,6 +255,9 @@ pub enum Level {
     /// The history's entries (issue #5): the `Recently played` source, not a
     /// level of the index.
     Recent,
+    /// The saved store's favourites (issue #7): the `Favourites` source, not
+    /// a level of the index.
+    Favourites,
 }
 
 /// Where the interface stands, including the flat command-line list.
@@ -280,6 +283,10 @@ enum Position {
     /// played` source. Not a level of the index: it is never read from the
     /// library and never persisted as a node.
     Recent,
+    /// The saved store's favourites (issue #7) — the `Favourites` source.
+    /// Not a level of the index: its rows are the store's entries, cloned in
+    /// when the source opens, and nothing here is persisted as a node.
+    Favourites,
 }
 
 /// Where the stream that is playing came from. The row it plays is found by
@@ -546,6 +553,13 @@ pub struct App<'lib> {
     /// stations alike — cloned in when the source opens. The library
     /// snapshot `tracks` holds stays where it was.
     recent_rows: Vec<crate::history::Entry>,
+    /// The saved store (issue #7): what the user marked, in `library.toml`
+    /// beside the config file, loaded with the config the way the history
+    /// is. Holds both tables; only `favorite` is consumed today.
+    favourites: crate::saved::Saved,
+    /// The rows the `Favourites` screen stands on (issue #7): the store's
+    /// favourites as the file holds them, cloned in when the source opens.
+    favourite_rows: Vec<crate::saved::Favorite>,
     /// Turns queue entries into files just before the producer opens them
     /// (T12c): the remote rows' `subsonic://…` entries resolve through the
     /// subsonic cache. `None` (a local-only launch) means every entry already
@@ -657,6 +671,8 @@ impl<'lib> App<'lib> {
             config_file: None,
             recent: Recent::default(),
             recent_rows: Vec::new(),
+            favourites: crate::saved::Saved::default(),
+            favourite_rows: Vec::new(),
             resolver: None,
             covers: None,
             pending_cover: None,
@@ -737,6 +753,8 @@ impl<'lib> App<'lib> {
             config_file: None,
             recent: Recent::default(),
             recent_rows: Vec::new(),
+            favourites: crate::saved::Saved::default(),
+            favourite_rows: Vec::new(),
             resolver: None,
             covers: None,
             pending_cover: None,
@@ -1091,7 +1109,66 @@ impl<'lib> App<'lib> {
                 self.open_recent();
                 Action::None
             }
+            sources::Source::Favourites => {
+                self.open_favourites();
+                Action::None
+            }
         }
+    }
+
+    /// Opens the `Favourites` source (issue #7): the saved store's favourites,
+    /// in the order they were marked, as the rows the screen stands on —
+    /// cloned in here, never re-read while the screen is open. This is not a
+    /// level of the library and never becomes a `BrowseBy`: nothing here is
+    /// persisted as a node, and the node the file holds is left alone.
+    fn open_favourites(&mut self) {
+        self.favourite_rows = self.favourites.favorite.clone();
+        self.view = View::Library;
+        self.position = Position::Favourites;
+        self.selected = 0;
+        self.queue_selected = 0;
+    }
+
+    /// The rows the `Favourites` screen stands on (issue #7): the store's
+    /// favourites as the file holds them, in the order they were marked.
+    /// Empty outside that screen.
+    #[must_use]
+    pub fn favourite_rows(&self) -> &[crate::saved::Favorite] {
+        &self.favourite_rows
+    }
+
+    /// `f` on a track row of the library views (issue #7): marks the row's
+    /// path — exactly the path the row carries, a `subsonic://` path stays
+    /// itself — or unmarks it again, keeping `artist`, `album` and `title`
+    /// copied from the row when it has them: there is no lookup by path in
+    /// the index, so the song must still be nameable from the file alone.
+    /// The store is written immediately, best effort: a store that cannot be
+    /// written is lost, not fatal — the same courtesy rule `history_tick`
+    /// follows. An absent field of the row (a path the index cannot
+    /// describe) stays absent, never an empty string.
+    fn toggle_favourite(&mut self) {
+        let Some(track) = self.tracks.get(self.selected) else {
+            return;
+        };
+        let known = |text: &str| (!text.is_empty()).then(|| text.to_owned());
+        let favorite = crate::saved::Favorite {
+            path: track.path.to_string_lossy().into_owned(),
+            artist: known(&track.artist),
+            album: known(&track.album),
+            title: known(&track.title),
+        };
+        self.favourites.toggle_favorite(favorite);
+        self.save_marks();
+    }
+
+    /// Writes the saved store beside the config file at once, best effort
+    /// (issue #7): a store that cannot be written is lost, not fatal.
+    fn save_marks(&mut self) {
+        let Some(config_file) = self.config_file.clone() else {
+            return;
+        };
+        let file = crate::saved::path_beside(&config_file);
+        let _ = self.favourites.save(&file);
     }
 
     /// Opens the `Recently played` source (issue #5): the history's entries,
@@ -1228,6 +1305,7 @@ impl<'lib> App<'lib> {
                 genre: genre.clone(),
             }),
             Position::Recent => Some(Level::Recent),
+            Position::Favourites => Some(Level::Favourites),
         }
     }
 
@@ -1269,6 +1347,13 @@ impl<'lib> App<'lib> {
                 .unwrap_or_default()
                 .iter()
                 .map(|entry| entry.path.clone())
+                .collect(),
+            Position::Favourites => self
+                .favourite_rows
+                .get(from..)
+                .unwrap_or_default()
+                .iter()
+                .map(|favorite| PathBuf::from(&favorite.path))
                 .collect(),
             _ => Vec::new(),
         }
@@ -1316,15 +1401,21 @@ impl<'lib> App<'lib> {
     }
 
     /// The config file a library chosen later with `L` is saved to, and the
-    /// file the history lives beside (issue #5): the history is loaded here,
-    /// eagerly, so a missing or corrupt file leaves an empty history — the
-    /// interface never complains about it.
+    /// file the history (issue #5) and the saved store (issue #7) live
+    /// beside: both are loaded here, eagerly, so a missing or corrupt file
+    /// leaves an empty state — the interface never complains about either.
     pub fn set_config_file(&mut self, config_file: Option<PathBuf>) {
         self.recent = Recent::default();
         if let Some(path) = &config_file
             && let Ok(history) = crate::history::History::load(&crate::history::path_beside(path))
         {
             self.recent.entries = history;
+        }
+        self.favourites = crate::saved::Saved::default();
+        if let Some(path) = &config_file
+            && let Ok(saved) = crate::saved::Saved::load(&crate::saved::path_beside(path))
+        {
+            self.favourites = saved;
         }
         self.config_file = config_file;
     }
@@ -1970,7 +2061,7 @@ impl<'lib> App<'lib> {
     fn read_level(&mut self, library: &Library) -> Result<(), crate::library::LibraryError> {
         self.artists = library.artists()?;
         match &self.position {
-            Position::Files | Position::Artists | Position::Recent => {}
+            Position::Files | Position::Artists | Position::Recent | Position::Favourites => {}
             Position::Albums { artist } => self.albums = library.albums_of(artist)?,
             Position::Tracks { artist, album } => {
                 self.tracks = library.tracks_of(artist, album)?;
@@ -2012,6 +2103,12 @@ impl<'lib> App<'lib> {
                 .recent_rows
                 .get(index)
                 .map(crate::history::Entry::identity),
+            // A favourite row's identity is its path, exactly as the store
+            // holds it (issue #7).
+            Position::Favourites => self
+                .favourite_rows
+                .get(index)
+                .map(|favorite| favorite.path.clone()),
             Position::Genres => self.genres.get(index).map(|entry| entry.name.clone()),
         }
     }
@@ -2138,6 +2235,20 @@ impl<'lib> App<'lib> {
             }
             KeyCode::Char('a') => {
                 self.append_selection();
+                Action::None
+            }
+            // `f` on a track row of the library views marks it, and again
+            // unmarks it (issue #7). The radio view claimed its own `f`
+            // above; the sources screen and the flat file list have no track
+            // row to mark.
+            KeyCode::Char('f')
+                if self.view == View::Library
+                    && matches!(
+                        self.position,
+                        Position::Tracks { .. } | Position::AllTracks | Position::Genre { .. }
+                    ) =>
+            {
+                self.toggle_favourite();
                 Action::None
             }
             KeyCode::Char('d') if self.view == View::Queue => {
@@ -2549,6 +2660,7 @@ impl<'lib> App<'lib> {
             {
                 play
             }
+            Position::Favourites if !self.favourite_rows.is_empty() => play,
             Position::Artists if !self.artists.is_empty() => Action::Descend,
             Position::Albums { .. } | Position::AllAlbums if !self.albums.is_empty() => {
                 Action::Descend
@@ -3521,7 +3633,8 @@ impl<'lib> App<'lib> {
             | Position::Tracks { .. }
             | Position::AllTracks
             | Position::Genre { .. }
-            | Position::Recent => ("track", "tracks"),
+            | Position::Recent
+            | Position::Favourites => ("track", "tracks"),
             Position::Artists => ("artist", "artists"),
             Position::Albums { .. } | Position::AllAlbums => ("album", "albums"),
             Position::Genres => ("genre", "genres"),
@@ -3615,6 +3728,27 @@ impl<'lib> App<'lib> {
             .collect()
     }
 
+    /// The row's name with the saved store's `★` before it when the row is
+    /// marked (issue #7) — the way the radio view stars its favourites, in
+    /// the label itself. The marker is state, read from the store every
+    /// frame, never a copy made when the list was built. Only whole-track
+    /// lists carry marks; every row of the favourites list is marked.
+    fn starred_name(&self, index: usize, name: String) -> String {
+        let starred = match &self.position {
+            Position::Tracks { .. } | Position::AllTracks | Position::Genre { .. } => self
+                .tracks
+                .get(index)
+                .is_some_and(|entry| self.favourites.is_favorite(&entry.path.to_string_lossy())),
+            Position::Favourites => true,
+            _ => false,
+        };
+        if starred {
+            format!("\u{2605} {name}")
+        } else {
+            name
+        }
+    }
+
     /// What row `index` of the current level says: its name, the note
     /// dimmed after it and the fact against the right edge.
     fn row_text(&self, index: usize) -> (String, String, String) {
@@ -3657,7 +3791,11 @@ impl<'lib> App<'lib> {
                 } else {
                     format!("{} · {}", entry.artist, entry.album)
                 };
-                (entry.title.clone(), note, Self::duration(entry.duration_ms))
+                (
+                    self.starred_name(index, entry.title.clone()),
+                    note,
+                    Self::duration(entry.duration_ms),
+                )
             }
             Position::Recent => {
                 let entry = &self.recent_rows[index];
@@ -3671,24 +3809,26 @@ impl<'lib> App<'lib> {
                         String::from("radio"),
                         String::new(),
                     ),
-                    crate::history::Kind::File => match &entry.title {
-                        Some(title) if !title.is_empty() => {
-                            let note = [
-                                entry.artist.as_deref().unwrap_or(""),
-                                entry.album.as_deref().unwrap_or(""),
-                            ]
-                            .into_iter()
-                            .filter(|part| !part.is_empty())
-                            .collect::<Vec<_>>()
-                            .join(" \u{b7} ");
-                            (title.clone(), note, String::new())
-                        }
-                        _ => {
-                            let (name, folder) = describe(Path::new(&entry.path), []);
-                            (name, folder, String::new())
-                        }
-                    },
+                    crate::history::Kind::File => file_entry_text(
+                        &entry.path,
+                        entry.artist.as_deref(),
+                        entry.album.as_deref(),
+                        entry.title.as_deref(),
+                    ),
                 }
+            }
+            Position::Favourites => {
+                let favorite = &self.favourite_rows[index];
+                // The same row convention as the recent list (issue #7):
+                // what the store knew about the track names it, and a path
+                // the index never described keeps its file name.
+                let (name, note, fact) = file_entry_text(
+                    &favorite.path,
+                    favorite.artist.as_deref(),
+                    favorite.album.as_deref(),
+                    favorite.title.as_deref(),
+                );
+                (self.starred_name(index, name), note, fact)
             }
             Position::Genres => {
                 let entry = &self.genres[index];
@@ -4143,6 +4283,7 @@ impl<'lib> App<'lib> {
                 self.tracks.len()
             }
             Position::Recent => self.recent_rows.len(),
+            Position::Favourites => self.favourite_rows.len(),
             Position::Genres => self.genres.len(),
         }
     }
@@ -4155,6 +4296,7 @@ impl<'lib> App<'lib> {
             }
             _ if self.row_count() > 0 => None,
             Position::Recent => Some("nothing played yet"),
+            Position::Favourites => Some("nothing favourited yet"),
             Position::Artists | Position::AllAlbums | Position::AllTracks | Position::Genres
                 if self.library_setup.is_some() =>
             {
@@ -4205,6 +4347,12 @@ impl<'lib> App<'lib> {
             Position::Tracks { .. } | Position::AllTracks | Position::Genre { .. } => {
                 let path = self.playing_path()?;
                 self.tracks.iter().position(|row| row.path == path)
+            }
+            Position::Favourites => {
+                let path = self.playing_path()?;
+                self.favourite_rows
+                    .iter()
+                    .position(|favorite| favorite.path == path.to_string_lossy())
             }
             Position::Artists
             | Position::Albums { .. }
@@ -4541,6 +4689,17 @@ impl<'lib> App<'lib> {
     /// entry, and the producer resolves it through the cache when it is
     /// reached — appending never starts a download.
     fn append_selection(&mut self) {
+        // The favourites list (issue #7) is its own list, not `tracks`: a
+        // row appends the store's path verbatim.
+        if matches!(self.position, Position::Favourites) {
+            let Some(favorite) = self.favourite_rows.get(self.selected) else {
+                return;
+            };
+            let path = PathBuf::from(&favorite.path);
+            self.edit_queue(|queue| queue.push(Entry::from(path)));
+            self.status = format!("velo: added {}", plural(1, "track", "tracks"));
+            return;
+        }
         // The recent list holds the file's entries (issue #33): a station
         // appends itself through the radio's own queue verb, a file appends
         // its path verbatim.
@@ -4612,9 +4771,9 @@ impl<'lib> App<'lib> {
                 "velo: open an album to add its tracks".clone_into(&mut self.status);
                 return;
             }
-            // The recent list is answered above: its rows are the file's
-            // entries, not `tracks` rows (issue #33).
-            (&Position::Recent, _) => return,
+            // The recent and favourites lists are answered above: their rows
+            // are the store's entries, not `tracks` rows (issue #33, #7).
+            (Position::Recent | Position::Favourites, _) => return,
         };
         if paths.is_empty() {
             return;
@@ -4703,7 +4862,8 @@ impl<'lib> App<'lib> {
             | Position::Tracks { .. }
             | Position::AllTracks
             | Position::Genre { .. }
-            | Position::Recent => {}
+            | Position::Recent
+            | Position::Favourites => {}
         }
         // The open node is persisted (S3), but only when it changed.
         self.remember_node();
@@ -4743,13 +4903,14 @@ impl<'lib> App<'lib> {
                 self.position = Position::Genres;
                 self.selected = 0;
             }
-            // The recent list (issue #5) is its own list, not a level of the
-            // library: there is no parent snapshot to keep — `open_recent`
+            // The recent list (issue #5) and the favourites list (issue #7)
+            // are their own lists, not levels of the library: there is no
+            // parent snapshot to keep — `open_recent`/`open_favourites`
             // replaced the tracks — so ascending lands on `Sources` over the
             // top of the library view, read again from the index, the way the
             // top of the library reaches `Sources` (S6). The saved node was
-            // never this list's to walk out of, so nothing is persisted here.
-            Position::Recent => {
+            // never these lists' to walk out of, so nothing is persisted.
+            Position::Recent | Position::Favourites => {
                 self.position = match self.browse_by {
                     BrowseBy::Artists => Position::Artists,
                     BrowseBy::Albums => Position::AllAlbums,
@@ -5276,6 +5437,32 @@ fn bar_color(from_bottom: usize, rows: usize, theme: &Theme) -> ratatui::style::
     }
 }
 
+/// One stored entry that names a file — a history entry or a favourite
+/// (issue #7) — as one row: the title when the store knew one, with
+/// `artist · album` dimmed after it, and the file's own name over its folder
+/// when it did not. Nothing is invented for a path the store never described.
+fn file_entry_text(
+    path: &str,
+    artist: Option<&str>,
+    album: Option<&str>,
+    title: Option<&str>,
+) -> (String, String, String) {
+    match title {
+        Some(title) if !title.is_empty() => {
+            let note = [artist.unwrap_or(""), album.unwrap_or("")]
+                .into_iter()
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join(" \u{b7} ");
+            (title.to_owned(), note, String::new())
+        }
+        _ => {
+            let (name, folder) = describe(Path::new(path), []);
+            (name, folder, String::new())
+        }
+    }
+}
+
 /// The title and the dim subtitle of a playing file: its library row when
 /// one of `known` has its path (`artist · album`), otherwise its file name
 /// over its folder. Nothing is invented for a file the index never saw.
@@ -5441,7 +5628,7 @@ fn mmss(duration: Duration) -> String {
 }
 
 /// Every row of the help card: the key, then what it does.
-const HELP_ROWS: [(&str, &str); 33] = [
+const HELP_ROWS: [(&str, &str); 34] = [
     ("j / Down", "move down"),
     ("k / Up", "move up"),
     ("g", "first track"),
@@ -5472,6 +5659,7 @@ const HELP_ROWS: [(&str, &str); 33] = [
         "no library set: a prompt asks for its path, tab completes",
     ),
     ("a", "add the selection to the queue"),
+    ("f", "on a track: mark it as a favourite"),
     ("d", "remove from the queue"),
     ("J / K", "move it down / up"),
     ("R", "radio: the directory, your favourites, your stations"),
