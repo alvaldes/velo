@@ -291,6 +291,57 @@ impl PlayState {
     }
 }
 
+/// The default URL opener (S3, issue #19): the system's own — `open` on
+/// macOS, `xdg-open` elsewhere — spawned without waiting for it, so the
+/// interface never blocks on a browser. A failure comes back as the error's
+/// text; the caller puts the URL on the status line so nothing is lost.
+fn open_url(url: &str) -> Result<(), String> {
+    let program = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    std::process::Command::new(program)
+        .arg(url)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+/// The prefilled GitHub issue URL for one radio report (S3, issue #19):
+/// the title and the body percent-encoded, the `bug` label attached. The
+/// URL is all velo builds — the browser shows the draft and the human
+/// sends it; nothing here ever posts.
+#[must_use]
+fn issue_url(title: &str, body: &str) -> String {
+    format!(
+        "https://github.com/alvaldes/velo/issues/new?title={}&body={}&labels=bug",
+        percent_encode(title),
+        percent_encode(body),
+    )
+}
+
+/// Percent-encodes a URL component: every byte but the unreserved ones
+/// (`A`–`Z`, `a`–`z`, `0`–`9`, `-`, `_`, `.`, `~`) becomes `%XX` with the
+/// hex digits in upper case — including the space, so no `+` ambiguity.
+#[must_use]
+fn percent_encode(text: &str) -> String {
+    use std::fmt::Write as _;
+
+    let mut encoded = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char);
+            }
+            _ => {
+                let _ = write!(encoded, "%{byte:02X}");
+            }
+        }
+    }
+    encoded
+}
+
 /// `1 track`, `2 tracks`: a count reads as English, not as a log line.
 #[must_use]
 pub fn plural(count: usize, one: &str, many: &str) -> String {
@@ -403,6 +454,19 @@ pub struct App<'lib> {
     /// `Sources` when it was chosen there, the library or the queue when `R`
     /// opened it over them.
     radio_from: View,
+    /// The refusal note the status line last showed for the radio's cursor
+    /// (S1, issue #19): `None` when the cursor is not on a rejected station
+    /// or the note is not on the line. The note is only rewritten when this
+    /// changes, so no tick rewrites the line, and it is only cleared when
+    /// it still carries the note — never another writer's message.
+    radio_refusal: Option<String>,
+    /// The opener the radio's report key hands issue URLs to (S3, issue
+    /// #19): the system's own (`open` on macOS, `xdg-open` elsewhere),
+    /// spawned without waiting for it. A function pointer so the tests can
+    /// install a recorder — no test ever spawns a browser. velo holds no
+    /// token and posts nothing: the browser shows the draft, and the human
+    /// reads it and submits.
+    url_opener: fn(&str) -> Result<(), String>,
     /// The screen `tab` returns to (issue #23): the round trip's other end.
     /// It is remembered when the queue is entered from anywhere and returned
     /// to when the queue is left. Default `View::Sources`.
@@ -473,6 +537,7 @@ impl<'lib> App<'lib> {
             position: Position::Files,
             sources: sources::Sources::default(),
             radio_from: View::Library,
+            url_opener: open_url,
             tab_origin: View::Sources,
             argv: tracks,
             library: None,
@@ -510,6 +575,7 @@ impl<'lib> App<'lib> {
             radio: None,
             transport_fixture: None,
             radio_wire: None,
+            radio_refusal: None,
             colors: ThemeColors::default(),
             library_setup: None,
             config_file: None,
@@ -542,6 +608,7 @@ impl<'lib> App<'lib> {
             position: Position::Artists,
             sources: sources::Sources::default(),
             radio_from: View::Library,
+            url_opener: open_url,
             tab_origin: View::Sources,
             argv: Vec::new(),
             library,
@@ -579,6 +646,7 @@ impl<'lib> App<'lib> {
             radio: None,
             transport_fixture: None,
             radio_wire: None,
+            radio_refusal: None,
             colors: ThemeColors::default(),
             library_setup: None,
             config_file: None,
@@ -1371,6 +1439,16 @@ impl<'lib> App<'lib> {
         self.radio_wire = Some(wire);
     }
 
+    /// Installs the URL opener (the integration tests' hook): no test can
+    /// spawn a browser, so the tests inject a recorder and assert on the
+    /// URL a report hands over. Production never calls this — [`App::new`]
+    /// installs the real system opener ([`open_url`]), which is why it is
+    /// hidden from the docs.
+    #[doc(hidden)]
+    pub fn set_url_opener(&mut self, opener: fn(&str) -> Result<(), String>) {
+        self.url_opener = opener;
+    }
+
     /// Stands in for a playing player (T6c), which no test can build —
     /// building one opens an audio device: the entry becomes the queue the
     /// transport reads, and the position, total and ICY title are held in
@@ -1935,7 +2013,79 @@ impl<'lib> App<'lib> {
                 self.status = format!("velo: added {}", plural(1, "track", "tracks"));
                 Some(Action::None)
             }
+            radio::RadioOutcome::ReportIssue { title, body } => {
+                self.open_issue_report(&title, &body);
+                Some(Action::None)
+            }
             radio::RadioOutcome::Pass => None,
+        }
+    }
+
+    /// The refusal of the station the radio's cursor rests on, as the status
+    /// line says it: `velo: <name> cannot play: <reason>` (S1, issue #19).
+    /// `None` when the cursor is not on a catalog station the filter
+    /// rejected — favourites and hand-added stations skip the filter by
+    /// design, so their playing is never a refusal.
+    fn radio_refusal_message(&self) -> Option<String> {
+        let view = self.radio.as_ref()?;
+        let reason = view.selected_refusal()?;
+        let name = view.selection().and_then(|row| match row.kind {
+            radio::RowKind::CatalogStation { station, .. } => Some(station.name.clone()),
+            _ => None,
+        })?;
+        Some(format!("velo: {name} cannot play: {reason}"))
+    }
+
+    /// Writes the refusal note onto the status line while the radio's cursor
+    /// rests on a rejected station and takes it off when the cursor leaves
+    /// (S1, issue #19). The note is compared against what was last shown, so
+    /// it is written only when it changes, and the line is only cleared when
+    /// it still carries the note — a message another writer put up
+    /// (`velo: opening …`, a wire error) is never wiped.
+    fn radio_refusal_status(&mut self) {
+        let message = self.radio_refusal_message();
+        if message == self.radio_refusal {
+            return;
+        }
+        match (&message, &self.radio_refusal) {
+            // The cursor arrived on a rejected row: the note takes the line.
+            (Some(new), _) => self.status = new.clone(),
+            // The cursor left: the line is taken back only if it still
+            // carries the note.
+            (None, Some(shown)) => {
+                if self.status == *shown {
+                    self.status.clear();
+                }
+            }
+            (None, None) => {}
+        }
+        self.radio_refusal = message;
+    }
+
+    /// Hands a radio report to the browser (S3, issue #19). The URL is
+    /// built here — the version and the platform are the shell's to know —
+    /// and given to the system opener without waiting on it. velo holds no
+    /// token and posts nothing: the browser shows the draft, and the human
+    /// reads it and submits. If the opener fails, the URL itself takes the
+    /// status line, so the report can still be filed by hand — nothing is
+    /// ever lost. The report's own status write does not fight the refusal
+    /// note: that note is only rewritten when it changes, and only cleared
+    /// when the line still carries it ([`App::radio_refusal_status`]).
+    fn open_issue_report(&mut self, title: &str, body: &str) {
+        let body = format!(
+            "{body}\n\nvelo {} on {} ({})",
+            env!("CARGO_PKG_VERSION"),
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+        );
+        let url = issue_url(title, &body);
+        if (self.url_opener)(&url).is_ok() {
+            self.status = String::from(
+                "velo: the report is open in your browser — reading it and sending it is yours to do",
+            );
+        } else {
+            self.status =
+                format!("velo: the browser did not open — the report to file by hand: {url}");
         }
     }
 
@@ -1949,17 +2099,22 @@ impl<'lib> App<'lib> {
     /// Never blocks — the request runs on a worker thread and lands
     /// through a channel, the pattern the library index uses.
     fn radio_poll(&mut self) {
-        let Some((wire, view)) = self.radio_wire.as_mut().zip(self.radio.as_mut()) else {
-            return;
-        };
-        wire.poll(view);
-        if let Some(message) = wire.take_message() {
-            self.status = message;
-        } else if wire.loading() {
-            self.status = String::from("⟳ loading…");
-        } else if self.status == "⟳ loading…" {
-            self.status.clear();
+        if let Some((wire, view)) = self.radio_wire.as_mut().zip(self.radio.as_mut()) {
+            wire.poll(view);
+            if let Some(message) = wire.take_message() {
+                self.status = message;
+            } else if wire.loading() {
+                self.status = String::from("⟳ loading…");
+            } else if self.status == "⟳ loading…" {
+                self.status.clear();
+            }
         }
+        // The refusal note follows the cursor (S1, issue #19): said while it
+        // rests on a station the filter rejected, gone when it leaves. It is
+        // written after the wiring's own messages, and only when it changes,
+        // so no tick rewrites the line and no other writer's message is
+        // disturbed.
+        self.radio_refusal_status();
     }
 
     /// Carries an [`Action`] into the audio or library half. Errors land in

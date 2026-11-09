@@ -15,6 +15,9 @@
 //!   codec seam above, minus the stations whose URL is an HLS manifest —
 //!   a list of `.ts` segments nothing compiled here can decode, whatever
 //!   the codec field claims.
+//! - [`refusal`] is the same answer spelled out: why one station cannot
+//!   play, as a sentence a person can read. The marker, the status line
+//!   and any report all read it from here, so they can never disagree.
 
 use crate::radio::client::Station;
 
@@ -105,12 +108,45 @@ fn is_hls_manifest(url: &str) -> bool {
 
 /// Whether one station can play as things stand: its codec is decodable
 /// ([`is_playable_codec`]) and its resolved URL is not an HLS manifest
-/// ([`is_hls_manifest`]).
+/// ([`is_hls_manifest`]). This is [`refusal`] turned into a yes-or-no, so
+/// the two can never disagree.
 ///
 /// The URL rule is spelled from the directory's own `url_resolved` only —
 /// no network, no sniffing. The stream layer keeps its body-level HLS
 /// refusal as the backstop for servers that hide the extension.
 #[must_use]
 pub fn is_playable_station(station: &Station) -> bool {
-    is_playable_codec(&station.codec) && !is_hls_manifest(&station.url_resolved)
+    refusal(station).is_none()
+}
+
+/// Why one station cannot play: `None` when it plays, otherwise the reason
+/// as a sentence a person can read — the marker `✗` never says only that,
+/// it says this too (S1, issue #19). One place decides it, and
+/// [`is_playable_station`] is this answer's yes-or-no shadow.
+#[must_use]
+pub fn refusal(station: &Station) -> Option<String> {
+    refusal_for(
+        &station.codec,
+        is_playable_codec(&station.codec),
+        &station.url_resolved,
+    )
+}
+
+/// The refusal given the codec spelling, whether this build can decode it,
+/// and the resolved URL. Every codec in the spelling table has a decoder in
+/// this build, so no real [`Station`] can carry the codec refusal here; the
+/// decodability is an argument so a test can state that branch without
+/// faking a build. The public entry point [`refusal`] computes exactly this
+/// argument and calls this — it never weakens the rule.
+#[must_use]
+pub fn refusal_for(codec: &str, decodable: bool, url: &str) -> Option<String> {
+    if is_hls_manifest(url) {
+        return Some(String::from(
+            "an HLS manifest: its .ts segments cannot be decoded",
+        ));
+    }
+    if !decodable {
+        return Some(format!("the codec {codec} is not in this build"));
+    }
+    None
 }

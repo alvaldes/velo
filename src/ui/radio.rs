@@ -10,7 +10,10 @@
 //! back through [`RadioView::set_catalog`] — and it never plays on its own:
 //! `enter` on a station answers [`RadioOutcome::Play`] and `a` answers
 //! [`RadioOutcome::Queue`], and the shell — which owns the queue and the
-//! player — carries them out (T6c).
+//! player — carries them out (T6c). One key more: `i` on a station the codec
+//! filter rejected answers [`RadioOutcome::ReportIssue`], and the shell turns
+//! that into a prefilled bug report the browser opens (S3, issue #19);
+//! nothing here posts anything.
 //!
 //! The sections, in order and only when they have content: browse all
 //! countries, the user's own country (`Norway (near you)`) with its regions
@@ -34,7 +37,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, ListState, Paragraph};
 
 use crate::radio::client::{Country, Order, State, Station, Tag};
-use crate::radio::directory::is_playable_station;
+use crate::radio::directory::{is_playable_station, refusal};
 use crate::radio::store::{Favorite, Pinned, RadioStore};
 
 use super::plural;
@@ -66,6 +69,19 @@ pub enum RadioOutcome {
         url: String,
         /// The station's own, user-facing name.
         name: String,
+    },
+    /// `i` on a catalog station the codec filter rejected (S3, issue #19):
+    /// the facts a prefilled bug report carries, gathered from the station
+    /// and the directory's [`refusal`]. The view builds only the facts; the
+    /// shell — which knows the version and the platform — builds the URL and
+    /// hands it to the browser. Nothing is ever posted; the human reads the
+    /// draft and submits it.
+    ReportIssue {
+        /// The issue's title, naming the station.
+        title: String,
+        /// The issue's body: the station's name, codec and `url_resolved`,
+        /// and the reason the directory refused it.
+        body: String,
     },
     /// Not a radio key: the rest of the keymap may have it.
     Pass,
@@ -484,6 +500,26 @@ impl RadioView {
         row.kind.selectable().then_some(row)
     }
 
+    /// Why the station under the cursor cannot play, when it is a catalog
+    /// station the codec filter rejected: the directory's own refusal
+    /// ([`crate::radio::directory::refusal`]) — the same reason `✗` marked
+    /// the row with (S1, issue #19). Every other row kind answers `None`:
+    /// favourites and hand-added stations skip the filter by design, so
+    /// their playing is never a refusal, and a playable station has none
+    /// to give.
+    #[must_use]
+    pub fn selected_refusal(&self) -> Option<String> {
+        let row = self.selection()?;
+        let RowKind::CatalogStation {
+            station,
+            playable: false,
+        } = row.kind
+        else {
+            return None;
+        };
+        refusal(&station)
+    }
+
     /// Applies one key press. Keys the view does not own answer
     /// [`RadioOutcome::Pass`] and still reach the rest of the keymap, so
     /// `space`, the volume and `q` keep working over the radio.
@@ -537,6 +573,7 @@ impl RadioView {
                 self.toggle_mark();
                 RadioOutcome::Handled
             }
+            KeyCode::Char('i') => self.report_issue(),
             KeyCode::Char('N') => {
                 self.open_countries();
                 RadioOutcome::Handled
@@ -711,6 +748,38 @@ impl RadioView {
             url,
             name,
         })
+    }
+
+    /// `i` on the selected row: only a catalog station the codec filter
+    /// rejected answers with [`RadioOutcome::ReportIssue`] — the report's
+    /// facts, from the station and the directory's [`refusal`] (S3, issue
+    /// #19). Every other row — a playable station, a favourite, a hand-added
+    /// station, a place, the rule, a header — passes the key through
+    /// untouched, so the rest of the keymap keeps it and a future global
+    /// binding stays free.
+    fn report_issue(&self) -> RadioOutcome {
+        let Some(row) = self.selection() else {
+            return RadioOutcome::Pass;
+        };
+        let RowKind::CatalogStation {
+            station,
+            playable: false,
+        } = row.kind
+        else {
+            return RadioOutcome::Pass;
+        };
+        let Some(reason) = refusal(&station) else {
+            // The `✗` marker was built from this same refusal: if it says
+            // no, there is no report to file.
+            return RadioOutcome::Pass;
+        };
+        RadioOutcome::ReportIssue {
+            title: format!("Radio station \"{}\" does not play", station.name),
+            body: format!(
+                "Station: {}\nCodec: {}\nURL: {}\nReason: {reason}",
+                station.name, station.codec, station.url_resolved,
+            ),
+        }
     }
 
     /// The place of one country, named from the index when it is there.
