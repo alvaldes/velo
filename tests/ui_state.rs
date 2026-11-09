@@ -2081,8 +2081,8 @@ fn the_library_view_and_the_open_node_are_written_as_you_move() {
                 &format!("browse_by = \"{browse_by}\""),
             )
             .replace(
-                "# the default for background and text only.\n[theme]",
-                &format!("# the default for background and text only.\n{keys}[theme]"),
+                "# the built-in default wins over the theme named above.\n[theme]",
+                &format!("# the built-in default wins over the theme named above.\n{keys}[theme]"),
             )
     };
     let file = || fs::read_to_string(&config).unwrap();

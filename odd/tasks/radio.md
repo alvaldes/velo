@@ -760,3 +760,13 @@ leaves the station playing.
   protections — `d`, `J` and `K` refuse on it, station or track alike; and
   `next` follows the human's rule in the queue's own one place, so the answer
   is the same on every screen.
+
+**L30** — **A fresh install finds a `radio.toml` that documents itself.** The
+store was only created when the first favourite, pin or hand-added station was
+saved, so the format was invisible until the user had already used the feature.
+It is now written on the first launch, every line a comment (so it loads as an
+empty store), and never over a file that is already there — the human's call:
+"al instalar se tienen que crear estos archivos y tienen que tener algo adentro".
+`history.toml` is deliberately not one of them: it appears when the first track
+does, because an empty history says nothing.
+

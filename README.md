@@ -296,15 +296,20 @@ plays the live stream. In `--json` output a station carries
 
 ## Configuration
 
-One TOML file, read once at startup, and the only place velo keeps anything:
+Everything velo keeps lives in one directory, `$XDG_CONFIG_HOME/velo` (else
+`~/.config/velo`):
 
 ```
-$XDG_CONFIG_HOME/velo/config.toml      # else ~/.config/velo/config.toml
+config.toml      # everything below, written on the first launch
+radio.toml       # the stations you kept, and the format to add one by hand
+history.toml     # what played, newest first — appears with the first track
+themes/*.toml    # one file per theme you drop in
 ```
 
-When the file does not exist, velo writes it with every key at its default
-value and a short comment per key, so everything below can be changed from
-it. Everything below can also be changed while velo runs: `o` opens the
+The first two are written when velo starts for the first time and never over a
+file that is already there, so nothing has to be created by hand. `config.toml`
+carries every key at its default value with a short comment per key, so
+everything below can be changed from it. Everything below can also be changed while velo runs: `o` opens the
 settings card (a smaller card shaped like the help), where the
 ReplayGain mode, the repeat and the shuffle, every `[theme]` colour, the
 six `[ui]` switches and the library folder can be stepped through live —
