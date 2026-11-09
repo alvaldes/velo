@@ -97,16 +97,17 @@ fn unwrap_pls(text: &str) -> Result<String, ListsError> {
         .ok_or(ListsError::NoStream)
 }
 
-/// The PLS body's `File<n>` values, sorted numerically by `n`, because real
-/// files are not written in order; keys are matched case-insensitively.
-/// Nothing is filtered: the station resolver picks the first playable one,
-/// the playlist importer (issue #9) takes every entry. Whether the body is
-/// a PLS at all is the caller's business: the importer dispatches on the
-/// file's extension.
-#[must_use]
-pub fn pls_entries(body: &[u8]) -> Vec<String> {
+/// The PLS body's entries with their titles, sorted numerically by `n`,
+/// because real files are not written in order; keys are matched
+/// case-insensitively. The title is the entry's `Title<n>` value when the
+/// body declares one and it is not empty (issue #34). Nothing is filtered:
+/// the station resolver picks the first playable one, the playlist importer
+/// (issue #9) takes every entry. Whether the body is a PLS at all is the
+/// caller's business: the importer dispatches on the file's extension.
+fn pls_pairs(body: &[u8]) -> Vec<(String, Option<String>)> {
     let text = text(body);
-    let mut entries = std::collections::BTreeMap::new();
+    let mut files: std::collections::BTreeMap<u32, String> = std::collections::BTreeMap::new();
+    let mut titles: std::collections::BTreeMap<u32, String> = std::collections::BTreeMap::new();
     for line in lines(&text) {
         let Some((key, value)) = line.split_once('=') else {
             continue;
@@ -115,10 +116,31 @@ pub fn pls_entries(body: &[u8]) -> Vec<String> {
         if let Some(index) = key.strip_prefix("file")
             && let Ok(n) = index.trim().parse::<u32>()
         {
-            entries.entry(n).or_insert_with(|| value.trim().to_string());
+            files.entry(n).or_insert_with(|| value.trim().to_string());
+        } else if let Some(index) = key.strip_prefix("title")
+            && let Ok(n) = index.trim().parse::<u32>()
+        {
+            titles.entry(n).or_insert_with(|| value.trim().to_string());
         }
     }
-    entries.into_values().collect()
+    files
+        .into_iter()
+        .map(|(n, url)| {
+            let title = titles.get(&n).filter(|title| !title.is_empty()).cloned();
+            (url, title)
+        })
+        .collect()
+}
+
+/// The PLS body's `File<n>` values, sorted numerically by `n`, because real
+/// files are not written in order; keys are matched case-insensitively.
+/// Nothing is filtered: the station resolver picks the first playable one,
+/// the playlist importer (issue #9) takes every entry. Whether the body is
+/// a PLS at all is the caller's business: the importer dispatches on the
+/// file's extension.
+#[must_use]
+pub fn pls_entries(body: &[u8]) -> Vec<String> {
+    pls_pairs(body).into_iter().map(|(url, _)| url).collect()
 }
 
 /// Resolves an M3U body to its first playable entry.
@@ -133,6 +155,38 @@ fn unwrap_m3u(text: &str) -> Result<String, ListsError> {
         .ok_or(ListsError::NoStream)
 }
 
+/// The M3U body's entries with their titles, in file order. An `#EXTINF`
+/// line's text after the first comma — `Artist - Title` in the wild — names
+/// the entry that follows it (issue #34); an entry with no `#EXTINF` of its
+/// own carries no title, and the last `#EXTINF` before an entry wins. An
+/// HLS manifest is detected before any entry is returned: its entries are
+/// `.ts` segments that symphonia cannot decode.
+///
+/// # Errors
+///
+/// [`ListsError::Hls`] for an HLS manifest: its `.ts` segments cannot be
+/// decoded, and saying so beats handing back a segment list.
+fn m3u_pairs(body: &[u8]) -> Result<Vec<(String, Option<String>)>, ListsError> {
+    let text = text(body);
+    let all: Vec<&str> = lines(&text).collect();
+    if all.iter().any(|line| line.starts_with("#EXT-X-")) {
+        return Err(ListsError::Hls);
+    }
+    let mut pairs = Vec::new();
+    let mut pending: Option<String> = None;
+    for line in all {
+        if let Some(rest) = line.strip_prefix("#EXTINF") {
+            pending = rest
+                .split_once(',')
+                .map(|(_, title)| title.trim().to_owned())
+                .filter(|title| !title.is_empty());
+        } else if !line.is_empty() && !line.starts_with('#') {
+            pairs.push((line.to_string(), pending.take()));
+        }
+    }
+    Ok(pairs)
+}
+
 /// The M3U body's entries in file order, `#` comments and blank lines
 /// skipped. An HLS manifest is detected before any entry is returned: its
 /// entries are `.ts` segments that symphonia cannot decode. No `#EXTM3U`
@@ -144,16 +198,7 @@ fn unwrap_m3u(text: &str) -> Result<String, ListsError> {
 /// [`ListsError::Hls`] for an HLS manifest: its `.ts` segments cannot be
 /// decoded, and saying so beats handing back a segment list.
 pub fn m3u_entries(body: &[u8]) -> Result<Vec<String>, ListsError> {
-    let text = text(body);
-    let all: Vec<&str> = lines(&text).collect();
-    if all.iter().any(|line| line.starts_with("#EXT-X-")) {
-        return Err(ListsError::Hls);
-    }
-    Ok(all
-        .into_iter()
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .map(str::to_string)
-        .collect())
+    Ok(m3u_pairs(body)?.into_iter().map(|(url, _)| url).collect())
 }
 
 /// Every entry the body carries, in order — the whole parse
@@ -170,12 +215,32 @@ pub fn m3u_entries(body: &[u8]) -> Result<Vec<String>, ListsError> {
 /// [`ListsError::Hls`] for an HLS manifest — the same verdicts
 /// [`unwrap_station`] makes.
 pub fn entries(body: &[u8]) -> Result<Vec<String>, ListsError> {
+    Ok(entries_with_titles(body)?
+        .into_iter()
+        .map(|(url, _)| url)
+        .collect())
+}
+
+/// Every entry the body carries with the title each one was given, in
+/// order — the whole parse [`entries`] starts from, with the wrapper's own
+/// names kept beside the URLs (issue #34): a PLS's `Title<n>` value, an
+/// M3U's `#EXTINF` text after the first comma, each naming the entry it
+/// precedes. Titles are what the wrapper declares and nothing more: an
+/// entry the wrapper did not name carries no title, and no name is ever
+/// invented from the URL. The same verdicts as [`entries`]:
+///
+/// # Errors
+///
+/// [`ListsError::NotAPlaylist`] when the body is neither format,
+/// [`ListsError::Hls`] for an HLS manifest — the same verdicts
+/// [`unwrap_station`] makes.
+pub fn entries_with_titles(body: &[u8]) -> Result<Vec<(String, Option<String>)>, ListsError> {
     let text = text(body);
     // Sniff on the first non-blank line so leading whitespace stays harmless.
     let first = lines(&text).find(|line| !line.is_empty());
     match first {
-        Some(line) if line.eq_ignore_ascii_case("[playlist]") => Ok(pls_entries(body)),
-        Some(line) if line.starts_with("#EXTM3U") => m3u_entries(body),
+        Some(line) if line.eq_ignore_ascii_case("[playlist]") => Ok(pls_pairs(body)),
+        Some(line) if line.starts_with("#EXTM3U") => m3u_pairs(body),
         _ => Err(ListsError::NotAPlaylist),
     }
 }

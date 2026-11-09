@@ -63,6 +63,7 @@ station with no songs.
 | T1.2 | S2, S3 | worker | the resolver branch: `RemoteResolver` wraps the session's resolver; an `http(s)://` entry caches into the same track cache (cap and `--cache-clean` unchanged) and resolves to that file; identity stays the URL | |
 | T1.3 | S1, S4, S5, S6 | worker | the shell: `RadioOutcome::Play` carries `configured`; `play_station` opens the songs as `Entry::File` rows, refuses with one line, or plays live exactly as before | |
 | T2.1 | S1, S4, S6 | worker | the distinction pinned: the queue row of a song never reads `● live`, the station row beside it does; the transport seams (open vs resolve) untouched; docs | |
+| T3 | S1, S2, S3, S4 | worker | the wrapper's title reaches the row and the probe is paid once (issue #34): `expand` carries each song's `#EXTINF`/`Title<n>` title beside its URL, the shell fills a session map at the expansion and the verdict cache at the open, `describe` alone consults the titles — `Entry` and the audio path untouched | |
 
 ## Live re-check (2026-11-09, authorized by the human)
 
@@ -126,10 +127,31 @@ Decisions beyond the brief, each taken for the smallest honest slice:
   `audio/output.rs` was out of scope, so the `#EXTINF` names are not
   carried into the queue rows; the queue shows the song's URL, which is its
   identity (S3) anyway. Extending `Entry` with a display name is the
-  natural next slice.
+  natural next slice. *(Taken up by T3 below — without touching `Entry`: the
+  title rides the expansion and a session map, read by `describe` alone.)*
 - **Resolution cost.** A configured station pays one probe fetch per play
   (the wrapper, or the first 16 KiB of a stream). A session cache of the
   verdict per station key would remove the repeat cost; not taken now.
+  *(Taken up by T3 below: the verdict is remembered for the session — Songs
+  verdicts only; failures stay retryable and plain streams keep today's
+  behavior.)*
+
+**Issue #34 (T3), one small slice on top:** the wrapper's title reaches the
+row. `lists` gained `entries_with_titles` — a PLS's `Title<n>` and an M3U's
+`#EXTINF` text ride beside the URLs they name; `unwrap_station`,
+`pls_entries` and `m3u_entries` are unchanged and still return URLs only.
+`Expansion::Songs` now carries `Song { url, title }`. The shell keeps two
+session maps: `song_titles`, filled where the expansion is consumed
+(`play_station`'s Songs arm) and consulted in ONE place — `describe`, the
+function that already names a path for display, so the queue row, the
+now-playing block and every list that shows the song by path read the title,
+with a song never expanded this session keeping today's fallback (the URL);
+and `expansion_cache`, filled in the `Play` route so the second open of a
+configured station fetches nothing. A FAILED expansion is never remembered (a
+transient error stays retryable) and a `Live` verdict is never remembered
+(a plain stream never needed the probe). `Entry::File` stays path-only,
+`src/audio/output.rs` is untouched, and identity — history, favourites,
+playlists — stays the URL.
 
 ## Log
 
@@ -152,3 +174,16 @@ beyond the brief are listed under `## Slices` above; the one the next lane shoul
 revisit is the queue row's label — the `#EXTINF` titles are dropped because
 `Entry::File` carries no display name and `audio/output.rs` was out of scope, so rows
 show the song's URL.
+
+**L4** — the issue (#34), in its own words: "a configured channel's songs play, but the
+queue names each one by its bare URL — the wrapper already parses `Artist - Title` and
+throws it away one step before it is needed", and "a configured station pays one probe
+fetch every time it is opened". Both fixed in one slice (T3 above): the expansion now
+carries each song's title beside its URL and the shell remembers it per session — the
+map filled where the expansion happens, consulted by `describe` alone, so the queue row,
+the now-playing block and any list showing the song by path name it, while identity stays
+the URL — and the expansion verdict is remembered for the session, so opening a channel
+twice fetches the wrapper once. A FAILED expansion is not remembered — a transient error
+must be retryable — and nothing is remembered for a plain stream that never needed a
+probe. The maps are session-scoped on purpose (S3): no persistence, no eviction beyond
+the session, and a fresh session shows the URL until the channel is opened again.
