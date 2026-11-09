@@ -2029,6 +2029,28 @@ fn repeat_and_shuffle_are_written_when_they_change() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// Low power (issue #11, S1): `P` toggles the session switch and writes
+/// `[ui] low_power` the way `s` writes `[state] shuffle` — once per
+/// change, and never when the value it would write is already there.
+#[test]
+fn p_toggles_low_power_and_writes_the_key_the_way_s_writes_shuffle() {
+    let dir = config_dir("low-power");
+    let config = dir.join("config.toml");
+    let mut app = app_with_default_config(&config);
+    let default = velo::config::default_config_text();
+
+    press(&mut app, KeyCode::Char('P'));
+    assert_eq!(
+        fs::read_to_string(&config).unwrap(),
+        default.replace("low_power = false", "low_power = true")
+    );
+    // And back out: `false` is a value too, and it is written.
+    press(&mut app, KeyCode::Char('P'));
+    assert_eq!(fs::read_to_string(&config).unwrap(), default);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
 /// S14 (decision A): `tab` is a transient round trip, not a setting — moving
 /// it to the queue and back writes nothing under `[state]`, and the file
 /// stays byte-identical.

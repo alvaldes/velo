@@ -34,6 +34,13 @@ nucleo-matcher = "0.3.1"
 ratatui = "0.28"
 ratatui-image = { version = "2", default-features = false, features = ["crossterm", "rustix"] }
 rtrb = "0.4.1"
+# Media keys / now-playing (issue #12): registers velo with the OS's
+# media session so play/pause, next and previous reach the same actions
+# the interface keys perform, and publishes what is playing. Best effort
+# by design: the client lives on its own thread and every call is
+# fallible-and-ignored, so a session bus that is absent can never stall
+# a launch.
+souvlaki = "0.8"
 rubato = "5.0.1"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
@@ -49,6 +56,7 @@ toml = "0.9"
 ureq = { version = "3.1", default-features = false, features = ["rustls"] }
 
 [dev-dependencies]
+souvlaki = "0.8"
 
 [lints.rust]
 unsafe_code = "forbid"

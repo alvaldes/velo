@@ -424,6 +424,53 @@ fn a_quiet_player_redraws_slowly_and_nothing_is_animating() {
     assert_eq!(app.frame_interval(), std::time::Duration::from_millis(100));
 }
 
+/// Low power (issue #11, S2): the redraw cadence drops to four times the
+/// ordinary interval, whatever the ordinary one would have been.
+#[test]
+fn low_power_quarters_the_redraw_cadence() {
+    let mut app = App::new(tracks(&["one.flac"]));
+    app.set_ui(velo::config::UiParts {
+        low_power: true,
+        ..velo::config::UiParts::default()
+    });
+    // A quiet screen redraws at ten ordinary; in low power, a quarter of
+    // that rate.
+    assert_eq!(app.frame_interval(), std::time::Duration::from_millis(400));
+}
+
+/// Low power (issue #11, S2): the spectrum is left out entirely — on the
+/// same tall window that otherwise draws the bars — and its rows go back to
+/// the list; the layout is otherwise unchanged (S3).
+#[test]
+fn low_power_leaves_the_spectrum_out_and_gives_its_rows_back() {
+    let mut app = App::new(tracks(&["one.flac", "two.flac", "three.flac"]));
+    let tall = screen_at(&app, 100, 32);
+    assert!(tall.contains("▁ ▁ ▁"), "ordinary power draws the spectrum");
+    let rows_before = tall
+        .lines()
+        .filter(|line| line.contains("one.flac"))
+        .count();
+
+    app.set_ui(velo::config::UiParts {
+        low_power: true,
+        ..velo::config::UiParts::default()
+    });
+    let tall = screen_at(&app, 100, 32);
+    assert!(
+        !tall.contains("▁ ▁ ▁"),
+        "low power leaves the spectrum out, got:\n{tall}"
+    );
+    // The rows the spectrum gave up hold list rows again.
+    let rows_after = tall
+        .lines()
+        .filter(|line| line.contains("one.flac") || line.contains("two.flac"))
+        .count();
+    assert!(
+        rows_after >= rows_before,
+        "the spectrum's rows go back to the list"
+    );
+}
+
 /// The cell at `(x, y)` of a `width`×`height` frame of `app`.
 fn cell_at_size(app: &App, width: u16, height: u16, x: usize, y: usize) -> Cell {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("a test terminal");
@@ -1630,6 +1677,7 @@ fn hiding_every_part_at_once_still_draws_a_coherent_window() {
         top_bar: false,
         advisories: true,
         view_numbers: true,
+        low_power: false,
     });
     let screen = screen_at(&app, 80, 24);
     let lines: Vec<&str> = screen.lines().collect();
