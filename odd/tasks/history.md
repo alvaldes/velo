@@ -37,8 +37,9 @@ spellings stays two entries.
 **S4 — `Recently played` is a source beside `Local library` and `Radio`.**
 It opens a list of the history entries, newest first, and its rows play, queue
 with `a` and follow the list conventions the rest of the app already has. The
-row label uses `artist — title` when the entry has them and the file's stem
-otherwise. The entry that is playing is marked like every other playing row.
+rows follow the library's row convention: the title, with `artist · album` as
+the note, and the file name with its folder when the index never knew it. The
+entry that is playing is marked like every other playing row.
 An empty history says so and opens an empty list, not an error.
 
 **S5 — The file and the screen agree.**

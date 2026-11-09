@@ -241,6 +241,9 @@ pub enum Level {
     Genres,
     /// The tracks of one genre.
     Genre { genre: String },
+    /// The history's entries (issue #5): the `Recently played` source, not a
+    /// level of the index.
+    Recent,
 }
 
 /// Where the interface stands, including the flat command-line list.
@@ -262,6 +265,10 @@ enum Position {
     Genre {
         genre: String,
     },
+    /// The history's entries (issue #5), newest first — the `Recently
+    /// played` source. Not a level of the index: it is never read from the
+    /// library and never persisted as a node.
+    Recent,
 }
 
 /// Where the stream that is playing came from. The row it plays is found by
@@ -981,7 +988,47 @@ impl<'lib> App<'lib> {
                 Action::None
             }
             sources::Source::Radio => self.open_radio(),
+            sources::Source::RecentlyPlayed => {
+                self.open_recent();
+                Action::None
+            }
         }
+    }
+
+    /// Opens the `Recently played` source (issue #5): the history's entries,
+    /// newest first, as the track list the screen stands on. The list is the
+    /// in-memory snapshot the tick keeps current — the screen never re-reads
+    /// the file — and each queue entry carries the history's path verbatim,
+    /// so a `subsonic://…` row resolves through the cache at play time. This
+    /// is not a level of the library and never becomes a `BrowseBy`: nothing
+    /// here is persisted, and the node the file holds is left alone.
+    fn open_recent(&mut self) {
+        self.tracks = self
+            .recent
+            .entries
+            .entry
+            .iter()
+            .map(|entry| TrackEntry {
+                path: PathBuf::from(&entry.path),
+                // What the file says and nothing more: a title the entry does
+                // not have stays empty here, so replaying this row cannot
+                // write a made-up title back into the history (S3). The row
+                // still shows the file's own name (see `row_text`).
+                title: entry.title.clone().unwrap_or_default(),
+                artist: entry.artist.clone().unwrap_or_default(),
+                album: entry.album.clone().unwrap_or_default(),
+                track_no: None,
+                disc_no: None,
+                duration_ms: 0,
+                source: crate::library::LOCAL_SOURCE.to_owned(),
+                remote_id: None,
+                cover_id: None,
+            })
+            .collect();
+        self.view = View::Library;
+        self.position = Position::Recent;
+        self.selected = 0;
+        self.queue_selected = 0;
     }
 
     /// The node the current position names, in the file's terms (S3).
@@ -1101,6 +1148,7 @@ impl<'lib> App<'lib> {
             Position::Genre { genre } => Some(Level::Genre {
                 genre: genre.clone(),
             }),
+            Position::Recent => Some(Level::Recent),
         }
     }
 
@@ -1126,7 +1174,10 @@ impl<'lib> App<'lib> {
             // selected track: handing the whole list over started the stream
             // at the first file whichever one was chosen.
             Position::Files if from < self.argv.len() => self.argv[from..].to_vec(),
-            Position::Tracks { .. } | Position::AllTracks | Position::Genre { .. } => self
+            Position::Tracks { .. }
+            | Position::AllTracks
+            | Position::Genre { .. }
+            | Position::Recent => self
                 .tracks
                 .get(from..)
                 .unwrap_or_default()
@@ -1604,13 +1655,19 @@ impl<'lib> App<'lib> {
         };
         // What the index can say about the path: everything, when it is a
         // library row; nothing, when it is a file the queue opened cold.
+        // An empty field is a field the index does not know: S3 keeps it out
+        // of the file instead of writing `""`. It matters for the rows the
+        // `Recently played` screen synthesizes, which carry empty strings
+        // where the history had nothing — replaying one from that screen must
+        // not turn an absent artist into a blank one.
+        let known = |text: &str| (!text.is_empty()).then(|| text.to_owned());
         let (artist, album, title) = self.known_tracks().find(|track| track.path == path).map_or(
             (None, None, None),
             |track| {
                 (
-                    Some(track.artist.clone()),
-                    Some(track.album.clone()),
-                    Some(track.title.clone()),
+                    known(&track.artist),
+                    known(&track.album),
+                    known(&track.title),
                 )
             },
         );
@@ -1800,7 +1857,7 @@ impl<'lib> App<'lib> {
     fn read_level(&mut self, library: &Library) -> Result<(), crate::library::LibraryError> {
         self.artists = library.artists()?;
         match &self.position {
-            Position::Files | Position::Artists => {}
+            Position::Files | Position::Artists | Position::Recent => {}
             Position::Albums { artist } => self.albums = library.albums_of(artist)?,
             Position::Tracks { artist, album } => {
                 self.tracks = library.tracks_of(artist, album)?;
@@ -1831,7 +1888,10 @@ impl<'lib> App<'lib> {
                 .albums
                 .get(index)
                 .map(|entry| format!("{}\u{0}{}", entry.artist, entry.title)),
-            Position::Tracks { .. } | Position::AllTracks | Position::Genre { .. } => self
+            Position::Tracks { .. }
+            | Position::AllTracks
+            | Position::Genre { .. }
+            | Position::Recent => self
                 .tracks
                 .get(index)
                 .map(|entry| entry.path.display().to_string()),
@@ -2340,7 +2400,10 @@ impl<'lib> App<'lib> {
         };
         match &self.position {
             Position::Files if !self.argv.is_empty() => play,
-            Position::Tracks { .. } | Position::AllTracks | Position::Genre { .. }
+            Position::Tracks { .. }
+            | Position::AllTracks
+            | Position::Genre { .. }
+            | Position::Recent
                 if !self.tracks.is_empty() =>
             {
                 play
@@ -3220,7 +3283,8 @@ impl<'lib> App<'lib> {
             Position::Files
             | Position::Tracks { .. }
             | Position::AllTracks
-            | Position::Genre { .. } => ("track", "tracks"),
+            | Position::Genre { .. }
+            | Position::Recent => ("track", "tracks"),
             Position::Artists => ("artist", "artists"),
             Position::Albums { .. } | Position::AllAlbums => ("album", "albums"),
             Position::Genres => ("genre", "genres"),
@@ -3357,6 +3421,23 @@ impl<'lib> App<'lib> {
                     format!("{} · {}", entry.artist, entry.album)
                 };
                 (entry.title.clone(), note, Self::duration(entry.duration_ms))
+            }
+            Position::Recent => {
+                let entry = &self.tracks[index];
+                // The library's row convention (S4): the title, with
+                // `artist · album` dimmed after it; an entry with no title
+                // keeps the file's own name over its folder.
+                if entry.title.is_empty() {
+                    let (name, folder) = describe(&entry.path, []);
+                    (name, folder, String::new())
+                } else {
+                    let note = [entry.artist.as_str(), entry.album.as_str()]
+                        .into_iter()
+                        .filter(|part| !part.is_empty())
+                        .collect::<Vec<_>>()
+                        .join(" \u{b7} ");
+                    (entry.title.clone(), note, String::new())
+                }
             }
             Position::Genres => {
                 let entry = &self.genres[index];
@@ -3804,9 +3885,10 @@ impl<'lib> App<'lib> {
             Position::Files => self.argv.len(),
             Position::Artists => self.artists.len(),
             Position::Albums { .. } | Position::AllAlbums => self.albums.len(),
-            Position::Tracks { .. } | Position::AllTracks | Position::Genre { .. } => {
-                self.tracks.len()
-            }
+            Position::Tracks { .. }
+            | Position::AllTracks
+            | Position::Genre { .. }
+            | Position::Recent => self.tracks.len(),
             Position::Genres => self.genres.len(),
         }
     }
@@ -3818,6 +3900,7 @@ impl<'lib> App<'lib> {
                 Some("no tracks — pass files on the command line")
             }
             _ if self.row_count() > 0 => None,
+            Position::Recent => Some("nothing played yet"),
             Position::Artists | Position::AllAlbums | Position::AllTracks | Position::Genres
                 if self.library_setup.is_some() =>
             {
@@ -3844,9 +3927,10 @@ impl<'lib> App<'lib> {
         let path = self.playing_path()?;
         match &self.position {
             Position::Files => self.argv.iter().position(|row| row == path),
-            Position::Tracks { .. } | Position::AllTracks | Position::Genre { .. } => {
-                self.tracks.iter().position(|row| row.path == path)
-            }
+            Position::Tracks { .. }
+            | Position::AllTracks
+            | Position::Genre { .. }
+            | Position::Recent => self.tracks.iter().position(|row| row.path == path),
             Position::Artists
             | Position::Albums { .. }
             | Position::AllAlbums
@@ -4181,12 +4265,16 @@ impl<'lib> App<'lib> {
     /// reached — appending never starts a download.
     fn append_selection(&mut self) {
         let paths: Vec<PathBuf> = match (&self.position, self.view) {
-            (Position::Tracks { .. } | Position::AllTracks | Position::Genre { .. }, _) => {
-                match self.tracks.get(self.selected) {
-                    Some(entry) => vec![entry.path.clone()],
-                    None => return,
-                }
-            }
+            (
+                Position::Tracks { .. }
+                | Position::AllTracks
+                | Position::Genre { .. }
+                | Position::Recent,
+                _,
+            ) => match self.tracks.get(self.selected) {
+                Some(entry) => vec![entry.path.clone()],
+                None => return,
+            },
             (Position::Files, _) => self
                 .argv
                 .get(self.selected)
@@ -4322,7 +4410,8 @@ impl<'lib> App<'lib> {
             Position::Files
             | Position::Tracks { .. }
             | Position::AllTracks
-            | Position::Genre { .. } => {}
+            | Position::Genre { .. }
+            | Position::Recent => {}
         }
         // The open node is persisted (S3), but only when it changed.
         self.remember_node();
@@ -4361,6 +4450,26 @@ impl<'lib> App<'lib> {
             Position::Genre { .. } => {
                 self.position = Position::Genres;
                 self.selected = 0;
+            }
+            // The recent list (issue #5) is its own list, not a level of the
+            // library: there is no parent snapshot to keep — `open_recent`
+            // replaced the tracks — so ascending lands on `Sources` over the
+            // top of the library view, read again from the index, the way the
+            // top of the library reaches `Sources` (S6). The saved node was
+            // never this list's to walk out of, so nothing is persisted here.
+            Position::Recent => {
+                self.position = match self.browse_by {
+                    BrowseBy::Artists => Position::Artists,
+                    BrowseBy::Albums => Position::AllAlbums,
+                    BrowseBy::Tracks => Position::AllTracks,
+                    BrowseBy::Genres => Position::Genres,
+                };
+                self.selected = 0;
+                self.load_top();
+                if self.view == View::Library {
+                    self.view = View::Sources;
+                }
+                return;
             }
         }
         // The open node is persisted (S3): walking out of a level removes
