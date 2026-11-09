@@ -107,6 +107,49 @@ with the name as it stands; `esc` cancels. Nothing else changes: `f`, `a`,
 `S` and the rest keep their meaning elsewhere — `f` does nothing on a
 playlist row, `a` still queues it.
 
+**S10 — `velo playlist import <file>` saves a playlist named after the
+file's stem.** (issue #9, its first sentence)
+The file may be `.m3u`, `.m3u8` or `.pls`. Relative entries resolve against
+the playlist file's own directory — made absolute first, since the file
+itself may have been named relative to where velo runs — and absolute ones
+stay as they are. A name that is already saved is refused with one line
+naming it, exit 1, and nothing is written: the same rule `save_playlist`
+enforces (S6), said before anything is reported or stored.
+
+**S11 — entries whose file is gone are NOT stored, and the command says how
+many and which.** (issue #9: "reporting the entries whose files are gone
+instead of dropping them silently")
+The report opens with `N of M entries are gone` — the issue's own words —
+and one line per missing path follows. A playlist in which every entry is
+gone is refused (nothing to save), exit 1, and so is a file that carries no
+entries. A stream URL (`http`/`https`) is not a file, so it never counts as
+gone and is stored as it is — the same playable rule the station wrapper
+applies.
+
+**S12 — `velo playlist export <name> <file>` writes the playlist back out
+as `.m3u`.** (issue #9: "export a playlist back to `.m3u`")
+The file starts with `#EXTM3U`, then carries one `#EXTINF:-1,<file name>`
+line and one absolute path per track, in the store's order — exactly the
+shape the import reads back, so the round trip is exact. An unknown name is
+refused, exit 1, and nothing is written.
+
+**S13 — both verbs are headless.**
+`playlist` is a subcommand beside `history`: no terminal, no library index,
+works over ssh. The `Cli` positional already carries
+`args_conflicts_with_subcommands = true` at the top and the `History` variant
+repeats it for its own shape — `Playlist` does the same, and no variant
+field may be named by `conflicts_with`, which clap debug-asserts.
+
+**S14 — the station parser is reused, not copied.** (issue #9: "The parser
+that already handles `.pls` and `.m3u` for stations is most of the work")
+`src/radio/lists.rs` gains public, whole-body entry functions — the PLS
+`File<n>` collection and the M3U line walk it already performs, with the
+HLS verdict — and [`unwrap_station`] keeps its behaviour to the letter,
+including skipping non-`http` entries for stations. The import dispatches on
+the file's extension (`.pls`, `.m3u`/`.m3u8`; anything else falls back to
+the same content sniff), so a hand-written `.m3u` without the `#EXTM3U`
+header still imports.
+
 ## Tasks
 
 | ID | Spec | Route | Task | Commit |
@@ -115,6 +158,7 @@ playlist row, `a` still queues it.
 | T2 | S2, S3 | parent | `App::set_config_file` loads the store, `f` toggles a library track row and saves at once, `★` before the title in every library list | |
 | T3 | S4 | parent | `Favourites` as the last source, its `Position` and `Level`, playing, queueing, `esc`, the empty list, and the docs | |
 | T4 | S6–S9, issue #4 | `feat/playlists` | the store's playlist verbs with their tests, `Playlists` as the last source with its two lists, the write verbs (`S` save, `S` append, `J`/`K`, `d`, `e`), and the docs |
+| T5 | S10–S14, issue #9 | `feat/playlist-io` | the headless `playlist import`/`export` verbs with their tests, the public entry functions in `src/radio/lists.rs`, and the docs |
 
 ## Log
 
@@ -144,6 +188,14 @@ their own file under `~/.config/velo` rather than mixed into `config.toml`."
 The file was already decided: `library.toml`, one file for marked tracks and
 playlists (L2), and its `[[playlist]]` table has existed since that slice —
 filling it needed no format change.
+
+**L5** — issue #9's own words: "Import a `.m3u`/`.m3u8`/`.pls` into a
+playlist, reporting the entries whose files are gone instead of dropping
+them silently, and export a playlist back to `.m3u`. The parser that already
+handles `.pls` and `.m3u` for stations is most of the work." The strict
+separation held: `src/radio/lists.rs` only gained public entry functions —
+its station-resolution behaviour is untouched, verified by the existing
+wrapper tests staying green.
 ## Slices
 
 One commit for this issue, on purpose: the store verbs, the `Playlists` screen and

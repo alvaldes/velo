@@ -10,7 +10,7 @@ use velo::audio::loudness;
 use velo::audio::output::{Entry, PathResolver};
 use velo::audio::replay_gain::{GainTags, format_gain_db, format_peak, write_tags};
 use velo::audio::{Player, TrackSource};
-use velo::config::{self, Cli, Command, Config, HistoryAction, Settings};
+use velo::config::{self, Cli, Command, Config, HistoryAction, PlaylistAction, Settings};
 use velo::library::Library;
 use velo::subsonic;
 use velo::subsonic::cache::{Cache, CoverArt, SubsonicResolver, Unconfigured, cache_dir};
@@ -300,6 +300,11 @@ fn one_shot(
             matches!(action, Some(HistoryAction::Clear)),
         ));
     }
+    // The playlist verbs are headless the same way (issue #9): a file in, a
+    // report out, the saved store beside the config — no terminal, no index.
+    if let Some(Command::Playlist { action }) = &cli.command {
+        return Some(playlist_command(config_file, action));
+    }
     None
 }
 
@@ -415,6 +420,198 @@ fn radio_test(url: &str) -> ExitCode {
     println!(
         "decode: {seconds:.1} s, {} Hz, {} ch",
         spec.sample_rate, spec.channels
+    );
+    ExitCode::SUCCESS
+}
+
+/// The `velo playlist` subcommand (issue #9): import a `.m3u`/`.m3u8`/`.pls`
+/// into the saved library, export a saved playlist back out as `.m3u`.
+/// Headless like [`history_command`]: no terminal, no library index — it
+/// works over ssh. Exit 0 when the verb happened, 1 with one line on stderr
+/// when it was refused.
+fn playlist_command(config_file: Option<&Path>, action: &PlaylistAction) -> ExitCode {
+    // Without a config directory there is no `library.toml` to read or save.
+    let Some(config_file) = config_file else {
+        eprintln!("velo: no config directory — nowhere to read or save a playlist");
+        return ExitCode::FAILURE;
+    };
+    let store = velo::saved::path_beside(config_file);
+    let saved = match velo::saved::Saved::load(&store) {
+        Ok(saved) => saved,
+        Err(error) => {
+            eprintln!("velo: cannot read {}: {error}", store.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    match action {
+        PlaylistAction::Import { file } => playlist_import(file, saved, &store),
+        PlaylistAction::Export { name, file } => playlist_export(name, file, &saved),
+    }
+}
+
+/// True when the entry is an absolute `http`/`https` URL: not a file, so it
+/// resolves to itself and is never reported gone — the same rule
+/// [`velo::radio::lists`] uses for a playable station.
+fn is_stream_url(entry: &str) -> bool {
+    let lower = entry.to_ascii_lowercase();
+    lower.starts_with("http://") || lower.starts_with("https://")
+}
+
+/// Imports `source` (a `.m3u`, `.m3u8` or `.pls` file) as a new saved
+/// playlist named after its stem (issue #9, S1). Relative entries resolve
+/// against the file's own directory, absolute ones stay (S1). Entries whose
+/// file is gone are not stored, and the report says how many and which (S2);
+/// a playlist whose every entry is gone is refused (S2). A name already
+/// taken is refused with one line naming it, and nothing is written (S1).
+fn playlist_import(source: &Path, mut saved: velo::saved::Saved, store: &Path) -> ExitCode {
+    let bytes = match std::fs::read(source) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            eprintln!("velo: cannot read {}: {error}", source.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    // The file's own extension decides how its body is read: `.pls` is a
+    // PLS, `.m3u`/`.m3u8` an M3U (no `#EXTM3U` header required — hand-made
+    // playlists often lack it), anything else the same content sniff the
+    // station wrapper makes.
+    let extension = source
+        .extension()
+        .and_then(OsStr::to_str)
+        .map(str::to_ascii_lowercase);
+    let parsed = match extension.as_deref() {
+        Some("pls") => Ok(velo::radio::lists::pls_entries(&bytes)),
+        Some("m3u" | "m3u8") => velo::radio::lists::m3u_entries(&bytes),
+        _ => velo::radio::lists::entries(&bytes),
+    };
+    let entries = match parsed {
+        Ok(entries) => entries,
+        Err(error) => {
+            eprintln!("velo: {}: {error}", source.display());
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // Relative entries resolve against the playlist file's own directory —
+    // made absolute, since the file may have been named relative to the
+    // current directory (`noche.m3u` lives wherever velo runs). Absolute
+    // entries and stream URLs stay as they are.
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let base = match source.parent() {
+        Some(parent) if parent.is_absolute() => parent.to_path_buf(),
+        Some(parent) => {
+            if parent.as_os_str().is_empty() || parent == Path::new(".") {
+                cwd
+            } else {
+                cwd.join(parent)
+            }
+        }
+        None => cwd,
+    };
+    let resolved: Vec<String> = entries
+        .iter()
+        .map(|entry| {
+            if is_stream_url(entry) || Path::new(entry).is_absolute() {
+                entry.clone()
+            } else {
+                base.join(entry).display().to_string()
+            }
+        })
+        .collect();
+    let total = resolved.len();
+    let gone = |entry: &String| !is_stream_url(entry) && !Path::new(entry).exists();
+    let missing: Vec<String> = resolved
+        .iter()
+        .filter(|entry| gone(entry))
+        .cloned()
+        .collect();
+    let kept: Vec<String> = resolved
+        .iter()
+        .filter(|entry| !gone(entry))
+        .cloned()
+        .collect();
+
+    // Nothing to save (S2): an empty file, and a playlist whose every entry
+    // is gone. Both are refused before any name is claimed or written.
+    if total == 0 {
+        eprintln!("velo: {}: the file carries no entries", source.display());
+        return ExitCode::FAILURE;
+    }
+    if kept.is_empty() {
+        eprintln!(
+            "velo: {}: all {total} entries are gone — nothing to save",
+            source.display()
+        );
+        return ExitCode::FAILURE;
+    }
+
+    let Some(name) = source.file_stem().and_then(OsStr::to_str) else {
+        eprintln!(
+            "velo: {}: the file has no name to save the playlist under",
+            source.display()
+        );
+        return ExitCode::FAILURE;
+    };
+    // The store is the authority on names; the check here keeps the refusal
+    // to one line naming it, before anything is reported or written (S1).
+    if saved.playlist(name).is_some() || saved.save_playlist(name, kept).is_err() {
+        eprintln!("velo: a playlist named \"{name}\" is already saved");
+        return ExitCode::FAILURE;
+    }
+    if !missing.is_empty() {
+        println!("{} of {total} entries are gone", missing.len());
+        for entry in &missing {
+            println!("{entry}");
+        }
+    }
+    if let Err(error) = saved.save(store) {
+        eprintln!("velo: cannot save {}: {error}", store.display());
+        return ExitCode::FAILURE;
+    }
+    println!(
+        "imported \"{name}\" with {} of {total} entries",
+        total - missing.len()
+    );
+    ExitCode::SUCCESS
+}
+
+/// Exports the saved playlist `name` as an `.m3u` at `target` (issue #9,
+/// S3): `#EXTM3U`, then an `#EXTINF` line and one absolute path per track —
+/// exactly the shape [`playlist_import`] reads back, so the round trip is
+/// exact. A relative stored path is written against the current directory;
+/// the library's paths are absolute already. An unknown name is refused and
+/// nothing is written.
+fn playlist_export(name: &str, target: &Path, saved: &velo::saved::Saved) -> ExitCode {
+    let Some(playlist) = saved.playlist(name) else {
+        eprintln!("velo: no playlist named \"{name}\" is saved");
+        return ExitCode::FAILURE;
+    };
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let mut text = String::from("#EXTM3U\n");
+    for track in &playlist.track {
+        let path = Path::new(track);
+        let absolute = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            cwd.join(path)
+        };
+        let title = absolute
+            .file_name()
+            .map_or_else(|| track.clone(), |file| file.to_string_lossy().into_owned());
+        text.push_str("#EXTINF:-1,");
+        text.push_str(&title);
+        text.push('\n');
+        text.push_str(&absolute.display().to_string());
+        text.push('\n');
+    }
+    if let Err(error) = std::fs::write(target, text) {
+        eprintln!("velo: cannot write {}: {error}", target.display());
+        return ExitCode::FAILURE;
+    }
+    println!(
+        "exported \"{name}\" ({} tracks) to {}",
+        playlist.track.len(),
+        target.display()
     );
     ExitCode::SUCCESS
 }

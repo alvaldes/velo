@@ -119,6 +119,16 @@ History:
                                      script, then exit
     velo history clear           Empty the history file, then exit — all
                                      three run without a terminal
+Playlists:
+    velo playlist import <file>  Import a .m3u/.m3u8/.pls as a saved playlist
+                                     named after the file's stem; relative
+                                     entries resolve against the file's own
+                                     directory, and entries whose file is
+                                     gone are reported, not stored
+    velo playlist export <name> <file>
+                                 Write the saved playlist as an .m3u with
+                                     absolute paths — both run without a
+                                     terminal
 ReplayGain:
     velo --replaygain-scan <file>...   Measure each file (all files in one
                                      invocation are one album) and print the
@@ -246,8 +256,9 @@ pub struct Cli {
     pub command: Option<Command>,
 }
 
-/// The one subcommand the command line carries: `velo history`, in its three
-/// shapes — plain, `--json`, `clear`.
+/// The subcommands the command line carries. `velo history` in its three
+/// shapes — plain, `--json`, `clear` — and the `velo playlist` verbs of
+/// issue #9, both headless.
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 pub enum Command {
     /// What was played recently, newest first.
@@ -259,6 +270,39 @@ pub enum Command {
         /// Empty the history.
         #[command(subcommand)]
         action: Option<HistoryAction>,
+    },
+    /// Import and export saved playlists (issue #9), headless like
+    /// `history`: no terminal, no library index.
+    #[command(args_conflicts_with_subcommands = true)]
+    Playlist {
+        /// The verb: import a playlist file, or export a saved one.
+        #[command(subcommand)]
+        action: PlaylistAction,
+    },
+}
+
+/// A playlist verb (issue #9): read a `.m3u`, `.m3u8` or `.pls` into the
+/// saved library, or write a saved playlist back out as `.m3u`.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum PlaylistAction {
+    /// Import a `.m3u`, `.m3u8` or `.pls` file as a new saved playlist,
+    /// named after the file's stem. Entries whose file is gone are
+    /// reported, not stored.
+    Import {
+        /// The playlist file to read; relative entries resolve against its
+        /// own directory.
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+    },
+    /// Export a saved playlist as an `.m3u` file with absolute paths and
+    /// the `#EXTM3U`/`#EXTINF` lines the importer reads back.
+    Export {
+        /// The saved playlist's name, exactly as it is stored.
+        #[arg(value_name = "NAME")]
+        name: String,
+        /// The `.m3u` file to write.
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
     },
 }
 
