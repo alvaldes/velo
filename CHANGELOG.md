@@ -1,6 +1,10 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.22.0] - 2026-11-09
+
+### Features
+- **queue:** A station in the queue reads as live, and next leaves it
 ## [0.21.0] - 2026-11-09
 
 ### Features
