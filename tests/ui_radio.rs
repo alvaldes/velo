@@ -115,12 +115,12 @@ fn the_sections_appear_in_order_only_when_they_have_content() {
     assert_eq!(
         view.labels(),
         [
+            "★ Jazz One [MP3] · NO",
             "Browse all countries",
             "Norway (near you)",
             "★ Germany",
+            "Stations without a country",
             "Browse genres & tags",
-            "Night FM",
-            "★ Jazz One [MP3] · NO",
             "Nova [128k] · NO",
             "✗ Hls One [96k] · NO",
         ],
@@ -162,8 +162,38 @@ fn the_cursor_moves_and_clamps_at_both_ends() {
 }
 
 #[test]
+fn favourites_come_first_at_the_top() {
+    let view = view();
+    let labels = view.labels();
+    assert_eq!(
+        labels.first().map(String::as_str),
+        Some("★ Jazz One [MP3] · NO"),
+        "the favourite is the first row, got: {labels:?}"
+    );
+    let browse = labels
+        .iter()
+        .position(|label| label == "Browse all countries")
+        .expect("the countries section is listed");
+    // A favourite is a station row marked with `★`; pinned countries carry the
+    // mark too but no codec, so the `[` is what tells the two apart.
+    let favourites = labels
+        .iter()
+        .filter(|label| label.starts_with("★ ") && label.contains('['))
+        .count();
+    assert!(
+        favourites > 0,
+        "the fixture has a favourite, got: {labels:?}"
+    );
+    assert_eq!(
+        favourites, browse,
+        "every favourite stands before the browse rows, got: {labels:?}"
+    );
+}
+
+#[test]
 fn enter_on_a_country_opens_its_stations() {
     let mut view = view();
+    press(&mut view, KeyCode::Char('j')); // past the favourite
     press(&mut view, KeyCode::Enter); // Browse all countries
     assert_eq!(
         view.place(),
@@ -204,6 +234,7 @@ fn enter_on_a_country_opens_its_stations() {
 #[test]
 fn back_returns_one_level_then_closes() {
     let mut view = view();
+    press(&mut view, KeyCode::Char('j')); // past the favourite
     press(&mut view, KeyCode::Enter); // into the country index
     press(&mut view, KeyCode::Enter); // into Norway
     assert!(matches!(view.place(), Place::Country { .. }));
@@ -249,6 +280,7 @@ fn slash_filters_the_focused_list_and_clearing_restores_it() {
 #[test]
 fn the_filter_belongs_to_the_focused_list_alone() {
     let mut view = view();
+    press(&mut view, KeyCode::Char('j')); // past the favourite
     press(&mut view, KeyCode::Enter); // country index
     press(&mut view, KeyCode::Char('/'));
     for character in "or".chars() {
@@ -318,6 +350,7 @@ fn f_on_a_station_toggles_the_favourite_through_the_station_key() {
 #[test]
 fn f_on_a_place_pins_it_and_f_on_a_pinned_place_unpins_it() {
     let mut view = view();
+    press(&mut view, KeyCode::Char('j')); // past the favourite
     press(&mut view, KeyCode::Enter); // country index
     press(&mut view, KeyCode::Char('f')); // Norway
     assert!(
@@ -333,6 +366,7 @@ fn f_on_a_place_pins_it_and_f_on_a_pinned_place_unpins_it() {
     );
 
     // The pinned row sits after Germany's; f on it takes the pin off again.
+    press(&mut view, KeyCode::Char('j'));
     press(&mut view, KeyCode::Char('j'));
     press(&mut view, KeyCode::Char('j'));
     press(&mut view, KeyCode::Char('j'));
@@ -490,9 +524,7 @@ fn a_appends_a_station_without_starting_it() {
 #[test]
 fn a_hand_added_or_favourite_station_queues_too() {
     let mut view = view();
-    press(&mut view, KeyCode::Char('G'));
-    press(&mut view, KeyCode::Char('k'));
-    press(&mut view, KeyCode::Char('k')); // ★ Jazz One
+    // The favourite sits at the top now (S5).
     assert_eq!(
         press(&mut view, KeyCode::Enter),
         RadioOutcome::Play {
@@ -501,7 +533,16 @@ fn a_hand_added_or_favourite_station_queues_too() {
         },
         "a favourite plays like any station"
     );
-    press(&mut view, KeyCode::Char('k')); // Night FM
+    // The hand-added station lives in the no-country section (S4).
+    let section = view
+        .labels()
+        .iter()
+        .position(|label| label == "Stations without a country")
+        .expect("the no-country section is listed");
+    for _ in 0..section {
+        press(&mut view, KeyCode::Char('j'));
+    }
+    press(&mut view, KeyCode::Enter);
     assert_eq!(
         press(&mut view, KeyCode::Char('a')),
         RadioOutcome::Queue {
@@ -515,9 +556,9 @@ fn a_hand_added_or_favourite_station_queues_too() {
 #[test]
 fn enter_on_a_tag_still_opens_its_stations() {
     let mut view = view();
-    press(&mut view, KeyCode::Char('j'));
-    press(&mut view, KeyCode::Char('j'));
-    press(&mut view, KeyCode::Char('j')); // Browse genres & tags
+    for _ in 0..5 {
+        press(&mut view, KeyCode::Char('j')); // Browse genres & tags
+    }
     press(&mut view, KeyCode::Enter); // into the tag index
     assert_eq!(view.place(), &Place::Tags);
     press(&mut view, KeyCode::Enter); // jazz
@@ -707,6 +748,87 @@ fn the_transport_shows_a_position_and_total_for_a_file() {
     assert!(!screen.contains("● live"), "a file is not live");
 }
 
+// ---- the stations without a country (S4) ------------------------------------
+
+#[test]
+fn the_no_country_section_lists_own_stations_then_no_country_favourites() {
+    let mut store = RadioStore::default();
+    store.favorite.push(Favorite {
+        name: "Jazz One".to_owned(),
+        url: "https://jazz.example/stream".to_owned(),
+        countrycode: "NO".to_owned(),
+        codec: "MP3".to_owned(),
+    });
+    store.favorite.push(Favorite {
+        name: "Free Radio".to_owned(),
+        url: "https://free.example/stream".to_owned(),
+        countrycode: String::new(),
+        codec: String::new(),
+    });
+    store.station.push(store::Station {
+        name: "Night FM".to_owned(),
+        url: "http://night.example/live".to_owned(),
+    });
+    let mut view = RadioView::new(store, Vec::new(), Vec::new(), None);
+
+    // The section sits after the pinned places and before the tags, and the
+    // no-country favourite is listed at the top too (S5): once is the
+    // shortcut, once is the section.
+    let section = view
+        .labels()
+        .iter()
+        .position(|label| label == "Stations without a country")
+        .expect("the no-country section is listed");
+    assert_eq!(
+        view.labels(),
+        [
+            "★ Jazz One [MP3] · NO",
+            "★ Free Radio",
+            "Stations without a country",
+        ],
+        "the section follows the favourites, got: {:?}",
+        view.labels()
+    );
+
+    for _ in 0..section {
+        press(&mut view, KeyCode::Char('j'));
+    }
+    press(&mut view, KeyCode::Enter);
+    assert_eq!(
+        view.place(),
+        &Place::NoCountry,
+        "entering the section opens its place, got: {:?}",
+        view.place()
+    );
+    assert_eq!(
+        view.labels(),
+        ["Night FM", "★ Free Radio"],
+        "own stations first, then the no-country favourites; a favourite with a country keeps out, got: {:?}",
+        view.labels()
+    );
+    assert!(view.back(), "the section goes back one level");
+    assert_eq!(view.place(), &Place::Top);
+}
+
+#[test]
+fn the_no_country_section_exists_only_with_content() {
+    let mut store = RadioStore::default();
+    store.favorite.push(Favorite {
+        name: "Jazz One".to_owned(),
+        url: "https://jazz.example/stream".to_owned(),
+        countrycode: "NO".to_owned(),
+        codec: "MP3".to_owned(),
+    });
+    let view = RadioView::new(store, Vec::new(), Vec::new(), None);
+    assert!(
+        !view
+            .labels()
+            .contains(&"Stations without a country".to_owned()),
+        "nothing belongs to no country, no section, got: {:?}",
+        view.labels()
+    );
+}
+
 // ---- the render -------------------------------------------------------------
 
 fn screen(view: &RadioView) -> String {
@@ -735,12 +857,12 @@ fn the_radio_list_draws_its_sections_and_lights_the_selected_row() {
 
     for expected in [
         "Radio",
+        "★ Jazz One",
         "Browse all countries",
         "Norway (near you)",
         "★ Germany",
+        "Stations without a country",
         "Browse genres & tags",
-        "Night FM",
-        "★ Jazz One",
         "Nova [128k] · NO",
         "✗ Hls One",
     ] {
@@ -753,7 +875,7 @@ fn the_radio_list_draws_its_sections_and_lights_the_selected_row() {
     // The selected row is distinguishable: its cells wear the accent.
     let row = screen
         .lines()
-        .position(|line| line.contains("1. Browse all countries"))
+        .position(|line| line.contains("1. ★ Jazz One"))
         .expect("the first row is on screen");
     let mut terminal =
         velo::ui::ratatui::Terminal::new(velo::ui::ratatui::backend::TestBackend::new(80, 24))

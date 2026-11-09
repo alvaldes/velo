@@ -12,13 +12,13 @@
 //! [`RadioOutcome::Queue`], and the shell — which owns the queue and the
 //! player — carries them out (T6c).
 //!
-//! The sections, in order and only when they have content: browse all
-//! countries, the user's own country (`Norway (near you)`) with its regions
-//! once their index is fetched (T6d), the pinned places (`★ Germany`),
-//! browse genres & tags, the hand-added stations, the favourites
-//! (`★ Name [codec] · CC`) and the loaded catalog (`Name [128k] · CC`),
-//! with stations the codec filter rejects marked so the user can tell
-//! before pressing enter.
+//! The sections, in order and only when they have content: the favourites
+//! (`★ Name [codec] · CC`) first, browse all countries, the user's own
+//! country (`Norway (near you)`) with its regions once their index is
+//! fetched (T6d), the pinned places (`★ Germany`), the stations that belong
+//! to no country, browse genres & tags, and the loaded catalog
+//! (`Name [128k] · CC`), with stations the codec filter rejects marked so
+//! the user can tell before pressing enter.
 //!
 //! Station identity is never raw string equality: marking goes through
 //! [`RadioStore`]'s toggles, which decide on [`station_key`] alone.
@@ -77,6 +77,10 @@ pub enum Place {
     Countries,
     /// The tag index (`Browse genres & tags`).
     Tags,
+    /// The stations that belong to no country: the ones the user added by
+    /// hand, and favourites saved without a `countrycode`. The user's own
+    /// data, so it is never a directory request.
+    NoCountry,
     /// The stations of one country, or of one of its regions.
     Country {
         /// ISO 3166-1 code.
@@ -101,6 +105,9 @@ pub enum RowKind {
     BrowseCountries,
     /// `Browse genres & tags`.
     BrowseTags,
+    /// `Stations without a country`: the place holding the stations that
+    /// belong to no country (S4). It opens [`Place::NoCountry`].
+    BrowseNoCountry,
     /// `Use my location`: the country question, shown while the store has
     /// no answer. `y` on the row stores the detected country, `n` stores
     /// the decline; no modal of its own (T6b, S5).
@@ -574,6 +581,7 @@ impl RadioView {
         let next = match row.kind {
             RowKind::BrowseCountries => Some(Place::Countries),
             RowKind::BrowseTags => Some(Place::Tags),
+            RowKind::BrowseNoCountry => Some(Place::NoCountry),
             RowKind::NearYou { code } | RowKind::Country { code, .. } => {
                 Some(self.country_place(&code, ""))
             }
@@ -732,6 +740,7 @@ impl RadioView {
             }
             RowKind::BrowseCountries
             | RowKind::BrowseTags
+            | RowKind::BrowseNoCountry
             | RowKind::Tag { .. }
             | RowKind::AskCountry { .. } => {}
         }
@@ -781,13 +790,60 @@ impl RadioView {
                 })
                 .collect(),
             Place::Country { .. } | Place::Tag { .. } => self.catalog_rows(),
+            Place::NoCountry => self.no_country_rows(),
         }
+    }
+
+    /// The stations that belong to no country (S4): every hand-added
+    /// station first, then the favourites saved without a `countrycode`.
+    /// The same [`RowKind`]s as everywhere else, so playing, queueing and
+    /// marking keep working unchanged.
+    fn no_country_rows(&self) -> Vec<Row> {
+        let mut rows: Vec<Row> = self
+            .store
+            .station
+            .iter()
+            .map(|added| Row {
+                label: added.name.clone(),
+                fact: String::new(),
+                kind: RowKind::AddedStation {
+                    name: added.name.clone(),
+                    url: added.url.clone(),
+                },
+            })
+            .collect();
+        rows.extend(
+            self.store
+                .favorite
+                .iter()
+                .filter(|favorite| favorite.countrycode.is_empty())
+                .map(|favorite| Row {
+                    label: favorite_label(favorite),
+                    fact: String::new(),
+                    kind: RowKind::FavoriteStation {
+                        favorite: favorite.clone(),
+                    },
+                }),
+        );
+        rows
     }
 
     /// The top level: the section rows and the station lists that show
     /// directly, in the order the layout fixed.
     fn top_rows(&self) -> Vec<Row> {
         let mut rows = Vec::new();
+        // The favourites first (S5): the stations someone actually listens
+        // to are one keypress away instead of buried under a country. A
+        // favourite with no country also shows in its section below.
+        for favorite in &self.store.favorite {
+            rows.push(Row {
+                label: favorite_label(favorite),
+                fact: String::new(),
+                kind: RowKind::FavoriteStation {
+                    favorite: favorite.clone(),
+                },
+            });
+        }
         // The browse rows belong to the sections, not to their content:
         // the wired view shows them before the indexes load, so entering
         // one can start the load (T6b).
@@ -859,6 +915,23 @@ impl RadioView {
                 },
             });
         }
+        // The stations that belong to no country (S4): the user's own
+        // hand-added stations and the favourites saved without a
+        // `countrycode`, one `enter` away and never a directory request.
+        let without_country = self.store.station.len()
+            + self
+                .store
+                .favorite
+                .iter()
+                .filter(|favorite| favorite.countrycode.is_empty())
+                .count();
+        if without_country > 0 {
+            rows.push(Row {
+                label: "Stations without a country".to_owned(),
+                fact: plural(without_country, "station", "stations"),
+                kind: RowKind::BrowseNoCountry,
+            });
+        }
         if self.browse_rows || !self.tags.is_empty() {
             let fact = if self.tags.is_empty() {
                 String::new()
@@ -869,25 +942,6 @@ impl RadioView {
                 label: "Browse genres & tags".to_owned(),
                 fact,
                 kind: RowKind::BrowseTags,
-            });
-        }
-        for added in &self.store.station {
-            rows.push(Row {
-                label: added.name.clone(),
-                fact: String::new(),
-                kind: RowKind::AddedStation {
-                    name: added.name.clone(),
-                    url: added.url.clone(),
-                },
-            });
-        }
-        for favorite in &self.store.favorite {
-            rows.push(Row {
-                label: favorite_label(favorite),
-                fact: String::new(),
-                kind: RowKind::FavoriteStation {
-                    favorite: favorite.clone(),
-                },
             });
         }
         rows.extend(self.catalog_rows());
@@ -938,6 +992,11 @@ impl RadioView {
                 }
             }
             Place::Tag { name } => (format!("Radio › {name}"), "station", "stations"),
+            Place::NoCountry => (
+                "Radio › stations without a country".to_owned(),
+                "station",
+                "stations",
+            ),
         };
         (label, plural(self.visible_rows().len(), one, many))
     }
