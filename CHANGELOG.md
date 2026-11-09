@@ -1,6 +1,10 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.17.0] - 2026-11-09
+
+### Features
+- **radio:** Search the directory by station name
 ## [0.16.0] - 2026-11-09
 
 ### Features
