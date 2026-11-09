@@ -2,6 +2,7 @@
 
 pub mod audio;
 pub mod config;
+pub mod history;
 pub mod library;
 pub mod radio;
 pub mod subsonic;
