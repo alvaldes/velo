@@ -64,60 +64,15 @@ fn main() -> ExitCode {
         return ExitCode::from(1);
     }
 
-    // The Subsonic probe needs no terminal and no library root, so it runs
-    // before both — it must work over ssh (T12a). Cleaning the caches is the
-    // same kind of headless chore: env in, two directories cleaned, stdout
-    // out.
-    if cli.cache_clean {
-        return cache_clean(
-            std::env::var_os("XDG_CACHE_HOME").as_deref(),
-            home.as_deref(),
-        );
-    }
-    if cli.subsonic_test {
-        return subsonic_test(&settings, home.as_deref());
-    }
-    // The station probe is headless the same way: no terminal, no library,
-    // no server — one URL in, a report out (issue #13).
-    if let Some(url) = &cli.radio_test {
-        return radio_test(url);
-    }
-    // The sync needs no terminal either — it runs over ssh like the probe.
-    if cli.sync {
-        return sync_library(&settings, home.as_deref());
-    }
-    // The ReplayGain scan is the same kind of headless chore: files in, a
-    // report out, and nothing written unless `--apply` was passed (T13).
-    if cli.replaygain_scan {
-        if cli.files.is_empty() {
-            return usage_help();
-        }
-        return replaygain_scan(&cli.files, cli.apply);
-    }
-    // `bit_perfect` is resolved and carried in `settings`; the audio path
-    // and the interface read it (T17).
-    if cli.index {
-        let Some(root) = library else {
-            let file = config_file.as_deref().map_or_else(
-                || "the config file".to_owned(),
-                |path| path.display().to_string(),
-            );
-            eprintln!(
-                "velo: no library to index — set `library` in {file} or pass --library <PATH>"
-            );
-            return ExitCode::from(2);
-        };
-        return index_library(&root);
-    }
-
-    // The history subcommand is the same kind of headless chore as
-    // `--cache-clean`: no terminal, no library, works over ssh.
-    if let Some(Command::History { json, action }) = &cli.command {
-        return history_command(
-            config_file.as_deref(),
-            *json,
-            matches!(action, Some(HistoryAction::Clear)),
-        );
+    // Every headless one-shot mode, in the order the help documents them.
+    if let Some(code) = one_shot(
+        &cli,
+        &settings,
+        home.as_deref(),
+        config_file.as_deref(),
+        library.as_deref(),
+    ) {
+        return code;
     }
 
     if cli.files.is_empty() {
@@ -263,6 +218,69 @@ fn subsonic_seams(
 
 /// Resolves the user's settings: the config file at `path` (a missing file is
 /// normal and silent) merged under the command line.
+/// Every headless one-shot mode, in the order the help documents them: each
+/// needs no terminal and no library root (the probes and the chores must work
+/// over ssh), and each answers `Some` with the exit code the process ends
+/// with. `None` means no one-shot was asked for, so the caller goes on into a
+/// file mode or the interface. This order is the precedence the `--help` text
+/// documents; the two live together on purpose.
+fn one_shot(
+    cli: &Cli,
+    settings: &Settings,
+    home: Option<&OsStr>,
+    config_file: Option<&Path>,
+    library: Option<&Path>,
+) -> Option<ExitCode> {
+    if cli.cache_clean {
+        return Some(cache_clean(
+            std::env::var_os("XDG_CACHE_HOME").as_deref(),
+            home,
+        ));
+    }
+    if cli.subsonic_test {
+        return Some(subsonic_test(settings, home));
+    }
+    // The station probe is headless the same way: one URL in, a report out.
+    if let Some(url) = &cli.radio_test {
+        return Some(radio_test(url));
+    }
+    if cli.sync {
+        return Some(sync_library(settings, home));
+    }
+    // Files in, a report out, and nothing written unless `--apply` was passed.
+    if cli.replaygain_scan {
+        if cli.files.is_empty() {
+            return Some(usage_help());
+        }
+        return Some(replaygain_scan(&cli.files, cli.apply));
+    }
+    // `bit_perfect` is resolved and carried in `settings`; the audio path and
+    // the interface read it.
+    if cli.index {
+        let Some(root) = library else {
+            let file = config_file.map_or_else(
+                || "the config file".to_owned(),
+                |path| path.display().to_string(),
+            );
+            eprintln!(
+                "velo: no library to index — set `library` in {file} or pass --library <PATH>"
+            );
+            return Some(ExitCode::from(2));
+        };
+        return Some(index_library(root));
+    }
+    // The history subcommand is the same kind of headless chore: no terminal,
+    // no library, works over ssh.
+    if let Some(Command::History { json, action }) = &cli.command {
+        return Some(history_command(
+            config_file,
+            *json,
+            matches!(action, Some(HistoryAction::Clear)),
+        ));
+    }
+    None
+}
+
 fn user_settings(cli: &Cli, path: Option<&Path>) -> Result<Settings, config::ConfigError> {
     match path {
         Some(path) => Config::load_from(path).map(|file| file.merged(cli)),
