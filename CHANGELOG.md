@@ -1,6 +1,10 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.26.0] - 2026-11-09
+
+### Features
+- **theme:** The themes folder ships velo's own palette
 ## [0.25.0] - 2026-11-09
 
 ### Features
