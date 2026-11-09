@@ -18,8 +18,10 @@
 //!
 //! Since S1 of the config-and-settings feature this one file also carries what
 //! the interface needs: the `[state]` table (what the next launch comes back
-//! to), the `[theme]` table (every colour, as `"#rrggbb"`) and the `[ui]`
-//! table (which parts of the screen are drawn). Nothing else is stored
+//! to), the `[theme]` table (every colour, as `"#rrggbb"`, plus `name`) and
+//! the `[ui]` table (which parts of the screen are drawn). It also reads the
+//! named theme files of the `themes/` folder beside the config file (issue
+//! #10, `select_theme`). Nothing else is stored
 //! anywhere: no state file, no settings table in the library index.
 
 use std::ffi::OsStr;
@@ -350,7 +352,7 @@ impl Config {
                 browse_by: self.state.browse_by.unwrap_or_default(),
                 node,
             },
-            theme: self.theme.resolved(),
+            theme: self.theme,
             ui: self.ui.resolved(),
             subsonic: self.subsonic.map(|server| SubsonicConfig {
                 url: server.url,
@@ -386,8 +388,10 @@ pub struct Settings {
     pub replay_gain: ReplayGainMode,
     /// What the next launch comes back to (S2, S3).
     pub session: Session,
-    /// The colours the interface draws with (S4).
-    pub theme: ThemeColors,
+    /// The `[theme]` table as the file wrote it (S4): the colour keys the
+    /// launch layers over the selected theme file (S2), and the `name`
+    /// selected from the `themes/` folder.
+    pub theme: ThemeKeys,
     /// Which parts of the interface are drawn (S5).
     pub ui: UiParts,
     /// The Subsonic server (T12a), when the config has the table.
@@ -505,6 +509,9 @@ const fn rgb(red: u8, green: u8, blue: u8) -> ThemeColor {
     ThemeColor::Rgb { red, green, blue }
 }
 
+/// The name the built-in theme always carries (S1).
+pub const DEFAULT_THEME_NAME: &str = "default";
+
 /// The `[theme]` table resolved with its defaults (S4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ThemeColors {
@@ -541,10 +548,15 @@ impl Default for ThemeColors {
     }
 }
 
-/// The `[theme]` table as the file writes it (S4): every colour optional.
-#[derive(Debug, Clone, Copy, Default, serde::Deserialize)]
+/// The `[theme]` table as the file writes it (S4): every colour optional,
+/// plus `name` — the theme file selected from the `themes/` folder (S2).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ThemeKeys {
+    /// `name` — the theme file to load from the `themes/` folder beside the
+    /// config file; absent or blank, the built-in theme (S2).
+    #[serde(default)]
+    pub name: Option<String>,
     /// `background` — `"#rrggbb"`, or `"reset"` for the terminal's own.
     #[serde(default, deserialize_with = "deserialize_terminal_colour")]
     pub background: Option<ThemeColor>,
@@ -571,16 +583,60 @@ pub struct ThemeKeys {
 impl ThemeKeys {
     /// The table with its defaults filled in.
     #[must_use]
-    pub fn resolved(self) -> ThemeColors {
+    pub fn resolved(&self) -> ThemeColors {
+        self.resolved_over(ThemeColors::default())
+    }
+
+    /// The table with only the keys that are not a written-out built-in
+    /// default (S2, issue #10): the generated config names all seven colour
+    /// keys at their defaults, and under a named theme those defaults are
+    /// documentation, not choices. A key whose value differs from the
+    /// built-in default is a genuine choice and survives.
+    #[must_use]
+    pub fn non_default_choices(&self) -> Self {
         let default = ThemeColors::default();
+        let is_choice = |value: Option<ThemeColor>, base: ThemeColor| {
+            value.is_some_and(|colour| colour != base)
+        };
+        Self {
+            name: self.name.clone(),
+            background: is_choice(self.background, default.background)
+                .then_some(self.background)
+                .flatten(),
+            text: is_choice(self.text, default.text)
+                .then_some(self.text)
+                .flatten(),
+            dim: is_choice(self.dim, default.dim)
+                .then_some(self.dim)
+                .flatten(),
+            accent: is_choice(self.accent, default.accent)
+                .then_some(self.accent)
+                .flatten(),
+            secondary: is_choice(self.secondary, default.secondary)
+                .then_some(self.secondary)
+                .flatten(),
+            border: is_choice(self.border, default.border)
+                .then_some(self.border)
+                .flatten(),
+            ink: is_choice(self.ink, default.ink)
+                .then_some(self.ink)
+                .flatten(),
+        }
+    }
+
+    /// The table resolved over `base` (S2): a key the table carries replaces
+    /// `base`'s, a key it leaves out keeps `base`'s. `name` is not a colour
+    /// and takes no part.
+    #[must_use]
+    pub fn resolved_over(&self, base: ThemeColors) -> ThemeColors {
         ThemeColors {
-            background: self.background.unwrap_or(default.background),
-            text: self.text.unwrap_or(default.text),
-            dim: self.dim.unwrap_or(default.dim),
-            accent: self.accent.unwrap_or(default.accent),
-            secondary: self.secondary.unwrap_or(default.secondary),
-            border: self.border.unwrap_or(default.border),
-            ink: self.ink.unwrap_or(default.ink),
+            background: self.background.unwrap_or(base.background),
+            text: self.text.unwrap_or(base.text),
+            dim: self.dim.unwrap_or(base.dim),
+            accent: self.accent.unwrap_or(base.accent),
+            secondary: self.secondary.unwrap_or(base.secondary),
+            border: self.border.unwrap_or(base.border),
+            ink: self.ink.unwrap_or(base.ink),
         }
     }
 }
@@ -675,6 +731,15 @@ pub fn config_path(xdg_config_home: Option<&OsStr>, home: Option<&OsStr>) -> Opt
                 .join("config.toml")
         })
     })
+}
+
+/// The themes folder beside the config file (S1): `<config dir>/themes/`,
+/// where a theme is one TOML file named after the theme.
+#[must_use]
+pub fn themes_dir(config_file: &Path) -> PathBuf {
+    config_file
+        .parent()
+        .map_or_else(|| PathBuf::from("themes"), |dir| dir.join("themes"))
 }
 
 /// The Radio Browser host the directory asks through: `host` in the
@@ -1233,4 +1298,191 @@ where
             "subsonic.url must be an http:// or https:// server address",
         )),
     }
+}
+
+// ------------------------------------------------------- theme files (issue #10)
+
+/// One theme the picker can focus (S1): the built-in `default`, or a file
+/// from the `themes/` folder, named after the file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadedTheme {
+    /// The name the `[theme]` table selects the theme by.
+    pub name: String,
+    /// The palette the theme resolves to, with the built-in under it.
+    pub colors: ThemeColors,
+}
+
+/// What selecting a theme resolved to at launch (S1–S3).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ThemeSelection {
+    /// The palette the interface draws with (S2): the built-in, then the
+    /// selected theme file, then the `[theme]` keys of the config file.
+    pub palette: ThemeColors,
+    /// The theme the palette came from: the selected name when it was on
+    /// disk, else [`DEFAULT_THEME_NAME`] (S3).
+    pub applied: String,
+    /// Every theme the picker can offer (S4): `default` first, then the
+    /// files that loaded, in name order.
+    pub themes: Vec<LoadedTheme>,
+    /// What to say once on the status line at startup (S3): a selected name
+    /// that is not on disk, a file that does not parse, a colour that does
+    /// not, a folder that cannot be read.
+    pub notices: Vec<String>,
+}
+
+/// The seven colour keys a theme file carries (S1) — the same keys the
+/// `[theme]` table does. The order is the file's documented order.
+const THEME_FILE_KEYS: [&str; 7] = [
+    "background",
+    "text",
+    "dim",
+    "accent",
+    "secondary",
+    "border",
+    "ink",
+];
+
+/// Loads the `themes/` folder and resolves the launch palette (S1–S3): the
+/// built-in `default` is always there, the selected theme file layers over
+/// it, and the `[theme]` colour keys of `keys` win over both. A missing
+/// folder is normal and silent; anything broken is a notice for the status
+/// line, with the built-in used — the app starts.
+#[must_use]
+pub fn select_theme(themes_dir: Option<&Path>, keys: &ThemeKeys) -> ThemeSelection {
+    let mut selection = ThemeSelection {
+        applied: DEFAULT_THEME_NAME.to_owned(),
+        themes: vec![LoadedTheme {
+            name: DEFAULT_THEME_NAME.to_owned(),
+            colors: ThemeColors::default(),
+        }],
+        ..ThemeSelection::default()
+    };
+
+    if let Some(dir) = themes_dir {
+        match fs::read_dir(dir) {
+            // The folder may not exist (S1): that is not an error.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => selection
+                .notices
+                .push(format!("cannot read {}: {error}", dir.display())),
+            Ok(entries) => {
+                let mut files: Vec<PathBuf> = entries
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .filter(|path| path.extension() == Some(OsStr::new("toml")))
+                    .collect();
+                files.sort();
+                for path in files {
+                    match load_theme_file(&path) {
+                        Ok(colors) => {
+                            let name = path
+                                .file_stem()
+                                .and_then(|stem| stem.to_str())
+                                .unwrap_or_default();
+                            if name.is_empty() {
+                                continue;
+                            }
+                            let entry = LoadedTheme {
+                                name: name.to_owned(),
+                                colors,
+                            };
+                            // The built-in always exists under `default`;
+                            // a file of that name takes its place, not a
+                            // second entry beside it.
+                            if name == DEFAULT_THEME_NAME {
+                                selection.themes[0] = entry;
+                            } else {
+                                selection.themes.push(entry);
+                            }
+                        }
+                        Err(reason) => selection
+                            .notices
+                            .push(format!("cannot use theme {}: {reason}", path.display())),
+                    }
+                }
+            }
+        }
+    }
+
+    let selected = keys
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty());
+    if let Some(name) = selected {
+        if let Some(theme) = selection.themes.iter().find(|theme| theme.name == name) {
+            // The generated config writes every colour key at the built-in
+            // default. Under a named theme those defaults are documentation,
+            // not a choice (L3): a key equal to the built-in default would
+            // mask the theme, so only keys that genuinely differ survive to
+            // override it. Selecting `default` (or no name at all) keeps
+            // today's layering, defaults and all.
+            let choices = if name == DEFAULT_THEME_NAME {
+                keys.clone()
+            } else {
+                keys.non_default_choices()
+            };
+            selection.palette = choices.resolved_over(theme.colors);
+            selection.applied = theme.name.clone();
+        } else {
+            let place = themes_dir.map_or_else(
+                || "the themes folder".to_owned(),
+                |dir| dir.display().to_string(),
+            );
+            selection.notices.push(format!(
+                "theme \"{name}\" is not in {place} — using the built-in"
+            ));
+            selection.palette = keys.resolved_over(selection.themes[0].colors);
+        }
+    } else {
+        // No name, or a blank one: the built-in — today's behaviour (S5) —
+        // with the config's keys on top, and the built-in's entry as a
+        // `default.toml` may have replaced it.
+        selection.palette = keys.resolved_over(selection.themes[0].colors);
+    }
+    selection
+}
+
+/// Reads one theme file (S1): the same seven colour keys the `[theme]`
+/// table carries. Every failure names the file (the caller adds it), the
+/// key, and, for a colour, what was wrong with it.
+fn load_theme_file(path: &Path) -> Result<ThemeColors, String> {
+    let text = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    let table: toml::Table = toml::from_str(&text).map_err(|error| error.to_string())?;
+    for key in table.keys() {
+        if !THEME_FILE_KEYS.contains(&key.as_str()) {
+            return Err(format!("unknown key \"{key}\""));
+        }
+    }
+    let keys = ThemeKeys {
+        background: theme_file_colour(&table, "background", true)?,
+        text: theme_file_colour(&table, "text", true)?,
+        dim: theme_file_colour(&table, "dim", false)?,
+        accent: theme_file_colour(&table, "accent", false)?,
+        secondary: theme_file_colour(&table, "secondary", false)?,
+        border: theme_file_colour(&table, "border", false)?,
+        ink: theme_file_colour(&table, "ink", false)?,
+        name: None,
+    };
+    Ok(keys.resolved())
+}
+
+/// Reads one colour of a theme file's table: `"#rrggbb"`, or `"reset"` for
+/// the two keys where it means the terminal's own colour. Every error names
+/// the key it belongs to.
+fn theme_file_colour(
+    table: &toml::Table,
+    key: &str,
+    allows_reset: bool,
+) -> Result<Option<ThemeColor>, String> {
+    let Some(value) = table.get(key).cloned() else {
+        return Ok(None);
+    };
+    let colour = ThemeColor::deserialize(value).map_err(|error| format!("{key}: {error}"))?;
+    if !allows_reset && matches!(colour, ThemeColor::Terminal) {
+        return Err(format!(
+            "{key}: \"reset\" is a colour for background and text only: write \"#rrggbb\""
+        ));
+    }
+    Ok(Some(colour))
 }

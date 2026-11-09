@@ -67,7 +67,7 @@ Every key below is what the code does today.
 | `J` / `K` | Move the selected entry down / up (queue view) |
 | `enter` (queue view) | Play the queue from the selected entry |
 | `?` | Help card: `j`/`k` (or `↓`/`↑`) scroll it and `g`/`G` jump to its ends; `/` filters it by key or description (`enter` keeps the filter, `esc` clears it, a second `esc` or `?` closes the help). The card keeps its full size however few rows the filter leaves, and every other key waits until it closes — `q` and `space` included |
-| `o` | Settings card: everything in `config.toml` — replay gain, repeat, shuffle, the seven `[theme]` colours, the six `[ui]` switches and the library folder (the volume is not a row: it stays on `+`/`-`). `j`/`k` (or `↓`/`↑`) move between the settings (the `sound`/`theme`/`screen`/`library` headers are never focused), `g`/`G` jump to the ends, `enter` or `←`/`→` step the focused row (colours cycle a short preset list, the `folder` row opens the library prompt), `esc` closes — and every other key waits until it does, `q` and `space` included |
+| `o` | Settings card: everything in `config.toml` — replay gain, repeat, shuffle, the theme (with a preview before it applies, issue #10), the seven `[theme]` colours, the six `[ui]` switches and the library folder (the volume is not a row: it stays on `+`/`-`). `j`/`k` (or `↓`/`↑`) move between the settings (the `sound`/`theme`/`screen`/`library` headers are never focused), `g`/`G` jump to the ends, `enter` or `←`/`→` step the focused row (colours cycle a short preset list, the `theme` row previews with `←`/`→` and applies with `enter`, the `folder` row opens the library prompt), `esc` closes — and every other key waits until it does, `q` and `space` included |
 | `R` | Radio view, straight from either screen: the shortcut for `Sources` → `Radio` |
 | `f` (radio view) | Favourite the selected station, or pin the selected country or region |
 | `F` (radio view) | Filter the list already loaded, without asking the directory — `enter` keeps the filter, `esc` clears it |
@@ -357,6 +357,29 @@ allowed for `background` and `text` only.
 | `ink` | The text drawn on top of `accent` | `#000000` |
 
 The brighter shade behind the accent is derived from `accent`, not written.
+
+A theme can also be a file of its own, named after the theme, dropped into
+the `themes/` folder beside this one:
+
+```
+$XDG_CONFIG_HOME/velo/themes/<name>.toml   # else ~/.config/velo/themes/<name>.toml
+```
+
+A theme file carries the same seven colour keys as the `[theme]` table, and
+`[theme] name = "<name>"` selects it. The palette velo draws with layers in
+one order: the built-in theme (`default`, which always exists), then the
+selected theme file, then the `[theme]` colour keys of this file that differ
+from the built-in defaults — a one-off change still wins, without copying a
+whole theme, and the defaults the generated file writes are documentation,
+not choices: they never mask a selected theme. A name that
+is not on disk falls back to the built-in and says so once; a theme file
+that does not parse, or carries a colour that does not, is reported naming
+the file and the key, and the built-in is used. velo always starts.
+
+In the settings card (`o`) a `theme` row, above the colours, steps through
+the loaded names with `←`/`→` — previewing each focused theme on screen —
+and `enter` applies the preview by writing `[theme] name`; `esc` leaves the
+previous theme applied.
 
 ### `[ui]` — what is drawn
 
