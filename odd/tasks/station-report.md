@@ -12,6 +12,13 @@ station refused to play.
 - **S2** "The README says what to do with one. Beside the `✗` explanation: a station marked
   `✗` is worth reporting as an issue, with the name, the codec, the URL, the reason velo
   reported, the velo version and the platform."
+- **S15** (issue #32, found while testing #19) the station that is playing is marked in the
+  radio list the way a track is in the library, wherever its row appears — any country, any
+  tag, the favourites, the no-country section, the loaded catalogue — and nothing is marked
+  when what plays is a local file or when nothing plays. Verbatim: "no se queda marcado la
+  radio que se esta reproduciendo como si pasa en local. no importa donde estemos genero pais
+  fav o donde sea la radio que se esta reproduciendo tiene que verse que se esta
+  reproduciendo en la lista".
 - **S3** "On a `✗` row, one keypress builds a prefilled GitHub issue (title and body carrying
   those facts) and opens it in the browser with the system opener. velo holds no token and
   posts nothing: the human reads it and submits. That is the 'something simple' — no
@@ -42,6 +49,7 @@ The human's own words, from the message that produced the issue:
 | --- | --- | --- | --- | --- |
 | T1 | S1 S2 | worker | `src/radio/directory.rs`, `src/ui/radio.rs`, `src/ui/mod.rs`, `tests/radio_directory.rs`, `tests/ui_radio.rs`, `README.md` | `feat(radio): a station that cannot play says why` |
 | T2 | S3 | worker | `src/ui/radio.rs`, `src/ui/mod.rs`, `tests/ui_radio.rs`, `README.md` | `feat(radio): i reports a station that cannot play` |
+| T4 | S15 (#32) | worker | `src/ui/radio.rs`, `src/ui/mod.rs`, `tests/ui_radio.rs` | `fix(radio): mark the station that is playing, wherever it is listed` |
 | T3 | S1–S3 | parent | — | verification: fmt, clippy, the suite, and the URL opened by hand |
 
 ## Log
