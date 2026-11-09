@@ -98,9 +98,10 @@ fn the_sources_screen_names_the_sources_with_the_cursor_on_the_first() {
     );
 }
 
-/// The cursor moves with the list keys and clamps at both ends.
+/// The cursor moves with the list keys and wraps at both ends (issue #36):
+/// `j` on the last source lands on the first, `k` on the first on the last.
 #[test]
-fn the_source_cursor_moves_with_the_list_keys_and_clamps() {
+fn the_source_cursor_moves_and_wraps_at_both_ends() {
     let mut app = app();
     app.open_sources();
 
@@ -117,7 +118,17 @@ fn the_source_cursor_moves_with_the_list_keys_and_clamps() {
     press(&mut app, KeyCode::Char('j'));
     assert_eq!(app.sources_selected(), 4, "Playlists is the last source");
     press(&mut app, KeyCode::Char('j'));
-    assert_eq!(app.sources_selected(), 4, "j stops at the last source");
+    assert_eq!(
+        app.sources_selected(),
+        0,
+        "j wraps from the last source to the first"
+    );
+    press(&mut app, KeyCode::Char('k'));
+    assert_eq!(
+        app.sources_selected(),
+        4,
+        "k wraps from the first source to the last"
+    );
     press(&mut app, KeyCode::Char('k'));
     assert_eq!(app.sources_selected(), 3);
     press(&mut app, KeyCode::Char('G'));

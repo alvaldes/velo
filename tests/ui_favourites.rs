@@ -534,7 +534,8 @@ fn the_list_reads_the_store_anew_every_time_it_opens() {
     press(&mut app, KeyCode::Char('g')); // the top of Sources: Local library
     press(&mut app, KeyCode::Enter); // into the library
     assert_eq!(app.level(), Some(Level::AllTracks));
-    press(&mut app, KeyCode::Char('k')); // onto the first row
+    // The selection is already on the first row: opening a source resets it.
+    assert_eq!(app.selected(), 0);
     mark(&mut app); // unmark 01
     app.open_sources();
     press(&mut app, KeyCode::Char('G'));
