@@ -115,6 +115,16 @@ pub enum Place {
         /// The tag's name.
         name: String,
     },
+    /// The stations whose name matches, asked of the directory by the
+    /// search box (`/`): any country, in the order the view loads places
+    /// in (S9, issue #15). It is a station place like a country or a tag —
+    /// its answer renders only here — but `enter` never walks into it from
+    /// a row: the search box opens it, and `esc` returns to wherever that
+    /// was.
+    Search {
+        /// The name the directory is asked for.
+        name: String,
+    },
 }
 
 /// What one visible row is. Station rows carry enough to mark and toggle
@@ -282,10 +292,17 @@ pub struct RadioView {
     stack: Vec<Place>,
     /// The selected row of the visible list.
     cursor: usize,
-    /// The filter text typed after `/`.
+    /// The filter text typed after `F`.
     filter: String,
-    /// Whether printable keys type into the filter (between `/` and `enter`).
+    /// Whether printable keys type into the filter (between `F` and `enter`).
     typing: bool,
+    /// The name typed into the search box after `/`: what `enter` hands the
+    /// directory (S9, issue #15). Never the filter — a search is one request
+    /// for a name, not a narrowing of the list already loaded.
+    query: String,
+    /// Whether printable keys type into the search box (between `/` and
+    /// `enter`).
+    naming: bool,
     /// The order a place's stations are loaded in.
     order: Order,
     /// The order overlay's cursor while it is open; `None` when it is not.
@@ -336,6 +353,8 @@ impl RadioView {
             cursor: 0,
             filter: String::new(),
             typing: false,
+            query: String::new(),
+            naming: false,
             order: Order::default(),
             order_card: None,
             browse_rows: false,
@@ -483,6 +502,18 @@ impl RadioView {
         self.typing
     }
 
+    /// The text in the search box, as it stands.
+    #[must_use]
+    pub fn query(&self) -> &str {
+        &self.query
+    }
+
+    /// Whether printable keys are typing into the search box right now.
+    #[must_use]
+    pub const fn naming(&self) -> bool {
+        self.naming
+    }
+
     /// Whether `ctrl-r` asked for a fresh directory, taking the ask: a
     /// second call answers `false` until `ctrl-r` is pressed again.
     pub fn take_refresh_request(&mut self) -> bool {
@@ -547,6 +578,10 @@ impl RadioView {
             self.order_key(event.code);
             return RadioOutcome::Handled;
         }
+        if self.naming {
+            self.naming_key(event.code);
+            return RadioOutcome::Handled;
+        }
         if self.typing {
             self.typing_key(event.code);
             return RadioOutcome::Handled;
@@ -584,6 +619,10 @@ impl RadioView {
             KeyCode::Enter => self.enter(),
             KeyCode::Char('a') => self.append_station(),
             KeyCode::Char('/') => {
+                self.open_search();
+                RadioOutcome::Handled
+            }
+            KeyCode::Char('F') => {
                 self.typing = true;
                 RadioOutcome::Handled
             }
@@ -629,6 +668,42 @@ impl RadioView {
                 self.order_card = None;
             }
             KeyCode::Esc => self.order_card = None,
+            _ => {}
+        }
+    }
+
+    /// Opens the search box: `/` asks the directory for a name (S9, issue
+    /// #15). Standing in a search prefills the box with the name that
+    /// produced it, so refining one edits it instead of retyping it.
+    fn open_search(&mut self) {
+        self.query.clear();
+        if let Place::Search { name } = &self.place {
+            self.query.clone_from(name);
+        }
+        self.naming = true;
+    }
+
+    /// The keys the search box owns: characters and `backspace` edit it,
+    /// `enter` asks the directory for the name written — an empty box asks
+    /// nothing and simply closes — and `esc` cancels without asking.
+    fn naming_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Char(character) => self.query.push(character),
+            KeyCode::Backspace => {
+                self.query.pop();
+            }
+            KeyCode::Enter => {
+                let name = self.query.trim().to_owned();
+                self.naming = false;
+                self.query.clear();
+                if !name.is_empty() {
+                    self.open_place(Place::Search { name });
+                }
+            }
+            KeyCode::Esc => {
+                self.naming = false;
+                self.query.clear();
+            }
             _ => {}
         }
     }
@@ -839,6 +914,8 @@ impl RadioView {
         self.cursor = 0;
         self.filter.clear();
         self.typing = false;
+        self.query.clear();
+        self.naming = false;
         self.catalog = Vec::new();
         self.catalog_place = None;
     }
@@ -853,6 +930,8 @@ impl RadioView {
                 self.cursor = 0;
                 self.filter.clear();
                 self.typing = false;
+                self.query.clear();
+                self.naming = false;
                 self.clamp();
                 true
             }
@@ -994,7 +1073,7 @@ impl RadioView {
                     },
                 })
                 .collect(),
-            Place::Country { .. } | Place::Tag { .. } => {
+            Place::Country { .. } | Place::Tag { .. } | Place::Search { .. } => {
                 // The answer renders only in the place it belongs to
                 // (S9): before it lands, or after a stale answer for
                 // another place arrived, the place lists nothing.
@@ -1238,6 +1317,7 @@ impl RadioView {
                 }
             }
             Place::Tag { name } => (format!("Radio › {name}"), "station", "stations"),
+            Place::Search { name } => (format!("Radio › search “{name}”"), "station", "stations"),
             Place::NoCountry => (
                 "Radio › stations without a country".to_owned(),
                 "station",
@@ -1260,7 +1340,10 @@ impl RadioView {
     /// to say.
     fn waiting_here(&self) -> bool {
         self.pending.as_ref() == Some(&self.place)
-            && matches!(self.place, Place::Country { .. } | Place::Tag { .. })
+            && matches!(
+                self.place,
+                Place::Country { .. } | Place::Tag { .. } | Place::Search { .. }
+            )
     }
 
     /// Draws the view into `area`: the header line, the list with the
@@ -1272,7 +1355,9 @@ impl RadioView {
             Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
 
         let (label, count) = self.header();
-        let filter_text = if self.filtering() {
+        let filter_text = if self.naming {
+            format!("  /{}", self.query)
+        } else if self.filtering() {
             format!("  /{}", self.filter)
         } else {
             String::new()

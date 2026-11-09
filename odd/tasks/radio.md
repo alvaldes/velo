@@ -70,11 +70,15 @@ directory omits or fudges it often enough that hiding those stations would throw
 away playable ones, and a failure that names the codec is the better outcome.
 
 **S9 — The radio view follows the sketched layout.**
-`R` opens/closes it, `/` filters the focused list, `enter` enters a country or
-tag and plays from the selected row, `a` queues without leaving, `f` favourites
-a station or pins a country, `N` opens the country list, `Ctrl+R` refreshes the
-directory, `tab` alternates radio and queue, `1`–`4` stay library views. UI copy
-is English. Footer shows `● live` instead of a position and total.
+`R` opens/closes it, `/` searches the directory by station name (any country,
+issued on `enter`, never a filter of what is loaded), `F` filters the focused
+list already loaded, `enter` enters a country or tag and plays from the
+selected row, `a` queues without leaving, `f` favourites a station or pins a
+country, `N` opens the country list, `Ctrl+R` refreshes the directory, `tab`
+alternates radio and queue, `1`–`4` stay library views. UI copy is English.
+Footer shows `● live` instead of a position and total. *(Revised in #15: `/`
+used to filter the loaded list, which made one key mean two things and left a
+name search unreachable.)*
 
 ## Tasks
 
@@ -89,6 +93,7 @@ is English. Footer shows `● live` instead of a position and total.
 | T6c | S9, S3 | parent | playing a station and the `● live` footer; **needs T5**; also README `## Keys` and the help card | |
 | T6d | S5 | parent | `/states/<country>/` for the home country, so a region can actually be pinned — today only countries are reachable | |
 | T7 | S5 | worker | country from the locale, asked once | `fc650a3` |
+| T8 | S9 | parent | `Place::Search`: `/` asks the directory for a station name from any country, `F` keeps the fuzzy filter of the loaded list; help card, README and spec revised | |
 
 ## Log
 

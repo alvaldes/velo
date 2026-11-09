@@ -394,6 +394,42 @@ fn entering_a_tag_searches_with_tag_exact() {
 }
 
 #[test]
+fn a_name_search_asks_the_directory_across_every_country() {
+    let canned = Arc::new(Canned::new().search(&stations_json(2)));
+    let mut data = wired(Arc::clone(&canned));
+    let mut view = data.view();
+
+    press(&mut view, KeyCode::Char('/'));
+    for character in "radio paradise".chars() {
+        press(&mut view, KeyCode::Char(character));
+    }
+    press(&mut view, KeyCode::Enter);
+    settle(&mut data, &mut view, &canned, |view, _canned| {
+        !view.labels().is_empty()
+    });
+
+    let calls = canned.calls();
+    let search = calls
+        .iter()
+        .find(|url| url.contains("/stations/search"))
+        .expect("the name reached the directory");
+    assert!(
+        search.contains("name=radio%20paradise"),
+        "the typed name goes on the wire, got: {search}"
+    );
+    assert!(
+        !search.contains("countrycode=") && !search.contains("tag=") && !search.contains("state="),
+        "a name search is bound to no country, tag or region, got: {search}"
+    );
+    assert_eq!(
+        view.labels(),
+        ["S0 [128k] · NO", "S1 [128k] · NO"],
+        "the answer lands in the view, got: {:?}",
+        view.labels()
+    );
+}
+
+#[test]
 fn ctrl_r_rerequests_only_what_the_current_place_needs() {
     let canned = Arc::new(
         Canned::new()

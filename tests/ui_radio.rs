@@ -334,7 +334,7 @@ fn enter_f_and_a_on_the_rule_or_the_header_change_nothing() {
 
     // The header: a filter only the header matches leaves the cursor on it.
     let mut filtered = view();
-    press(&mut filtered, KeyCode::Char('/'));
+    press(&mut filtered, KeyCode::Char('F'));
     for character in "fav".chars() {
         press(&mut filtered, KeyCode::Char(character));
     }
@@ -625,9 +625,9 @@ fn the_top_the_indexes_and_no_country_never_say_loading() {
 // ---- the filter ------------------------------------------------------------
 
 #[test]
-fn slash_filters_the_focused_list_and_clearing_restores_it() {
+fn shift_f_filters_the_focused_list_and_clearing_restores_it() {
     let mut view = view();
-    press(&mut view, KeyCode::Char('/'));
+    press(&mut view, KeyCode::Char('F'));
     for character in "many".chars() {
         press(&mut view, KeyCode::Char(character));
     }
@@ -656,7 +656,7 @@ fn slash_filters_the_focused_list_and_clearing_restores_it() {
 fn the_filter_belongs_to_the_focused_list_alone() {
     let mut view = view();
     press(&mut view, KeyCode::Enter); // country index
-    press(&mut view, KeyCode::Char('/'));
+    press(&mut view, KeyCode::Char('F'));
     for character in "or".chars() {
         press(&mut view, KeyCode::Char(character));
     }
@@ -677,6 +677,129 @@ fn the_filter_belongs_to_the_focused_list_alone() {
         8,
         "the top level is unfiltered and shows sections only"
     );
+}
+
+// ---- the directory name search (S9, issue #15) -----------------------------
+
+#[test]
+fn slash_asks_the_directory_and_never_filters_the_list_on_screen() {
+    let mut view = view();
+    press(&mut view, KeyCode::Char('/'));
+    assert!(view.naming(), "the search box is open, not the filter");
+    assert!(
+        !view.filtering(),
+        "the search box is not the filter: one key, one meaning"
+    );
+    for character in "many".chars() {
+        press(&mut view, KeyCode::Char(character));
+    }
+    assert_eq!(view.query(), "many", "the text goes to the search box");
+    assert_eq!(
+        view.labels().len(),
+        8,
+        "typing a name leaves the loaded list alone, got: {:?}",
+        view.labels()
+    );
+
+    press(&mut view, KeyCode::Enter);
+    assert!(!view.naming(), "enter closes the search box");
+    assert_eq!(
+        view.place(),
+        &Place::Search {
+            name: String::from("many")
+        },
+        "enter stands in the search, which the caller loads"
+    );
+    assert!(
+        view.labels().is_empty(),
+        "a search lists nothing before the directory answers, got: {:?}",
+        view.labels()
+    );
+}
+
+#[test]
+fn esc_closes_the_search_box_without_asking_the_directory() {
+    let mut view = view();
+    press(&mut view, KeyCode::Char('/'));
+    press(&mut view, KeyCode::Char('n'));
+    press(&mut view, KeyCode::Esc);
+
+    assert!(!view.naming(), "esc closes the search box");
+    assert_eq!(view.query(), "", "esc drops the text");
+    assert_eq!(view.place(), &Place::Top, "esc leaves the place alone");
+    assert_eq!(view.labels().len(), 8, "the list was never touched");
+}
+
+#[test]
+fn an_empty_search_asks_for_nothing() {
+    let mut view = view();
+    press(&mut view, KeyCode::Char('/'));
+    press(&mut view, KeyCode::Enter);
+    assert!(!view.naming());
+    assert_eq!(view.place(), &Place::Top, "an empty box searches nothing");
+
+    press(&mut view, KeyCode::Char('/'));
+    press(&mut view, KeyCode::Char(' '));
+    press(&mut view, KeyCode::Char(' '));
+    press(&mut view, KeyCode::Enter);
+    assert_eq!(
+        view.place(),
+        &Place::Top,
+        "blank text is not a station name"
+    );
+}
+
+#[test]
+fn the_header_shows_the_box_then_names_the_search() {
+    let mut view = view();
+    press(&mut view, KeyCode::Char('/'));
+    for character in "nova".chars() {
+        press(&mut view, KeyCode::Char(character));
+    }
+    let typing = screen(&view);
+    assert!(
+        typing.contains("  /nova"),
+        "the box shows what is typed, got:\n{typing}"
+    );
+
+    press(&mut view, KeyCode::Enter);
+    let searched = screen(&view);
+    assert!(
+        searched.contains("Radio › search “nova”"),
+        "the header names the search, got:\n{searched}"
+    );
+}
+
+#[test]
+fn slash_in_a_search_prefills_the_box_with_its_name() {
+    let mut view = view();
+    view.open_place(Place::Search {
+        name: String::from("nova"),
+    });
+    press(&mut view, KeyCode::Char('/'));
+    assert_eq!(
+        view.query(),
+        "nova",
+        "refining a search starts from its name instead of a blank box"
+    );
+}
+
+#[test]
+fn esc_leaves_a_search_for_the_place_it_started_from() {
+    let mut view = view();
+    press(&mut view, KeyCode::Char('/'));
+    for character in "nova".chars() {
+        press(&mut view, KeyCode::Char(character));
+    }
+    press(&mut view, KeyCode::Enter);
+    press(&mut view, KeyCode::Esc);
+
+    assert_eq!(
+        view.place(),
+        &Place::Top,
+        "esc returns to where the search started"
+    );
+    assert_eq!(view.labels().len(), 8, "the list comes back as it was");
 }
 
 // ---- marking stations and places -------------------------------------------
