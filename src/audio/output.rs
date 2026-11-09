@@ -222,6 +222,35 @@ impl RepeatCell {
     }
 }
 
+/// Whether the output folds every frame's channels into one value both
+/// channels then carry (issue #8): a downmix to mono, shared with the
+/// interface the way the repeat mode is, so `--mono` starts a session in mono
+/// and `M` toggles it while playing. The producer reads it at every block, so
+/// the toggle reaches the sample path without restarting the stream; the
+/// average is taken after `ReplayGain` and before the ring. Never read by the
+/// device callback.
+#[derive(Debug, Default)]
+pub struct MonoCell(AtomicBool);
+
+impl MonoCell {
+    /// A cell holding `mono`.
+    #[must_use]
+    pub const fn new(mono: bool) -> Self {
+        Self(AtomicBool::new(mono))
+    }
+
+    /// Whether the mix is folded down to mono.
+    #[must_use]
+    pub fn get(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    /// Changes the downmix from the next block on.
+    pub fn set(&self, mono: bool) {
+        self.0.store(mono, Ordering::Relaxed);
+    }
+}
+
 /// The queue index that follows track `index` of `len` under `repeat`, or
 /// `None` when the sequence ends there.
 #[must_use]
@@ -309,6 +338,10 @@ pub struct Player {
     /// Whether this player runs bit-perfect: unity gain, always, whatever is
     /// asked of [`Player::set_volume`].
     bit_perfect: bool,
+    /// Whether the mono downmix is in force (issue #8): the cell is shared
+    /// with the producer, so [`Player::set_mono`] reaches the sample path
+    /// without restarting the stream.
+    mono: Arc<MonoCell>,
     /// The repeat mode the producer follows at each track boundary.
     repeat: Arc<RepeatCell>,
 }
@@ -566,6 +599,7 @@ impl Player {
             offset,
             gain_mode,
             repeat,
+            /* mono = */ false,
             /* bit_perfect = */ false,
             /* resolver = */ None,
         )
@@ -581,6 +615,10 @@ impl Player {
     /// player falls back to the converted path and says so once — see
     /// [`Player::take_notices`].
     ///
+    /// `mono` (issue #8) starts the session with the mono downmix in force:
+    /// both channels carry the average of the mix, applied after `ReplayGain`
+    /// and before the ring; [`Player::set_mono`] changes it while playing.
+    ///
     /// `resolver` (T12c) turns queue entries into files just before the
     /// producer opens them: `None` means every entry already is a file, which
     /// is today's behaviour. A remote entry's fetch failure past the first
@@ -592,6 +630,10 @@ impl Player {
     /// The same errors as [`Player::play_gapless_at_with`], including the
     /// first entry's resolution failure.
     #[expect(
+        clippy::too_many_arguments,
+        reason = "the call is one flat list of what a session starts with —\n    the queue, its position, gain, repeat, mono, bit-perfect and the\n    resolver — and every caller names every part it wants; bundling them\n    would hide which knob a call site turns"
+    )]
+    #[expect(
         clippy::too_many_lines,
         reason = "the construction is one story: open the first track, open\n    the device on it, wire the cells and hand the rest to the producer\n    thread; splitting it would scatter that story"
     )]
@@ -601,6 +643,7 @@ impl Player {
         offset: Duration,
         gain_mode: ReplayGainMode,
         repeat: Repeat,
+        mono: bool,
         bit_perfect: bool,
         resolver: Option<Arc<dyn PathResolver>>,
     ) -> Result<Self, AudioError> {
@@ -687,6 +730,7 @@ impl Player {
         }));
         let failures = Arc::new(Mutex::new(VecDeque::new()));
         let repeat = Arc::new(RepeatCell::new(repeat));
+        let mono = Arc::new(MonoCell::new(mono));
         let wires = CallbackWires {
             playing: Arc::new(AtomicBool::new(true)),
             producing: Arc::new(AtomicBool::new(true)),
@@ -717,6 +761,7 @@ impl Player {
             let progress = Arc::clone(&progress);
             let failures = Arc::clone(&failures);
             let repeat = Arc::clone(&repeat);
+            let mono = Arc::clone(&mono);
             let producing = Arc::clone(&wires.producing);
             let cell = Arc::clone(&cell);
             let wires = wires.clone();
@@ -741,6 +786,7 @@ impl Player {
                         current: &current,
                         progress: &progress,
                         repeat: &repeat,
+                        mono: &mono,
                     };
                     let mut out = StreamOut {
                         device,
@@ -775,6 +821,7 @@ impl Player {
             producer: Some(producer),
             cell,
             notices,
+            mono,
             bit_perfect,
             repeat,
         })
@@ -784,6 +831,19 @@ impl Player {
     /// reads the mode at the boundary, so the music does not stop for it.
     pub fn set_repeat(&self, mode: Repeat) {
         self.repeat.set(mode);
+    }
+
+    /// Folds the mix down to mono (issue #8, S2) — or back out of it — from
+    /// the next block on: the producer reads the shared cell per block, so
+    /// the stream never restarts for it (S4).
+    pub fn set_mono(&self, mono: bool) {
+        self.mono.set(mono);
+    }
+
+    /// Whether the mix is folded down to mono.
+    #[must_use]
+    pub fn mono(&self) -> bool {
+        self.mono.get()
     }
 
     /// Moves every mono sample the callback has played since the last call
@@ -1131,6 +1191,28 @@ fn build_stream(
         .map_err(|error| AudioError::Device(error.to_string()))
 }
 
+/// Folds every whole frame of `samples` into one value that every channel of
+/// the frame then carries: the mean of the channels — `(left + right) / 2` on
+/// a stereo frame, never their sum, so downmixing cannot grow the peak (issue
+/// #8, S1). The device keeps its own layout: this is mono content in the
+/// stream it already had, not a mono device. A trailing partial frame is not
+/// a frame and is left exactly as it came, the same rule the spectrum tap
+/// keeps.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "a channel count is a handful, exact in f32"
+)]
+pub fn mono_mix(samples: &mut [f32], channels: usize) {
+    if channels <= 1 {
+        return;
+    }
+    let scale = 1.0 / channels as f32;
+    for frame in samples.chunks_exact_mut(channels) {
+        let mix = frame.iter().sum::<f32>() * scale;
+        frame.fill(mix);
+    }
+}
+
 /// Pushes the mono mix of every whole frame of `samples` into the spectrum
 /// tap. Called from the device callback, so it may not wait: a sample that
 /// does not fit is dropped, and a trailing partial frame is not a frame.
@@ -1151,14 +1233,16 @@ pub fn tap_mono(samples: &[f32], channels: usize, tap: &mut Producer<f32>) {
 }
 
 /// The handles the producer shares with the player and the interface: the
-/// stop flag, the delivered counter, the index and progress it publishes, and
-/// the repeat mode it reads at every track boundary.
+/// stop flag, the delivered counter, the index and progress it publishes, the
+/// repeat mode it reads at every track boundary and the mono cell it reads at
+/// every block (issue #8).
 struct Shared<'a> {
     stop: &'a AtomicBool,
     delivered: &'a AtomicUsize,
     current: &'a AtomicUsize,
     progress: &'a Mutex<Progress>,
     repeat: &'a RepeatCell,
+    mono: &'a MonoCell,
 }
 
 /// Fills the stream from the file system: the producer's device-side sink.
@@ -1671,6 +1755,12 @@ fn play_turn(
         // The gain's one multiplication, before the ring: the callback keeps
         // copying and ramping (T11).
         gain.apply(&mut resampled);
+        // The mono downmix (issue #8, S1): after `ReplayGain`, before the
+        // ring. The cell is read per block, so `M` lands mid-stream without
+        // a restart (S4).
+        if shared.mono.get() {
+            mono_mix(&mut resampled, usize::from(expected.channels));
+        }
         heard |= !resampled.is_empty();
         sink.push_block(&resampled);
     }
@@ -1685,6 +1775,9 @@ fn play_turn(
         }
     };
     gain.apply(&mut flushed);
+    if shared.mono.get() {
+        mono_mix(&mut flushed, usize::from(expected.channels));
+    }
     heard |= !flushed.is_empty();
     if !flushed.is_empty() {
         sink.push_block(&flushed);
@@ -1802,6 +1895,11 @@ fn play_station_turn(
             }
         };
         gain.apply(&mut resampled);
+        // The same downmix, after the identity gain a station plays at (S1):
+        // the toggle is the stream's, whatever the entry is.
+        if shared.mono.get() {
+            mono_mix(&mut resampled, usize::from(expected.channels));
+        }
         let emitted = !resampled.is_empty();
         heard |= emitted;
         if emitted {
@@ -1831,6 +1929,9 @@ fn play_station_turn(
         }
     };
     gain.apply(&mut flushed);
+    if shared.mono.get() {
+        mono_mix(&mut flushed, usize::from(expected.channels));
+    }
     heard |= !flushed.is_empty();
     if !flushed.is_empty() {
         sink.push_block(&flushed);
@@ -2064,6 +2165,58 @@ pub fn drain_headless_with_opener(
     )
 }
 
+/// [`drain_headless_with_gain`] with the mono cell a caller holds (issue #8):
+/// the sequence reads it at every block, exactly as the producer thread does,
+/// so a test can flip it mid-drain and prove the toggle lands on the sample
+/// path without a restart (S4).
+///
+/// # Errors
+///
+/// The same errors as [`drain_headless`].
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the job, the mode, the mono cell and the two sinks are the\n    whole contract of the drain; bundling them would only hide what is\n    shared"
+)]
+pub fn drain_headless_with_mono(
+    queue: SharedQueue,
+    start_track: usize,
+    offset_frames: u64,
+    expected: TrackSpec,
+    gain_mode: ReplayGainMode,
+    mono: &MonoCell,
+    stop: &AtomicBool,
+    on_block: &mut dyn FnMut(&[f32]),
+    on_failure: &mut dyn FnMut(TrackFailure),
+) -> Result<(), AudioError> {
+    let job = Sequence {
+        queue,
+        start_track,
+        offset_frames,
+        gain_mode,
+        bit_perfect: false,
+        resolver: None,
+        opener: None,
+        retry: Retry::NONE,
+        preopen: None,
+    };
+    let mut refuse = |_: TrackSpec| -> Result<TrackSpec, AudioError> {
+        unreachable!("only bit-perfect sequences reopen the stream")
+    };
+    drain_with_mono(
+        job,
+        expected,
+        &RepeatCell::default(),
+        mono,
+        stop,
+        &mut FnSink {
+            block: on_block,
+            failure: on_failure,
+            reopen: &mut refuse,
+            progress: &mut |_: Option<Duration>, _: Option<&str>| {},
+        },
+    )
+}
+
 /// [`drain_headless`] under a repeat mode the caller can change while it
 /// runs, the way the interface changes a playing stream's: the loop reads it
 /// at every track boundary. Under `All` or `One` the drain only ends when
@@ -2172,10 +2325,44 @@ pub fn drain_headless_bit_perfect(
 }
 
 /// The headless drains' one body: the producer's loop with local counters.
+/// The mono cell is the drains' own, stereo unless the caller's drain takes
+/// one from its caller ([`drain_headless_with_mono`]).
 fn drain(
     job: Sequence,
     expected: TrackSpec,
     repeat: &RepeatCell,
+    stop: &AtomicBool,
+    sink: &mut dyn SequenceSink,
+) -> Result<(), AudioError> {
+    let delivered = AtomicUsize::new(0);
+    let current = AtomicUsize::new(job.start_track);
+    let mono = MonoCell::default();
+    let progress = Mutex::new(Progress {
+        start: 0,
+        duration: None,
+        first: true,
+        title: None,
+    });
+    let shared = Shared {
+        stop,
+        delivered: &delivered,
+        current: &current,
+        progress: &progress,
+        repeat,
+        mono: &mono,
+    };
+    run_sequence(job, expected, &shared, sink)
+}
+
+/// [`drain`] with the mono cell a caller holds (issue #8): the sequence reads
+/// it at every block, exactly as the producer thread does, so a test can flip
+/// it mid-drain and prove the toggle lands on the sample path without a
+/// restart (S4).
+fn drain_with_mono(
+    job: Sequence,
+    expected: TrackSpec,
+    repeat: &RepeatCell,
+    mono: &MonoCell,
     stop: &AtomicBool,
     sink: &mut dyn SequenceSink,
 ) -> Result<(), AudioError> {
@@ -2193,6 +2380,7 @@ fn drain(
         current: &current,
         progress: &progress,
         repeat,
+        mono,
     };
     run_sequence(job, expected, &shared, sink)
 }

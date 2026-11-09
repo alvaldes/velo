@@ -1247,3 +1247,28 @@ fn the_default_file_names_the_radio_table_commented_out() {
     assert!(text.contains("# [radio]"), "{text}");
     assert!(text.contains("# host ="), "{text}");
 }
+
+// ---------------------------------------------------------- mono (issue #8)
+
+#[test]
+fn mono_is_a_session_flag_and_never_a_config_key() {
+    // `--mono` lives on the command line only — nothing is persisted — so a
+    // config file carrying the key is an unknown-key error, not a setting.
+    let dir = temp_dir("mono-not-a-key");
+    let path = write_config(&dir, "mono = true\n");
+    let error = Config::load_from(&path).expect_err("mono is not a config key");
+    assert!(
+        error.to_string().contains("mono"),
+        "the error names the key it refused: {error}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+
+    // Off the command line, a session starts in stereo.
+    let settings = Config::default().merged(&cli_with_no_flags());
+    assert!(!settings.mono);
+
+    let cli = Cli::try_parse_from(["velo", "--mono"])
+        .unwrap_or_else(|error| panic!("parse failed: {error}"));
+    let settings = Config::default().merged(&cli);
+    assert!(settings.mono);
+}

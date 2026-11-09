@@ -2764,3 +2764,32 @@ fn a_station_beginning_records_one_entry_with_the_station_name() {
 
     let _ = fs::remove_dir_all(&root);
 }
+
+// ---------------------------------------------------------- mono (issue #8)
+
+#[test]
+fn m_toggles_mono_for_the_session() {
+    let mut app = app_with_three_tracks();
+    assert!(!app.mono(), "a session starts in stereo");
+
+    assert_eq!(app.on_key(key(KeyCode::Char('M'))), Action::ToggleMono);
+    app.apply(Action::ToggleMono);
+    assert!(app.mono());
+
+    app.apply(Action::ToggleMono);
+    assert!(!app.mono(), "M toggles it back off");
+}
+
+#[test]
+fn m_with_bit_perfect_is_refused_in_the_status_line() {
+    let mut app = app_with_three_tracks();
+    app.set_bit_perfect(true);
+
+    assert_eq!(app.on_key(key(KeyCode::Char('M'))), Action::ToggleMono);
+    app.apply(Action::ToggleMono);
+    assert!(!app.mono(), "bit-perfect leaves mono off");
+    assert_eq!(
+        app.status(),
+        "velo: --mono cannot be combined with bit_perfect"
+    );
+}

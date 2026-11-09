@@ -17,7 +17,7 @@ use velo::subsonic::cache::{Cache, CoverArt, SubsonicResolver, Unconfigured, cac
 use velo::subsonic::client::{Auth, Client, HttpTransport};
 use velo::subsonic::scrobble::{Scrobbler, Scrobbles};
 use velo::ui::indexing::Indexer;
-use velo::ui::{Action, App, artwork, crossterm};
+use velo::ui::{Action, App, MONO_WITH_BIT_PERFECT_REFUSED, artwork, crossterm};
 
 use crossterm::event::{Event, KeyEventKind};
 use crossterm::{execute, terminal};
@@ -54,6 +54,15 @@ fn main() -> ExitCode {
         .library
         .as_deref()
         .map(|raw| config::expand_path(raw, home.as_deref().map(Path::new), &cwd));
+
+    // Mono and bit-perfect contradict each other (issue #8, S3): the downmix
+    // scales samples, which is what bit-perfect exists to refuse. The flag is
+    // rejected here, at startup, once — never applied silently on the way to
+    // the ring.
+    if cli.mono && settings.bit_perfect {
+        eprintln!("{MONO_WITH_BIT_PERFECT_REFUSED}");
+        return ExitCode::from(1);
+    }
 
     // The Subsonic probe needs no terminal and no library root, so it runs
     // before both — it must work over ssh (T12a). Cleaning the caches is the
@@ -760,8 +769,11 @@ fn run_interface(
     let outcome = with_terminal(|terminal| {
         let mut app = App::new(paths);
         // Bit-perfect first: it pins the volume and forces ReplayGain off,
-        // and the setters below must land on the pinned player (T17).
+        // and the setters below must land on the pinned player (T17). The
+        // launch above already refused `--mono` under bit-perfect, so mono
+        // starts only when it can (issue #8).
         app.set_bit_perfect(settings.bit_perfect);
+        app.set_mono(settings.mono);
         app.set_replay_gain(settings.replay_gain);
         app.set_volume(settings.volume);
         app.set_theme(settings.theme);
@@ -804,8 +816,10 @@ fn browse_interface(
     let outcome = with_terminal(|terminal| {
         let opened = Library::open();
         let mut app = App::browse(opened.as_ref().ok());
-        // Bit-perfect first, as in the file interface (T17).
+        // Bit-perfect first, as in the file interface (T17); mono starts
+        // only when the launch let it (issue #8).
         app.set_bit_perfect(settings.bit_perfect);
+        app.set_mono(settings.mono);
         app.set_replay_gain(settings.replay_gain);
         app.set_volume(settings.volume);
         app.set_theme(settings.theme);
@@ -943,6 +957,7 @@ fn play(
         std::time::Duration::ZERO,
         settings.replay_gain,
         velo::audio::output::Repeat::Off,
+        settings.mono,
         settings.bit_perfect,
         // A `subsonic://<host>/<id>` argument is fetched into the cache and
         // played from there, exactly as the interface does it (T12c). Without

@@ -134,7 +134,9 @@ Interface keys: j/k move, enter open/play, tab switches to the queue view
 Audio must share one channel layout: sample rates are converted to the
     output device, channel layouts are not. With bit_perfect in the config,
     rates are not converted either — the device is reopened at each track's
-    own rate, the volume is pinned to 100% and ReplayGain is skipped.
+    own rate, the volume is pinned to 100% and ReplayGain is skipped. With
+    --mono, both channels carry the average of the mix; the combination with
+    bit_perfect is refused.
 
 Configuration: $XDG_CONFIG_HOME/velo/config.toml, or
     ~/.config/velo/config.toml — keys: library, bit_perfect, replay_gain, and
@@ -171,6 +173,14 @@ pub struct Cli {
     /// Play the files and exit, without the terminal interface.
     #[arg(long)]
     pub play: bool,
+
+    /// Start this session in mono: both output channels carry the average of
+    /// the mix, after `ReplayGain`, before the ring. `M` toggles it while
+    /// playing. A session setting only — there is no config key, and nothing
+    /// is persisted — and refused when the config turns `bit_perfect` on
+    /// (issue #8).
+    #[arg(long)]
+    pub mono: bool,
 
     /// Build or refresh the library index, print its counts, then exit.
     #[arg(long)]
@@ -319,6 +329,9 @@ impl Config {
                 .filter(|library| !library.as_os_str().is_empty())),
             volume: self.state.volume.or(self.volume).unwrap_or(DEFAULT_VOLUME),
             bit_perfect: self.bit_perfect.unwrap_or(false),
+            // `--mono` is a session request alone (issue #8, S2): the config
+            // file carries no such key, so there is nothing to merge it with.
+            mono: cli.mono,
             replay_gain: self.replay_gain.unwrap_or(ReplayGainMode::Track),
             session: Session {
                 shuffle: self.state.shuffle.unwrap_or(false),
@@ -355,6 +368,11 @@ pub struct Settings {
     pub library: Option<PathBuf>,
     pub volume: u8,
     pub bit_perfect: bool,
+    /// Whether the session starts in mono (issue #8, S2): `--mono` on the
+    /// command line, never a config key, never persisted. The interface and
+    /// the `--play` path hand it to the player; the interface's `M` key
+    /// toggles it through the shared cell.
+    pub mono: bool,
     pub replay_gain: ReplayGainMode,
     /// What the next launch comes back to (S2, S3).
     pub session: Session,
