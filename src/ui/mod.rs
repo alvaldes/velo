@@ -1864,8 +1864,15 @@ impl<'lib> App<'lib> {
                 BrowseBy::from_key(key).map_or(Action::None, Action::Browse)
             }
             KeyCode::Char(' ') => Action::TogglePause,
+            // The plain keys keep the coarse five points; the brackets are the
+            // fine gear, a point a press (issue #16). Shift cannot carry it: a
+            // terminal sends the shifted *character*, and on a US layout
+            // `shift`+`=` arrives as the `+` that already means five points
+            // up, so only the down side would have a modifier to read.
             KeyCode::Char('+' | '=') => Action::SetVolume(self.change_volume(5)),
             KeyCode::Char('-') => Action::SetVolume(self.change_volume(-5)),
+            KeyCode::Char(']') => Action::SetVolume(self.change_volume(1)),
+            KeyCode::Char('[') => Action::SetVolume(self.change_volume(-1)),
             KeyCode::Left | KeyCode::Char(',') => Action::Seek { delta_secs: -5 },
             KeyCode::Right | KeyCode::Char('.') => Action::Seek { delta_secs: 5 },
             KeyCode::Char('n') => Action::Next,

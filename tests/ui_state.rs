@@ -98,6 +98,8 @@ fn an_empty_list_never_panics_on_any_key() {
         KeyCode::Char(' '),
         KeyCode::Char('+'),
         KeyCode::Char('-'),
+        KeyCode::Char('['),
+        KeyCode::Char(']'),
         KeyCode::Char('?'),
         KeyCode::Esc,
         KeyCode::Char('q'),
@@ -148,6 +150,35 @@ fn volume_moves_in_five_percent_steps_and_clamps_at_the_bounds() {
     }
     // At 0, `-` clamps instead of underflowing.
     assert_eq!(app.on_key(key(KeyCode::Char('-'))), Action::SetVolume(0));
+    assert_eq!(app.volume(), 0);
+}
+
+#[test]
+fn volume_moves_one_point_at_a_time_on_the_fine_keys() {
+    let mut app = app_with_three_tracks();
+    assert_eq!(app.on_key(key(KeyCode::Char('-'))), Action::SetVolume(95));
+
+    // The fine gear is one point per press (issue #16).
+    assert_eq!(app.on_key(key(KeyCode::Char(']'))), Action::SetVolume(96));
+    assert_eq!(app.on_key(key(KeyCode::Char('['))), Action::SetVolume(95));
+
+    // The plain keys keep the five-point step they always had.
+    assert_eq!(app.on_key(key(KeyCode::Char('+'))), Action::SetVolume(100));
+    assert_eq!(app.on_key(key(KeyCode::Char('-'))), Action::SetVolume(95));
+}
+
+#[test]
+fn the_fine_volume_keys_clamp_at_the_bounds() {
+    // At 100 from the start, `]` clamps instead of overflowing by one.
+    let mut app = app_with_three_tracks();
+    assert_eq!(app.on_key(key(KeyCode::Char(']'))), Action::SetVolume(100));
+    assert_eq!(app.volume(), 100);
+
+    for _ in 0..100 {
+        app.on_key(key(KeyCode::Char('[')));
+    }
+    // At 0, `[` clamps instead of underflowing.
+    assert_eq!(app.on_key(key(KeyCode::Char('['))), Action::SetVolume(0));
     assert_eq!(app.volume(), 0);
 }
 
