@@ -177,9 +177,11 @@ decode it, because its `.ts` segments are not audio this player can play.
 A station the directory's filter rejects is marked `✗` before you press `enter`:
 either its URL is an HLS manifest, or this build has no decoder for the codec the
 directory claims. The marker never leaves it at that: while the cursor rests on
-the row, the status line names the station and says the reason — `an HLS manifest:
-its .ts segments cannot be decoded`, or `the codec <name> is not in this build` —
-and it goes away when the cursor moves on. Your own favourites and hand-added
+the row, the status line names the station, says the reason in a couple of words —
+`HLS manifest`, or `codec <name>` — and names the key that reports it
+(`velo: HLS One cannot play (HLS manifest) — i reports it`), all on a line that fits
+an 80-column terminal; the long sentence is what the report carries. It goes away
+when the cursor moves on. Your own favourites and hand-added
 stations are never marked: they were put there deliberately. A station marked
 `✗` is worth reporting as an issue: press `i` on the row and velo opens a
 prefilled bug report in your browser — the station's name, codec and URL, the
