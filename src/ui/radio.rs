@@ -61,6 +61,12 @@ pub enum RadioOutcome {
         url: String,
         /// The station's own, user-facing name.
         name: String,
+        /// Whether the station is one the user configured in `radio.toml` —
+        /// a hand-added `[[station]]` or a favourite. Only a configured
+        /// station's URL is resolved before playing, so a wrapper that lists
+        /// songs opens as a finite list of them (cliamp S1, S2); a directory
+        /// station always plays live, untouched (S6).
+        configured: bool,
     },
     /// `a` on a playable station (T6c): the shell appends the station to
     /// the queue without starting it, and the view stays open.
@@ -800,7 +806,20 @@ impl RadioView {
             return RadioOutcome::Handled;
         };
         if let Some((url, name)) = station_of_row(&row.kind) {
-            return RadioOutcome::Play { url, name };
+            // A station the user put into `radio.toml` themselves — a
+            // hand-added `[[station]]` or a favourite — may be a channel
+            // whose URL is a wrapper of songs; the shell resolves it once
+            // before queueing (cliamp S1). A directory station always plays
+            // live (S6).
+            let configured = matches!(
+                row.kind,
+                RowKind::AddedStation { .. } | RowKind::FavoriteStation { .. }
+            );
+            return RadioOutcome::Play {
+                url,
+                name,
+                configured,
+            };
         }
         let next = match row.kind {
             RowKind::BrowseCountries => Some(Place::Countries),

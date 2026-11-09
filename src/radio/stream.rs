@@ -271,6 +271,19 @@ impl<R: Read> Read for Observed<R> {
     }
 }
 
+/// The one-shot agent [`probe`] and [`expand`] share: the three
+/// per-operation timeouts of [`Timeouts`], and the redirect history kept
+/// (`save_redirect_history(true)`), which only records URLs.
+fn station_agent(timeouts: Timeouts) -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_connect(Some(timeouts.connect))
+        .timeout_recv_response(Some(timeouts.response))
+        .timeout_per_read(Some(timeouts.read))
+        .save_redirect_history(true)
+        .build()
+        .new_agent()
+}
+
 /// Performs one GET with `Icy-MetaData: 1` sent before the body, checks the
 /// status, parses `Icy-Metaint` case-insensitively, and returns the owned
 /// body reader plus the response facts the one-shot probe reports. Used for
@@ -431,13 +444,7 @@ pub struct Probe {
 ///
 /// The same errors as [`open`].
 pub fn probe(url: &str, timeouts: Timeouts) -> Result<(StationStream, Probe), StreamError> {
-    let agent = ureq::Agent::config_builder()
-        .timeout_connect(Some(timeouts.connect))
-        .timeout_recv_response(Some(timeouts.response))
-        .timeout_per_read(Some(timeouts.read))
-        .save_redirect_history(true)
-        .build()
-        .new_agent();
+    let agent = station_agent(timeouts);
 
     let fetched = fetch(&agent, url)?;
     let mut redirects = fetched.redirects;
@@ -555,4 +562,158 @@ impl StationOpener for LiveOpener {
     fn open(&self, url: &str) -> Result<Box<dyn StationSource>, StreamError> {
         open(url, Timeouts::default()).map(|stream| Box::new(stream) as Box<dyn StationSource>)
     }
+}
+
+/// The most bytes read past the inspection cap once the body sniffs as a
+/// wrapper. A wrapper is a finite text file, but a hostile server could
+/// stream forever, so the read is bounded: 4 MiB is roughly 40,000 entries,
+/// far past any real channel's song list.
+const WRAPPER_REST_CAP: u64 = 4 * 1024 * 1024;
+
+/// What a station URL resolved to, before anything is queued (cliamp S1):
+/// the shell asks this once for a station the user configured in
+/// `radio.toml`, and a multi-entry wrapper opens as the songs it lists — one
+/// row per entry, in the wrapper's order, each playable and seekable as a
+/// track. A wrapper with one entry, or a body that is audio outright, plays
+/// live exactly as before (S6). Nothing here knows whose service the
+/// wrapper is: the rule keys on the body alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Expansion {
+    /// The songs of a channel: one absolute `http(s)` URL per entry, in the
+    /// wrapper's order. Two or more — a wrapper with one entry plays live.
+    Songs(Vec<String>),
+    /// Not a multi-entry wrapper: play live.
+    Live,
+}
+
+/// Resolves one wrapper entry against the wrapper's own URL (cliamp S2):
+/// an absolute `http(s)` entry stays as written, a scheme-relative
+/// `//host/path` entry takes the wrapper's scheme, an absolute `/path`
+/// entry joins the wrapper's origin, and a directory-relative entry joins
+/// the wrapper's directory, with `./` and `../` resolved the way a browser
+/// resolves a playlist entry. `None` for anything that cannot become a
+/// fetchable URL — another scheme, an empty line.
+#[must_use]
+fn resolve_entry(base: &str, entry: &str) -> Option<String> {
+    let entry = entry.trim();
+    if entry.is_empty() {
+        return None;
+    }
+    let lower = entry.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        return Some(entry.to_owned());
+    }
+    let (scheme, rest) = base.split_once("://")?;
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        return None;
+    }
+    let authority_end = rest.find('/').unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    if authority.is_empty() {
+        return None;
+    }
+    if let Some(path) = entry.strip_prefix("//") {
+        return Some(format!("{scheme}://{path}"));
+    }
+    if let Some(path) = entry.strip_prefix('/') {
+        return Some(format!("{scheme}://{authority}/{path}"));
+    }
+    let path = &rest[authority_end..];
+    let directory = match path.rfind('/') {
+        Some(index) => &path[..=index],
+        None => "/",
+    };
+    let mut segments: Vec<&str> = directory
+        .split('/')
+        .filter(|segment| !segment.is_empty() && *segment != ".")
+        .collect();
+    let relative = entry.strip_prefix("./").unwrap_or(entry);
+    for segment in relative.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            other => segments.push(other),
+        }
+    }
+    Some(format!("{scheme}://{authority}/{}", segments.join("/")))
+}
+
+/// The network-free half of [`expand`]: the expansion decision for one
+/// fetched body against the URL it was fetched from. Two or more resolvable
+/// entries are [`Expansion::Songs`]; one entry plays live (S1); none is the
+/// refusal of cliamp S5. An HLS manifest is refused on its own: its `.ts`
+/// segments are not songs. Not a wrapper at all — audio outright — is live.
+fn expansion_for(base: &str, body: &[u8]) -> Result<Expansion, StreamError> {
+    let entries = match lists::entries(body) {
+        Ok(entries) => entries,
+        // Not a wrapper, or a known format with no playable entry — for the
+        // expansion both mean the same thing: this is not a song list, and
+        // the live path reports it as it always has.
+        Err(ListsError::NotAPlaylist | ListsError::NoStream) => return Ok(Expansion::Live),
+        Err(ListsError::Hls) => return Err(StreamError::Hls),
+    };
+    let songs: Vec<String> = entries
+        .iter()
+        .filter_map(|entry| resolve_entry(base, entry))
+        .collect();
+    match songs.len() {
+        0 => Err(StreamError::NotAudio {
+            detail: String::from("the wrapper playlist carries no song entry"),
+        }),
+        1 => Ok(Expansion::Live),
+        _ => Ok(Expansion::Songs(songs)),
+    }
+}
+
+/// Resolves `url` once and decides between a finite song list and live
+/// playback (cliamp S1): one GET with the same headers and per-operation
+/// timeouts as [`open`]. A body that sniffs as a wrapper playlist is read
+/// whole — a wrapper is a finite text file, and no entry may be cut in half
+/// by the inspection cap — and expanded; anything else is
+/// [`Expansion::Live`], and the live path re-fetches and reports what it
+/// finds, exactly as before (S6).
+///
+/// A wrapper that carries no resolvable song entry, an unreachable URL and a
+/// non-200 answer are refusals: the caller says one line naming the station
+/// and the reason (cliamp S5) and queues nothing — a station already known
+/// to be unopenable is never queued to fail again. A body that stalls
+/// before its first bytes are read is *not* a verdict: the live path
+/// re-fetches and reports the stall through its own error, the way it always
+/// has.
+///
+/// # Errors
+///
+/// [`StreamError::Unreachable`] when the URL cannot be fetched,
+/// [`StreamError::BadStatus`] for a non-200 answer, [`StreamError::Hls`]
+/// for an HLS manifest, and [`StreamError::NotAudio`] when a wrapper
+/// carries no song entry.
+pub fn expand(url: &str, timeouts: Timeouts) -> Result<Expansion, StreamError> {
+    let agent = station_agent(timeouts);
+    let fetched = fetch(&agent, url)?;
+    let (prefix, body, complete) = bounded_prefix(fetched.body);
+    if !complete {
+        // The inspection was cut off by the read bound: an audio-shaped
+        // stall, not a playlist verdict. The live path re-fetches and
+        // reports the stall through its own error.
+        return Ok(Expansion::Live);
+    }
+    if matches!(
+        lists::unwrap_station(&prefix),
+        Err(ListsError::NotAPlaylist)
+    ) {
+        return Ok(Expansion::Live);
+    }
+    // A wrapper: read the rest of the body, so no entry is cut in half by
+    // the inspection cap.
+    let mut whole = prefix;
+    let mut rest = Vec::new();
+    body.take(WRAPPER_REST_CAP)
+        .read_to_end(&mut rest)
+        .map_err(|error| StreamError::Unreachable {
+            detail: error.to_string(),
+        })?;
+    whole.extend_from_slice(&rest);
+    expansion_for(url, &whole)
 }

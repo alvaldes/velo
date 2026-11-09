@@ -212,6 +212,21 @@ track as a gapless pair. A playlist wrapper (`.pls`, `.m3u`) is resolved one lev
 deep; an HLS manifest is refused with its own message before anything tries to
 decode it, because its `.ts` segments are not audio this player can play.
 
+A station **you** put into `radio.toml` that turns out to be a wrapper listing
+**songs** — two or more playable entries — opens as that list instead of playing
+live: one queue row per song, in the wrapper's order, each playable and seekable
+as a track, with its duration taken from the file itself (the wrapper declares
+none). The rule keys on the wrapper alone, not on any service: entries that are
+relative paths resolve against the wrapper's own URL. The songs cache like any
+remote track — the first play downloads into the same cache a Subsonic server
+uses, and `velo --cache-clean` cleans it — and their identity is their
+`https://…` URL everywhere: the queue row, the history entry, a saved playlist.
+A wrapper with one entry, a plain stream URL, and a wrapper that cannot be
+expanded — unreachable, empty, no playable entry — behave as before: the first
+two play live, and the third is one status line naming the station and the
+reason, with nothing queued. The `a` key keeps queueing the station itself, so a
+station in the queue still reads `● live`.
+
 A station the directory's filter rejects is marked `✗` before you press `enter`:
 either its URL is an HLS manifest, or this build has no decoder for the codec the
 directory claims. The marker never leaves it at that: while the cursor rests on
@@ -236,7 +251,10 @@ Your favourites, your pinned places and your own stations live in
 `~/.config/velo/radio.toml`, deduplicated by URL and written atomically, so a bad
 edit in `config.toml` cannot take them with it. A URL that is already a favourite
 is unmarked by pressing `f` again, however it is spelled (`https://A.example/stream`
-and `https://a.example:443/stream/` are the same station).
+and `https://a.example:443/stream/` are the same station). A hand-added station
+is where a channel of songs comes from too: point a `[[station]]` at a `.m3u`
+that lists the channel's songs and `enter` opens the list (above), with nothing
+about the service hardcoded anywhere — velo only ever reads what you wrote.
 
 The country used for "near you" is **opt-in**: velo offers the question once, reads
 it from your locale (`LC_ALL`, `LC_MESSAGES`, `LANG`) and nothing else — no geo-IP,
@@ -522,7 +540,9 @@ downloaded is never the one removed, so playing one enormous track cannot
 evict the very thing it is playing. The covers cache is capped the same way
 at 256 MiB. To empty both caches on demand, run `velo --cache-clean`: it
 prints, per cache, how many files and how much space it freed and touches
-nothing outside the two directories.
+nothing outside the two directories. A radio channel's songs (see Radio)
+cache into the same directory the same way — no server needs to be
+configured for that — so `--cache-clean` cleans both kinds alike.
 
 ### Remote covers and scrobbling
 

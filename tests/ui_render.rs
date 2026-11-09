@@ -1878,3 +1878,45 @@ fn the_seek_prompt_card_shows_what_was_typed() {
         );
     }
 }
+
+/// A configured channel's song is a finite track (cliamp S4): its row — the
+/// song's `https://…` URL, its identity (S3) — reads like any file's, with a
+/// position where a station row reads `● live`, and it never shows the live
+/// marker even while it sits beside one.
+#[test]
+fn a_remote_song_row_in_the_queue_reads_as_a_track_never_as_live() {
+    let mut app = App::new(Vec::new());
+    app.show_playing_for_tests(
+        Entry::Station {
+            url: String::from("https://stream.example/nova.mp3"),
+            name: String::from("Radio Nova"),
+        },
+        std::time::Duration::ZERO,
+        None,
+        None,
+    );
+    app.queue_song_for_tests("https://radio.example/a.mp3");
+    press(&mut app, KeyCode::Tab); // into the queue
+
+    let screen = screen_at(&app, 90, 12);
+    let song_row = screen
+        .lines()
+        .find(|line| line.contains("2. ") && line.contains("a.mp3"))
+        .expect("the queue shows the song's row, its note the song's URL");
+    assert!(
+        song_row.contains("https://radio.example"),
+        "the row's identity is the song's URL (S3), got: {song_row:?}"
+    );
+    assert!(
+        !song_row.contains("● live"),
+        "a finite song never reads as live, got: {song_row:?}"
+    );
+    let station_row = screen
+        .lines()
+        .find(|line| line.contains("1. ") && line.contains("Radio Nova"))
+        .expect("the station beside it keeps its own row");
+    assert!(
+        station_row.contains("● live"),
+        "the live/finite distinction holds in one queue, got: {station_row:?}"
+    );
+}

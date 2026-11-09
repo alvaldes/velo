@@ -1006,6 +1006,7 @@ fn enter_on_a_playable_station_asks_to_queue_and_play_it() {
         RadioOutcome::Play {
             url: String::from("https://stream.example/nova.mp3"),
             name: String::from("Nova"),
+            configured: false,
         },
         "enter hands the station to the shell to queue and play"
     );
@@ -1044,8 +1045,9 @@ fn a_hand_added_or_favourite_station_queues_too() {
         RadioOutcome::Play {
             url: String::from("https://jazz.example/stream"),
             name: String::from("Jazz One"),
+            configured: true,
         },
-        "a favourite plays like any station"
+        "a favourite is a station the user configured in radio.toml"
     );
     // The hand-added station lives in the no-country section (S4).
     press(&mut view, KeyCode::Char('g')); // back to the first row
@@ -2189,6 +2191,7 @@ fn a_refused_favourite_is_still_playable_on_purpose() {
         RadioOutcome::Play {
             url: "https://mine.example/live.m3u8".to_owned(),
             name: "Mine Hls".to_owned(),
+            configured: true,
         },
         "a marked favourite or hand-added station is still played on purpose"
     );
