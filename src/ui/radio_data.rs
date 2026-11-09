@@ -70,66 +70,46 @@ enum Outcome {
     States(Result<Vec<State>, client::Error>),
     /// The `/tags` index.
     Tags(Result<Vec<Tag>, client::Error>),
-    /// The stations of one place, capped by [`loadable_stations`].
+    /// The stations of one place, capped by [`loadable_stations`]. The
+    /// answer carries the whole [`Place`] it was asked for (S9): it is
+    /// cached under that place and renders only in exactly that place.
     Stations {
         /// The place the search was for, so a stale answer is dropped.
-        key: CatalogKey,
+        place: Place,
         /// The search's answer.
         result: Result<Vec<Station>, client::Error>,
     },
 }
 
-/// Which place the one catalog slot holds, or the request in flight is
-/// for. Country and region together; a tag by its name.
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum CatalogKey {
-    /// A country, optionally one of its regions.
-    Country {
-        /// ISO 3166-1 code.
-        code: String,
-        /// Region within the country; empty for the country itself.
-        state: String,
-    },
-    /// A tag.
-    Tag {
-        /// The tag's name.
-        name: String,
-    },
-}
-
-impl CatalogKey {
-    /// The search a place's stations load with: the country code, the
-    /// region when the place names one, or the exact tag, in the view's
-    /// order, at the directory's own 200-per-place cap.
-    fn search(&self, order: Order) -> StationSearch {
-        match self {
-            Self::Country { code, state } => StationSearch {
-                countrycode: Some(code.clone()),
-                state: (!state.is_empty()).then(|| state.clone()),
-                order,
-                ..StationSearch::default()
-            },
-            Self::Tag { name } => StationSearch {
-                tag: Some(name.clone()),
-                order,
-                ..StationSearch::default()
-            },
+/// The search a place's stations load with: the country code, the region
+/// when the place names one, or the exact tag, in the view's order, at the
+/// directory's own 200-per-place cap. Only a place with a directory
+/// request reaches this; [`requests_stations`] gates the rest out.
+fn station_search(place: &Place, order: Order) -> StationSearch {
+    match place {
+        Place::Country { code, state, .. } => StationSearch {
+            countrycode: Some(code.clone()),
+            state: (!state.is_empty()).then(|| state.clone()),
+            order,
+            ..StationSearch::default()
+        },
+        Place::Tag { name } => StationSearch {
+            tag: Some(name.clone()),
+            order,
+            ..StationSearch::default()
+        },
+        Place::Top | Place::Countries | Place::Tags | Place::NoCountry => {
+            unreachable!("a place without a directory request never searches")
         }
     }
 }
 
-/// The [`CatalogKey`] of the place the view stands in, if it is a place.
-fn place_key(place: &Place) -> Option<CatalogKey> {
-    match place {
-        Place::Country { code, state, .. } => Some(CatalogKey::Country {
-            code: code.clone(),
-            state: state.clone(),
-        }),
-        Place::Tag { name } => Some(CatalogKey::Tag { name: name.clone() }),
-        // The no-country place is the user's own data (S4): never a
-        // directory request, so an empty section must not produce one.
-        Place::Top | Place::Countries | Place::Tags | Place::NoCountry => None,
-    }
+/// Whether the place asks the directory for its stations. The no-country
+/// place is the user's own data (S4): never a directory request, so an
+/// empty section must not produce one — and the top and the two indexes
+/// are not station places at all.
+fn requests_stations(place: &Place) -> bool {
+    matches!(place, Place::Country { .. } | Place::Tag { .. })
 }
 
 /// The radio data: the client, the store and its file, and the one request
@@ -161,10 +141,14 @@ pub struct RadioData<T> {
     states: Vec<State>,
     /// The `/tags` index, once loaded.
     tags: Vec<Tag>,
-    /// The stations of the one catalog slot, once loaded.
-    catalog: Vec<Station>,
-    /// The place [`Self::catalog`] belongs to.
-    catalog_key: Option<CatalogKey>,
+    /// The place whose stations were already requested this session, set
+    /// when the request starts: an answer — empty, failed or stale — is
+    /// never re-requested behind the user's back; `Ctrl+R` is the retry.
+    requested: Option<Place>,
+    /// The last station answer and the place it belongs to, set only when
+    /// an answer lands: coming back to its place shows it again without a
+    /// request (S9), and it renders only in that exact place.
+    catalog: Option<(Place, Vec<Station>)>,
     /// Whether `/countries` was already requested (or answered) this
     /// session: an empty answer is still an answer.
     countries_loaded: bool,
@@ -210,8 +194,8 @@ impl<T: Transport + Send + Sync + 'static> RadioData<T> {
             countries: Vec::new(),
             states: Vec::new(),
             tags: Vec::new(),
-            catalog: Vec::new(),
-            catalog_key: None,
+            catalog: None,
+            requested: None,
             countries_loaded: false,
             states_loaded: false,
             tags_loaded: false,
@@ -234,10 +218,15 @@ impl<T: Transport + Send + Sync + 'static> RadioData<T> {
             Err(TryRecvError::Disconnected) => {
                 self.pending = None;
                 self.message = Some("the radio request stopped without an answer".to_owned());
+                // The error is the wait's end too (S10).
+                view.set_loading(None);
                 return;
             }
         };
         self.pending = None;
+        // An answer or an error landed: the waiting fact goes away with
+        // the request (S10).
+        view.set_loading(None);
         match outcome {
             Outcome::Countries(result) => match result {
                 Ok(countries) => {
@@ -260,13 +249,14 @@ impl<T: Transport + Send + Sync + 'static> RadioData<T> {
                 }
                 Err(error) => self.message = Some(format!("velo: {error}")),
             },
-            Outcome::Stations { key, result } => match result {
+            Outcome::Stations { place, result } => match result {
                 Ok(stations) => {
-                    self.catalog.clone_from(&stations);
-                    self.catalog_key = Some(key.clone());
-                    if place_key(view.place()).as_ref() == Some(&key) {
-                        view.set_catalog(stations);
+                    // The cache keeps the answer under its own place; the
+                    // view takes it only when it still stands there (S9).
+                    if view.place() == &place {
+                        view.set_catalog(place.clone(), stations.clone());
                     }
+                    self.catalog = Some((place, stations));
                 }
                 Err(error) => self.message = Some(format!("velo: {error}")),
             },
@@ -296,7 +286,8 @@ impl<T: Transport + Send + Sync + 'static> RadioData<T> {
         if self.pending.is_some() || self.client.is_none() {
             return;
         }
-        match view.place() {
+        let place = view.place().clone();
+        match place {
             Place::Countries if !self.countries_loaded => {
                 self.countries_loaded = true;
                 let client = Arc::clone(self.client.as_ref().expect("just checked"));
@@ -306,6 +297,9 @@ impl<T: Transport + Send + Sync + 'static> RadioData<T> {
                     let _ = sender.send(Outcome::Countries(client.countries()));
                 });
                 self.pending = Some(receiver);
+                // The waiting fact goes up with the request (S10) and comes
+                // down when the answer or the error lands.
+                view.set_loading(Some(Place::Countries));
             }
             // The home country's state index (T6d, S5), fetched beside the
             // country index and only for the home country: the directory
@@ -323,6 +317,7 @@ impl<T: Transport + Send + Sync + 'static> RadioData<T> {
                     let _ = sender.send(Outcome::States(client.states(&home)));
                 });
                 self.pending = Some(receiver);
+                view.set_loading(Some(Place::Countries));
             }
             Place::Tags if !self.tags_loaded => {
                 self.tags_loaded = true;
@@ -332,12 +327,12 @@ impl<T: Transport + Send + Sync + 'static> RadioData<T> {
                     let _ = sender.send(Outcome::Tags(client.tags()));
                 });
                 self.pending = Some(receiver);
+                view.set_loading(Some(Place::Tags));
             }
             place => {
-                if let Some(key) = place_key(place)
-                    && self.catalog_key.as_ref() != Some(&key)
-                {
-                    self.spawn_stations(key, view.order());
+                if requests_stations(&place) && self.requested.as_ref() != Some(&place) {
+                    self.spawn_stations(place.clone(), view.order());
+                    view.set_loading(Some(place));
                 }
             }
         }
@@ -346,16 +341,33 @@ impl<T: Transport + Send + Sync + 'static> RadioData<T> {
     /// Starts the station search of one place on the worker thread. The
     /// answer goes through [`loadable_stations`], which caps it at 200 and
     /// drops the rows without a stream URL.
-    fn spawn_stations(&mut self, key: CatalogKey, order: Order) {
-        self.catalog_key = Some(key.clone());
+    fn spawn_stations(&mut self, place: Place, order: Order) {
+        self.requested = Some(place.clone());
         let client = Arc::clone(self.client.as_ref().expect("a client is present"));
-        let search = key.search(order);
+        let search = station_search(&place, order);
         let (sender, receiver) = mpsc::channel();
         thread::spawn(move || {
             let result = client.search_stations(&search).map(loadable_stations);
-            let _ = sender.send(Outcome::Stations { key, result });
+            let _ = sender.send(Outcome::Stations { place, result });
         });
         self.pending = Some(receiver);
+    }
+
+    /// Hands the view the cached answer when it stands in the answer's
+    /// place without holding it: coming back to a loaded place shows the
+    /// cache again and never re-requests it (S9). The answer's own place
+    /// is the only place it may show in — never the top, a sibling country
+    /// or a tag.
+    fn sync(&mut self, view: &mut RadioView) {
+        if self.pending.is_some() || !requests_stations(view.place()) {
+            return;
+        }
+        if let Some((place, stations)) = &self.catalog
+            && place == view.place()
+            && view.catalog_place().is_none_or(|held| held != place)
+        {
+            view.set_catalog(place.clone(), stations.clone());
+        }
     }
 
     /// Re-requests only what the current place needs, dropping the loaded
@@ -372,7 +384,7 @@ impl<T: Transport + Send + Sync + 'static> RadioData<T> {
                 self.states_loaded = false;
             }
             Place::Tags => self.tags_loaded = false,
-            Place::Country { .. } | Place::Tag { .. } => self.catalog_key = None,
+            Place::Country { .. } | Place::Tag { .. } => self.requested = None,
         }
         self.request(view);
     }
@@ -400,9 +412,10 @@ impl<T: Transport + Send + Sync + 'static> RadioWire for RadioData<T> {
         if !self.states.is_empty() {
             view.set_states(self.states.clone());
         }
-        if !self.catalog.is_empty() {
-            view.set_catalog(self.catalog.clone());
-        }
+        // The station cache is deliberately not injected here (S9): a
+        // fresh view stands at the top, and the top is a section list —
+        // never a country's stations. [`Self::sync`] hands the cache back
+        // when the view stands in the answer's own place again.
         view
     }
 
@@ -416,6 +429,7 @@ impl<T: Transport + Send + Sync + 'static> RadioWire for RadioData<T> {
             self.refresh(view);
             return;
         }
+        self.sync(view);
         self.request(view);
     }
 

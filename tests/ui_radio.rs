@@ -19,7 +19,7 @@ use velo::radio::store::{self, Favorite, Pinned, RadioStore};
 use velo::ui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use velo::ui::radio::{Place, RadioOutcome, RadioView, RowKind};
 use velo::ui::theme::Theme;
-use velo::ui::{Action, App};
+use velo::ui::{Action, App, View};
 
 /// One directory station with the fields the view shows.
 fn station(name: &str, url: &str, codec: &str, bitrate: u32, code: &str) -> Station {
@@ -86,8 +86,17 @@ fn view() -> RadioView {
         ],
         Some("NO".to_owned()),
     );
-    view.set_catalog(catalog());
+    view.set_catalog(norway(), catalog());
     view
+}
+
+/// The place the fixture's catalog belongs to: Norway itself.
+fn norway() -> Place {
+    Place::Country {
+        code: String::from("NO"),
+        name: String::from("Norway"),
+        state: String::new(),
+    }
 }
 
 fn catalog() -> Vec<Station> {
@@ -115,16 +124,16 @@ fn the_sections_appear_in_order_only_when_they_have_content() {
     assert_eq!(
         view.labels(),
         [
-            "★ Jazz One [MP3] · NO",
             "Browse all countries",
             "Norway (near you)",
             "★ Germany",
             "Stations without a country",
             "Browse genres & tags",
-            "Nova [128k] · NO",
-            "✗ Hls One [96k] · NO",
+            "", // the dotted rule that closes the sections above
+            "favourites",
+            "★ Jazz One [MP3] · NO",
         ],
-        "the sections keep their order, got: {:?}",
+        "the sections come first and the favourites close the list (S5, #22), got: {:?}",
         view.labels()
     );
 
@@ -161,39 +170,204 @@ fn the_cursor_moves_and_clamps_at_both_ends() {
     assert_eq!(view.cursor(), 0, "g jumps to the first row");
 }
 
+/// `★ Name [codec]`: what a favourite station row's label starts and ends
+/// with. Pinned countries carry the mark too but no codec, so the `[` is
+/// what tells the two apart.
+fn is_favorite_station_label(label: &str) -> bool {
+    label.starts_with("★ ") && label.contains('[')
+}
+
 #[test]
-fn favourites_come_first_at_the_top() {
+fn favourites_sit_below_the_sections_behind_a_rule_and_a_header() {
     let view = view();
     let labels = view.labels();
+    let rule = labels
+        .iter()
+        .position(String::is_empty)
+        .expect("the dotted rule is listed");
+    let header = labels
+        .iter()
+        .position(|label| label == "favourites")
+        .expect("the favourites header is listed");
+    let first_favorite = labels
+        .iter()
+        .position(|label| is_favorite_station_label(label))
+        .expect("the fixture has a favourite");
     assert_eq!(
-        labels.first().map(String::as_str),
-        Some("★ Jazz One [MP3] · NO"),
-        "the favourite is the first row, got: {labels:?}"
+        rule + 1,
+        header,
+        "the rule closes the sections right above the header, got: {labels:?}"
     );
-    let browse = labels
-        .iter()
-        .position(|label| label == "Browse all countries")
-        .expect("the countries section is listed");
-    // A favourite is a station row marked with `★`; pinned countries carry the
-    // mark too but no codec, so the `[` is what tells the two apart.
-    let favourites = labels
-        .iter()
-        .filter(|label| label.starts_with("★ ") && label.contains('['))
-        .count();
+    assert_eq!(
+        header + 1,
+        first_favorite,
+        "the favourites start right under their header, got: {labels:?}"
+    );
     assert!(
-        favourites > 0,
-        "the fixture has a favourite, got: {labels:?}"
+        labels[..rule]
+            .iter()
+            .all(|label| !is_favorite_station_label(label)),
+        "no favourite stands above the rule, got: {labels:?}"
+    );
+    assert!(
+        labels[first_favorite..]
+            .iter()
+            .all(|label| is_favorite_station_label(label)),
+        "only favourites stand under the header, got: {labels:?}"
+    );
+}
+
+#[test]
+fn with_no_favourites_there_is_no_rule_and_no_header() {
+    let mut store = RadioStore::default();
+    store.pinned.push(Pinned {
+        code: "DE".to_owned(),
+        name: "Germany".to_owned(),
+        state: String::new(),
+    });
+    let mut view = RadioView::new(store, Vec::new(), Vec::new(), None);
+    view.show_browse_rows();
+    assert_eq!(
+        view.labels(),
+        ["Browse all countries", "★ Germany", "Browse genres & tags"],
+        "an empty section is not drawn — the favourites' neither, got: {:?}",
+        view.labels()
+    );
+}
+
+#[test]
+fn j_k_g_and_g_never_rest_on_the_rule_or_the_header() {
+    let mut view = view();
+    // Down from the last normal row lands on the first favourite, never on
+    // the rule between them.
+    for _ in 0..4 {
+        press(&mut view, KeyCode::Char('j')); // onto Browse genres & tags
+    }
+    assert_eq!(view.labels()[view.cursor()], "Browse genres & tags");
+    press(&mut view, KeyCode::Char('j'));
+    assert_eq!(
+        view.labels()[view.cursor()],
+        "★ Jazz One [MP3] · NO",
+        "j skips the rule and the header"
+    );
+
+    // Walking the list in both directions rests only on rows a person can
+    // act on.
+    press(&mut view, KeyCode::Char('G'));
+    assert_eq!(view.labels()[view.cursor()], "★ Jazz One [MP3] · NO");
+    for _ in 0..8 {
+        press(&mut view, KeyCode::Char('k'));
+        assert!(
+            view.selection().is_some(),
+            "k never rests on the rule or the header, at {:?}",
+            view.labels()[view.cursor()]
+        );
+    }
+    assert_eq!(view.cursor(), 0, "k walks back to the first row");
+    press(&mut view, KeyCode::Char('G'));
+    assert_eq!(
+        view.cursor(),
+        view.labels().len() - 1,
+        "G jumps to the last row"
+    );
+    press(&mut view, KeyCode::Char('g'));
+    assert_eq!(view.cursor(), 0, "g jumps to the first row");
+    for _ in 0..12 {
+        press(&mut view, KeyCode::Char('j'));
+        assert!(
+            view.selection().is_some(),
+            "j never rests on the rule or the header, at {:?}",
+            view.labels()[view.cursor()]
+        );
+    }
+}
+
+#[test]
+fn enter_f_and_a_on_the_rule_or_the_header_change_nothing() {
+    // A store with only favourites: the list opens on the rule — the one
+    // place the cursor can start on, since there is no row above it.
+    let mut store = RadioStore::default();
+    store.favorite.push(Favorite {
+        name: "Jazz One".to_owned(),
+        url: "https://jazz.example/stream".to_owned(),
+        countrycode: "NO".to_owned(),
+        codec: "MP3".to_owned(),
+    });
+    let mut rule_view = RadioView::new(store, Vec::new(), Vec::new(), None);
+    assert_eq!(
+        rule_view.labels(),
+        ["", "favourites", "★ Jazz One [MP3] · NO"],
+        "got: {:?}",
+        rule_view.labels()
     );
     assert_eq!(
-        favourites, browse,
-        "every favourite stands before the browse rows, got: {labels:?}"
+        rule_view.selection(),
+        None,
+        "the cursor stands on the rule: no row to act on"
     );
+    let before = rule_view.labels();
+    assert_eq!(
+        press(&mut rule_view, KeyCode::Enter),
+        RadioOutcome::Handled,
+        "enter on the rule opens nothing"
+    );
+    assert_eq!(
+        press(&mut rule_view, KeyCode::Char('a')),
+        RadioOutcome::Handled,
+        "a on the rule queues nothing"
+    );
+    press(&mut rule_view, KeyCode::Char('f'));
+    assert_eq!(rule_view.labels(), before, "f on the rule marks nothing");
+    assert!(
+        rule_view.store().is_favorite("https://jazz.example/stream"),
+        "the store keeps its favourite"
+    );
+    press(&mut rule_view, KeyCode::Char('j'));
+    assert_eq!(
+        rule_view.labels()[rule_view.cursor()],
+        "★ Jazz One [MP3] · NO",
+        "j skips the header too"
+    );
+
+    // The header: a filter only the header matches leaves the cursor on it.
+    let mut filtered = view();
+    press(&mut filtered, KeyCode::Char('/'));
+    for character in "fav".chars() {
+        press(&mut filtered, KeyCode::Char(character));
+    }
+    press(&mut filtered, KeyCode::Enter); // keeps the filter
+    assert_eq!(
+        filtered.labels(),
+        ["favourites"],
+        "only the header survives this filter, got: {:?}",
+        filtered.labels()
+    );
+    assert_eq!(
+        filtered.selection(),
+        None,
+        "the cursor stands on the header: no row to act on"
+    );
+    assert_eq!(
+        press(&mut filtered, KeyCode::Enter),
+        RadioOutcome::Handled,
+        "enter on the header opens nothing"
+    );
+    assert_eq!(
+        press(&mut filtered, KeyCode::Char('a')),
+        RadioOutcome::Handled,
+        "a on the header queues nothing"
+    );
+    press(&mut filtered, KeyCode::Char('f'));
+    assert!(
+        filtered.store().is_favorite("https://jazz.example/stream"),
+        "f on the header marks nothing"
+    );
+    assert_eq!(filtered.labels(), ["favourites"], "the list is unchanged");
 }
 
 #[test]
 fn enter_on_a_country_opens_its_stations() {
     let mut view = view();
-    press(&mut view, KeyCode::Char('j')); // past the favourite
     press(&mut view, KeyCode::Enter); // Browse all countries
     assert_eq!(
         view.place(),
@@ -221,8 +395,14 @@ fn enter_on_a_country_opens_its_stations() {
         "enter opens the country's place"
     );
 
-    // The caller loads the place's stations into the one catalog slot.
-    view.set_catalog(catalog());
+    // The caller loads the place's stations into the one catalog slot,
+    // naming the place the answer belongs to (S9).
+    let germany = Place::Country {
+        code: "DE".to_owned(),
+        name: "Germany".to_owned(),
+        state: String::new(),
+    };
+    view.set_catalog(germany, catalog());
     assert_eq!(
         view.labels(),
         ["Nova [128k] · NO", "✗ Hls One [96k] · NO"],
@@ -234,7 +414,6 @@ fn enter_on_a_country_opens_its_stations() {
 #[test]
 fn back_returns_one_level_then_closes() {
     let mut view = view();
-    press(&mut view, KeyCode::Char('j')); // past the favourite
     press(&mut view, KeyCode::Enter); // into the country index
     press(&mut view, KeyCode::Enter); // into Norway
     assert!(matches!(view.place(), Place::Country { .. }));
@@ -248,6 +427,195 @@ fn back_returns_one_level_then_closes() {
         press(&mut view, KeyCode::Esc),
         RadioOutcome::Close,
         "esc at the top closes the radio"
+    );
+}
+
+// ---- a place lists its own stations, never another's (T6, S9, #20) ----------
+
+#[test]
+fn the_top_lists_sections_only_never_station_rows() {
+    let view = view(); // the fixture holds a loaded catalog
+    for label in view.labels() {
+        assert!(
+            !label.contains("Nova") && !label.contains("Hls One"),
+            "the top is a section list: no station rows, got: {label:?}"
+        );
+    }
+}
+
+#[test]
+fn back_from_a_place_leaves_no_station_rows_behind() {
+    let mut view = view();
+    press(&mut view, KeyCode::Enter); // country index
+    press(&mut view, KeyCode::Enter); // Norway, the index's first row
+    view.set_catalog(norway(), catalog()); // the answer lands for Norway
+    assert_eq!(
+        view.labels(),
+        ["Nova [128k] · NO", "✗ Hls One [96k] · NO"],
+        "the place lists its own stations"
+    );
+
+    assert!(view.back(), "a place goes back one level");
+    assert_eq!(view.place(), &Place::Countries);
+    assert!(
+        view.labels().iter().all(|label| !label.contains("Nova")),
+        "the index lists countries only, got: {:?}",
+        view.labels()
+    );
+    assert!(view.back(), "the index goes back to the sections");
+    assert_eq!(view.place(), &Place::Top);
+    for label in view.labels() {
+        assert!(
+            !label.contains("Nova") && !label.contains("Hls One"),
+            "the top lists no station rows, got: {label:?}"
+        );
+    }
+}
+
+#[test]
+fn a_second_place_shows_nothing_from_the_first_before_its_own_answer() {
+    let mut view = view();
+    press(&mut view, KeyCode::Enter); // country index
+    press(&mut view, KeyCode::Enter); // Norway
+    view.set_catalog(norway(), catalog()); // Norway's answer lands
+    assert!(
+        view.labels().contains(&"Nova [128k] · NO".to_owned()),
+        "Norway shows its stations, got: {:?}",
+        view.labels()
+    );
+
+    view.back();
+    view.back();
+    press(&mut view, KeyCode::Enter); // country index
+    press(&mut view, KeyCode::Char('j')); // Norway
+    press(&mut view, KeyCode::Char('j')); // Germany
+    press(&mut view, KeyCode::Enter);
+    assert!(
+        matches!(view.place(), Place::Country { code, .. } if code == "DE"),
+        "the second place is Germany, got: {:?}",
+        view.place()
+    );
+    assert!(
+        view.labels().is_empty(),
+        "no answer yet, and nothing from Norway, got: {:?}",
+        view.labels()
+    );
+}
+
+// ---- a wait says so (T7, S10, #21) ------------------------------------------
+
+#[test]
+fn an_empty_waiting_place_says_it_is_loading_until_the_answer_lands() {
+    let mut view = view();
+    press(&mut view, KeyCode::Enter); // country index
+    press(&mut view, KeyCode::Enter); // Norway, no answer yet
+    assert!(
+        view.labels().is_empty(),
+        "no answer yet, the place lists nothing"
+    );
+    assert_eq!(
+        view.pending_place(),
+        None,
+        "nothing is in flight before the wiring says so"
+    );
+    assert!(screen(&view).contains("no stations here"));
+
+    view.set_loading(Some(norway()));
+    assert_eq!(
+        view.pending_place(),
+        Some(&norway()),
+        "the waiting fact is readable while the request runs"
+    );
+    let loading = screen(&view);
+    assert!(
+        loading.contains("⟳ loading…"),
+        "the list area says it is loading, got:\n{loading}"
+    );
+    assert!(
+        !loading.contains("no stations here"),
+        "the empty wording yields to the waiting one, got:\n{loading}"
+    );
+
+    // The answer lands: the waiting fact and its wording both go away.
+    view.set_loading(None);
+    assert_eq!(view.pending_place(), None);
+    let answered = screen(&view);
+    assert!(
+        answered.contains("no stations here") && !answered.contains("⟳ loading…"),
+        "the message goes away with the answer, got:\n{answered}"
+    );
+
+    // A tag place says it too (S10).
+    let jazz = Place::Tag {
+        name: String::from("jazz"),
+    };
+    view.open_place(jazz.clone());
+    view.set_loading(Some(jazz));
+    assert!(
+        screen(&view).contains("⟳ loading…"),
+        "a tag place waiting says so, got:\n{}",
+        screen(&view)
+    );
+}
+
+#[test]
+fn a_place_with_rows_keeps_them_while_its_request_is_in_flight() {
+    let mut view = view();
+    press(&mut view, KeyCode::Enter); // country index
+    press(&mut view, KeyCode::Enter); // Norway
+    view.set_catalog(norway(), catalog()); // the answer is in
+    view.set_loading(Some(norway())); // ctrl-r asked for it again
+
+    assert_eq!(
+        view.labels(),
+        ["Nova [128k] · NO", "✗ Hls One [96k] · NO"],
+        "the rows stay while the request runs, got: {:?}",
+        view.labels()
+    );
+    assert!(
+        !screen(&view).contains("⟳ loading…"),
+        "a loaded place shows its rows, not the waiting wording, got:\n{}",
+        screen(&view)
+    );
+}
+
+#[test]
+fn the_top_the_indexes_and_no_country_never_say_loading() {
+    // The top is a section list; it never requests and never waits.
+    let mut view = view();
+    view.set_loading(Some(Place::Top));
+    let top = screen(&view);
+    assert!(
+        !top.contains("⟳ loading…"),
+        "the top never says loading, got:\n{top}"
+    );
+
+    // The two indexes do request, but their empty lists never say loading
+    // (S10): the footer carries the wait, the list keeps its own wording.
+    let mut bare = RadioView::new(store(), Vec::new(), Vec::new(), None);
+    bare.open_place(Place::Countries);
+    bare.set_loading(Some(Place::Countries));
+    let countries = screen(&bare);
+    assert!(
+        countries.contains("no stations here") && !countries.contains("⟳ loading…"),
+        "the country index never says loading, got:\n{countries}"
+    );
+    bare.open_place(Place::Tags);
+    bare.set_loading(Some(Place::Tags));
+    let tags = screen(&bare);
+    assert!(
+        tags.contains("no stations here") && !tags.contains("⟳ loading…"),
+        "the tag index never says loading, got:\n{tags}"
+    );
+
+    // The no-country place is the user's own data: never a request, never
+    // a wait (S4, S10).
+    bare.open_place(Place::NoCountry);
+    bare.set_loading(Some(Place::NoCountry));
+    let no_country = screen(&bare);
+    assert!(
+        no_country.contains("Night FM") && !no_country.contains("⟳ loading…"),
+        "the no-country place never says loading, got:\n{no_country}"
     );
 }
 
@@ -274,13 +642,16 @@ fn slash_filters_the_focused_list_and_clearing_restores_it() {
 
     press(&mut view, KeyCode::Esc); // clears the filter
     assert!(!view.filtering(), "esc clears the filter");
-    assert_eq!(view.labels().len(), 8, "clearing restores every row");
+    assert_eq!(
+        view.labels().len(),
+        8,
+        "clearing restores every section row and the favourites' rule and header"
+    );
 }
 
 #[test]
 fn the_filter_belongs_to_the_focused_list_alone() {
     let mut view = view();
-    press(&mut view, KeyCode::Char('j')); // past the favourite
     press(&mut view, KeyCode::Enter); // country index
     press(&mut view, KeyCode::Char('/'));
     for character in "or".chars() {
@@ -298,7 +669,11 @@ fn the_filter_belongs_to_the_focused_list_alone() {
         !view.filtering(),
         "going back one level leaves the filter behind"
     );
-    assert_eq!(view.labels().len(), 8, "the top level is unfiltered");
+    assert_eq!(
+        view.labels().len(),
+        8,
+        "the top level is unfiltered and shows sections only"
+    );
 }
 
 // ---- marking stations and places -------------------------------------------
@@ -315,13 +690,17 @@ fn f_on_a_station_toggles_the_favourite_through_the_station_key() {
         codec: "MP3".to_owned(),
     });
     let mut view = RadioView::new(store, Vec::new(), Vec::new(), None);
-    view.set_catalog(vec![station(
-        "Nova",
-        "https://stream.example/stream",
-        "MP3",
-        128,
-        "NO",
-    )]);
+    view.open_place(norway());
+    view.set_catalog(
+        norway(),
+        vec![station(
+            "Nova",
+            "https://stream.example/stream",
+            "MP3",
+            128,
+            "NO",
+        )],
+    );
 
     assert!(
         view.labels()[0].starts_with('★'),
@@ -350,7 +729,6 @@ fn f_on_a_station_toggles_the_favourite_through_the_station_key() {
 #[test]
 fn f_on_a_place_pins_it_and_f_on_a_pinned_place_unpins_it() {
     let mut view = view();
-    press(&mut view, KeyCode::Char('j')); // past the favourite
     press(&mut view, KeyCode::Enter); // country index
     press(&mut view, KeyCode::Char('f')); // Norway
     assert!(
@@ -366,7 +744,6 @@ fn f_on_a_place_pins_it_and_f_on_a_pinned_place_unpins_it() {
     );
 
     // The pinned row sits after Germany's; f on it takes the pin off again.
-    press(&mut view, KeyCode::Char('j'));
     press(&mut view, KeyCode::Char('j'));
     press(&mut view, KeyCode::Char('j'));
     press(&mut view, KeyCode::Char('j'));
@@ -461,6 +838,9 @@ fn n_opens_the_country_index_from_anywhere() {
 #[test]
 fn enter_and_a_on_an_unplayable_station_never_queue() {
     let mut view = view();
+    press(&mut view, KeyCode::Enter); // country index
+    press(&mut view, KeyCode::Enter); // Norway
+    view.set_catalog(norway(), catalog());
     press(&mut view, KeyCode::Char('G')); // last row: Hls One
     let selection = view.selection().expect("a row is selected");
     let RowKind::CatalogStation { station, playable } = &selection.kind else {
@@ -489,6 +869,9 @@ fn enter_and_a_on_an_unplayable_station_never_queue() {
 #[test]
 fn enter_on_a_playable_station_asks_to_queue_and_play_it() {
     let mut view = view();
+    press(&mut view, KeyCode::Enter); // country index
+    press(&mut view, KeyCode::Enter); // Norway
+    view.set_catalog(norway(), catalog());
     press(&mut view, KeyCode::Char('G')); // last row: Hls One
     press(&mut view, KeyCode::Char('k')); // up onto Nova
     let outcome = press(&mut view, KeyCode::Enter);
@@ -500,13 +883,16 @@ fn enter_on_a_playable_station_asks_to_queue_and_play_it() {
         },
         "enter hands the station to the shell to queue and play"
     );
-    assert_eq!(view.place(), &Place::Top, "playing does not navigate");
-    assert_eq!(view.cursor(), 6, "the selection is held");
+    assert_eq!(view.place(), &norway(), "playing does not navigate");
+    assert_eq!(view.cursor(), 0, "the selection is held");
 }
 
 #[test]
 fn a_appends_a_station_without_starting_it() {
     let mut view = view();
+    press(&mut view, KeyCode::Enter); // country index
+    press(&mut view, KeyCode::Enter); // Norway
+    view.set_catalog(norway(), catalog());
     press(&mut view, KeyCode::Char('G'));
     press(&mut view, KeyCode::Char('k'));
     let outcome = press(&mut view, KeyCode::Char('a'));
@@ -518,13 +904,15 @@ fn a_appends_a_station_without_starting_it() {
         },
         "a hands the station to the shell to queue, not to play"
     );
-    assert_eq!(view.place(), &Place::Top, "a does not leave the view");
+    assert_eq!(view.place(), &norway(), "a does not leave the view");
 }
 
 #[test]
 fn a_hand_added_or_favourite_station_queues_too() {
     let mut view = view();
-    // The favourite sits at the top now (S5).
+    // The favourite sits below the sections, behind the rule and its header
+    // (S5, #22): the last row a person can act on.
+    press(&mut view, KeyCode::Char('G'));
     assert_eq!(
         press(&mut view, KeyCode::Enter),
         RadioOutcome::Play {
@@ -534,6 +922,7 @@ fn a_hand_added_or_favourite_station_queues_too() {
         "a favourite plays like any station"
     );
     // The hand-added station lives in the no-country section (S4).
+    press(&mut view, KeyCode::Char('g')); // back to the first row
     let section = view
         .labels()
         .iter()
@@ -556,7 +945,7 @@ fn a_hand_added_or_favourite_station_queues_too() {
 #[test]
 fn enter_on_a_tag_still_opens_its_stations() {
     let mut view = view();
-    for _ in 0..5 {
+    for _ in 0..4 {
         press(&mut view, KeyCode::Char('j')); // Browse genres & tags
     }
     press(&mut view, KeyCode::Enter); // into the tag index
@@ -573,6 +962,79 @@ fn enter_on_a_tag_still_opens_its_stations() {
 
 // ---- the shell wiring (T6c): from the view into the queue --------------------
 
+// ---- the shell wiring (T6c): from the view into the queue --------------------
+
+#[test]
+fn a_country_stations_show_in_the_country_and_nowhere_else() {
+    let mut app = App::new(Vec::new());
+    shell(&mut app, KeyCode::Char('R'));
+    app.show_radio_catalog(
+        norway(),
+        vec![station(
+            "Nova",
+            "https://stream.example/nova.mp3",
+            "MP3",
+            128,
+            "NO",
+        )],
+    );
+    assert!(
+        app_screen(&app).contains("Nova [128k] · NO"),
+        "the country lists its own stations"
+    );
+
+    // Back out: the top lists sections only, never the place's stations.
+    shell(&mut app, KeyCode::Esc);
+    let screen = app_screen(&app);
+    assert!(
+        !screen.contains("Nova"),
+        "the top screen lists no station rows, got:\n{screen}"
+    );
+}
+
+#[test]
+fn the_tag_place_behaves_the_same_way() {
+    let jazz = Place::Tag {
+        name: String::from("jazz"),
+    };
+    let mut view = view();
+    for _ in 0..4 {
+        press(&mut view, KeyCode::Char('j')); // Browse genres & tags
+    }
+    press(&mut view, KeyCode::Enter); // the tag index
+    press(&mut view, KeyCode::Enter); // jazz
+    assert_eq!(view.place(), &jazz);
+    assert!(
+        view.labels().is_empty(),
+        "no answer yet: the tag place lists nothing, got: {:?}",
+        view.labels()
+    );
+    // A country's answer never renders inside a tag.
+    view.set_catalog(norway(), catalog());
+    assert!(
+        view.labels().is_empty(),
+        "a country's answer is not the tag's, got: {:?}",
+        view.labels()
+    );
+    view.set_catalog(jazz.clone(), catalog());
+    assert_eq!(
+        view.labels(),
+        ["Nova [128k] · NO", "✗ Hls One [96k] · NO"],
+        "the tag's own answer renders, got: {:?}",
+        view.labels()
+    );
+
+    // Back out: the tag index lists tags, not stations.
+    assert!(view.back());
+    assert_eq!(view.place(), &Place::Tags);
+    assert_eq!(
+        view.labels(),
+        ["jazz", "lofi"],
+        "the tag index lists tags, got: {:?}",
+        view.labels()
+    );
+}
+
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::from(code)
 }
@@ -586,6 +1048,35 @@ fn shell(app: &mut App<'_>, code: KeyCode) -> Action {
         app.apply(action);
     }
     action
+}
+
+#[test]
+fn enter_on_a_station_says_it_is_opening_before_the_player_answers() {
+    let mut app = App::new(Vec::new());
+    shell(&mut app, KeyCode::Char('R')); // the radio opens over its wiring
+    app.show_radio_catalog(
+        norway(),
+        vec![station(
+            "Nova",
+            "https://stream.example/nova.mp3",
+            "MP3",
+            128,
+            "NO",
+        )],
+    );
+    shell(&mut app, KeyCode::Char('G')); // the last row: Nova
+
+    let action = shell(&mut app, KeyCode::Enter);
+    assert_eq!(
+        action,
+        Action::PlayQueue { from: 0 },
+        "the player was asked to start at the station"
+    );
+    assert_eq!(
+        app.status(),
+        "velo: opening Nova…",
+        "the status names the station while the player is opening it"
+    );
 }
 
 /// The whole interface as one screen, the way the user sees it.
@@ -621,13 +1112,16 @@ fn nova() -> Entry {
 fn enter_on_a_station_queues_it_and_asks_the_player_to_start() {
     let mut app = App::new(Vec::new());
     shell(&mut app, KeyCode::Char('R')); // the radio opens over its wiring
-    app.show_radio_catalog(vec![station(
-        "Nova",
-        "https://stream.example/nova.mp3",
-        "MP3",
-        128,
-        "NO",
-    )]);
+    app.show_radio_catalog(
+        norway(),
+        vec![station(
+            "Nova",
+            "https://stream.example/nova.mp3",
+            "MP3",
+            128,
+            "NO",
+        )],
+    );
     shell(&mut app, KeyCode::Char('G')); // the last row: Nova
 
     let action = shell(&mut app, KeyCode::Enter);
@@ -647,13 +1141,16 @@ fn enter_on_a_station_queues_it_and_asks_the_player_to_start() {
 fn a_appends_to_the_queue_without_starting() {
     let mut app = App::new(Vec::new());
     shell(&mut app, KeyCode::Char('R'));
-    app.show_radio_catalog(vec![station(
-        "Nova",
-        "https://stream.example/nova.mp3",
-        "MP3",
-        128,
-        "NO",
-    )]);
+    app.show_radio_catalog(
+        norway(),
+        vec![station(
+            "Nova",
+            "https://stream.example/nova.mp3",
+            "MP3",
+            128,
+            "NO",
+        )],
+    );
     shell(&mut app, KeyCode::Char('G'));
 
     let action = shell(&mut app, KeyCode::Char('a'));
@@ -663,6 +1160,92 @@ fn a_appends_to_the_queue_without_starting() {
         app.status(),
         "velo: added 1 track",
         "the status line says what happened"
+    );
+}
+
+/// S8 (issue #23): `tab` inside the radio is the round trip: the queue
+/// shows, the radio stays alive underneath, and `tab` again lands back in
+/// the radio at the same place with the same loaded rows.
+#[test]
+fn tab_from_the_radio_shows_the_queue_and_tab_returns_to_the_same_place() {
+    let mut app = App::new(Vec::new());
+    shell(&mut app, KeyCode::Char('R')); // the radio opens over its wiring
+    app.show_radio_catalog(
+        norway(),
+        vec![station(
+            "Nova",
+            "https://stream.example/nova.mp3",
+            "MP3",
+            128,
+            "NO",
+        )],
+    );
+    shell(&mut app, KeyCode::Char('G')); // the last row: Nova
+
+    shell(&mut app, KeyCode::Tab);
+    assert_eq!(app.view(), View::Queue);
+    assert!(app.radio_open(), "the round trip keeps the radio alive");
+
+    shell(&mut app, KeyCode::Tab);
+    assert_eq!(
+        app.view(),
+        View::Library,
+        "tab returns to the screen the radio was opened from"
+    );
+    let screen = app_screen(&app);
+    assert!(
+        screen.contains("Nova [128k] · NO"),
+        "the loaded list is still the radio's, got:\n{screen}"
+    );
+
+    // The place and the selection are held: enter still plays the station
+    // the cursor was left on.
+    assert_eq!(
+        shell(&mut app, KeyCode::Enter),
+        Action::PlayQueue { from: 0 },
+        "the player was asked to start the station the cursor held"
+    );
+    assert_eq!(app.queue(), [nova()]);
+}
+
+/// S8 (issue #23): while the round trip has the queue on screen, the radio's
+/// own keys are asleep — `f` never touches the store, `N` never moves the
+/// place, and the queue is untouched.
+#[test]
+fn the_radio_keys_do_nothing_while_the_queue_is_on_screen() {
+    let mut app = App::new(Vec::new());
+    shell(&mut app, KeyCode::Char('R'));
+    app.show_radio_catalog(
+        norway(),
+        vec![station(
+            "Nova",
+            "https://stream.example/nova.mp3",
+            "MP3",
+            128,
+            "NO",
+        )],
+    );
+    shell(&mut app, KeyCode::Char('G')); // the last row: Nova
+
+    shell(&mut app, KeyCode::Tab);
+    assert_eq!(app.view(), View::Queue);
+
+    // `f` would toggle the favourite, `N` would jump to the country index:
+    // both are the radio's keys, and both are inert while the queue is
+    // what the keys act on.
+    assert_eq!(shell(&mut app, KeyCode::Char('f')), Action::None);
+    assert_eq!(shell(&mut app, KeyCode::Char('N')), Action::None);
+    assert_eq!(app.queue(), [] as [Entry; 0], "the queue is untouched");
+
+    shell(&mut app, KeyCode::Tab);
+    let screen = app_screen(&app);
+    assert!(
+        !screen.contains("★ Nova"),
+        "f never reached the store, got:\n{screen}"
+    );
+    assert!(
+        screen.contains("Nova [128k] · NO"),
+        "N never left the top place, got:\n{screen}"
     );
 }
 
@@ -771,9 +1354,8 @@ fn the_no_country_section_lists_own_stations_then_no_country_favourites() {
     });
     let mut view = RadioView::new(store, Vec::new(), Vec::new(), None);
 
-    // The section sits after the pinned places and before the tags, and the
-    // no-country favourite is listed at the top too (S5): once is the
-    // shortcut, once is the section.
+    // The sections come first; the favourites — including the one with no
+    // country — close the list behind the rule and the header (S5, #22).
     let section = view
         .labels()
         .iter()
@@ -782,11 +1364,13 @@ fn the_no_country_section_lists_own_stations_then_no_country_favourites() {
     assert_eq!(
         view.labels(),
         [
+            "Stations without a country",
+            "", // the dotted rule
+            "favourites",
             "★ Jazz One [MP3] · NO",
             "★ Free Radio",
-            "Stations without a country",
         ],
-        "the section follows the favourites, got: {:?}",
+        "the favourites close the list, got: {:?}",
         view.labels()
     );
 
@@ -857,25 +1441,46 @@ fn the_radio_list_draws_its_sections_and_lights_the_selected_row() {
 
     for expected in [
         "Radio",
-        "★ Jazz One",
         "Browse all countries",
         "Norway (near you)",
         "★ Germany",
         "Stations without a country",
         "Browse genres & tags",
-        "Nova [128k] · NO",
-        "✗ Hls One",
+        "favourites",
+        "★ Jazz One",
     ] {
         assert!(
             screen.contains(expected),
             "the radio list must show {expected:?}, got:\n{screen}"
         );
     }
+    assert!(
+        !screen.contains("Nova") && !screen.contains("Hls One"),
+        "the top screen lists no station rows (S9), got:\n{screen}"
+    );
+
+    // The dotted rule is a line of dots across the width, and the rule and
+    // the header take no number: the numbering counts only the rows a person
+    // can act on (S5, #22), so the favourite keeps the last number.
+    assert!(
+        screen
+            .lines()
+            .any(|line| !line.is_empty() && line.chars().all(|character| character == '·')),
+        "the rule is a dotted line, got:\n{screen}"
+    );
+    assert!(
+        !screen.contains("7. ") && !screen.contains("5. ·"),
+        "the rule and the header take no row number, got:\n{screen}"
+    );
+    assert!(
+        screen.contains("6. ★ Jazz One"),
+        "the favourite keeps the last selectable number, got:\n{screen}"
+    );
 
     // The selected row is distinguishable: its cells wear the accent.
     let row = screen
         .lines()
-        .position(|line| line.contains("1. ★ Jazz One"))
+        .position(|line| line.contains("1. Browse all countries"))
         .expect("the first row is on screen");
     let mut terminal =
         velo::ui::ratatui::Terminal::new(velo::ui::ratatui::backend::TestBackend::new(80, 24))

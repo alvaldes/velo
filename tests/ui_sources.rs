@@ -9,6 +9,14 @@ fn app() -> App<'static> {
     App::browse(None)
 }
 
+/// An app with a library configured but no prompt to answer: entering
+/// `Local library` opens no path card (S12).
+fn app_with_a_library() -> App<'static> {
+    let mut app = app();
+    app.set_library_root(Some(std::path::PathBuf::from("/music")));
+    app
+}
+
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::from(code)
 }
@@ -58,12 +66,16 @@ fn the_source_cursor_moves_with_the_list_keys_and_clamps() {
 /// library's own keys still switch the four views inside it.
 #[test]
 fn entering_the_local_library_lands_on_the_library_and_its_keys_still_work() {
-    let mut app = app();
+    let mut app = app_with_a_library();
     app.open_sources();
 
     press(&mut app, KeyCode::Enter);
     assert_eq!(app.view(), View::Library);
     assert_eq!(app.level(), Some(Level::Artists));
+    assert!(
+        !app.library_prompt_open(),
+        "a configured library is not asked for again"
+    );
 
     assert_eq!(
         app.on_key(key(KeyCode::Char('2'))),
@@ -74,11 +86,49 @@ fn entering_the_local_library_lands_on_the_library_and_its_keys_still_work() {
     assert_eq!(app.level(), Some(Level::AllAlbums));
 }
 
+/// S12 (issue #27): the saved tab belongs to the queue's half of the round
+/// trip, not to the library's address — entering `Local library` lands on
+/// the library even when the session was last on the queue.
+#[test]
+fn entering_the_local_library_lands_on_the_library_even_when_the_saved_tab_was_the_queue() {
+    let mut app = app_with_a_library();
+    app.set_session(velo::config::Session {
+        view: View::Queue,
+        ..velo::config::Session::default()
+    });
+    assert_eq!(
+        app.view(),
+        View::Queue,
+        "the session restored the saved tab"
+    );
+
+    app.open_sources();
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.view(), View::Library);
+    assert_eq!(app.level(), Some(Level::Artists));
+}
+
+/// S12 (issue #27): with no library configured, entering `Local library`
+/// opens the prompt — the reader is asked where the music is instead of
+/// being left somewhere else.
+#[test]
+fn entering_the_local_library_without_one_configured_asks_for_its_path() {
+    let mut app = app(); // no open index, no configured root
+    app.open_sources();
+    press(&mut app, KeyCode::Enter);
+
+    assert_eq!(app.view(), View::Library);
+    assert!(
+        app.library_prompt_open(),
+        "the reader is asked where the music is"
+    );
+}
+
 /// S6: `esc` walks back to the sources screen and stays there — the way out
 /// of a screen is the way in.
 #[test]
 fn esc_from_the_top_of_the_library_lands_on_sources_and_stays() {
-    let mut app = app();
+    let mut app = app_with_a_library();
     app.open_sources();
     press(&mut app, KeyCode::Enter);
 
@@ -113,7 +163,7 @@ fn esc_closing_the_radio_lands_on_sources() {
 /// sources screen the user never crossed.
 #[test]
 fn r_still_opens_the_radio_from_inside_the_library() {
-    let mut app = app();
+    let mut app = app_with_a_library();
     app.open_sources();
     press(&mut app, KeyCode::Enter);
 
@@ -143,13 +193,20 @@ fn the_flat_files_list_never_shows_a_sources_screen() {
     );
 }
 
-/// `tab` switches the library and the queue; on the sources screen it is
-/// inert, because neither list is what the keys act on.
+/// S8 (issue #23): `tab` is one round trip. From the sources screen it goes
+/// to the queue, and `tab` again returns to the sources screen with its
+/// cursor exactly where it was left.
 #[test]
-fn tab_is_inert_on_the_sources_screen() {
+fn tab_from_the_sources_screen_reaches_the_queue_and_returns_to_it() {
     let mut app = app();
     app.open_sources();
+    press(&mut app, KeyCode::Char('j')); // onto Radio
+    assert_eq!(app.sources_selected(), 1);
+
+    press(&mut app, KeyCode::Tab);
+    assert_eq!(app.view(), View::Queue);
 
     press(&mut app, KeyCode::Tab);
     assert_eq!(app.view(), View::Sources);
+    assert_eq!(app.sources_selected(), 1, "the cursor is where it was left");
 }
