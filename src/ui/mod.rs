@@ -3549,18 +3549,21 @@ impl<'lib> App<'lib> {
                     Entry::File(path) => describe(path, self.known_tracks()),
                     Entry::Station { name, .. } => (name.clone(), String::new()),
                 };
-                ListItem::new(list_row(
-                    ListRow {
-                        playing: playing == Some(index),
-                        number: index + 1,
-                        digits,
-                        name,
-                        note,
-                        fact: String::new(),
-                    },
-                    width,
-                    &self.theme,
-                ))
+                let row = ListRow {
+                    playing: playing == Some(index),
+                    number: index + 1,
+                    digits,
+                    name,
+                    note,
+                    fact: String::new(),
+                };
+                // A station reads as live (issue #17): its row shows `● live`
+                // where a track shows its position and total — the same fact
+                // the transport shows for a live stream.
+                ListItem::new(match entry {
+                    Entry::Station { .. } => live_row(row, width, &self.theme),
+                    Entry::File(_) => list_row(row, width, &self.theme),
+                })
             })
             .collect()
     }
@@ -4274,10 +4277,12 @@ impl<'lib> App<'lib> {
     }
 
     /// The queue index that is playing, when anything is: the player counts
-    /// from the list it was given, which is this queue.
+    /// from the list it was given, which is this queue. Production sets
+    /// `playing` and the player together; the tests' fixture (no player) reads
+    /// the queue's head, the same entry [`Self::playing_entry`] names.
     fn playing_queue_index(&self) -> Option<usize> {
         self.playing.as_ref()?;
-        self.player.as_ref().map(Player::current_index)
+        Some(self.player.as_ref().map_or(0, Player::current_index))
     }
 
     /// Applies an edit to the queue and to the handle the player reads, in that
@@ -4744,6 +4749,20 @@ impl<'lib> App<'lib> {
         }
     }
 
+    /// The queue index `next` goes to while a station plays (issue #17): the
+    /// FIRST track of the queue — the human's rule, "ir a la primera pista de
+    /// la cola" — not the entry after the station, so an evening of stations
+    /// lined up behind it is left whole. `Err` is the one status line the
+    /// refusal says; the station keeps playing. Only consulted when the entry
+    /// that plays is a station; a queue of tracks alone answers from
+    /// [`skip_target`] as it always has.
+    fn station_next_target(queue: &[Entry]) -> Result<usize, &'static str> {
+        queue
+            .iter()
+            .position(|entry| matches!(entry, Entry::File(_)))
+            .ok_or("velo: no track in the queue — the station keeps playing")
+    }
+
     /// Moves to the next track, or back one (see [`skip_target`]), by
     /// rebuilding the player at that track the way a seek rebuilds it at an
     /// offset. Past the last track it says so instead of stopping the music.
@@ -4752,6 +4771,15 @@ impl<'lib> App<'lib> {
             return;
         };
         let current = player.current_index();
+        // A station playing takes `next` by the human's rule (issue #17), not
+        // by position: the first track of the queue, or one refusal that
+        // leaves the station playing. `previous` keeps its own rule below.
+        if forward && matches!(self.queue.get(current), Some(Entry::Station { .. })) {
+            match Self::station_next_target(&self.queue) {
+                Ok(track) => return self.start_track_at(track, Duration::ZERO),
+                Err(message) => return self.note(message),
+            }
+        }
         match skip_target(current, self.queue.len(), player.position(), forward) {
             Some(track) => self.start_track_at(track, Duration::ZERO),
             None => self.note("velo: this is the last track"),
@@ -4939,6 +4967,25 @@ fn list_row(row: ListRow, width: u16, theme: &Theme) -> Line<'static> {
         spans.push(Span::styled(row.fact, Style::new().fg(theme.dim)));
     }
     Line::from(spans)
+}
+
+/// The queue row of a live station (issue #17): numbered and marked like
+/// every row, so the queue edits keep working on it, and showing `● live`
+/// against the right edge where a track would show its length — the same
+/// fact, in the accent, the transport shows for a live stream.
+fn live_row(row: ListRow, width: u16, theme: &Theme) -> Line<'static> {
+    const LIVE: &str = "● live";
+    let mut line = list_row(row, width, theme);
+    let marker_width = LIVE.chars().count();
+    let used = line.width();
+    let width = usize::from(width);
+    if used + 2 + marker_width <= width {
+        line.spans
+            .push(Span::raw(" ".repeat(width - used - marker_width)));
+        line.spans
+            .push(Span::styled(LIVE.to_owned(), Style::new().fg(theme.accent)));
+    }
+    line
 }
 
 /// How many digits the largest row number of a list this long takes.
@@ -5631,6 +5678,7 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::App;
+    use crate::audio::output::Entry;
 
     // The playing-entry refusals of T18b cannot be driven through `App::on_key`
     // without a sound device: marking an entry as playing means opening one.
@@ -5865,5 +5913,68 @@ mod tests {
         assert_eq!(App::queue_move_target(3, None, 2, -1), Some(1));
         assert_eq!(App::queue_move_target(3, None, 0, -1), None);
         assert_eq!(App::queue_move_target(3, None, 2, 1), None);
+    }
+
+    // ---- the station's own `next` (issue #17) --------------------------------
+    //
+    // The human's rule, recorded in odd/tasks/radio.md (L29) before the code:
+    // `next` while a station plays goes to the FIRST track of the queue —
+    // "Ir a la primera pista de la cola" — and with no track in the queue it
+    // refuses with one status line and leaves the station playing. The rule is
+    // pure and lives in one place `skip` reads, the way the playing-entry
+    // refusals above do, so the answer is the same on every screen.
+
+    fn station(name: &str) -> Entry {
+        Entry::Station {
+            url: format!("https://stream.example/{name}"),
+            name: name.to_owned(),
+        }
+    }
+
+    #[test]
+    fn next_while_a_station_plays_jumps_to_the_first_track_of_the_queue() {
+        use std::path::PathBuf;
+
+        // The station plays at the head; the first track is the very first
+        // entry that is a track — not the entry after the station — so an
+        // evening of stations lined up behind it is left whole.
+        let queue = vec![
+            station("nova"),
+            Entry::from(PathBuf::from("/music/one.flac")),
+        ];
+        assert_eq!(App::station_next_target(&queue), Ok(1));
+
+        // Stations first, tracks later: the first *track* is the answer.
+        let queue = vec![
+            station("nova"),
+            station("cap"),
+            Entry::from(PathBuf::from("/music/one.flac")),
+            Entry::from(PathBuf::from("/music/two.flac")),
+        ];
+        assert_eq!(App::station_next_target(&queue), Ok(2));
+    }
+
+    #[test]
+    fn next_while_a_station_plays_with_no_track_refuses_and_leaves_it_playing() {
+        use std::path::PathBuf;
+
+        let refusal = "velo: no track in the queue — the station keeps playing";
+        assert_eq!(
+            App::station_next_target(&[station("nova")]),
+            Err(refusal),
+            "nothing but the station: it keeps playing"
+        );
+        let queue = vec![station("nova"), station("cap")];
+        assert_eq!(
+            App::station_next_target(&queue),
+            Err(refusal),
+            "an evening of stations and not one track: the station keeps playing"
+        );
+        // A queue of tracks alone never reaches this rule: `skip` answers from
+        // `skip_target` unless the entry that plays is a station.
+        assert_eq!(
+            App::station_next_target(&[Entry::from(PathBuf::from("/music/one.flac"))]),
+            Ok(0)
+        );
     }
 }

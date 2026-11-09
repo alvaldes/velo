@@ -31,7 +31,9 @@ status line.
 **S3 — Live is a property of the entry, not of the queue.**
 `next`/`prev` over a station is the next/previous **station**. Repeat does not
 repeat a station. Gapless does not apply. ReplayGain and bit-perfect are skipped.
-Seek is a no-op and progress shows `live`.
+Seek is a no-op and progress shows `live`. *(Revised in #17, after the human's
+decision — L29: the queue keeps stations, and `next` over a station is no longer
+the next station but the first track of the queue.)*
 
 **S4 — The station's now-playing comes from ICY.**
 Request `Icy-MetaData: 1`; the server then sends `Icy-Metaint: N`. The stream is
@@ -738,3 +740,23 @@ country, and put favourites at the top; and `esc` should walk back to the source
 Filed as https://github.com/alvaldes/velo/issues/3 at the human's request — the standing
 rule from now on is that a reported problem becomes an issue first, and only an issue
 produces a pull request.
+
+**L29** — issue #17 asked to remove stations from the queue; the human decided
+otherwise, and the decision is recorded here before any code change. Keeping
+station queueing, verbatim: "Sí, pero con la fila marcada como vivo en la cola".
+And on `next` while a station plays, verbatim: "Ir a la primera pista de la
+cola" — with a track in the queue, `next` jumps to the FIRST track of the queue
+and plays it; with no track in the queue it refuses with one status line and
+leaves the station playing.
+
+- **Decisión 2 of the ten (the typed queue entry) stands**: the queue stays
+  typed and `Entry::Station` stays, because the real case is lining up several
+  stations for an evening. The old S3 rule — `next` over a station is the next
+  station — is retired, not deleted: the revision is recorded on S3 above, and
+  the decisions' history is untouched.
+- What the code does about it: a station row in the queue view shows the
+  station's name and `● live` where a track shows its position and total (the
+  same fact the transport shows for a live stream); the playing entry keeps its
+  protections — `d`, `J` and `K` refuse on it, station or track alike; and
+  `next` follows the human's rule in the queue's own one place, so the answer
+  is the same on every screen.
