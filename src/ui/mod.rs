@@ -2033,7 +2033,19 @@ impl<'lib> App<'lib> {
             radio::RowKind::CatalogStation { station, .. } => Some(station.name.clone()),
             _ => None,
         })?;
-        Some(format!("velo: {name} cannot play: {reason}"))
+        // The reason is the sentence the report carries; on a status line that
+        // one row wide it would be cut before the key, so the tag goes here and
+        // the sentence stays in the report (S1, S3).
+        let tag = view
+            .selection()
+            .and_then(|row| match row.kind {
+                radio::RowKind::CatalogStation { station, .. } => {
+                    crate::radio::directory::refusal_tag(&station)
+                }
+                _ => None,
+            })
+            .unwrap_or(reason);
+        Some(format!("velo: {name} cannot play ({tag}) — i reports it"))
     }
 
     /// Writes the refusal note onto the status line while the radio's cursor

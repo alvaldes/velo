@@ -1491,7 +1491,7 @@ fn the_status_line_says_why_the_station_under_the_cursor_cannot_play() {
     shell(&mut app, KeyCode::Char('G')); // onto Hls One
     assert_eq!(
         app.status(),
-        "velo: Hls One cannot play: an HLS manifest: its .ts segments cannot be decoded",
+        "velo: Hls One cannot play (HLS manifest) — i reports it",
         "the status names the station and the reason while the cursor rests there"
     );
 
@@ -1530,9 +1530,36 @@ fn moving_between_rejected_stations_says_the_new_reason_not_the_old() {
     shell(&mut app, KeyCode::Char('j')); // onto Hls Two
     assert_eq!(
         app.status(),
-        "velo: Hls Two cannot play: an HLS manifest: its .ts segments cannot be decoded",
+        "velo: Hls Two cannot play (HLS manifest) — i reports it",
         "the note follows the cursor, got: {:?}",
         app.status()
+    );
+}
+
+/// S1 and S3 together: the note has to carry the key, and it has to survive the
+/// width of a normal terminal — an 80-column line is where the message is read,
+/// and a hint that gets cut off by the border is a hint nobody reads.
+#[test]
+fn the_refusal_note_names_the_key_and_fits_a_standard_terminal() {
+    let mut app = App::new(Vec::new());
+    app.set_radio_wire(Box::new(RadioData::<HttpTransport>::new(None, None, None)));
+    shell(&mut app, KeyCode::Char('R'));
+    app.show_radio_catalog(norway(), catalog());
+
+    shell(&mut app, KeyCode::Char('G')); // onto Hls One
+    let status = app.status();
+    assert!(
+        status.contains('i'),
+        "the note names the key that reports it, got: {status:?}"
+    );
+    assert!(
+        status.contains("i reports it"),
+        "and says what the key does, got: {status:?}"
+    );
+    assert!(
+        status.chars().count() < 80,
+        "the note fits a standard terminal, got {} columns: {status:?}",
+        status.chars().count()
     );
 }
 

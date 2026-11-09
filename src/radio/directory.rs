@@ -132,6 +132,37 @@ pub fn refusal(station: &Station) -> Option<String> {
     )
 }
 
+/// The same reason in a few words, for a line that cannot hold the sentence: the
+/// status line shows `HLS manifest` or `codec <name>` and the report carries the
+/// sentence. Both come from [`refusal_parts`], so they cannot disagree (S1).
+#[must_use]
+pub fn refusal_tag(station: &Station) -> Option<String> {
+    refusal_tag_for(
+        &station.codec,
+        is_playable_codec(&station.codec),
+        &station.url_resolved,
+    )
+}
+
+/// The one place the two shapes of the reason are decided: the sentence a report
+/// carries and the tag a status line carries.
+fn refusal_parts(codec: &str, decodable: bool, url: &str) -> Option<(String, String)> {
+    if is_hls_manifest(url) {
+        return Some((
+            String::from("an HLS manifest: its .ts segments cannot be decoded"),
+            String::from("HLS manifest"),
+        ));
+    }
+    if !decodable {
+        let name = codec.trim();
+        return Some((
+            format!("the codec {name} is not in this build"),
+            format!("codec {name}"),
+        ));
+    }
+    None
+}
+
 /// The refusal given the codec spelling, whether this build can decode it,
 /// and the resolved URL. Every codec in the spelling table has a decoder in
 /// this build, so no real [`Station`] can carry the codec refusal here; the
@@ -140,13 +171,11 @@ pub fn refusal(station: &Station) -> Option<String> {
 /// argument and calls this — it never weakens the rule.
 #[must_use]
 pub fn refusal_for(codec: &str, decodable: bool, url: &str) -> Option<String> {
-    if is_hls_manifest(url) {
-        return Some(String::from(
-            "an HLS manifest: its .ts segments cannot be decoded",
-        ));
-    }
-    if !decodable {
-        return Some(format!("the codec {codec} is not in this build"));
-    }
-    None
+    refusal_parts(codec, decodable, url).map(|(sentence, _)| sentence)
+}
+
+/// The tag half of [`refusal_for`]: see [`refusal_parts`].
+#[must_use]
+pub fn refusal_tag_for(codec: &str, decodable: bool, url: &str) -> Option<String> {
+    refusal_parts(codec, decodable, url).map(|(_, tag)| tag)
 }

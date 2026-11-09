@@ -13,6 +13,7 @@ use std::cell::RefCell;
 use velo::radio::client::{self, Client, Error, Order, StationSearch, Transport};
 use velo::radio::directory::{
     is_playable_codec, is_playable_station, loadable_stations, refusal, refusal_for,
+    refusal_tag_for,
 };
 
 /// A canned transport: records every URL it is asked to fetch and always
@@ -539,4 +540,32 @@ fn the_refusal_agrees_with_playability_in_both_branches() {
             decodable,
         );
     }
+}
+
+/// The tag and the sentence are two shapes of one decision: a status line gets
+/// the tag, the report gets the sentence, and they always name the same cause.
+#[test]
+fn the_refusal_tag_and_the_refusal_sentence_always_agree() {
+    let hls = "https://stream.example/live/chill.m3u8";
+    assert_eq!(
+        refusal_tag_for("MP3", true, hls).as_deref(),
+        Some("HLS manifest")
+    );
+    assert_eq!(
+        refusal_for("MP3", true, hls).as_deref(),
+        Some("an HLS manifest: its .ts segments cannot be decoded")
+    );
+
+    assert_eq!(
+        refusal_tag_for("wma", false, "https://stream.example/live").as_deref(),
+        Some("codec wma")
+    );
+    assert_eq!(
+        refusal_for("wma", false, "https://stream.example/live").as_deref(),
+        Some("the codec wma is not in this build")
+    );
+
+    // A station that plays has neither shape.
+    assert_eq!(refusal_tag_for("MP3", true, "https://s.example/live"), None);
+    assert_eq!(refusal_for("MP3", true, "https://s.example/live"), None);
 }
