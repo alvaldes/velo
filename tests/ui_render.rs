@@ -1708,6 +1708,7 @@ fn the_settings_card_draws_its_title_sections_and_focused_row_in_the_accent() {
         ("replay gain", "track"),
         ("repeat", "off"),
         ("shuffle", "off"),
+        ("theme", "default"),
         ("accent", "#af00af"),
         ("background", "reset"),
         ("cover art", "shown"),
@@ -1792,7 +1793,7 @@ fn hiding_the_cover_from_the_card_removes_its_columns_on_the_next_frame() {
     app.show_artwork(Some(velo::ui::artwork::Picker::new((8, 12))));
 
     press(&mut app, KeyCode::Char('o'));
-    for _ in 0..10 {
+    for _ in 0..11 {
         press(&mut app, KeyCode::Char('j'));
     }
     assert_eq!(app.settings_focused(), "cover art");

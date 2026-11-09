@@ -882,7 +882,12 @@ fn run_interface(
         app.set_mono(settings.mono);
         app.set_replay_gain(settings.replay_gain);
         app.set_volume(settings.volume);
-        app.set_theme(settings.theme);
+        // The theme library (issue #10), as the browse interface wires it.
+        let themes_dir = config_file.as_deref().map(config::themes_dir);
+        app.set_theme_library(
+            config::select_theme(themes_dir.as_deref(), &settings.theme),
+            settings.theme.clone(),
+        );
         app.set_ui(settings.ui);
         app.show_artwork(picker);
         app.set_config_file(config_file);
@@ -928,7 +933,13 @@ fn browse_interface(
         app.set_mono(settings.mono);
         app.set_replay_gain(settings.replay_gain);
         app.set_volume(settings.volume);
-        app.set_theme(settings.theme);
+        // The theme library (issue #10): the built-in, the `themes/` folder,
+        // and the `[theme]` keys of the config file over both (S2).
+        let themes_dir = config_file.as_deref().map(config::themes_dir);
+        app.set_theme_library(
+            config::select_theme(themes_dir.as_deref(), &settings.theme),
+            settings.theme.clone(),
+        );
         app.set_ui(settings.ui);
         app.show_artwork(picker);
         app.set_config_file(config_file);

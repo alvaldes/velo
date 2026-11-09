@@ -2419,8 +2419,14 @@ fn the_settings_cursor_moves_between_settings_only_and_stops_at_the_ends() {
     press(&mut app, KeyCode::Char('j'));
     assert_eq!(
         app.settings_focused(),
+        "theme",
+        "the card has a theme row (issue #10)"
+    );
+    press(&mut app, KeyCode::Char('j'));
+    assert_eq!(
+        app.settings_focused(),
         "accent",
-        "the theme header is skipped, never focused"
+        "the theme row is a setting, the theme header is never focused"
     );
 
     press(&mut app, KeyCode::Char('G'));
@@ -2480,7 +2486,7 @@ fn enter_on_a_visibility_row_flips_it_and_writes_cover_art_to_the_file() {
     let default = velo::config::default_config_text();
 
     press(&mut app, KeyCode::Char('o'));
-    for _ in 0..10 {
+    for _ in 0..11 {
         press(&mut app, KeyCode::Char('j'));
     }
     assert_eq!(app.settings_focused(), "cover art");
@@ -2502,7 +2508,7 @@ fn right_on_a_colour_row_changes_the_palette_and_writes_the_theme_accent() {
     let default = velo::config::default_config_text();
 
     press(&mut app, KeyCode::Char('o'));
-    for _ in 0..3 {
+    for _ in 0..4 {
         press(&mut app, KeyCode::Char('j'));
     }
     assert_eq!(app.settings_focused(), "accent");
@@ -2543,7 +2549,7 @@ fn enter_on_the_advisories_row_writes_it_to_the_file() {
     let default = velo::config::default_config_text();
 
     press(&mut app, KeyCode::Char('o'));
-    for _ in 0..14 {
+    for _ in 0..15 {
         press(&mut app, KeyCode::Char('j'));
     }
     assert_eq!(app.settings_focused(), "advisories");
@@ -2565,7 +2571,7 @@ fn enter_on_the_view_numbers_row_writes_it_to_the_file() {
     let default = velo::config::default_config_text();
 
     press(&mut app, KeyCode::Char('o'));
-    for _ in 0..15 {
+    for _ in 0..16 {
         press(&mut app, KeyCode::Char('j'));
     }
     assert_eq!(app.settings_focused(), "view numbers");
@@ -2587,6 +2593,249 @@ fn a_question_mark_inside_the_settings_card_does_nothing() {
     assert_eq!(app.on_key(key(KeyCode::Char('?'))), Action::None);
     assert!(app.settings_open(), "the card stays open");
     assert!(!app.help_open(), "? does not open the help over the card");
+}
+
+// ---- the theme row (issue #10) ----------------------------------------------
+
+use velo::config::{ThemeColor, ThemeColors, ThemeKeys};
+
+/// An app launched over a config file without `[theme]` colour keys, with a
+/// `nord` theme file on disk and the theme library wired in the way the
+/// launch paths do it.
+fn theme_app(name: &str) -> (PathBuf, App<'static>) {
+    let dir = config_dir(name);
+    let config = dir.join("config.toml");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        &config,
+        "bit_perfect = false\nreplay_gain = \"track\"\n\n[state]\nvolume = 100\n",
+    )
+    .unwrap();
+    let themes = dir.join("themes");
+    fs::create_dir_all(&themes).unwrap();
+    fs::write(
+        themes.join("nord.toml"),
+        "accent = \"#88c0d0\"\nsecondary = \"#81a1c1\"\n",
+    )
+    .unwrap();
+
+    let keys = ThemeKeys::default();
+    let selection = velo::config::select_theme(Some(&themes), &keys);
+    let mut app = app_with_three_tracks();
+    app.set_config_file(Some(config.clone()));
+    app.set_theme_library(selection, keys);
+    (config, app)
+}
+
+fn open_on_theme_row(app: &mut App<'_>) {
+    press(app, KeyCode::Char('o'));
+    for _ in 0..3 {
+        press(app, KeyCode::Char('j'));
+    }
+    assert_eq!(app.settings_focused(), "theme", "the theme row is focused");
+}
+
+#[test]
+fn the_settings_card_has_a_theme_row_above_the_colour_rows() {
+    let mut app = app_with_three_tracks();
+    press(&mut app, KeyCode::Char('o'));
+
+    for _ in 0..3 {
+        press(&mut app, KeyCode::Char('j'));
+    }
+    assert_eq!(app.settings_focused(), "theme");
+    press(&mut app, KeyCode::Char('j'));
+    assert_eq!(
+        app.settings_focused(),
+        "accent",
+        "the theme row sits above the colours"
+    );
+    press(&mut app, KeyCode::Char('G'));
+    assert_eq!(
+        app.settings_focused(),
+        "folder",
+        "folder stays the last row"
+    );
+}
+
+#[test]
+fn the_theme_row_shows_the_applied_theme_and_previews_with_the_arrows() {
+    let (config, mut app) = theme_app("theme-preview");
+    open_on_theme_row(&mut app);
+    assert_eq!(app.theme_name(), "default");
+
+    press(&mut app, KeyCode::Right);
+    assert_eq!(
+        app.theme_preview(),
+        Some("nord"),
+        "the focused theme is previewed"
+    );
+    assert_eq!(
+        app.theme_name(),
+        "default",
+        "the preview is not applied yet"
+    );
+    assert_eq!(
+        app.theme_colors().accent,
+        ThemeColor::Rgb {
+            red: 0x88,
+            green: 0xc0,
+            blue: 0xd0,
+        },
+        "the focused theme's palette is on screen"
+    );
+    assert!(
+        !fs::read_to_string(&config).unwrap().contains("name"),
+        "a preview never writes: {}",
+        fs::read_to_string(&config).unwrap()
+    );
+
+    // Previewing wraps around the loaded names, back to the applied one.
+    press(&mut app, KeyCode::Right);
+    assert_eq!(app.theme_preview(), Some("default"));
+    press(&mut app, KeyCode::Left);
+    assert_eq!(app.theme_preview(), Some("nord"));
+    let _ = fs::remove_dir_all(dir_of(&config));
+}
+
+#[test]
+fn enter_on_the_theme_row_applies_the_preview_and_writes_the_name() {
+    let (config, mut app) = theme_app("theme-apply");
+    open_on_theme_row(&mut app);
+
+    press(&mut app, KeyCode::Right);
+    press(&mut app, KeyCode::Enter);
+
+    assert_eq!(
+        app.theme_preview(),
+        None,
+        "the preview became the applied theme"
+    );
+    assert_eq!(app.theme_name(), "nord");
+    assert_eq!(
+        app.theme_colors().accent,
+        ThemeColor::Rgb {
+            red: 0x88,
+            green: 0xc0,
+            blue: 0xd0,
+        }
+    );
+    assert!(
+        fs::read_to_string(&config)
+            .unwrap()
+            .contains("name = \"nord\""),
+        "the name is written under [theme]: {}",
+        fs::read_to_string(&config).unwrap()
+    );
+    let _ = fs::remove_dir_all(dir_of(&config));
+}
+
+#[test]
+fn esc_on_a_preview_restores_the_previous_theme_and_writes_nothing() {
+    let (config, mut app) = theme_app("theme-esc");
+    let before = fs::read_to_string(&config).unwrap();
+    open_on_theme_row(&mut app);
+
+    press(&mut app, KeyCode::Right);
+    press(&mut app, KeyCode::Esc);
+
+    assert!(!app.settings_open(), "esc closes the card");
+    assert_eq!(app.theme_preview(), None, "the preview is gone");
+    assert_eq!(app.theme_name(), "default", "the previous theme is applied");
+    assert_eq!(
+        app.theme_colors().accent,
+        ThemeColors::default().accent,
+        "the built-in palette is back"
+    );
+    assert_eq!(
+        fs::read_to_string(&config).unwrap(),
+        before,
+        "esc writes nothing"
+    );
+    let _ = fs::remove_dir_all(dir_of(&config));
+}
+
+#[test]
+fn esc_after_applying_keeps_the_applied_theme() {
+    let (config, mut app) = theme_app("theme-esc-applied");
+    open_on_theme_row(&mut app);
+
+    press(&mut app, KeyCode::Right);
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Esc);
+
+    assert!(!app.settings_open());
+    assert_eq!(app.theme_name(), "nord", "the applied theme stays");
+    assert!(
+        fs::read_to_string(&config)
+            .unwrap()
+            .contains("name = \"nord\""),
+        "the name stays written"
+    );
+    let _ = fs::remove_dir_all(dir_of(&config));
+}
+
+#[test]
+fn the_theme_row_previews_wrap_around_the_loaded_names() {
+    let (config, mut app) = theme_app("theme-wrap");
+    open_on_theme_row(&mut app);
+
+    // From the applied theme, `←` wraps to the last loaded one.
+    press(&mut app, KeyCode::Left);
+    assert_eq!(app.theme_preview(), Some("nord"));
+    let _ = fs::remove_dir_all(dir_of(&config));
+}
+
+#[test]
+fn enter_on_the_theme_row_without_a_preview_writes_nothing() {
+    let (config, mut app) = theme_app("theme-enter-plain");
+    let before = fs::read_to_string(&config).unwrap();
+    open_on_theme_row(&mut app);
+
+    press(&mut app, KeyCode::Enter);
+
+    assert_eq!(app.theme_name(), "default");
+    assert_eq!(
+        fs::read_to_string(&config).unwrap(),
+        before,
+        "nothing to apply, nothing written"
+    );
+    let _ = fs::remove_dir_all(dir_of(&config));
+}
+
+#[test]
+fn theme_notices_are_said_once_in_the_status_line() {
+    let dir = config_dir("theme-notice");
+    let mut app = app_with_three_tracks();
+    let selection = velo::config::ThemeSelection {
+        palette: ThemeColors::default(),
+        applied: "default".to_owned(),
+        themes: Vec::new(),
+        notices: vec![format!(
+            "theme \"nord\" is not in {} — using the built-in",
+            dir.display()
+        )],
+    };
+    app.set_theme_library(selection, ThemeKeys::default());
+
+    app.tick();
+    assert!(
+        app.status().contains("nord"),
+        "the notice is on the status line: {}",
+        app.status()
+    );
+    app.tick();
+    app.tick();
+    assert!(
+        app.status().matches("nord").count() == 1,
+        "the notice is said once, not per tick: {}",
+        app.status()
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+fn dir_of(config: &Path) -> PathBuf {
+    config.parent().unwrap().to_path_buf()
 }
 
 // --------------------------------------------------- a launch with no library

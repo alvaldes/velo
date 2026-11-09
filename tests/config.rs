@@ -178,29 +178,29 @@ view_numbers = false
     );
     assert_eq!(
         settings.theme.accent,
-        ThemeColor::Rgb {
+        Some(ThemeColor::Rgb {
             red: 0xff,
             green: 0x00,
             blue: 0xaa,
-        },
+        }),
         "hex is read case-insensitively"
     );
-    assert_eq!(settings.theme.background, ThemeColor::Terminal);
+    assert_eq!(settings.theme.background, Some(ThemeColor::Terminal));
     assert_eq!(
         settings.theme.text,
-        ThemeColor::Rgb {
+        Some(ThemeColor::Rgb {
             red: 0xe0,
             green: 0xe0,
             blue: 0xe0
-        }
+        })
     );
     assert_eq!(
         settings.theme.border,
-        ThemeColor::Rgb {
+        Some(ThemeColor::Rgb {
             red: 0x30,
             green: 0x30,
             blue: 0x30,
-        }
+        })
     );
     assert_eq!(
         settings.ui,
@@ -225,7 +225,7 @@ fn every_new_table_is_optional_and_defaults_to_what_velo_did_before() {
     assert_eq!(settings.session.view, View::Library);
     assert_eq!(settings.session.browse_by, BrowseBy::Artists);
     assert_eq!(settings.session.node, None);
-    assert_eq!(settings.theme, ThemeColors::default());
+    assert_eq!(settings.theme.resolved(), ThemeColors::default());
     assert_eq!(settings.ui, UiParts::default());
     assert!(
         settings.ui.cover_art,
@@ -365,7 +365,7 @@ fn the_default_file_names_every_table_and_reads_back_as_the_defaults() {
         .unwrap_or_else(|error| panic!("the default file must load: {error}"))
         .merged(&cli_with_no_flags());
     assert_eq!(settings.volume, DEFAULT_VOLUME);
-    assert_eq!(settings.theme, ThemeColors::default());
+    assert_eq!(settings.theme.resolved(), ThemeColors::default());
     assert_eq!(settings.ui, UiParts::default());
     assert_eq!(settings.session.repeat, Repeat::Off);
     assert_eq!(settings.session.view, View::Library);
@@ -1096,11 +1096,11 @@ fn a_written_value_round_trips_through_the_parser() {
     assert_eq!(settings.session.repeat, Repeat::All);
     assert_eq!(
         settings.theme.accent,
-        ThemeColor::Rgb {
+        Some(ThemeColor::Rgb {
             red: 0x12,
             green: 0x34,
             blue: 0x56,
-        }
+        })
     );
     assert!(!settings.ui.cover_art);
     let _ = fs::remove_dir_all(&dir);
@@ -1271,4 +1271,415 @@ fn mono_is_a_session_flag_and_never_a_config_key() {
         .unwrap_or_else(|error| panic!("parse failed: {error}"));
     let settings = Config::default().merged(&cli);
     assert!(settings.mono);
+}
+
+// ------------------------------------------------ theme files (issue #10)
+
+use velo::config::{DEFAULT_THEME_NAME, LoadedTheme, ThemeKeys, select_theme, themes_dir};
+
+/// Writes a theme file into `<dir>/themes/` and returns the folder's path.
+fn write_theme(dir: &Path, name: &str, contents: &str) -> PathBuf {
+    let themes = dir.join("themes");
+    fs::create_dir_all(&themes).unwrap();
+    fs::write(themes.join(format!("{name}.toml")), contents).unwrap();
+    themes
+}
+
+const NORD_ACCENT: ThemeColor = ThemeColor::Rgb {
+    red: 0x88,
+    green: 0xc0,
+    blue: 0xd0,
+};
+
+#[test]
+fn the_themes_folder_lives_beside_the_config_file() {
+    let dir = temp_dir("themes-dir");
+    let config = write_config(&dir, "");
+    assert_eq!(
+        themes_dir(&config),
+        dir.join("velo").join("themes"),
+        "<config dir>/themes/ (S1)"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_missing_themes_folder_is_no_error_and_the_builtin_still_there() {
+    let dir = temp_dir("themes-absent");
+    // The folder was never created: normal, silent, the built-in remains.
+    let selection = select_theme(Some(&dir.join("themes")), &ThemeKeys::default());
+    assert_eq!(selection.applied, DEFAULT_THEME_NAME);
+    assert_eq!(selection.palette, ThemeColors::default());
+    assert_eq!(
+        selection.themes,
+        vec![LoadedTheme {
+            name: "default".to_owned(),
+            colors: ThemeColors::default(),
+        }]
+    );
+    assert!(
+        selection.notices.is_empty(),
+        "a missing folder is not an error"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn with_no_themes_folder_and_no_theme_keys_the_builtin_is_the_whole_story() {
+    // S5: no `themes/` folder and no `[theme]` keys looks exactly as it
+    // always did.
+    let selection = select_theme(None, &ThemeKeys::default());
+    assert_eq!(selection.palette, ThemeColors::default());
+    assert_eq!(selection.applied, DEFAULT_THEME_NAME);
+    assert_eq!(selection.themes.len(), 1);
+    assert_eq!(selection.notices, Vec::<String>::new());
+}
+
+#[test]
+fn a_theme_file_loads_by_name_and_layers_over_the_builtin() {
+    let dir = temp_dir("themes-load");
+    let themes = write_theme(&dir, "nord", "accent = \"#88c0d0\"\nink = \"#2e3440\"\n");
+    let keys = ThemeKeys {
+        name: Some("nord".to_owned()),
+        ..ThemeKeys::default()
+    };
+
+    let selection = select_theme(Some(&themes), &keys);
+
+    assert_eq!(selection.applied, "nord");
+    assert_eq!(selection.palette.accent, NORD_ACCENT);
+    assert_eq!(
+        selection.palette.ink,
+        ThemeColor::Rgb {
+            red: 0x2e,
+            green: 0x34,
+            blue: 0x40,
+        }
+    );
+    assert_eq!(
+        selection.palette.secondary,
+        ThemeColors::default().secondary,
+        "a key the file leaves out keeps the built-in"
+    );
+    assert_eq!(
+        selection.themes,
+        vec![
+            LoadedTheme {
+                name: "default".to_owned(),
+                colors: ThemeColors::default(),
+            },
+            LoadedTheme {
+                name: "nord".to_owned(),
+                colors: ThemeKeys {
+                    accent: Some(NORD_ACCENT),
+                    ink: Some(ThemeColor::Rgb {
+                        red: 0x2e,
+                        green: 0x34,
+                        blue: 0x40,
+                    }),
+                    ..ThemeKeys::default()
+                }
+                .resolved(),
+            },
+        ],
+        "the built-in first, then the files in name order"
+    );
+    assert_eq!(selection.notices, Vec::<String>::new());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_config_theme_keys_win_over_the_selected_theme_file() {
+    let dir = temp_dir("themes-override");
+    let themes = write_theme(
+        &dir,
+        "nord",
+        "accent = \"#88c0d0\"\nsecondary = \"#5f87d7\"\n",
+    );
+    let keys = ThemeKeys {
+        name: Some("nord".to_owned()),
+        // Deliberately not a built-in default value (L3): a key at the
+        // default is not a choice and would not win.
+        accent: Some(ThemeColor::Rgb {
+            red: 0xdc,
+            green: 0x8a,
+            blue: 0xf3,
+        }),
+        ..ThemeKeys::default()
+    };
+
+    let selection = select_theme(Some(&themes), &keys);
+
+    assert_eq!(
+        selection.palette.accent,
+        ThemeColor::Rgb {
+            red: 0xdc,
+            green: 0x8a,
+            blue: 0xf3,
+        },
+        "the [theme] key wins (S2)"
+    );
+    assert_eq!(
+        selection.palette.secondary,
+        ThemeColor::Rgb {
+            red: 0x5f,
+            green: 0x87,
+            blue: 0xd7,
+        },
+        "a key the config does not carry comes from the file"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_selected_theme_not_on_disk_falls_back_to_the_builtin_and_says_so() {
+    let dir = temp_dir("themes-missing-name");
+    let themes = dir.join("themes");
+    let keys = ThemeKeys {
+        name: Some("nord".to_owned()),
+        ..ThemeKeys::default()
+    };
+
+    let selection = select_theme(Some(&themes), &keys);
+
+    assert_eq!(selection.applied, DEFAULT_THEME_NAME);
+    assert_eq!(selection.palette, ThemeColors::default());
+    assert_eq!(selection.notices.len(), 1, "said once (S3)");
+    assert!(
+        selection.notices[0].contains("nord"),
+        "the notice names the theme: {}",
+        selection.notices[0]
+    );
+    assert!(
+        selection.notices[0].contains(themes.display().to_string().as_str()),
+        "the notice names the folder: {}",
+        selection.notices[0]
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_theme_file_that_does_not_parse_is_reported_and_skipped() {
+    let dir = temp_dir("themes-broken");
+    let themes = write_theme(&dir, "nord", "accent = \n");
+
+    let selection = select_theme(Some(&themes), &ThemeKeys::default());
+
+    assert_eq!(selection.themes.len(), 1, "the broken file is not offered");
+    assert_eq!(selection.palette, ThemeColors::default());
+    assert_eq!(selection.notices.len(), 1);
+    assert!(
+        selection.notices[0].contains("nord.toml"),
+        "the notice names the file: {}",
+        selection.notices[0]
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_theme_colour_that_does_not_parse_is_reported_naming_the_file_and_the_key() {
+    let dir = temp_dir("themes-bad-colour");
+    let themes = write_theme(&dir, "nord", "accent = \"#gg00aa\"\n");
+
+    let selection = select_theme(Some(&themes), &ThemeKeys::default());
+
+    assert_eq!(selection.themes.len(), 1, "the broken file is not offered");
+    assert_eq!(selection.notices.len(), 1);
+    assert!(
+        selection.notices[0].contains("nord.toml"),
+        "the notice names the file: {}",
+        selection.notices[0]
+    );
+    assert!(
+        selection.notices[0].contains("accent"),
+        "the notice names the key: {}",
+        selection.notices[0]
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn reset_in_a_theme_file_colour_it_would_erase_is_reported() {
+    let dir = temp_dir("themes-reset");
+    let themes = write_theme(&dir, "nord", "accent = \"reset\"\n");
+
+    let selection = select_theme(Some(&themes), &ThemeKeys::default());
+
+    assert_eq!(selection.themes.len(), 1);
+    assert_eq!(selection.notices.len(), 1);
+    assert!(
+        selection.notices[0].contains("accent"),
+        "the notice names the key: {}",
+        selection.notices[0]
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_unknown_key_in_a_theme_file_is_reported_naming_the_file() {
+    let dir = temp_dir("themes-unknown-key");
+    let themes = write_theme(&dir, "nord", "accent_bright = \"#88c0d0\"\n");
+
+    let selection = select_theme(Some(&themes), &ThemeKeys::default());
+
+    assert_eq!(selection.themes.len(), 1);
+    assert_eq!(selection.notices.len(), 1);
+    assert!(
+        selection.notices[0].contains("nord.toml"),
+        "the notice names the file: {}",
+        selection.notices[0]
+    );
+    assert!(
+        selection.notices[0].contains("accent_bright"),
+        "the notice names the key: {}",
+        selection.notices[0]
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_default_toml_file_replaces_the_builtin_colours_under_the_same_name() {
+    // The built-in always exists under the name `default` (S1); a file of
+    // that name takes its place in the picker instead of shadowing it.
+    let dir = temp_dir("themes-default-file");
+    let themes = write_theme(&dir, "default", "accent = \"#88c0d0\"\n");
+
+    let selection = select_theme(Some(&themes), &ThemeKeys::default());
+
+    assert_eq!(selection.applied, DEFAULT_THEME_NAME);
+    assert_eq!(selection.palette.accent, NORD_ACCENT);
+    assert_eq!(selection.themes.len(), 1, "one default, not two");
+    assert_eq!(selection.notices, Vec::<String>::new());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_name_key_reads_from_the_theme_table_and_theme_keys_resolve_over_a_base() {
+    let dir = temp_dir("themes-name-key");
+    let path = write_config(&dir, "[theme]\nname = \"nord\"\n");
+    let settings = Config::load_from(&path)
+        .unwrap_or_else(|error| panic!("load failed: {error}"))
+        .merged(&cli_with_no_flags());
+    assert_eq!(settings.theme.name.as_deref(), Some("nord"));
+
+    // `resolved_over` is the layering rule (S2): a key the table carries
+    // replaces the base's, a key it leaves out keeps the base's.
+    let keys = ThemeKeys {
+        accent: Some(ThemeColor::Rgb {
+            red: 0xaf,
+            green: 0x00,
+            blue: 0xaf,
+        }),
+        ..ThemeKeys::default()
+    };
+    let base = ThemeColors {
+        accent: ThemeColor::Rgb {
+            red: 0x12,
+            green: 0x34,
+            blue: 0x56,
+        },
+        secondary: ThemeColor::Rgb {
+            red: 0x65,
+            green: 0x43,
+            blue: 0x21,
+        },
+        ..ThemeColors::default()
+    };
+    let resolved = keys.resolved_over(base);
+    assert_eq!(
+        resolved.accent,
+        ThemeColor::Rgb {
+            red: 0xaf,
+            green: 0x00,
+            blue: 0xaf,
+        }
+    );
+    assert_eq!(
+        resolved.secondary,
+        ThemeColor::Rgb {
+            red: 0x65,
+            green: 0x43,
+            blue: 0x21,
+        }
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_generated_file_does_not_mask_a_named_theme_with_its_default_keys() {
+    // The file velo generates writes all seven colour keys at the built-in
+    // defaults. Those defaults are documentation, not a choice (L3): with a
+    // theme selected, they must not mask the theme — otherwise the feature
+    // is dead for everyone with a generated config, the common case.
+    let dir = temp_dir("themes-generated");
+    let config = write_config(&dir, &default_config_text());
+    let themes = write_theme(&dir, "nord", "accent = \"#88c0d0\"\n");
+    set_value(&config, Some("theme"), "name", "\"nord\"").unwrap();
+
+    let settings = Config::load_from(&config)
+        .unwrap_or_else(|error| panic!("load failed: {error}"))
+        .merged(&cli_with_no_flags());
+    let selection = select_theme(Some(&themes), &settings.theme);
+
+    assert_eq!(selection.applied, "nord");
+    assert_eq!(
+        selection.palette.accent, NORD_ACCENT,
+        "nord's accent is in force, not the generated default: {:?}",
+        selection.palette.accent
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_deliberately_different_key_still_wins_over_a_named_theme() {
+    // A key whose value differs from the built-in default IS a choice and
+    // keeps winning over the selected theme, exactly as S2 says.
+    let dir = temp_dir("themes-choice");
+    let config = write_config(&dir, &default_config_text());
+    let themes = write_theme(&dir, "nord", "accent = \"#88c0d0\"\n");
+    set_value(&config, Some("theme"), "name", "\"nord\"").unwrap();
+    set_value(&config, Some("theme"), "dim", "\"#d70000\"").unwrap();
+
+    let settings = Config::load_from(&config)
+        .unwrap_or_else(|error| panic!("load failed: {error}"))
+        .merged(&cli_with_no_flags());
+    let selection = select_theme(Some(&themes), &settings.theme);
+
+    assert_eq!(selection.applied, "nord");
+    assert_eq!(
+        selection.palette.dim,
+        ThemeColor::Rgb {
+            red: 0xd7,
+            green: 0x00,
+            blue: 0x00,
+        },
+        "the deliberate dim wins over nord"
+    );
+    assert_eq!(
+        selection.palette.accent, NORD_ACCENT,
+        "every other colour is nord's"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn selecting_default_or_no_name_keeps_todays_layering() {
+    // `name = "default"`, and no name at all, layer every `[theme]` key —
+    // defaults included — exactly as before the theme files existed.
+    let dir = temp_dir("themes-default-selected");
+    let config = write_config(&dir, &default_config_text());
+    let themes = write_theme(&dir, "nord", "accent = \"#88c0d0\"\n");
+    set_value(&config, Some("theme"), "name", "\"default\"").unwrap();
+
+    let settings = Config::load_from(&config)
+        .unwrap_or_else(|error| panic!("load failed: {error}"))
+        .merged(&cli_with_no_flags());
+    let selected = select_theme(Some(&themes), &settings.theme);
+    let unnamed = select_theme(Some(&themes), &ThemeKeys::default());
+
+    for selection in [selected, unnamed] {
+        assert_eq!(selection.applied, DEFAULT_THEME_NAME);
+        assert_eq!(selection.palette, ThemeColors::default());
+    }
+    let _ = fs::remove_dir_all(&dir);
 }
