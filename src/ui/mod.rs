@@ -403,6 +403,10 @@ pub struct App<'lib> {
     /// `Sources` when it was chosen there, the library or the queue when `R`
     /// opened it over them.
     radio_from: View,
+    /// The screen `tab` returns to (issue #23): the round trip's other end.
+    /// It is remembered when the queue is entered from anywhere and returned
+    /// to when the queue is left. Default `View::Sources`.
+    tab_origin: View,
     /// The palette as the `[theme]` table wrote it (S4): what the settings
     /// card rebuilds with one role replaced when a colour is cycled.
     colors: ThemeColors,
@@ -469,6 +473,7 @@ impl<'lib> App<'lib> {
             position: Position::Files,
             sources: sources::Sources::default(),
             radio_from: View::Library,
+            tab_origin: View::Sources,
             argv: tracks,
             library: None,
             browse_by: BrowseBy::Artists,
@@ -537,6 +542,7 @@ impl<'lib> App<'lib> {
             position: Position::Artists,
             sources: sources::Sources::default(),
             radio_from: View::Library,
+            tab_origin: View::Sources,
             argv: Vec::new(),
             library,
             browse_by: BrowseBy::Artists,
@@ -1333,16 +1339,32 @@ impl<'lib> App<'lib> {
         self.artwork_path = None;
     }
 
-    /// Sets the catalog of the open radio view (T6c): the integration
-    /// tests' hook, because no fixture can reach a station row through the
-    /// real wiring — that needs the directory. Production never calls this,
-    /// which is why it is hidden from the docs; the wiring sets the catalog
-    /// through [`radio_data::RadioWire::poll`] instead.
+    /// Stands the open radio view in `place` and sets its catalog (T6c):
+    /// the integration tests' hook, because no fixture can reach a station
+    /// row through the real wiring — that needs the directory. The view
+    /// stands in the place the stations belong to (S9); production never
+    /// calls this, which is why it is hidden from the docs; the wiring sets
+    /// the catalog through [`radio_data::RadioWire::poll`] instead.
     #[doc(hidden)]
-    pub fn show_radio_catalog(&mut self, stations: Vec<crate::radio::client::Station>) {
+    pub fn show_radio_catalog(
+        &mut self,
+        place: crate::ui::radio::Place,
+        stations: Vec<crate::radio::client::Station>,
+    ) {
         if let Some(view) = self.radio.as_mut() {
-            view.set_catalog(stations);
+            view.open_place(place.clone());
+            view.set_catalog(place, stations);
         }
+    }
+
+    /// Installs the radio's data wiring (the integration tests' hook): no
+    /// test can reach the directory, so the tests drive a wiring over a
+    /// canned transport through the same [`App`] the event loop runs.
+    /// Production never calls this — `R` builds the real wiring when none
+    /// is installed.
+    #[doc(hidden)]
+    pub fn set_radio_wire(&mut self, wire: Box<dyn radio_data::RadioWire>) {
+        self.radio_wire = Some(wire);
     }
 
     /// Stands in for a playing player (T6c), which no test can build —
@@ -1702,9 +1724,13 @@ impl<'lib> App<'lib> {
         if self.help.is_some() {
             return self.on_help_key(event.code);
         }
-        // The radio view (T6a) owns its keys while it is open; the keys it
-        // does not claim still reach the lists and the transport.
+        // The radio view (T6a) owns its keys while it is open and on screen;
+        // the keys it does not claim still reach the lists and the transport.
+        // A queue on screen keeps it asleep (issue #23): the round trip holds
+        // the radio alive underneath, and while the queue is what the keys
+        // act on, the radio's keys must not act behind it.
         if self.radio.is_some()
+            && self.view != View::Queue
             && let Some(action) = self.radio_key(event)
         {
             return action;
@@ -1842,12 +1868,12 @@ impl<'lib> App<'lib> {
             }
             KeyCode::Enter => Some(self.open_source()),
             // The way out is where you are (S6): `Esc` stays on the sources
-            // screen, which is already the top. The library's keys and the
-            // tab are not this screen's to act on (S7): while it is up they
-            // arrive as no-ops.
+            // screen, which is already the top. The library's keys are not
+            // this screen's to act on (S7): while it is up they arrive as
+            // no-ops. `Tab` is the round trip (issue #23): it falls through
+            // to the keymap, which takes it to the queue and back.
             KeyCode::Esc
             | KeyCode::Backspace
-            | KeyCode::Tab
             | KeyCode::Char('1'..='4' | 'a' | 'd' | 'J' | 'K' | '/') => Some(Action::None),
             _ => None,
         }
@@ -1875,11 +1901,20 @@ impl<'lib> App<'lib> {
                 Some(Action::None)
             }
             radio::RadioOutcome::ToQueue => {
-                self.radio = None;
+                // The round trip keeps the radio alive (issue #23): the
+                // queue shows over it, and `tab` returns to the screen the
+                // radio was opened from, its place and its loaded list
+                // untouched. Its keys sleep while the queue is on screen.
+                self.tab_origin = self.radio_from;
                 self.view = View::Queue;
                 Some(Action::None)
             }
             radio::RadioOutcome::Play { url, name } => {
+                // The stream can take a while to open (S10): the status
+                // names the station now, before the player has answered.
+                // `start_stream`'s success clears the line and its failure
+                // names the error, so a stale "opening" never lingers.
+                self.status = format!("velo: opening {name}…");
                 // The station joins the queue and plays from it (T6c): the
                 // queue is edited here, and the play action goes to the
                 // shell, which builds the player the way `enter` on a queue
@@ -1900,6 +1935,10 @@ impl<'lib> App<'lib> {
     /// Runs one turn of the radio wiring (T6b): collects finished
     /// requests, starts the ones the view's place needs, saves store
     /// mutations, and reports progress and failures on the status line.
+    /// The waiting note `⟳ loading…` is written when a request starts and
+    /// cleared when the answer or the error lands (S10), so it never
+    /// sticks after the wait is over; any other status write keeps its
+    /// place and is never wiped by the clearing.
     /// Never blocks — the request runs on a worker thread and lands
     /// through a channel, the pattern the library index uses.
     fn radio_poll(&mut self) {
@@ -1911,6 +1950,8 @@ impl<'lib> App<'lib> {
             self.status = message;
         } else if wire.loading() {
             self.status = String::from("⟳ loading…");
+        } else if self.status == "⟳ loading…" {
+            self.status.clear();
         }
     }
 
@@ -2367,8 +2408,12 @@ impl<'lib> App<'lib> {
         self.draw_now_playing(frame, now);
         self.draw_header(frame, header);
         self.draw_body(frame, body);
-        // The radio view (T6a) replaces the list, not the block above it.
-        if let Some(view) = &self.radio {
+        // The radio view (T6a) replaces the list, not the block above it. It
+        // never paints over the queue (issue #23): when the round trip put
+        // the queue on screen, the queue is what the body draws.
+        if self.view != View::Queue
+            && let Some(view) = &self.radio
+        {
             view.render(frame, body, &self.theme);
         }
         self.draw_footer(frame, footer);
@@ -3589,24 +3634,30 @@ impl<'lib> App<'lib> {
         self.set_view_selection(self.view_len().saturating_sub(1));
     }
 
-    /// Switches between the library and the queue, naming the new view in the
-    /// status line so the screen says where the keys went.
+    /// The tab round trip (issue #23): from the queue, back to the screen
+    /// `tab` was pressed on; from anywhere else — the sources screen, the
+    /// library at any level, the radio at any depth — to the queue. The
+    /// status line names the queue when it arrives and is cleared when it
+    /// leaves.
     fn toggle_view(&mut self) {
-        self.view = match self.view {
-            View::Library | View::Sources => View::Queue,
-            View::Queue => View::Library,
-        };
-        match self.view {
-            View::Queue => {
-                self.queue_selected = self.queue_selected.min(self.queue.len().saturating_sub(1));
-                self.status = format!(
-                    "velo: queue, {}",
-                    plural(self.queue.len(), "track", "tracks")
-                );
-            }
-            View::Library | View::Sources => self.status.clear(),
+        if self.view == View::Queue {
+            self.view = self.tab_origin;
+        } else {
+            self.tab_origin = self.view;
+            self.view = View::Queue;
         }
-        // The tab is persisted (S3), but only when it changed.
+        if self.view == View::Queue {
+            self.queue_selected = self.queue_selected.min(self.queue.len().saturating_sub(1));
+            self.status = format!(
+                "velo: queue, {}",
+                plural(self.queue.len(), "track", "tracks")
+            );
+        } else {
+            self.status.clear();
+        }
+        // The tab is persisted (S3), but only when it changed. The sources
+        // screen is never persisted, so a round trip through it writes
+        // nothing.
         self.remember_view();
     }
 

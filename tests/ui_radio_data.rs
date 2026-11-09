@@ -9,10 +9,11 @@
 //! blocks and that opening the view costs zero requests.
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use velo::radio::client::{Client, Error, Transport};
+use velo::ui::App;
 use velo::ui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use velo::ui::radio::RadioView;
 use velo::ui::radio_data::{RadioData, RadioWire};
@@ -113,6 +114,56 @@ impl Transport for Shared {
     }
 }
 
+/// A gate the tests hold shut while they look at a request in flight:
+/// a `/stations/search` the gate holds waits inside the transport, so the
+/// request is genuinely in flight and nothing races the answer.
+struct Gate {
+    open: Mutex<bool>,
+    signal: Condvar,
+}
+
+impl Gate {
+    fn closed() -> Self {
+        Self {
+            open: Mutex::new(false),
+            signal: Condvar::new(),
+        }
+    }
+
+    fn open(&self) {
+        *self.open.lock().expect("the gate lock") = true;
+        self.signal.notify_all();
+    }
+
+    fn close(&self) {
+        *self.open.lock().expect("the gate lock") = false;
+    }
+
+    fn wait(&self) {
+        let mut open = self.open.lock().expect("the gate lock");
+        while !*open {
+            open = self.signal.wait(open).expect("the gate lock");
+        }
+    }
+}
+
+/// The canned transport with the station searches behind the gate; the
+/// index endpoints answer freely, so a test reaches a place without
+/// touching the gate.
+struct Gated {
+    canned: Arc<Canned>,
+    gate: Arc<Gate>,
+}
+
+impl Transport for Gated {
+    fn get(&self, url: &str) -> Result<String, Error> {
+        if url.contains("/stations/search") {
+            self.gate.wait();
+        }
+        self.canned.get(url)
+    }
+}
+
 /// One directory station as the wire lists it.
 fn station_json(index: usize, url: &str) -> String {
     format!(
@@ -165,12 +216,14 @@ fn press(view: &mut RadioView, code: KeyCode) {
 /// Polls until `done` sees what it waits for, the way the event loop polls
 /// the channel between keys. The worker answers in microseconds; the
 /// timeout only catches a wiring that never answers.
-fn settle(
-    data: &mut RadioData<Shared>,
+fn settle<T>(
+    data: &mut RadioData<T>,
     view: &mut RadioView,
     canned: &Canned,
     done: impl Fn(&RadioView, &Canned) -> bool,
-) {
+) where
+    T: Transport + Send + Sync + 'static,
+{
     // Waiting only for the request to be recorded races the answer: the
     // transport records the call the moment the worker thread starts, while
     // the reply still has to come back through the channel and be polled in.
@@ -828,6 +881,290 @@ fn the_no_country_section_never_requests_the_directory() {
         canned.calls().is_empty(),
         "ctrl-r in the no-country place asks for nothing, got: {:?}",
         canned.calls()
+    );
+}
+
+// ---- a place shows its own stations, never another's (T6, S9, #20) ---------
+
+#[test]
+fn coming_back_to_a_loaded_place_shows_the_cache_without_a_request() {
+    let canned = Arc::new(
+        Canned::new()
+            .countries(r#"[{"name":"Norway","iso_3166_1":"NO","stationcount":2}]"#)
+            .search(&stations_json(2)),
+    );
+    let mut data = wired(Arc::clone(&canned));
+    let mut view = data.view();
+
+    press(&mut view, KeyCode::Enter); // Browse all countries
+    settle(&mut data, &mut view, &canned, |view, _canned| {
+        !view.labels().is_empty()
+    });
+    press(&mut view, KeyCode::Enter); // Norway
+    settle(&mut data, &mut view, &canned, |view, canned| {
+        !view.labels().is_empty()
+            && canned
+                .calls()
+                .iter()
+                .any(|url| url.contains("/stations/search"))
+    });
+    assert_eq!(
+        view.labels(),
+        ["S0 [128k] · NO", "S1 [128k] · NO"],
+        "Norway shows its stations, got: {:?}",
+        view.labels()
+    );
+
+    press(&mut view, KeyCode::Esc); // back to the country index
+    assert_eq!(
+        view.place(),
+        &velo::ui::radio::Place::Countries,
+        "one esc is one level, got: {:?}",
+        view.place()
+    );
+    press(&mut view, KeyCode::Esc); // back to the top
+    assert_eq!(view.place(), &velo::ui::radio::Place::Top);
+    for label in view.labels() {
+        assert!(
+            !label.contains("S0") && !label.contains("S1"),
+            "the top lists sections, never station rows, got: {label:?}"
+        );
+    }
+
+    // Back into Norway: the cache answers again, and no second request is
+    // made for a place already loaded this session.
+    press(&mut view, KeyCode::Enter); // Browse all countries (cached)
+    press(&mut view, KeyCode::Enter); // Norway
+    settle(&mut data, &mut view, &canned, |view, canned| {
+        view.labels() == ["S0 [128k] · NO".to_owned(), "S1 [128k] · NO".to_owned()]
+            && canned.calls().len() == 2
+    });
+    assert_eq!(
+        canned
+            .calls()
+            .iter()
+            .filter(|url| url.contains("/stations/search"))
+            .count(),
+        1,
+        "coming back re-uses the cached answer, got: {:?}",
+        canned.calls()
+    );
+}
+
+// ---- a wait says so (T7, S10, #21) ------------------------------------------
+
+/// The Norway place the fixtures stand in.
+fn norway_place() -> velo::ui::radio::Place {
+    velo::ui::radio::Place::Country {
+        code: String::from("NO"),
+        name: String::from("Norway"),
+        state: String::new(),
+    }
+}
+
+#[test]
+fn entering_a_place_shows_the_waiting_fact_until_its_answer_lands() {
+    let canned = Arc::new(
+        Canned::new()
+            .countries(r#"[{"name":"Norway","iso_3166_1":"NO","stationcount":1}]"#)
+            .search(&stations_json(1)),
+    );
+    let gate = Arc::new(Gate::closed());
+    let mut data = RadioData::new(
+        Some(Client::new(Gated {
+            canned: Arc::clone(&canned),
+            gate: Arc::clone(&gate),
+        })),
+        None,
+        None,
+    );
+    let mut view = data.view();
+
+    press(&mut view, KeyCode::Enter); // Browse all countries
+    settle(&mut data, &mut view, &canned, |view, canned| {
+        !view.labels().is_empty() && canned.calls().len() == 1
+    });
+    assert_eq!(
+        view.pending_place(),
+        None,
+        "the index answered; nothing waits any more"
+    );
+
+    // Norway's search is held by the gate: the wiring says the view is
+    // waiting for exactly the place on screen.
+    press(&mut view, KeyCode::Enter); // Norway
+    data.poll(&mut view);
+    assert!(data.loading(), "the search is in flight");
+    assert_eq!(
+        view.pending_place(),
+        Some(&norway_place()),
+        "the waiting fact names the place on screen"
+    );
+    assert!(view.labels().is_empty(), "no answer yet");
+
+    // The gate opens, the answer lands, the waiting fact goes away.
+    gate.open();
+    settle(&mut data, &mut view, &canned, |view, canned| {
+        !view.labels().is_empty()
+            && canned
+                .calls()
+                .iter()
+                .any(|url| url.contains("/stations/search"))
+    });
+    assert_eq!(
+        view.pending_place(),
+        None,
+        "the answer landed; the waiting fact is gone"
+    );
+    assert!(!data.loading());
+}
+
+#[test]
+fn ctrl_r_shows_the_waiting_fact_again_and_the_answer_clears_it() {
+    let canned = Arc::new(
+        Canned::new()
+            .countries(r#"[{"name":"Norway","iso_3166_1":"NO","stationcount":1}]"#)
+            .search(&stations_json(1)),
+    );
+    let gate = Arc::new(Gate::closed());
+    let mut data = RadioData::new(
+        Some(Client::new(Gated {
+            canned: Arc::clone(&canned),
+            gate: Arc::clone(&gate),
+        })),
+        None,
+        None,
+    );
+    let mut view = data.view();
+
+    press(&mut view, KeyCode::Enter); // Browse all countries
+    settle(&mut data, &mut view, &canned, |view, _canned| {
+        !view.labels().is_empty()
+    });
+    press(&mut view, KeyCode::Enter); // Norway
+    gate.open();
+    settle(&mut data, &mut view, &canned, |view, _canned| {
+        !view.labels().is_empty()
+    });
+    assert_eq!(view.pending_place(), None, "nothing is in flight");
+
+    // The gate shut again: ctrl-r re-requests the place on screen, and the
+    // waiting fact is shown again.
+    gate.close();
+    let _ = view.key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+    data.poll(&mut view);
+    assert!(data.loading(), "the refresh is in flight");
+    assert_eq!(
+        view.pending_place(),
+        Some(&norway_place()),
+        "ctrl-r shows the waiting fact again"
+    );
+
+    gate.open();
+    settle(&mut data, &mut view, &canned, |_view, canned| {
+        canned
+            .calls()
+            .iter()
+            .filter(|url| url.contains("/stations/search"))
+            .count()
+            == 2
+    });
+    assert_eq!(
+        view.pending_place(),
+        None,
+        "the refreshed answer clears the waiting fact"
+    );
+}
+
+#[test]
+fn a_failed_request_clears_the_waiting_fact() {
+    let canned = Arc::new(Canned::new().failing());
+    let mut data = wired(Arc::clone(&canned));
+    let mut view = data.view();
+
+    press(&mut view, KeyCode::Enter); // Browse all countries
+    settle(&mut data, &mut view, &canned, |_view, canned| {
+        !canned.calls().is_empty()
+    });
+
+    assert_eq!(
+        view.pending_place(),
+        None,
+        "the error landed; the waiting fact is gone with it"
+    );
+    let message = data
+        .take_message()
+        .expect("the failure reaches the status line");
+    assert!(
+        message.contains("could not be reached"),
+        "the status names the failure, got: {message}"
+    );
+}
+
+// ---- the footer stops lying about loading (S10, #21) -----------------------
+
+#[test]
+fn the_footer_stops_saying_loading_once_the_answer_lands() {
+    let canned = Arc::new(
+        Canned::new()
+            .countries(r#"[{"name":"Norway","iso_3166_1":"NO","stationcount":1}]"#)
+            .search(&stations_json(1)),
+    );
+    let gate = Arc::new(Gate::closed());
+    let mut app = App::new(Vec::new());
+    app.set_radio_wire(Box::new(RadioData::new(
+        Some(Client::new(Gated {
+            canned: Arc::clone(&canned),
+            gate: Arc::clone(&gate),
+        })),
+        None,
+        None,
+    )));
+
+    let _ = app.on_key(KeyEvent::from(KeyCode::Char('R'))); // the radio opens over the wiring
+    let _ = app.on_key(KeyEvent::from(KeyCode::Enter)); // Browse all countries: the request starts
+    assert_eq!(
+        app.status(),
+        "⟳ loading…",
+        "the footer says loading while the request is in flight"
+    );
+
+    // The answer lands through the tick, the way the event loop collects
+    // it: the footer must stop saying loading — today it sticks.
+    gate.open();
+    for _ in 0..400 {
+        app.tick();
+        if app.status() != "⟳ loading…" {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_ne!(
+        app.status(),
+        "⟳ loading…",
+        "the answer landed; the footer must not keep saying loading"
+    );
+    assert_eq!(app.status(), "", "nothing replaced it, so it is empty");
+
+    // A place's station search says the same and stops the same way.
+    let _ = app.on_key(KeyEvent::from(KeyCode::Enter)); // Norway's stations
+    assert_eq!(
+        app.status(),
+        "⟳ loading…",
+        "the search says loading while it is held in flight"
+    );
+    gate.open();
+    for _ in 0..400 {
+        app.tick();
+        if app.status() != "⟳ loading…" {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        app.status(),
+        "",
+        "the search's answer lands, the footer clears again"
     );
 }
 

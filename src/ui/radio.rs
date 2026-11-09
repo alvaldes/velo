@@ -12,13 +12,17 @@
 //! [`RadioOutcome::Queue`], and the shell — which owns the queue and the
 //! player — carries them out (T6c).
 //!
-//! The sections, in order and only when they have content: the favourites
-//! (`★ Name [codec] · CC`) first, browse all countries, the user's own
-//! country (`Norway (near you)`) with its regions once their index is
-//! fetched (T6d), the pinned places (`★ Germany`), the stations that belong
-//! to no country, browse genres & tags, and the loaded catalog
-//! (`Name [128k] · CC`), with stations the codec filter rejects marked so
-//! the user can tell before pressing enter.
+//! The sections, in order and only when they have content: browse all
+//! countries, the user's own country (`Norway (near you)`) with its regions
+//! once their index is fetched (T6d), the pinned places (`★ Germany`), the
+//! stations that belong to no country, and browse genres & tags — and below
+//! them, behind a dotted rule that closes the list above and their own
+//! header, the favourites (`★ Name [codec] · CC`) (S5, revised in #22). Each
+//! *place* below the sections
+//! lists its own stations (`Name [128k] · CC`) and nothing else: the top is
+//! a section list and never shows station rows, and a place's answer renders
+//! only in that exact place (S9), with stations the codec filter rejects
+//! marked so the user can tell before pressing enter.
 //!
 //! Station identity is never raw string equality: marking goes through
 //! [`RadioStore`]'s toggles, which decide on [`station_key`] alone.
@@ -172,6 +176,27 @@ pub enum RowKind {
         /// The stored favourite.
         favorite: Favorite,
     },
+    /// The dotted rule that closes the list of sections above the
+    /// favourites (S5, revised in #22). Display only: no number, and the
+    /// cursor never rests on it.
+    Rule,
+    /// A section header: a title above its rows. Display only: no number,
+    /// and the cursor never rests on it.
+    Header {
+        /// The header's title.
+        title: String,
+    },
+}
+
+impl RowKind {
+    /// Whether the cursor may rest on the row and its number counts: the
+    /// dotted rule and a section header are display only — there is nothing
+    /// to act on, so the navigation never lands on them and they take no
+    /// row number (S5, #22).
+    #[must_use]
+    fn selectable(&self) -> bool {
+        !matches!(self, RowKind::Rule | RowKind::Header { .. })
+    }
 }
 
 /// One visible row: what it says, the dim fact against the right edge and
@@ -220,9 +245,20 @@ pub struct RadioView {
     /// store's `country` agree that there is one (S5). The caller resolves
     /// that once and hands the answer in.
     own_country: Option<String>,
-    /// The stations of the place or tag currently loaded — the one catalog
-    /// slot. Replaced whole by [`RadioView::set_catalog`], never merged.
+    /// The stations of the place [`Self::catalog_place`] names — the one
+    /// catalog slot. Replaced whole by [`RadioView::set_catalog`], never
+    /// merged, and dropped by every move to another place.
     catalog: Vec<Station>,
+    /// The place [`Self::catalog`] is the answer to, when one is held
+    /// (S9): its rows render only in exactly that place — code, name and
+    /// region together — never at the top, in a sibling place or in the
+    /// parent.
+    catalog_place: Option<Place>,
+    /// The place whose directory request is in flight, when one is: the
+    /// waiting fact (S10). The wiring sets it when a request starts and
+    /// clears it when the answer or the error lands, so an empty place
+    /// can say it is loading instead of that there is nothing here.
+    pending: Option<Place>,
     /// Where the view stands.
     place: Place,
     /// The places `enter` went through, most recent first: what `esc`
@@ -270,6 +306,8 @@ impl RadioView {
             tags,
             own_country,
             catalog: Vec::new(),
+            catalog_place: None,
+            pending: None,
             place: Place::Top,
             stack: Vec::new(),
             cursor: 0,
@@ -292,12 +330,33 @@ impl RadioView {
         Self::new(RadioStore::default(), Vec::new(), Vec::new(), None)
     }
 
-    /// Replaces the loaded catalog with the stations of the current place or
-    /// tag, in the order the caller loaded them. The catalog is one slot:
-    /// loading a new place replaces the old list whole.
-    pub fn set_catalog(&mut self, stations: Vec<Station>) {
+    /// Sets the catalog to the stations of `place`, in the order the
+    /// caller loaded them. The answer belongs to the place that asked
+    /// (S9): its rows render only while the view stands in exactly that
+    /// place, never at the top, in a sibling or in the parent. Entering
+    /// another place drops it ([`RadioView::open_place`]).
+    pub fn set_catalog(&mut self, place: Place, stations: Vec<Station>) {
         self.catalog = stations;
+        self.catalog_place = Some(place);
         self.clamp();
+    }
+
+    /// The place the catalog slot's answer belongs to, when one is held.
+    #[must_use]
+    pub fn catalog_place(&self) -> Option<&Place> {
+        self.catalog_place.as_ref()
+    }
+
+    /// Marks a directory request as in flight for `place`, or clears the
+    /// waiting fact with `None` when the answer or the error lands (S10).
+    pub fn set_loading(&mut self, place: Option<Place>) {
+        self.pending = place;
+    }
+
+    /// The place whose directory request is in flight, when one is (S10).
+    #[must_use]
+    pub fn pending_place(&self) -> Option<&Place> {
+        self.pending.as_ref()
     }
 
     /// Replaces the country index, as `/countries` answered (T6b). An
@@ -416,10 +475,13 @@ impl RadioView {
             .collect()
     }
 
-    /// The row the cursor stands on, if the list has one.
+    /// The row the cursor stands on, if the list has one and it is a row a
+    /// person can act on: the rule and the headers answer `None`, so
+    /// `enter`, `f` and `a` on them do nothing.
     #[must_use]
     pub fn selection(&self) -> Option<Row> {
-        self.visible_rows().into_iter().nth(self.cursor)
+        let row = self.visible_rows().into_iter().nth(self.cursor)?;
+        row.kind.selectable().then_some(row)
     }
 
     /// Applies one key press. Keys the view does not own answer
@@ -538,31 +600,63 @@ impl RadioView {
         }
     }
 
-    /// Moves the cursor down one visible row, clamped at the end.
+    /// Moves the cursor down to the next row a person can act on, skipping
+    /// the rule and the headers, and stays put past the end.
     pub fn select_next(&mut self) {
-        let last = self.visible_rows().len().saturating_sub(1);
-        self.cursor = (self.cursor + 1).min(last);
+        let rows = self.visible_rows();
+        if let Some(next) =
+            (self.cursor + 1..rows.len()).find(|&index| rows[index].kind.selectable())
+        {
+            self.cursor = next;
+        }
     }
 
-    /// Moves the cursor up one visible row, clamped at the start.
+    /// Moves the cursor up to the previous row a person can act on,
+    /// skipping the rule and the headers, and stays put before the start.
     pub fn select_prev(&mut self) {
-        self.cursor = self.cursor.saturating_sub(1);
+        let rows = self.visible_rows();
+        if let Some(previous) = (0..self.cursor.min(rows.len()))
+            .rev()
+            .find(|&index| rows[index].kind.selectable())
+        {
+            self.cursor = previous;
+        }
     }
 
-    /// Moves the cursor to the first visible row.
+    /// Moves the cursor to the first row a person can act on.
     pub fn select_first(&mut self) {
-        self.cursor = 0;
+        let rows = self.visible_rows();
+        self.cursor = (0..rows.len())
+            .find(|&index| rows[index].kind.selectable())
+            .unwrap_or(0);
     }
 
-    /// Moves the cursor to the last visible row.
+    /// Moves the cursor to the last row a person can act on.
     pub fn select_last(&mut self) {
-        self.cursor = self.visible_rows().len().saturating_sub(1);
+        let rows = self.visible_rows();
+        self.cursor = (0..rows.len())
+            .rev()
+            .find(|&index| rows[index].kind.selectable())
+            .unwrap_or(rows.len().saturating_sub(1));
     }
 
-    /// Keeps the cursor inside the visible list after its length changed.
+    /// Keeps the cursor inside the visible list after its length changed,
+    /// and off the rule and the headers: it snaps to the nearest row a
+    /// person can act on.
     fn clamp(&mut self) {
-        let last = self.visible_rows().len().saturating_sub(1);
-        self.cursor = self.cursor.min(last);
+        let rows = self.visible_rows();
+        if rows.is_empty() {
+            self.cursor = 0;
+            return;
+        }
+        self.cursor = self.cursor.min(rows.len() - 1);
+        if !rows[self.cursor].kind.selectable() {
+            let forward = (self.cursor..rows.len()).find(|&index| rows[index].kind.selectable());
+            let back = (0..self.cursor)
+                .rev()
+                .find(|&index| rows[index].kind.selectable());
+            self.cursor = forward.or(back).unwrap_or(self.cursor);
+        }
     }
 
     /// Opens the highlighted section or row: a browse row opens its index, a
@@ -595,14 +689,12 @@ impl RadioView {
             RowKind::CatalogStation { .. }
             | RowKind::AddedStation { .. }
             | RowKind::FavoriteStation { .. }
-            | RowKind::AskCountry { .. } => None,
+            | RowKind::AskCountry { .. }
+            | RowKind::Rule
+            | RowKind::Header { .. } => None,
         };
         if let Some(place) = next {
-            self.stack.push(self.place.clone());
-            self.place = place;
-            self.cursor = 0;
-            self.filter.clear();
-            self.typing = false;
+            self.open_place(place);
         }
         RadioOutcome::Handled
     }
@@ -635,6 +727,24 @@ impl RadioView {
         }
     }
 
+    /// Moves to `place` the way `enter` does: the current place goes on
+    /// the stack, the cursor and filter reset, and whatever the previous
+    /// place had loaded is dropped — a stale list can never be drawn
+    /// inside a new place (S9). A move to the place already standing does
+    /// nothing, so the stack never doubles.
+    pub fn open_place(&mut self, place: Place) {
+        if self.place == place {
+            return;
+        }
+        self.stack.push(self.place.clone());
+        self.place = place;
+        self.cursor = 0;
+        self.filter.clear();
+        self.typing = false;
+        self.catalog = Vec::new();
+        self.catalog_place = None;
+    }
+
     /// Goes back one level, restoring where `enter` came from. At the top
     /// there is nothing to go back to: the answer is `false` and the shell
     /// closes the radio.
@@ -645,6 +755,7 @@ impl RadioView {
                 self.cursor = 0;
                 self.filter.clear();
                 self.typing = false;
+                self.clamp();
                 true
             }
             None => false,
@@ -653,13 +764,7 @@ impl RadioView {
 
     /// Opens the country index from anywhere.
     pub fn open_countries(&mut self) {
-        if self.place != Place::Countries {
-            self.stack.push(self.place.clone());
-            self.place = Place::Countries;
-            self.cursor = 0;
-            self.filter.clear();
-            self.typing = false;
-        }
+        self.open_place(Place::Countries);
     }
 
     /// Opens the order overlay, cursor on the current order.
@@ -742,7 +847,9 @@ impl RadioView {
             | RowKind::BrowseTags
             | RowKind::BrowseNoCountry
             | RowKind::Tag { .. }
-            | RowKind::AskCountry { .. } => {}
+            | RowKind::AskCountry { .. }
+            | RowKind::Rule
+            | RowKind::Header { .. } => {}
         }
     }
 
@@ -789,7 +896,16 @@ impl RadioView {
                     },
                 })
                 .collect(),
-            Place::Country { .. } | Place::Tag { .. } => self.catalog_rows(),
+            Place::Country { .. } | Place::Tag { .. } => {
+                // The answer renders only in the place it belongs to
+                // (S9): before it lands, or after a stale answer for
+                // another place arrived, the place lists nothing.
+                if self.catalog_place.as_ref() == Some(&self.place) {
+                    self.catalog_rows()
+                } else {
+                    Vec::new()
+                }
+            }
             Place::NoCountry => self.no_country_rows(),
         }
     }
@@ -832,18 +948,6 @@ impl RadioView {
     /// directly, in the order the layout fixed.
     fn top_rows(&self) -> Vec<Row> {
         let mut rows = Vec::new();
-        // The favourites first (S5): the stations someone actually listens
-        // to are one keypress away instead of buried under a country. A
-        // favourite with no country also shows in its section below.
-        for favorite in &self.store.favorite {
-            rows.push(Row {
-                label: favorite_label(favorite),
-                fact: String::new(),
-                kind: RowKind::FavoriteStation {
-                    favorite: favorite.clone(),
-                },
-            });
-        }
         // The browse rows belong to the sections, not to their content:
         // the wired view shows them before the indexes load, so entering
         // one can start the load (T6b).
@@ -944,7 +1048,45 @@ impl RadioView {
                 kind: RowKind::BrowseTags,
             });
         }
-        rows.extend(self.catalog_rows());
+        // The favourites (S5, revised in #22): below the sections, behind
+        // a dotted rule that closes the list above and their own header.
+        // No favourite, no rule and no header — an empty section is not
+        // drawn, and theirs is no exception.
+        rows.extend(self.favourite_rows());
+        // No station rows here (S9): the top is a section list. A place's
+        // stations render only inside that place.
+        rows
+    }
+
+    /// The favourites' closing block (S5, revised in #22): the dotted rule,
+    /// their header, and the favourite rows. Empty when there is no
+    /// favourite, so an empty section is never drawn.
+    fn favourite_rows(&self) -> Vec<Row> {
+        let mut rows = Vec::new();
+        if self.store.favorite.is_empty() {
+            return rows;
+        }
+        rows.push(Row {
+            label: String::new(),
+            fact: String::new(),
+            kind: RowKind::Rule,
+        });
+        rows.push(Row {
+            label: "favourites".to_owned(),
+            fact: String::new(),
+            kind: RowKind::Header {
+                title: "favourites".to_owned(),
+            },
+        });
+        for favorite in &self.store.favorite {
+            rows.push(Row {
+                label: favorite_label(favorite),
+                fact: String::new(),
+                kind: RowKind::FavoriteStation {
+                    favorite: favorite.clone(),
+                },
+            });
+        }
         rows
     }
 
@@ -998,7 +1140,23 @@ impl RadioView {
                 "stations",
             ),
         };
-        (label, plural(self.visible_rows().len(), one, many))
+        let counted = self
+            .visible_rows()
+            .iter()
+            .filter(|row| row.kind.selectable())
+            .count();
+        (label, plural(counted, one, many))
+    }
+
+    /// Whether the place on screen is the one a directory request is in
+    /// flight for: an empty place then says it is loading, not that there
+    /// is nothing here (S10). The top, the two indexes and the no-country
+    /// place never say it: only a place that itself asked the directory
+    /// for stations waits in its list — the indexes' wait is the footer's
+    /// to say.
+    fn waiting_here(&self) -> bool {
+        self.pending.as_ref() == Some(&self.place)
+            && matches!(self.place, Place::Country { .. } | Place::Tag { .. })
     }
 
     /// Draws the view into `area`: the header line, the list with the
@@ -1031,27 +1189,43 @@ impl RadioView {
         if visible.is_empty() {
             let message = if self.filtering() {
                 "no station matches"
+            } else if self.waiting_here() {
+                "⟳ loading…"
             } else {
                 "no stations here"
             };
             draw_empty(frame, list_area, message, theme.dim);
         } else {
+            // The rule and the headers take no number: the numbering counts
+            // only the rows a person can act on (S5, #22).
+            let numbered = visible.iter().filter(|row| row.kind.selectable()).count();
+            let mut number = 0usize;
             let rows: Vec<ListItem<'static>> = visible
                 .iter()
-                .enumerate()
-                .map(|(index, row)| {
-                    ListItem::new(list_row(
-                        ListRow {
-                            playing: false,
-                            number: index + 1,
-                            digits: digits(visible.len()),
-                            name: row.label.clone(),
-                            note: String::new(),
-                            fact: row.fact.clone(),
-                        },
-                        list_area.width,
-                        theme,
-                    ))
+                .map(|row| match &row.kind {
+                    RowKind::Rule => ListItem::new(Line::styled(
+                        "·".repeat(usize::from(list_area.width)),
+                        Style::new().fg(theme.dim),
+                    )),
+                    RowKind::Header { title } => ListItem::new(Line::styled(
+                        title.clone(),
+                        Style::new().fg(theme.text).bold(),
+                    )),
+                    _ => {
+                        number += 1;
+                        ListItem::new(list_row(
+                            ListRow {
+                                playing: false,
+                                number,
+                                digits: digits(numbered),
+                                name: row.label.clone(),
+                                note: String::new(),
+                                fact: row.fact.clone(),
+                            },
+                            list_area.width,
+                            theme,
+                        ))
+                    }
                 })
                 .collect();
             let list = List::new(rows)

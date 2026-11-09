@@ -143,13 +143,20 @@ fn the_flat_files_list_never_shows_a_sources_screen() {
     );
 }
 
-/// `tab` switches the library and the queue; on the sources screen it is
-/// inert, because neither list is what the keys act on.
+/// S8 (issue #23): `tab` is one round trip. From the sources screen it goes
+/// to the queue, and `tab` again returns to the sources screen with its
+/// cursor exactly where it was left.
 #[test]
-fn tab_is_inert_on_the_sources_screen() {
+fn tab_from_the_sources_screen_reaches_the_queue_and_returns_to_it() {
     let mut app = app();
     app.open_sources();
+    press(&mut app, KeyCode::Char('j')); // onto Radio
+    assert_eq!(app.sources_selected(), 1);
+
+    press(&mut app, KeyCode::Tab);
+    assert_eq!(app.view(), View::Queue);
 
     press(&mut app, KeyCode::Tab);
     assert_eq!(app.view(), View::Sources);
+    assert_eq!(app.sources_selected(), 1, "the cursor is where it was left");
 }

@@ -456,6 +456,33 @@ fn tab_switches_the_view_and_the_status_names_it() {
     );
 }
 
+/// S8 (issue #23): the round trip works from inside the library too — `tab`
+/// to the queue, `tab` back, and the library is at the same level it was
+/// left at. The level itself is the proof of the round trip.
+#[test]
+fn tab_from_inside_the_library_returns_to_the_same_level() {
+    let temp = TempLibrary::new("tab-round-trip");
+    temp.write_wav("Tide/2019 - Harbor/01 - Dawn.wav");
+    temp.index();
+
+    let mut app = App::browse(Some(&temp.library));
+    assert_eq!(app.on_key(key(KeyCode::Enter)), Action::Descend);
+    app.apply(Action::Descend); // the albums of Tide
+
+    app.on_key(key(KeyCode::Tab));
+    assert_eq!(app.view(), View::Queue);
+
+    app.on_key(key(KeyCode::Tab));
+    assert_eq!(app.view(), View::Library);
+    assert_eq!(
+        app.level(),
+        Some(Level::Albums {
+            artist: "Tide".to_owned()
+        }),
+        "the library is at the level it was left at"
+    );
+}
+
 #[test]
 fn enter_in_the_queue_view_plays_from_the_queue_selection() {
     let mut app = app_with_a_queue_of_three();
