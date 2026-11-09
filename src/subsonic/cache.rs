@@ -44,6 +44,7 @@
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
@@ -400,6 +401,86 @@ impl<T: Transport + Send + Sync> CoverArt for SubsonicResolver<T> {
         self.covers
             .ensure(cover_id, || self.client.cover_art_bytes(cover_id))
             .ok()
+    }
+}
+
+/// Whether `path` is an absolute `http(s)://` URL: a remote song row from a
+/// configured radio channel (cliamp S2) — neither a local file nor a
+/// `subsonic://` row.
+#[must_use]
+pub fn is_remote_url(path: &Path) -> bool {
+    path.to_str().is_some_and(|text| {
+        let lower = text.to_ascii_lowercase();
+        lower.starts_with("http://") || lower.starts_with("https://")
+    })
+}
+
+/// A transport handed to the remote-song resolver by value: `Arc<T>` keeps
+/// the test's counting handle beside the resolver, the way the `&T` impl
+/// lets the Subsonic client's tests borrow theirs.
+impl<T: Transport + ?Sized> Transport for Arc<T> {
+    fn get(&self, url: &str) -> Result<Vec<u8>, Error> {
+        (**self).get(url)
+    }
+}
+
+/// The player's resolver for remote song URLs (cliamp S2, S3 — the human's
+/// decision: cache like Subsonic, reusing the resolver). An `http(s)://`
+/// queue entry — a configured radio channel's song — downloads into the same
+/// track cache a Subsonic server's songs use (a hit costs no network, a miss
+/// downloads once) and resolves to that file, so seek, gapless and
+/// `ReplayGain` behave as they do for any local file, and `--cache-clean`
+/// cleans what it writes. Every other entry follows the wrapped resolver —
+/// the configured server's own, whatever its disposition — or, without one,
+/// passes through untouched.
+pub struct RemoteResolver<T> {
+    transport: T,
+    cache: Cache,
+    /// Where every non-remote path goes: the server's own resolver when one
+    /// is configured, or a plain pass-through.
+    fallback: Option<Arc<dyn PathResolver>>,
+}
+
+impl<T: Transport> RemoteResolver<T> {
+    /// A resolver over one transport and the shared track cache.
+    #[must_use]
+    pub fn new(transport: T, cache: Cache, fallback: Option<Arc<dyn PathResolver>>) -> Self {
+        Self {
+            transport,
+            cache,
+            fallback,
+        }
+    }
+
+    /// The cached file of `path` when it is a remote URL, `None` for any
+    /// other entry.
+    ///
+    /// # Errors
+    ///
+    /// When a remote URL cannot be fetched or stored: the producer announces
+    /// the failure and the queue keeps going (T19).
+    pub fn resolve_remote(&self, path: &Path) -> Result<Option<PathBuf>, AudioError> {
+        if !is_remote_url(path) {
+            return Ok(None);
+        }
+        // `is_remote_url` saw the text, so it is there and it is a URL.
+        let url = path.to_str().unwrap_or_default();
+        self.cache
+            .ensure(url, || self.transport.get(url))
+            .map(Some)
+            .map_err(|error| as_audio_error(&error))
+    }
+}
+
+impl<T: Transport + Send + Sync> PathResolver for RemoteResolver<T> {
+    fn resolve(&self, path: &Path) -> Result<PathBuf, AudioError> {
+        if let Some(resolved) = self.resolve_remote(path)? {
+            return Ok(resolved);
+        }
+        match &self.fallback {
+            Some(resolver) => resolver.resolve(path),
+            None => Ok(path.to_path_buf()),
+        }
     }
 }
 

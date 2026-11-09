@@ -705,3 +705,229 @@ fn a_body_cut_mid_stream_never_panics_or_hangs() {
         "the cut took {elapsed:?}; the stream hung instead of ending"
     );
 }
+
+// ------------------------------------------------------------------ expansion (cliamp S1)
+
+/// A m3u channel of songs, the way the live service lists them: an
+/// `#EXTINF` line naming `Artist - Title` and one entry per song, absolute
+/// and relative mixed, plus a comment the parser must skip.
+fn channel_m3u(base: &str) -> Vec<u8> {
+    format!(
+        "#EXTM3U\r\n\
+         #EXTINF:-1,Alice - First\r\n\
+         {base}/channel/songs/a\r\n\
+         #EXTINF:-1,Bob - Second\r\n\
+         /channel/songs/b\r\n\
+         #EXTINF:-1,Cara - Third\r\n\
+         songs/c\r\n"
+    )
+    .into_bytes()
+}
+
+#[test]
+fn a_multi_entry_wrapper_expands_to_its_songs_in_wrapper_order() {
+    let server = CountingServer::start(|base| {
+        vec![
+            (
+                "/channel.m3u".to_owned(),
+                String::from("Content-Type: audio/x-mpegurl\r\n"),
+                channel_m3u(base),
+            ),
+            ("/channel/songs/a".to_owned(), String::new(), b"a".to_vec()),
+            ("/channel/songs/b".to_owned(), String::new(), b"b".to_vec()),
+            ("/songs/c".to_owned(), String::new(), b"c".to_vec()),
+        ]
+    });
+
+    let expansion =
+        stream::expand(&server.url("/channel.m3u"), wrapper_timeouts()).expect("it expands");
+
+    let base = server.url("");
+    assert_eq!(
+        expansion,
+        stream::Expansion::Songs(vec![
+            format!("{base}/channel/songs/a"),
+            format!("{base}/channel/songs/b"),
+            // A directory-relative entry joins the wrapper's own directory:
+            // the wrapper is at the root here, so `songs/c` sits beside it.
+            format!("{base}/songs/c"),
+        ]),
+        "one absolute URL per entry, in the wrapper's order, relatives resolved"
+    );
+    // Expanding decides from the wrapper alone: no song is fetched here —
+    // the cache fetches a song when the producer reaches it.
+    CountingServer::settle();
+    assert_eq!(
+        server.paths(),
+        vec!["/channel.m3u".to_owned()],
+        "only the wrapper was fetched"
+    );
+}
+
+#[test]
+fn a_pls_with_several_entries_expands_to_them_in_order() {
+    let server = CountingServer::start(|base| {
+        vec![(
+            "/channel.pls".to_owned(),
+            String::new(),
+            format!(
+                "[playlist]\r\nFile1={base}/channel/songs/b\r\nFile2={base}/channel/songs/a\r\n"
+            )
+            .into_bytes(),
+        )]
+    });
+
+    let expansion =
+        stream::expand(&server.url("/channel.pls"), wrapper_timeouts()).expect("it expands");
+    let base = server.url("");
+    assert_eq!(
+        expansion,
+        stream::Expansion::Songs(vec![
+            format!("{base}/channel/songs/b"),
+            format!("{base}/channel/songs/a"),
+        ]),
+        "a PLS's entries sort by their File<n> number"
+    );
+}
+
+#[test]
+fn a_one_entry_wrapper_plays_live() {
+    let server = CountingServer::start(|base| {
+        vec![(
+            "/one.m3u".to_owned(),
+            String::new(),
+            format!("#EXTM3U\r\n{base}/stream\r\n").into_bytes(),
+        )]
+    });
+
+    let expansion =
+        stream::expand(&server.url("/one.m3u"), wrapper_timeouts()).expect("one entry is live");
+    assert_eq!(
+        expansion,
+        stream::Expansion::Live,
+        "a wrapper with one entry is a station, not a song list (cliamp S1)"
+    );
+}
+
+#[test]
+fn a_plain_stream_url_is_not_a_song_list() {
+    let plain = std::fs::read(fixture()).expect("the fixture is readable");
+    let (url, _requests) = served(ok_head("", plain.len()), plain);
+
+    let expansion = stream::expand(&url, wrapper_timeouts()).expect("audio is live");
+    assert_eq!(expansion, stream::Expansion::Live);
+}
+
+#[test]
+fn a_wrapper_with_no_song_entry_is_refused_with_its_reason() {
+    let server = CountingServer::start(|_| {
+        vec![(
+            "/empty.m3u".to_owned(),
+            String::new(),
+            b"#EXTM3U\r\n#EXTINF:-1,named but never listed\r\n".to_vec(),
+        )]
+    });
+
+    let error = stream::expand(&server.url("/empty.m3u"), wrapper_timeouts())
+        .expect_err("nothing to open as songs and nothing to play live");
+    assert!(
+        error.to_string().contains("no song entry"),
+        "the refusal names the reason, got: {error}"
+    );
+}
+
+#[test]
+fn an_unreachable_channel_is_refused_with_its_reason() {
+    let url = served_silently();
+    let error = stream::expand(&url, wrapper_timeouts())
+        .expect_err("a station that never answers is a refusal, not a hang");
+    assert!(
+        matches!(error, StreamError::Unreachable { .. }),
+        "got: {error}"
+    );
+}
+
+#[test]
+fn a_channel_that_answers_an_error_status_is_refused() {
+    let server = CountingServer::start(|_| Vec::new()); // every route 404s
+
+    let error =
+        stream::expand(&server.url("/gone.m3u"), wrapper_timeouts()).expect_err("404 is a refusal");
+    assert_eq!(error, StreamError::BadStatus { status: 404 });
+}
+
+#[test]
+fn an_hls_manifest_is_refused_as_its_own_thing() {
+    let server = CountingServer::start(|_| {
+        vec![(
+            "/live.m3u8".to_owned(),
+            String::new(),
+            b"#EXTM3U\r\n#EXT-X-TARGETDURATION:10\r\n#EXTINF:10,\r\nseg-1.ts\r\n".to_vec(),
+        )]
+    });
+
+    let error =
+        stream::expand(&server.url("/live.m3u8"), wrapper_timeouts()).expect_err("HLS is refused");
+    assert_eq!(error, StreamError::Hls);
+}
+
+#[test]
+fn a_wrapper_larger_than_the_inspection_cap_still_expands_whole() {
+    // The stream open inspects at most 16 KiB before deciding; a channel
+    // with enough songs to pass that cap must still expand completely —
+    // no entry cut in half by the inspection.
+    let padding = "#EXTM3U\r\n".to_owned()
+        + &"# a comment line padding the wrapper past the inspection cap\r\n".repeat(300);
+    let body = padding
+        + "#EXTINF:-1,Alice - Late\r\n/channel/songs/late\r\n#EXTINF:-1,Bob - Later\r\n/channel/songs/later\r\n";
+    assert!(
+        body.len() > 16 * 1024,
+        "the wrapper must actually pass the 16 KiB cap"
+    );
+    let server = CountingServer::start(move |_| {
+        vec![("/big.m3u".to_owned(), String::new(), body.into_bytes())]
+    });
+
+    let expansion =
+        stream::expand(&server.url("/big.m3u"), wrapper_timeouts()).expect("it expands");
+    let base = server.url("");
+    assert_eq!(
+        expansion,
+        stream::Expansion::Songs(vec![
+            format!("{base}/channel/songs/late"),
+            format!("{base}/channel/songs/later"),
+        ]),
+        "the songs past the cap are resolved whole, in order"
+    );
+}
+
+#[test]
+fn a_directory_relative_entry_joins_the_wrappers_own_directory() {
+    // The wrapper sits in a directory of its own (`/lofi/tracks.m3u`), so a
+    // relative entry resolves against that directory — `../` climbs out of
+    // it, `./` and repeated slashes do not move it.
+    let server = CountingServer::start(|base| {
+        let body = format!(
+            "#EXTM3U\r\n{base}/shared/absolute\r\ntracks/late\r\n./tracks/dotted\r\n../shared/up\r\n"
+        );
+        vec![(
+            "/lofi/tracks.m3u".to_owned(),
+            String::new(),
+            body.into_bytes(),
+        )]
+    });
+
+    let expansion =
+        stream::expand(&server.url("/lofi/tracks.m3u"), wrapper_timeouts()).expect("it expands");
+    let base = server.url("");
+    assert_eq!(
+        expansion,
+        stream::Expansion::Songs(vec![
+            format!("{base}/shared/absolute"),
+            format!("{base}/lofi/tracks/late"),
+            format!("{base}/lofi/tracks/dotted"),
+            format!("{base}/shared/up"),
+        ]),
+        "relative entries resolve against the wrapper's directory, `..` climbs"
+    );
+}

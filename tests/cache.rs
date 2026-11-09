@@ -17,7 +17,7 @@ use std::time::{Duration, SystemTime};
 use velo::audio::output::{Entry, PathResolver, drain_headless_resolving};
 use velo::audio::{AudioError, TrackSpec};
 use velo::subsonic::Error;
-use velo::subsonic::cache::{Cache, SubsonicResolver, Unconfigured, cache_dir};
+use velo::subsonic::cache::{Cache, RemoteResolver, SubsonicResolver, Unconfigured, cache_dir};
 use velo::subsonic::client::{Auth, Client, Transport};
 
 // ------------------------------------------------------------- infrastructure
@@ -711,4 +711,181 @@ fn a_file_entry_round_trips_through_the_queue_and_resolves_once_per_start() {
     );
     assert_eq!(heard, as_f32(&pcm), "the entry played the file it named");
     assert!(failures.is_empty(), "nothing was skipped: {failures:?}");
+}
+
+// ------------------------------------------------- remote songs (cliamp S2, S3)
+
+/// A transport that serves canned bodies for any URL and records the URLs it
+/// was asked for: the remote-song resolver speaks plain `http(s)`, so the
+/// stream-endpoint shape [`Counting`] asserts does not apply here.
+struct Serving {
+    bodies: Mutex<Vec<(String, Vec<u8>)>>,
+    calls: AtomicUsize,
+}
+
+impl Serving {
+    fn with(bodies: &[(&str, &[u8])]) -> Self {
+        Self {
+            bodies: Mutex::new(
+                bodies
+                    .iter()
+                    .map(|(url, body)| ((*url).to_owned(), body.to_vec()))
+                    .collect(),
+            ),
+            calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+impl Transport for Serving {
+    fn get(&self, url: &str) -> Result<Vec<u8>, Error> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let mut bodies = self.bodies.lock().unwrap();
+        if let Some(index) = bodies.iter().position(|(known, _)| known == url) {
+            return Ok(bodies.remove(index).1);
+        }
+        Err(Error::Unreachable {
+            detail: format!("no canned body for {url}"),
+        })
+    }
+}
+
+/// A remote song URL caches into the same track cache a Subsonic server's
+/// songs use: one download, then hits, one stable file (cliamp S2, S3).
+#[test]
+fn a_remote_song_url_caches_through_the_track_cache() {
+    let dir = temp_dir("remote-song");
+    let serving = Arc::new(Serving::with(&[(
+        "https://radio.example/lofi/tracks/a",
+        b"song-audio".as_slice(),
+    )]));
+    let resolver = RemoteResolver::new(
+        Arc::clone(&serving) as Arc<dyn Transport + Send + Sync>,
+        Cache::new(dir.clone()),
+        None,
+    );
+
+    let first = resolver
+        .resolve(Path::new("https://radio.example/lofi/tracks/a"))
+        .expect("the first resolve downloads");
+    let second = resolver
+        .resolve(Path::new("https://radio.example/lofi/tracks/a"))
+        .expect("the second resolve hits the cache");
+    assert_eq!(first, second, "one song, one cached file");
+    assert!(
+        first.starts_with(&dir),
+        "the song lives in the same cache root --cache-clean cleans"
+    );
+    assert_eq!(fs::read(&first).unwrap(), b"song-audio");
+    assert_eq!(serving.calls(), 1, "the hit needed no network");
+}
+
+/// A local file passes the remote-song resolver untouched, and never costs a
+/// request.
+#[test]
+fn a_local_file_passes_through_the_remote_song_resolver() {
+    let serving = Arc::new(Serving::with(&[]));
+    let resolver = RemoteResolver::new(
+        Arc::clone(&serving) as Arc<dyn Transport + Send + Sync>,
+        Cache::new(temp_dir("remote-pass")),
+        None,
+    );
+    let local = Path::new("/music/Library/Artist/01 - Here.wav");
+    assert_eq!(resolver.resolve(local).unwrap(), local.to_path_buf());
+    assert_eq!(serving.calls(), 0, "no request for a local file");
+}
+
+/// Everything that is not a remote URL follows the wrapped resolver: a
+/// `subsonic://` row gets the configured server's own disposition, here the
+/// credential refusal.
+#[test]
+fn a_subsonic_row_follows_the_wrapped_resolver() {
+    let serving = Arc::new(Serving::with(&[]));
+    let resolver = RemoteResolver::new(
+        Arc::clone(&serving) as Arc<dyn Transport + Send + Sync>,
+        Cache::new(temp_dir("remote-fallback")),
+        Some(Arc::new(Unconfigured::new("no credentials".to_owned())) as Arc<dyn PathResolver>),
+    );
+    let error = resolver
+        .resolve(Path::new("subsonic://music.example.com/s-1"))
+        .unwrap_err();
+    assert!(error.to_string().contains("no credentials"), "got: {error}");
+    assert_eq!(serving.calls(), 0);
+}
+
+/// A remote URL whose download fails is the error the producer announces and
+/// skips past — the queue keeps going (T19's rule, remote songs included).
+#[test]
+fn a_failed_remote_download_is_the_producers_skip_error() {
+    let resolver = RemoteResolver::new(
+        Arc::new(Serving::with(&[])) as Arc<dyn Transport + Send + Sync>,
+        Cache::new(temp_dir("remote-dead")),
+        None,
+    );
+    let error = resolver
+        .resolve(Path::new("https://radio.example/lofi/tracks/gone"))
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("could not be reached"),
+        "the sentence names the reason, got: {error}"
+    );
+}
+
+/// A configured channel's song plays as an ordinary file (cliamp S2, S4):
+/// the `https://…` queue entry resolves through the remote-song cache, the
+/// producer opens the cached file, and the queue continues to the next
+/// entry — seek, gapless and the file's own duration come with it for free,
+/// because the producer opens a file either way.
+#[test]
+fn a_remote_song_entry_drains_through_the_cache_as_an_ordinary_file() {
+    let dir = temp_dir("remote-drain");
+    let local = dir.join("local.wav");
+    let local_pcm: Vec<i16> = (0..2_000)
+        .map(|frame| i16::try_from(frame % 600 + 90).expect("in range"))
+        .collect();
+    write_wav(&local, SPEC, &local_pcm);
+
+    let serving = Arc::new(Serving::with(&[(
+        "https://radio.example/lofi/tracks/a",
+        fs::read(&local).unwrap().as_slice(),
+    )]));
+    let resolver = RemoteResolver::new(
+        Arc::clone(&serving) as Arc<dyn Transport + Send + Sync>,
+        Cache::new(temp_dir("remote-drain-cache")),
+        None,
+    );
+
+    let queue = Arc::new(Mutex::new(vec![
+        Entry::File(PathBuf::from("https://radio.example/lofi/tracks/a")),
+        Entry::File(local.clone()),
+    ]));
+    let mut heard: Vec<f32> = Vec::new();
+    let mut failures: Vec<velo::audio::output::TrackFailure> = Vec::new();
+    drain_headless_resolving(
+        queue,
+        0,
+        0,
+        SPEC,
+        velo::config::ReplayGainMode::default(),
+        Some(Arc::new(resolver)),
+        &std::sync::atomic::AtomicBool::new(false),
+        &mut |block| heard.extend_from_slice(block),
+        &mut |failure| failures.push(failure),
+    )
+    .expect("the sequence drains");
+
+    assert_eq!(
+        heard,
+        [as_f32(&local_pcm), as_f32(&local_pcm)].concat(),
+        "the cached song's bytes, then the local file's, back to back"
+    );
+    assert!(
+        failures.is_empty(),
+        "nothing had to be skipped: {failures:?}"
+    );
+    assert_eq!(serving.calls(), 1, "the cache fetched the song once");
 }

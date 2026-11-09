@@ -59,6 +59,10 @@ station with no songs.
 |:--|:--|:--|:--|:--|
 | T1 | S2, S3, S5 | parent | expand a multi-entry wrapper into a finite list when a configured station opens; rows and playback as tracks; the refusal line | |
 | T2 | S1, S4 | parent | the live/finite distinction pinned end to end (transport, queue, marker) and the docs | |
+| T1.1 | S1, S2, S5 | worker | `stream::expand` — one fetch, the decision in `expansion_for`: a multi-entry wrapper (relative entries resolved against the wrapper's own URL) expands, one entry or plain audio stays live, no songs / unreachable / bad status / HLS are refusals | |
+| T1.2 | S2, S3 | worker | the resolver branch: `RemoteResolver` wraps the session's resolver; an `http(s)://` entry caches into the same track cache (cap and `--cache-clean` unchanged) and resolves to that file; identity stays the URL | |
+| T1.3 | S1, S4, S5, S6 | worker | the shell: `RadioOutcome::Play` carries `configured`; `play_station` opens the songs as `Entry::File` rows, refuses with one line, or plays live exactly as before | |
+| T2.1 | S1, S4, S6 | worker | the distinction pinned: the queue row of a song never reads `● live`, the station row beside it does; the transport seams (open vs resolve) untouched; docs | |
 
 ## Live re-check (2026-11-09, authorized by the human)
 
@@ -87,6 +91,46 @@ Verified against the running service, not the note: no credential anywhere.
 - **Whether the songs list is one level or a queue**: settled by the note — "playlist de
   archivos finitos", so a level whose `enter` plays from that row onwards, like an album.
 
+## Slices
+
+One pass, and deliberately small: no new source, no new dependency, no
+hardcoded host (S1). The three pieces are the resolver branch (`expand` in
+`src/radio/stream.rs`), the cache branch (`RemoteResolver` in
+`src/subsonic/cache.rs`, composed with the session's resolver in the binary)
+and the shell wiring (`RadioOutcome::Play.configured` → `play_station`). The
+"level" the songs open as is the queue itself: one `Entry::File` row per
+song, and the queue's `enter` plays from a row onwards, the way an album
+does — no new `Place` was needed, and the radio view's own places are
+untouched.
+
+Decisions beyond the brief, each taken for the smallest honest slice:
+
+- **Which stations resolve.** Only rows the user wrote into `radio.toml` — a
+  hand-added `[[station]]` or a favourite. Directory stations always play
+  live through the untouched open path (S6): no extra fetch, no behavior
+  change. The rule is still service-agnostic — it keys on the fetched body,
+  never on a host.
+- **The `a` verb does not resolve.** It queues the station itself, so the
+  queue's semantics are exactly #17's (a station in the queue reads
+  `● live`); the resolution happens where the station *opens*.
+- **An unreachable URL is a refusal, not a live attempt.** The shell asks
+  once; `Unreachable`, a non-200 answer, HLS and a wrapper with no song
+  entry are one status line naming the station and the reason, and nothing
+  is queued (S5). Only a body that stalls before its first bytes — an
+  audio-shaped stall the wrapper question cannot answer — falls through to
+  the live path, which reports it as it always has.
+- **Wrapper bodies are read whole** (bounded at 4 MiB past the 16 KiB
+  inspection cap) once they sniff as a wrapper, so no entry is cut in half
+  by the cap that keeps audio bodies cheap to inspect.
+- **Row labels are the URLs.** `Entry::File` carries no title field, and
+  `audio/output.rs` was out of scope, so the `#EXTINF` names are not
+  carried into the queue rows; the queue shows the song's URL, which is its
+  identity (S3) anyway. Extending `Entry` with a display name is the
+  natural next slice.
+- **Resolution cost.** A configured station pays one probe fetch per play
+  (the wrapper, or the first 16 KiB of a stream). A session cache of the
+  verdict per station key would remove the repeat cost; not taken now.
+
 ## Log
 
 **L1** — the issue: "A second radio source beside the Radio Browser directory, so `Radio`
@@ -96,3 +140,15 @@ which the issue itself makes authoritative.
 **L2** — user, when asked whether the vault note could be read and the live service
 re-verified: "Sí a las dos: la nota y la red", and "si la nota contradice el issue, gana la
 nota". Hence S1: the channels arrive as configuration, never as a shipped source.
+
+**L3** — worker, one-pass delivery of T1/T2. The human's decision quoted at lane start
+("Cachear como Subsonic (reusar el resolver)") is implemented literally: the resolver
+the player already uses gained one branch — an `http(s)://` queue entry caches into
+the same track cache (same cap, same `--cache-clean`) and opens as a file, so seek,
+gapless and ReplayGain are the file path's own (S2), and identity stays the URL
+everywhere (S3). Nothing cliamp ships (S1): the channel exists only because the user
+wrote it in `radio.toml`, and the rule keys on the fetched body alone. Decisions
+beyond the brief are listed under `## Slices` above; the one the next lane should
+revisit is the queue row's label — the `#EXTINF` titles are dropped because
+`Entry::File` carries no display name and `audio/output.rs` was out of scope, so rows
+show the song's URL.

@@ -2148,6 +2148,16 @@ impl<'lib> App<'lib> {
         });
     }
 
+    /// Queues one remote song entry (cliamp S4), the queue edit an expanded
+    /// channel makes: the entry is the song's URL as a file row, its identity
+    /// (S3). Production queues through [`App::play_station`]; a test cannot
+    /// call that with a real resolution, so this stands in for the edit
+    /// alone. Hidden from the docs.
+    #[doc(hidden)]
+    pub fn queue_song_for_tests(&mut self, url: &str) {
+        self.edit_queue(|queue| queue.push(Entry::File(PathBuf::from(url))));
+    }
+
     /// Runs once per turn of the event loop — the same cadence as key
     /// polling — so the producer's announcements surface without a key
     /// press, the cover art follows the track it plays (T8), and the server
@@ -2976,7 +2986,22 @@ impl<'lib> App<'lib> {
                 self.view = View::Queue;
                 Some(Action::None)
             }
-            radio::RadioOutcome::Play { url, name } => Some(self.play_station(url, name)),
+            radio::RadioOutcome::Play {
+                url,
+                name,
+                configured,
+            } => {
+                // A configured station's URL is resolved before anything is
+                // queued (cliamp S1): a multi-entry wrapper opens as the
+                // songs it lists, a wrapper that cannot be expanded is one
+                // refusal line, and anything else plays live as before.
+                let expansion = if configured {
+                    crate::radio::stream::expand(&url, crate::radio::stream::Timeouts::default())
+                } else {
+                    Ok(crate::radio::stream::Expansion::Live)
+                };
+                Some(self.play_station(url, name, expansion))
+            }
             radio::RadioOutcome::Queue { url, name } => {
                 self.queue_station(url, name);
                 Some(Action::None)
@@ -2994,12 +3019,46 @@ impl<'lib> App<'lib> {
     /// the shell, which builds the player the way `enter` on a queue row
     /// does (T6c). The queue edit is shared with the radio view's queue
     /// verb — and, since issue #33, with the `Recently played` screen.
-    fn play_station(&mut self, url: String, name: String) -> Action {
+    ///
+    /// `expansion` is the configured station's URL resolution (cliamp S1,
+    /// computed by the caller so the tests can inject it): a multi-entry
+    /// wrapper opens as the songs it lists — one file row per entry, in the
+    /// wrapper's order, each playable and seekable as a track, its identity
+    /// the song's `https://…` URL and never a cache path (S3) — a refusal
+    /// is one status line naming the station and the reason, with nothing
+    /// queued (S5), and anything else plays live exactly as before (S6).
+    fn play_station(
+        &mut self,
+        url: String,
+        name: String,
+        expansion: Result<crate::radio::stream::Expansion, crate::radio::stream::StreamError>,
+    ) -> Action {
         // The stream can take a while to open (S10): the status names the
         // station now, before the player has answered. `start_stream`'s
         // success clears the line and its failure names the error, so a
         // stale "opening" never lingers.
         self.status = format!("velo: opening {name}…");
+        match expansion {
+            Ok(crate::radio::stream::Expansion::Songs(songs)) => {
+                let from = self.queue.len();
+                self.edit_queue(|queue| {
+                    queue.extend(
+                        songs
+                            .into_iter()
+                            .map(|song| Entry::File(PathBuf::from(song))),
+                    );
+                });
+                return Action::PlayQueue { from };
+            }
+            // A wrapper that cannot be expanded (cliamp S5): one status line
+            // naming the station and the reason, and nothing queued — never
+            // an empty screen that looks like a station with no songs.
+            Err(error) => {
+                self.status = format!("velo: {name}: {error}");
+                return Action::None;
+            }
+            Ok(crate::radio::stream::Expansion::Live) => {}
+        }
         self.edit_queue(|queue| queue.push(Entry::Station { url, name }));
         let from = self.queue.len() - 1;
         Action::PlayQueue { from }
@@ -3203,7 +3262,14 @@ impl<'lib> App<'lib> {
                     return Action::None;
                 };
                 if entry.is_station() {
-                    self.play_station(entry.path, entry.title.unwrap_or_default())
+                    // A station in the history plays live (S6): the
+                    // resolution that opens a channel's songs belongs to the
+                    // radio view's configured rows.
+                    self.play_station(
+                        entry.path,
+                        entry.title.unwrap_or_default(),
+                        Ok(crate::radio::stream::Expansion::Live),
+                    )
                 } else {
                     play
                 }
@@ -6857,6 +6923,84 @@ mod tests {
         assert_eq!(filled(Some(1.0), 10), 10);
         assert_eq!(filled(Some(0.5), 10), 5);
         assert_eq!(filled(None, 10), 0);
+    }
+
+    // The station-play wiring of cliamp S1–S3, S5, S6, with the URL
+    // resolution injected: a real one would speak to the network, which no
+    // test does.
+
+    use crate::radio::stream::{Expansion, StreamError};
+
+    /// The queue's paths as strings, asserting on the way: every entry a
+    /// song opens as must be a file row, never a station.
+    fn queue_paths(app: &App<'_>) -> Vec<String> {
+        app.queue
+            .iter()
+            .map(|entry| match entry {
+                Entry::File(path) => path.to_string_lossy().into_owned(),
+                Entry::Station { .. } => {
+                    panic!("a song opens as a track, never as a station row: {entry:?}")
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_channel_of_songs_opens_as_one_file_row_per_song_in_wrapper_order() {
+        let mut app = App::new(Vec::new());
+        let songs = vec![
+            "https://radio.example/lofi/tracks/a".to_owned(),
+            "https://radio.example/lofi/tracks/b".to_owned(),
+            "https://radio.example/lofi/tracks/c".to_owned(),
+        ];
+        let action = app.play_station(
+            "https://radio.example/lofi/tracks.m3u".to_owned(),
+            "Lofi".to_owned(),
+            Ok(Expansion::Songs(songs.clone())),
+        );
+        assert_eq!(action, super::Action::PlayQueue { from: 0 });
+        // Identity is the URL (S3): the row's path is the song's `https://…`
+        // URL, never a cache path — the cache resolves it when it plays.
+        assert_eq!(queue_paths(&app), songs, "one row per song, in order");
+    }
+
+    #[test]
+    fn a_wrapper_that_cannot_expand_is_one_refusal_line_and_nothing_queued() {
+        let mut app = App::new(Vec::new());
+        let action = app.play_station(
+            "https://radio.example/lofi/tracks.m3u".to_owned(),
+            "Lofi".to_owned(),
+            Err(StreamError::NotAudio {
+                detail: "the wrapper playlist carries no song entry".to_owned(),
+            }),
+        );
+        assert_eq!(action, super::Action::None);
+        assert!(app.queue.is_empty(), "nothing was queued");
+        assert_eq!(
+            app.status,
+            "velo: Lofi: the station body is not audio: the wrapper playlist \
+             carries no song entry",
+            "one line naming the station and the reason (S5)"
+        );
+    }
+
+    #[test]
+    fn a_station_that_resolves_to_live_plays_live_exactly_as_before() {
+        let mut app = App::new(Vec::new());
+        let action = app.play_station(
+            "https://stream.example/nova".to_owned(),
+            "Nova".to_owned(),
+            Ok(Expansion::Live),
+        );
+        assert_eq!(action, super::Action::PlayQueue { from: 0 });
+        assert_eq!(
+            app.queue,
+            vec![Entry::Station {
+                url: "https://stream.example/nova".to_owned(),
+                name: "Nova".to_owned(),
+            }],
+            "the live path is untouched (S6)"
+        );
     }
 
     /// The cover switch decides before the terminal's capability and the

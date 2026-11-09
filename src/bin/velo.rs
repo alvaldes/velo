@@ -13,8 +13,10 @@ use velo::audio::{Player, TrackSource};
 use velo::config::{self, Cli, Command, Config, HistoryAction, PlaylistAction, Settings};
 use velo::library::Library;
 use velo::subsonic;
-use velo::subsonic::cache::{Cache, CoverArt, SubsonicResolver, Unconfigured, cache_dir};
-use velo::subsonic::client::{Auth, Client, HttpTransport};
+use velo::subsonic::cache::{
+    Cache, CoverArt, RemoteResolver, SubsonicResolver, Unconfigured, cache_dir,
+};
+use velo::subsonic::client::{Auth, Client, HttpTransport, Transport};
 use velo::subsonic::scrobble::{Scrobbler, Scrobbles};
 use velo::ui::indexing::Indexer;
 use velo::ui::{Action, App, MONO_WITH_BIT_PERFECT_REFUSED, artwork, crossterm};
@@ -169,6 +171,27 @@ fn subsonic_seams(
     xdg_cache_home: Option<&OsStr>,
     home: Option<&OsStr>,
 ) -> SubsonicSeams {
+    // The track cache both a server's songs and a radio channel's songs
+    // share (cliamp S2): `--cache-clean` cleans what either writes.
+    let shared_cache = || {
+        cache_dir(xdg_cache_home, home).map(|dir| Cache::new(dir).with_cap(Cache::TRACK_CACHE_CAP))
+    };
+    // Wraps the server's own resolver disposition with the remote-song cache
+    // (cliamp S2): an `http(s)://` row — a configured radio channel's song —
+    // caches and plays as a file, everything else follows the disposition.
+    // Without a cache directory or a transport there is nothing to wrap, and
+    // the disposition stands as it is.
+    let with_remote = |fallback: Option<Arc<dyn PathResolver>>| -> Option<Arc<dyn PathResolver>> {
+        let (Some(transport), Some(cache)) = (HttpTransport::new(false).ok(), shared_cache())
+        else {
+            return fallback;
+        };
+        Some(Arc::new(RemoteResolver::new(
+            Arc::new(transport) as Arc<dyn Transport + Send + Sync>,
+            cache,
+            fallback,
+        )))
+    };
     let without = |resolver: Option<Arc<dyn PathResolver>>| SubsonicSeams {
         resolver,
         covers: None,
@@ -176,7 +199,9 @@ fn subsonic_seams(
         warnings: Vec::new(),
     };
     let Some(server) = &settings.subsonic else {
-        return without(None);
+        // No server: a radio channel's songs still cache through the same
+        // track cache (cliamp S2), and local files pass through.
+        return without(with_remote(None));
     };
     let credentials = match subsonic::credentials::resolve(
         &server.url,
@@ -187,14 +212,20 @@ fn subsonic_seams(
         home,
     ) {
         Ok(credentials) => credentials,
-        Err(error) => return without(Some(Arc::new(Unconfigured::new(error.to_string())))),
+        Err(error) => {
+            return without(with_remote(Some(Arc::new(Unconfigured::new(
+                error.to_string(),
+            )))));
+        }
     };
     let transport = match HttpTransport::new(server.insecure) {
         Ok(transport) => transport,
         Err(error) => {
             // HttpTransport::new never fails today; if it ever does,
             // the sentence still reaches the skip path.
-            return without(Some(Arc::new(Unconfigured::new(error.to_string()))));
+            return without(with_remote(Some(Arc::new(Unconfigured::new(
+                error.to_string(),
+            )))));
         }
     };
     let Some(cache) =
@@ -202,9 +233,9 @@ fn subsonic_seams(
     else {
         // With no place for the caches there is nothing a remote track can
         // resolve to; the same sentence path as unconfigured credentials.
-        return without(Some(Arc::new(Unconfigured::new(
+        return without(with_remote(Some(Arc::new(Unconfigured::new(
             "no cache directory — neither XDG_CACHE_HOME nor HOME is usable".to_owned(),
-        ))));
+        )))));
     };
     let client = Client::new(
         transport.clone(),
@@ -217,8 +248,8 @@ fn subsonic_seams(
         },
     );
     let source = velo::library::source_for(&credentials.url);
-    let resolver = Arc::new(SubsonicResolver::new(client, source, cache));
-    let covers: Arc<dyn CoverArt> = Arc::clone(&resolver) as Arc<dyn CoverArt>;
+    let subsonic = Arc::new(SubsonicResolver::new(client, source, cache));
+    let covers: Arc<dyn CoverArt> = Arc::clone(&subsonic) as Arc<dyn CoverArt>;
     // The scrobbler speaks to the same server over the same pool, from its
     // own client: it fires from background threads, never from a tick's path
     // back into the player (T12d).
@@ -231,7 +262,7 @@ fn subsonic_seams(
         },
     ));
     SubsonicSeams {
-        resolver: Some(resolver),
+        resolver: with_remote(Some(subsonic as Arc<dyn PathResolver>)),
         covers: Some(covers),
         scrobbler: Some(Arc::new(scrobbler)),
         warnings: credentials.warnings,
