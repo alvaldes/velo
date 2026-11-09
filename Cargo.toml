@@ -1,6 +1,6 @@
 [package]
 name = "velo"
-version = "0.30.3"
+version = "0.31.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"

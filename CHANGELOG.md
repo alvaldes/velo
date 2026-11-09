@@ -1,6 +1,10 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.31.0] - 2026-11-09
+
+### Features
+- **ui:** Lists wrap at their ends, except the queue
 ## [0.30.3] - 2026-11-09
 
 ### Fixes
