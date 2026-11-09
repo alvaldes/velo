@@ -10,6 +10,27 @@ Quoted verbatim from issue #3 (github.com/alvaldes/velo/issues/3).
 - **S3** "The library's current views become what sits *inside* `Local library`."
 - **S4** "Entering `Radio` shows the stations view, which today has countries, the home country's regions, genres and tags, and the directory's catalogue. It should also have a section for stations that belong to no country — an independent station of our own is the case in mind — so that \"radio\" is not only \"radio in a country\"."
 - **S5** "**Favourites get their own section at the top of the radio view**, so the stations someone actually listens to are one keypress away instead of buried under a country."
+  **Revised the same day (#22), by the human:** the favourites go **below** the sections,
+  under their own header and a dotted rule that closes the list above them. Verbatim:
+  "En source hay que separar fav del resto. arriba lo normal y abajo favs con su header y
+  una ....... que delimite".
+- **S8** (issue #23) `tab` is one round trip: from `Sources`, the library at any level, or
+  the radio view at any depth it goes to the queue; from the queue it returns to exactly
+  the screen and state you left, the radio keeping its place and its loaded list. Verbatim:
+  "de la cola regreso al estado donde yo estaba, que es el source, ya sea que esté dentro
+  de una estación, dentro de un país o dentro de un género o cualquier otra fuente de
+  radio".
+- **S9** (issue #20) a screen lists what it is: categories list categories, a place lists
+  its own stations or says it is loading, and no child or sibling place's rows survive into
+  a parent. The library must keep answering the same way. Verbatim: "al entrar a uno de
+  estos browse y que carguen la lista de estaciones al regresar se muestran las estaciones
+  junto a lo de esa pagina y eso no debe pasar. las categorias muestran categorisas no
+  estaciones. si me explico? igual revisa en librari local porque esto tampoco puede pasar
+  ahi".
+- **S10** (issue #21) a wait says so: a directory request and a live station opening both
+  show progress, and the message goes away when the answer lands. Verbatim: "cuando entre a
+  por ejemplo a browse ... debe mostrar cargando para que el usuario vea que se esta
+  haciendo algo. Igual cuando se reproduce una radio que tarda un tin en cargar".
 - **S6** "`esc` walks back one level at a time and lands on `Sources`, so the way out of any screen is the way in."
 - **S7** "Once a source is chosen, nothing about its own keys changes: the library keys stay the library's, the radio keys stay the radio's."
 
@@ -29,6 +50,10 @@ Quoted verbatim from issue #3 (github.com/alvaldes/velo/issues/3).
 | T2 | S4 S5 | worker B | `src/ui/radio.rs`, `src/ui/radio_data.rs`, `tests/ui_radio.rs`, `tests/ui_radio_data.rs` | `17bc33e` — slice 2, 337 lines |
 | T3 | S1–S7 | parent | `README.md`, `odd/tasks/sources-view.md` | `docs: document the sources view and the new radio order` — slice 3 |
 | T4 | all | parent | — | verification: fmt, clippy, 648 tests, independent pass |
+| T5 | S8 (#23) | worker | `src/ui/mod.rs`, `tests/ui_sources.rs`, `tests/ui_state.rs`, `tests/ui_radio.rs` | `feat(ui): tab is a round trip to the queue and back` |
+| T6 | S9 (#20) | worker | `src/ui/radio.rs`, `src/ui/radio_data.rs`, `tests/ui_radio.rs`, `tests/ui_radio_data.rs` | `fix(radio): a place shows its own stations, never another's` |
+| T7 | S10 (#21) | worker | `src/ui/radio.rs`, `src/ui/mod.rs`, `tests/ui_radio.rs`, `tests/ui_radio_data.rs` | `feat(ui): a request and a live stream say they are working` |
+| T8 | S5 (#22) | worker | `src/ui/radio.rs`, `src/ui/radio_data.rs`, `tests/ui_radio.rs` | `feat(radio): favourites below the sections, behind a header` |
 
 ## Log
 
@@ -73,3 +98,45 @@ order (`17bc33e`, 337), because they are independent of each other — the radio
 never learns about sources — so a reviewer can take them apart. 799 authored lines in
 total, past the ~400-line slice on purpose and disclosed: the split is two commits, and
 the pull-request split is the human's to choose (one PR with both, or one per commit).
+
+**L4 — the human used it, and found four things. Verbatim.**
+
+> con tab ya no se pasa de library a queue sino de source a queue.
+> En source hay que separar fav del resto. arriba lo normal y abajo favs con su header y
+> una ....... que delimite
+> en source todo tiene su ventana o vista no se mescla. en radio cuando entre a por ejemplo
+> a browse ... debe mostrar cargando para que el usuario vea que se esta haciendo algo.
+> Igual cuando se reproduce una radio que tarda un tin en cargar.
+> Otro detalle es que al entrar a uno de estos browse y que carguen la lista de estaciones
+> al regresar se muestran las estaciones junto a lo de esa pagina y eso no debe pasar. las
+> categorias muestran categorisas no estaciones. si me explico?
+> igual revisa en librari local porque esto tampoco puede pasar ahi.
+
+And on the key, the correction that turned a bug report into a requirement:
+
+> El hecho es mejor donde yo estaba. El hecho es que ahora el tab sigue llevando a Q. Q
+> solamente va a tener vistas locales, pero la otra parte que lleva el tab ya no va a ser
+> al library, va a ser al solus, pero ese solus igual mantiene el estado de donde estaba
+> antes, en el que renuevo a la cola, y de la cola regreso al estado donde yo estaba, que
+> es el source, ya sea que esté dentro de una estación, dentro de un país o dentro de un
+> género o cualquier otra fuente de radio.
+
+**What reproduction said, before any of it was touched** (four claims, read from the
+source at `4b801cf` plus one new commit):
+
+1. **`tab` on `Sources` did not reproduce as "jumps to the queue"**: `sources_key` absorbs
+   `Tab` and `tab_is_inert_on_the_sources_screen` passes. The report was a requirement, not
+   a defect — hence #23 and S8, which *replaces* the inert behaviour.
+2. **The mixing reproduces** (#20, S9): one `catalog` slot (`radio.rs:225`) is rendered by
+   `Place::Country | Tag` (`radio.rs:792`), never cleared on `enter`/`back`, `set_catalog`
+   never called empty, and `radio_data.rs:402-404` re-injects a cached list on every build.
+3. **Loading partly reproduces** (#21, S10): `⟳ loading…` exists in the footer
+   (`mod.rs:1905-1914`) but is never cleared, the list area shows stale rows or
+   `no stations here`, and a live stream publishes nothing until Ok/Err because
+   `PlayState` has no connecting state (`mod.rs:277-281`).
+4. **The library cannot reproduce it** — each level owns its vector (`mod.rs:3332-3341`,
+   `2856-2871`), `descend` writes the child into that level's slot and ascent reads no new
+   data. That mechanism is what the radio lacks, and it is the model for T6.
+5. **Sections have no structure to separate with**: `Row` is `{ label, fact, kind }`, there
+   is no header or separator variant, and the renderer draws every row identically
+   (`radio.rs:1044-1065`). T8 needs that concept, not just a reorder.
