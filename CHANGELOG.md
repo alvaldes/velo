@@ -1,6 +1,10 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.29.0] - 2026-11-09
+
+### Features
+- **playlists:** Import and export .m3u and .pls
 ## [0.28.0] - 2026-11-09
 
 ### Features
