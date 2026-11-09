@@ -1,6 +1,13 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.14.0] - 2026-11-09
+
+### Features
+- **ui:** The volume has a one-point gear between the five-point steps
+
+### Fixes
+- **ui:** The help card covers the radio view it is opened over
 ## [0.13.0] - 2026-11-09
 
 ### Features
