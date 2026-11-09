@@ -591,3 +591,48 @@ fn a_corrupt_history_file_is_reported_not_ignored() {
 
     let _ = std::fs::remove_dir_all(&home);
 }
+
+// ---------------------------------------------------------- mono (issue #8)
+
+#[test]
+fn the_mono_flag_parses_and_defaults_to_off() {
+    let cli = Cli::try_parse_from(["velo", "--mono", "/a.flac"])
+        .unwrap_or_else(|error| panic!("parse failed: {error}"));
+    assert!(cli.mono);
+
+    let cli = Cli::try_parse_from(["velo", "/a.flac"])
+        .unwrap_or_else(|error| panic!("parse failed: {error}"));
+    assert!(!cli.mono, "without --mono the session starts in stereo");
+}
+
+#[test]
+fn mono_with_bit_perfect_is_refused_at_startup() {
+    // `bit_perfect = true` in the config: one line on stderr, exit 1, and
+    // nothing plays. The file below does not exist, so reaching it would mean
+    // the check did not fire first.
+    let home = temp_home("mono-bit-perfect");
+    let config = home.join(".config").join("velo");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(config.join("config.toml"), "bit_perfect = true\n").unwrap();
+    let (code, stderr) = run_in(&home, &["--mono", "--play", "/no/such/velo-mono.wav"]);
+    assert_eq!(code, 1, "stderr: {stderr}");
+    assert_eq!(
+        stderr, "velo: --mono cannot be combined with bit_perfect\n",
+        "exactly one line on stderr: {stderr:?}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn mono_without_bit_perfect_gets_past_the_startup_check() {
+    // The differential: the same invocation without `bit_perfect` never
+    // mentions the refusal — it fails later, on the file it was asked to open.
+    let home = temp_home("mono-bit-perfect-off");
+    let (code, stderr) = run_in(&home, &["--mono", "--play", "/no/such/velo-mono.wav"]);
+    assert_eq!(code, 1, "stderr: {stderr}");
+    assert!(
+        !stderr.contains("bit_perfect"),
+        "the refusal is bit-perfect's alone: {stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}

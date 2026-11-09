@@ -60,6 +60,11 @@ pub const NO_LIBRARY_OR_SERVER_MESSAGE: &str = "velo: no library and no server c
     `library` in the config file (or run velo --library <PATH>), or add a \
     [subsonic] server and run velo --sync";
 
+/// What mono and bit-perfect playback say about each other (issue #8, S3):
+/// one sentence — at startup, on stderr, and in the status line when `M` is
+/// pressed under bit-perfect. Never applied silently.
+pub const MONO_WITH_BIT_PERFECT_REFUSED: &str = "velo: --mono cannot be combined with bit_perfect";
+
 /// What one key press asks the runtime to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -91,6 +96,9 @@ pub enum Action {
     ToggleShuffle,
     /// What follows the end of a track from now on.
     SetRepeat(Repeat),
+    /// Fold the mix down to mono — or back out of it — for the rest of the
+    /// session (issue #8, S2). Never persisted.
+    ToggleMono,
     /// Check the path typed into the library prompt; save and index it when
     /// it is a directory, otherwise say why in the prompt.
     SetLibrary,
@@ -548,6 +556,10 @@ pub struct App<'lib> {
     /// Whether playback is bit-perfect (T17): the volume is pinned to 100%
     /// and `ReplayGain` is skipped, both explained once in the status line.
     bit_perfect: bool,
+    /// Whether the mono downmix is in force (issue #8, S2): a session
+    /// setting, toggled by `M`, never persisted. It travels to the producer
+    /// through the player's shared cell.
+    mono: bool,
     /// Whether the bit-perfect volume pinning has been explained already, so
     /// the status line says it once, not once per volume key press.
     bit_perfect_volume_said: bool,
@@ -633,6 +645,7 @@ impl<'lib> App<'lib> {
             refresh: Refresh::default(),
             bit_perfect: false,
             bit_perfect_volume_said: false,
+            mono: false,
             volume: 100,
             state: PlayState::Stopped,
             player: None,
@@ -707,6 +720,7 @@ impl<'lib> App<'lib> {
             refresh: Refresh::default(),
             bit_perfect: false,
             bit_perfect_volume_said: false,
+            mono: false,
             volume: 100,
             state: PlayState::Stopped,
             player: None,
@@ -790,6 +804,19 @@ impl<'lib> App<'lib> {
             self.set_replay_gain(self.replay_gain);
             self.set_volume(100);
         }
+    }
+
+    /// Starts the session in mono (issue #8, S2), from `--mono`. The launch
+    /// has already refused the combination with bit-perfect, so this never
+    /// has to negotiate with it.
+    pub fn set_mono(&mut self, mono: bool) {
+        self.mono = mono;
+    }
+
+    /// Whether the mono downmix is in force.
+    #[must_use]
+    pub const fn mono(&self) -> bool {
+        self.mono
     }
 
     /// The palette the interface draws with, from the config's `[theme]` (S4):
@@ -2099,6 +2126,10 @@ impl<'lib> App<'lib> {
             KeyCode::Char('n') => Action::Next,
             KeyCode::Char('p') => Action::Previous,
             KeyCode::Char('s') => Action::ToggleShuffle,
+            // The mono downmix (issue #8, S2): a session setting, `M` on and
+            // off. The refusal under bit-perfect lives in `apply`, with the
+            // rest of the answers.
+            KeyCode::Char('M') => Action::ToggleMono,
             // The library can be set again at any time (library-refresh T1);
             // the files given on the command line have none to set.
             KeyCode::Char('L') if !matches!(self.position, Position::Files) => {
@@ -2398,6 +2429,7 @@ impl<'lib> App<'lib> {
             Action::Next => self.skip(true),
             Action::Previous => self.skip(false),
             Action::ToggleShuffle => self.toggle_shuffle(),
+            Action::ToggleMono => self.toggle_mono(),
             Action::SetRepeat(mode) => {
                 if let Some(player) = &self.player {
                     player.set_repeat(mode);
@@ -4622,6 +4654,7 @@ impl<'lib> App<'lib> {
             Duration::ZERO,
             self.replay_gain,
             self.repeat,
+            self.mono,
             self.bit_perfect,
             self.resolver.clone(),
         ) {
@@ -4756,6 +4789,7 @@ impl<'lib> App<'lib> {
             offset,
             self.replay_gain,
             self.repeat,
+            self.mono,
             self.bit_perfect,
             self.resolver.clone(),
         ) {
@@ -4787,6 +4821,22 @@ impl<'lib> App<'lib> {
                 self.state = PlayState::Playing;
             }
             _ => {}
+        }
+    }
+
+    /// Toggles the mono downmix for the session (issue #8, S2): both channels
+    /// carry the average of the mix until `M` is pressed again. Nothing is
+    /// persisted. With bit-perfect on it is refused in the status line and
+    /// mono stays off (S3): the downmix scales samples, which is exactly what
+    /// bit-perfect refuses.
+    fn toggle_mono(&mut self) {
+        if self.bit_perfect {
+            self.note(MONO_WITH_BIT_PERFECT_REFUSED);
+            return;
+        }
+        self.mono = !self.mono;
+        if let Some(player) = &self.player {
+            player.set_mono(self.mono);
         }
     }
 
@@ -5177,7 +5227,7 @@ fn mmss(duration: Duration) -> String {
 }
 
 /// Every row of the help card: the key, then what it does.
-const HELP_ROWS: [(&str, &str); 32] = [
+const HELP_ROWS: [(&str, &str); 33] = [
     ("j / Down", "move down"),
     ("k / Up", "move up"),
     ("g", "first track"),
@@ -5195,6 +5245,7 @@ const HELP_ROWS: [(&str, &str); 32] = [
     ("n / p", "next / previous track"),
     ("s", "shuffle what is left of the queue"),
     ("r", "repeat: off, all, one"),
+    ("M", "mono: both channels carry the average of the mix"),
     ("+ / -", "volume up / down; [ / ] a point at a time"),
     ("?", "toggle this help"),
     ("o", "settings"),

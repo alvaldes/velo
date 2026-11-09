@@ -57,6 +57,7 @@ Every key below is what the code does today.
 | `n` / `p` | Next track / previous track — `p` restarts a track already 3 s in |
 | `s` | Shuffle what is left of the queue; again to put it back in order |
 | `r` | Repeat: off → all (the queue again) → one (the track again) |
+| `M` | Mono: both output channels carry the average of the mix — `(left + right) / 2`, never the sum, so the peak does not grow — applied after ReplayGain, before the samples reach the device, and toggled without restarting the stream. Refused while `bit_perfect` is on: the status line says so |
 | `L` | Set the library folder: the same prompt as the first run, at any time |
 | `u` | Refresh the library index in the background; the title bar shows `⟳ indexing…` until it ends and the lists reload |
 | `+` / `-` | Volume up / down, 5% at a time; `[` / `]` move it a single point for the levels in between |
@@ -488,7 +489,7 @@ server is reported as unreachable — never as a credential problem.
 | Code | Meaning |
 |:--|:--|
 | `0` | Success, including `--help` |
-| `1` | A missing file, a missing library root, a non-interactive terminal, or a playback error |
+| `1` | A missing file, a missing library root, a non-interactive terminal, a playback error, or `--mono` together with `bit_perfect` in the config |
 | `2` | A usage error, or a config file that cannot be read or parsed |
 
 When `replay_gain` is `track` or `album`, every track's ReplayGain tags are
@@ -497,6 +498,14 @@ protection: a track that declares its own peak is never pushed past full scale.
 Tracks without usable tags play unchanged; a wrong tag value is ignored rather
 than misapplied. To fill those tags in from a measurement, see
 `--replaygain-scan` above.
+
+Mono folds the mix into both channels as their average — `(left + right) / 2`,
+never a sum, so the peak does not grow. `velo --mono` starts a session that way
+and `M` toggles it while playing, without restarting the stream; it is a step
+in the sample path after ReplayGain is applied, and it is refused while
+`bit_perfect` is on — one line at startup, or the status line on `M` — instead
+of being quietly applied. Nothing about it is persisted: the setting dies with
+the session.
 
 ## Not yet
 
