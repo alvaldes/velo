@@ -37,6 +37,11 @@ use crate::ui::{BrowseBy, View};
 /// The volume the player has always started at (T3 kept it at full).
 pub const DEFAULT_VOLUME: u8 = 100;
 
+/// The Radio Browser host the directory asks through when the config names
+/// none (issue #14): the community's published round-robin across its
+/// mirrors, not one mirror's box.
+pub const DEFAULT_RADIO_HOST: &str = "all.api.radio-browser.info";
+
 /// The way `ReplayGain` is applied (T11, S15): `track` is the default, `album`
 /// prefers the album tags and falls back to the track tags, `off` applies
 /// nothing. serde's own unknown-variant error is the strictness the config
@@ -232,6 +237,10 @@ pub struct Config {
     /// table exists. `url` and `user` are required inside it.
     #[serde(default)]
     pub subsonic: Option<SubsonicFile>,
+    /// `[radio]` — the Radio Browser directory host (issue #14), when the
+    /// table exists. `host` is optional inside it.
+    #[serde(default)]
+    pub radio: Option<RadioFile>,
 }
 
 impl Config {
@@ -605,6 +614,29 @@ pub fn config_path(xdg_config_home: Option<&OsStr>, home: Option<&OsStr>) -> Opt
     })
 }
 
+/// The Radio Browser host the directory asks through: `host` in the
+/// `[radio]` table of the config file at `path`, else [`DEFAULT_RADIO_HOST`]
+/// (issue #14).
+///
+/// Never fails: the host is read when the radio view opens, long after the
+/// launch already rejected broken files, so a missing path, an unreadable
+/// file or a broken one yields the default — a file broken since then must
+/// not empty the directory.
+#[must_use]
+pub fn radio_host_from(config_path: Option<&Path>) -> String {
+    let Some(path) = config_path else {
+        return DEFAULT_RADIO_HOST.to_owned();
+    };
+    let Ok(text) = fs::read_to_string(path) else {
+        return DEFAULT_RADIO_HOST.to_owned();
+    };
+    toml::from_str::<Config>(&text)
+        .ok()
+        .and_then(|config| config.radio)
+        .and_then(|radio| radio.host)
+        .unwrap_or_else(|| DEFAULT_RADIO_HOST.to_owned())
+}
+
 /// The config file velo writes when there is none: every key at its default,
 /// each under a short comment. `library` has no default that suits everyone,
 /// so it is written commented out — "not in the file" — and the interface
@@ -667,6 +699,11 @@ top_bar = true
 advisories = true
 # The numbers 1–4 before the library view names in the header.
 view_numbers = true
+
+# The Radio Browser directory host: a bare name, no scheme, no path. Unset,
+# velo asks the community's round-robin across the directory's mirrors.
+# [radio]
+# host = \"all.api.radio-browser.info\"
 
 # A Subsonic-compatible server (Navidrome and friends), optional. Uncomment
 # the table to browse a remote server; `velo --subsonic-test` checks it and
@@ -1088,6 +1125,16 @@ where
     }
 
     deserializer.deserialize_i64(VolumeVisitor).map(Some)
+}
+
+/// The serde shape of the `[radio]` table: the same keys and nothing else.
+/// `host` is a bare host name — no scheme, no path — and an absent table,
+/// or a table without `host`, means [`DEFAULT_RADIO_HOST`] (issue #14).
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RadioFile {
+    #[serde(default)]
+    host: Option<String>,
 }
 
 /// The serde shape of the `[subsonic]` table: the same keys and nothing

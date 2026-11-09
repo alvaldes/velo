@@ -10,7 +10,7 @@
 
 use std::cell::RefCell;
 
-use velo::radio::client::{self, Client, Error, Order, StationSearch, Transport};
+use velo::radio::client::{self, Client, Error, HttpTransport, Order, StationSearch, Transport};
 use velo::radio::directory::{
     is_playable_codec, is_playable_station, loadable_stations, refusal, refusal_for,
     refusal_tag_for,
@@ -47,7 +47,27 @@ impl Transport for Recorder {
     }
 }
 
-const BASE: &str = "https://de1.api.radio-browser.info/json";
+/// A transport that never answers: the failure's one-line text is what the
+/// tests read back. Tests never touch the network.
+struct Refusing;
+
+impl Transport for Refusing {
+    fn get(&self, _url: &str) -> Result<String, Error> {
+        Err(Error::Unreachable {
+            detail: "connection refused".to_owned(),
+        })
+    }
+}
+
+const BASE: &str = "https://all.api.radio-browser.info/json";
+
+/// The host the default client asks: the community's published round-robin
+/// across the directory's mirrors (issue #14).
+const DEFAULT_HOST: &str = "all.api.radio-browser.info";
+
+/// The host a `[radio] host` in the config names, for the tests that pin
+/// every request going to the configured one.
+const CONFIGURED_HOST: &str = "de1.api.radio-browser.info";
 
 /// Two real-shaped stations with every field the contract names plus the
 /// unknown fields the API actually sends (ignored, never an error).
@@ -206,11 +226,150 @@ fn offset_and_limit_override_the_defaults() {
     );
 }
 
+// --- The user agent -------------------------------------------------------
+
 #[test]
 fn the_user_agent_is_velo_and_the_crate_version() {
     assert_eq!(
         client::USER_AGENT,
         concat!("velo/", env!("CARGO_PKG_VERSION"))
+    );
+}
+
+#[test]
+fn the_default_host_is_the_community_round_robin() {
+    // The client built with no host asks the community's round-robin name,
+    // never one mirror's box (issue #14).
+    let recorder = Recorder::serving("[]");
+    let client = Client::new(recorder);
+    let _ = client.countries().expect("countries parse");
+    assert!(
+        client
+            .transport
+            .last_url()
+            .starts_with(&format!("https://{DEFAULT_HOST}/json/"))
+    );
+}
+
+#[test]
+fn a_failure_names_the_host_it_tried() {
+    // The status line says which host the request went to, not just that
+    // the network failed (issue #14). One line, the host first.
+    let error = Client::new(Refusing).countries().unwrap_err().to_string();
+    assert_eq!(
+        error,
+        format!("{DEFAULT_HOST} could not be reached: connection refused")
+    );
+}
+
+#[test]
+fn a_configured_host_is_what_every_request_goes_to() {
+    // Every endpoint is built from the one host the config names: the
+    // search, the three indexes, all under the same base (issue #14).
+    let recorder = Recorder::serving("[]");
+    let client = Client::with_host(recorder, CONFIGURED_HOST);
+
+    let search = StationSearch::default();
+    let _ = client.search_stations(&search);
+    assert_eq!(
+        client.transport.last_url(),
+        format!(
+            "https://{CONFIGURED_HOST}/json/stations/search\
+?limit=200&offset=0&order=votes&reverse=true&hidebroken=true"
+        )
+    );
+
+    let _ = client.states("NO").expect("states parse");
+    assert_eq!(
+        client.transport.last_url(),
+        format!("https://{CONFIGURED_HOST}/json/states/NO/")
+    );
+
+    let _ = client.tags().expect("tags parse");
+    assert_eq!(
+        client.transport.last_url(),
+        format!(
+            "https://{CONFIGURED_HOST}/json/tags?order=stationcount\
+&reverse=true&hidebroken=true&limit=100000"
+        )
+    );
+
+    let _ = client.countries().expect("countries parse");
+    assert_eq!(
+        client.transport.last_url(),
+        format!("https://{CONFIGURED_HOST}/json/countries")
+    );
+}
+
+#[test]
+fn a_configured_failure_names_the_configured_host() {
+    let client = Client::with_host(Refusing, CONFIGURED_HOST);
+    let error = client
+        .search_stations(&StationSearch::default())
+        .unwrap_err()
+        .to_string();
+    assert_eq!(
+        error,
+        format!("{CONFIGURED_HOST} could not be reached: connection refused")
+    );
+}
+
+/// One local HTTP round trip: the request bytes come back from a
+/// `std::net::TcpListener` on `127.0.0.1:0`, the same seam
+/// `tests/radio_stream.rs` speaks through. No external network.
+fn served_request() -> String {
+    use std::io::{Read as _, Write as _};
+    use std::net::TcpListener;
+    use std::thread;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let port = listener.local_addr().expect("an address").port();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("one request");
+        let mut request = String::new();
+        let mut buffer = [0u8; 1024];
+        loop {
+            let read = stream.read(&mut buffer).expect("read the request");
+            if read == 0 {
+                break;
+            }
+            request.push_str(&String::from_utf8_lossy(&buffer[..read]));
+            if request.contains("\r\n\r\n") {
+                break;
+            }
+        }
+        let body = "[]";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream
+            .write_all(response.as_bytes())
+            .expect("answer the request");
+        request
+    });
+
+    let transport = HttpTransport::new().expect("the transport builds");
+    let body = transport
+        .get(&format!("http://127.0.0.1:{port}/json/countries"))
+        .expect("the local server answers");
+    assert_eq!(body, "[]");
+    server.join().expect("the server thread ends")
+}
+
+#[test]
+fn http_transport_sends_the_user_agent_on_every_request() {
+    let request = served_request();
+    // ureq normalizes header names to lower case on the wire; the value is
+    // what matters, and it must be the descriptive one verbatim.
+    let lower = request.to_ascii_lowercase();
+    assert!(
+        lower.contains(&format!("user-agent: {}", client::USER_AGENT)),
+        "the request must carry the descriptive User-Agent, got:\n{request}"
+    );
+    assert!(
+        request.starts_with("GET /json/countries"),
+        "the request must be the directory path, got:\n{request}"
     );
 }
 

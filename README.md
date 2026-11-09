@@ -144,7 +144,10 @@ From `Sources`, choose `Radio` — or press `R` anywhere — for internet radio:
 [Radio Browser](https://www.radio-browser.info/)
 directory — about 58,000 stations across 241 countries — plus the stations you add
 yourself. It is a source beside your library and your Subsonic servers, not a
-replacement for either.
+replacement for either. The directory's host is configurable — a `host` in a
+`[radio]` table in the config file, a bare name with no scheme and no path —
+and defaults to the community's round-robin across its mirrors,
+`all.api.radio-browser.info`, so no single mirror's outage empties the view.
 
 The sections come first: the country browser, your home country with its regions,
 your pinned places, the **stations without a country** — the ones you added by hand
@@ -262,6 +265,7 @@ alone.
 | `library` | The root folder to index and browse: an absolute path, `~/...` (your home) or a path relative to the directory velo starts in | none — written commented out (`# library = "~/Music"`) |
 | `bit_perfect` | Decoder samples reach the device unmodified: no resampling, no ReplayGain, and the volume is pinned to 100%. A track at another rate reopens the device at its own rate (a small gap at that boundary); channel layouts still map; when the device has no such output, velo falls back to converting and says so once | `false` |
 | `replay_gain` | ReplayGain mode: `track` (use the track's own gain), `album` (album gain, falling back to the track's), or `off` | `track` |
+| `[radio]` | The internet radio directory's host: `host`, a bare name — no scheme, no path — to pin one Radio Browser mirror | `all.api.radio-browser.info` — the community's round-robin across its mirrors |
 
 ### `[state]` — where the next launch begins
 

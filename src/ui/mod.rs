@@ -931,7 +931,12 @@ impl<'lib> App<'lib> {
                 .config_file
                 .as_ref()
                 .map(|config| config.with_file_name("radio.toml"));
-            Box::new(radio_data::RadioData::open(store_path))
+            Box::new({
+                // The host the config names, else the community's
+                // round-robin — decided here and nowhere else (issue #14).
+                let host = crate::config::radio_host_from(self.config_file.as_deref());
+                radio_data::RadioData::open(store_path, &host)
+            })
         });
         self.radio_from = self.view;
         self.radio = Some(wire.view());
