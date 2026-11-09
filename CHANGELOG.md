@@ -1,6 +1,10 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.28.0] - 2026-11-09
+
+### Features
+- **power:** A low-power mode, and the media keys reach velo
 ## [0.27.0] - 2026-11-09
 
 ### Features
