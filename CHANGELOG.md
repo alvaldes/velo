@@ -1,6 +1,20 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.13.0] - 2026-11-09
+
+### Features
+- **radio:** A station that cannot play says why and can be reported
+- **radio:** The refusal note names the key that reports it
+
+### Fixes
+- **radio:** Mark a station that cannot play wherever it appears
+- **radio:** The star comes before the cross
+- **radio:** Mark the station that is playing, wherever it is listed
+- **config:** Retire the recorded tab that no longer opens a screen
+
+### Documentation
+- The status line gives the reason in a couple of words, and names i
 ## [0.12.0] - 2026-11-09
 
 ### Features
