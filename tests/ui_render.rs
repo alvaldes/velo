@@ -1768,3 +1768,19 @@ fn hiding_the_cover_from_the_card_removes_its_columns_on_the_next_frame() {
         "the block's text starts at the left edge: no cover columns, got: {title}"
     );
 }
+
+#[test]
+fn the_seek_prompt_card_shows_what_was_typed() {
+    let mut app = App::new(tracks(&["one.flac", "two.flac", "three.flac"]));
+    for code in [':', '1', ':', '2'] {
+        app.on_key(KeyEvent::from(KeyCode::Char(code)));
+    }
+
+    let screen = screen_at(&app, 80, 24);
+    for expected in ["Jump to where?", "1:20", "enter jump"] {
+        assert!(
+            screen.contains(expected),
+            "the seek card must show {expected:?} while it is open"
+        );
+    }
+}

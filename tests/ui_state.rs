@@ -2552,3 +2552,116 @@ fn a_launch_with_only_a_subsonic_server_asks_for_no_folder() {
     );
     assert_eq!(app.status(), "");
 }
+
+#[test]
+fn the_second_seek_gear_moves_thirty_seconds_and_the_plain_keys_keep_five() {
+    let mut app = app_with_three_tracks();
+
+    assert_eq!(
+        app.on_key(key(KeyCode::Left)),
+        Action::Seek { delta_secs: -5 }
+    );
+    assert_eq!(
+        app.on_key(key(KeyCode::Right)),
+        Action::Seek { delta_secs: 5 }
+    );
+    assert_eq!(
+        app.on_key(key(KeyCode::Char(','))),
+        Action::Seek { delta_secs: -5 }
+    );
+    assert_eq!(
+        app.on_key(key(KeyCode::Char('.'))),
+        Action::Seek { delta_secs: 5 }
+    );
+
+    // Shift on an arrow is a modifier a terminal reports, so the coarse gear
+    // rides on the same key.
+    let shift_left = KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT);
+    let shift_right = KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT);
+    assert_eq!(app.on_key(shift_left), Action::Seek { delta_secs: -30 });
+    assert_eq!(app.on_key(shift_right), Action::Seek { delta_secs: 30 });
+
+    // A character key arrives already shifted, so the pair shift produces
+    // carries the coarse gear for the comma keys.
+    assert_eq!(
+        app.on_key(key(KeyCode::Char('<'))),
+        Action::Seek { delta_secs: -30 }
+    );
+    assert_eq!(
+        app.on_key(key(KeyCode::Char('>'))),
+        Action::Seek { delta_secs: 30 }
+    );
+}
+
+// ---- the seek prompt (issue #6) ------------------------------------------
+
+#[test]
+fn parse_seek_reads_percentages_clock_positions_and_bare_seconds() {
+    use velo::ui::{SeekPosition, parse_seek};
+
+    assert_eq!(parse_seek("70%"), Ok(SeekPosition::Percent(70)));
+    assert_eq!(parse_seek(" 100% "), Ok(SeekPosition::Percent(100)));
+    assert_eq!(parse_seek("1:20"), Ok(SeekPosition::Secs(80)));
+    assert_eq!(parse_seek("1:20:30"), Ok(SeekPosition::Secs(4830)));
+    assert_eq!(parse_seek("90"), Ok(SeekPosition::Secs(90)));
+    assert_eq!(parse_seek("0:00"), Ok(SeekPosition::Secs(0)));
+
+    for refused in ["", "   ", "101%", "%", "1:99", "1:2:3:4", "abc", "1:20m"] {
+        assert!(parse_seek(refused).is_err(), "`{refused}` must be refused");
+    }
+}
+
+#[test]
+fn colon_opens_the_seek_prompt_and_enter_jumps() {
+    let mut app = app_with_three_tracks();
+    assert!(!app.seek_prompt_open());
+
+    // `:` opens it, and what is typed goes into the prompt, not the list.
+    assert_eq!(app.on_key(key(KeyCode::Char(':'))), Action::None);
+    assert!(app.seek_prompt_open());
+    for typed in ['1', ':', '2', '0'] {
+        assert_eq!(app.on_key(key(KeyCode::Char(typed))), Action::None);
+    }
+    assert_eq!(app.seek_prompt_input(), "1:20");
+    assert_eq!(app.selected(), 0, "the list never moved while typing");
+
+    assert_eq!(app.on_key(key(KeyCode::Enter)), Action::SeekTo { secs: 80 });
+    assert!(!app.seek_prompt_open(), "an accepted answer closes it");
+}
+
+#[test]
+fn esc_closes_the_seek_prompt_and_the_list_moves_again() {
+    let mut app = app_with_three_tracks();
+    app.on_key(key(KeyCode::Char(':')));
+    app.on_key(key(KeyCode::Char('9')));
+    assert!(app.seek_prompt_open());
+
+    assert_eq!(app.on_key(key(KeyCode::Esc)), Action::None);
+    assert!(!app.seek_prompt_open());
+
+    assert_eq!(app.on_key(key(KeyCode::Char('j'))), Action::None);
+    assert_eq!(app.selected(), 1, "`j` moves the list again");
+}
+
+#[test]
+fn a_refused_answer_leaves_the_seek_prompt_open() {
+    let mut app = app_with_three_tracks();
+    app.on_key(key(KeyCode::Char(':')));
+    for typed in ['7', '0', '%'] {
+        app.on_key(key(KeyCode::Char(typed)));
+    }
+
+    // Nothing is playing, so a percentage has no track length to become a
+    // position from: the answer is refused and the prompt stays open.
+    assert_eq!(app.on_key(key(KeyCode::Enter)), Action::None);
+    assert!(app.seek_prompt_open());
+
+    // `j` afterwards types into the prompt instead of moving the selection.
+    assert_eq!(app.on_key(key(KeyCode::Char('j'))), Action::None);
+    assert_eq!(app.selected(), 0, "`j` never moved the list");
+    assert_eq!(
+        app.seek_prompt_input(),
+        "70%j",
+        "`j` was typed into the prompt"
+    );
+}
