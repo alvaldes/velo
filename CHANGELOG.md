@@ -1,6 +1,13 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.30.1] - 2026-11-09
+
+### Fixes
+- **deps:** Souvlaki over its pure-Rust D-Bus backend
+
+### Maintenance
+- **ci:** The Linux builds need libdbus for souvlaki
 ## [0.30.0] - 2026-11-09
 
 ### Features
