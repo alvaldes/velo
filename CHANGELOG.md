@@ -1,6 +1,16 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.18.0] - 2026-11-09
+
+### Features
+- **history:** Keep what was played recently in history.toml
+- **ui:** Record every beginning in the history file
+- **cli:** Read the history without opening the interface
+- **ui:** A `Recently played` source lists the history
+
+### Documentation
+- **readme:** A file named history needs a path now
 ## [0.17.0] - 2026-11-09
 
 ### Features
