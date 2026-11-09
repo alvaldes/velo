@@ -59,7 +59,7 @@ Every key below is what the code does today.
 | `L` | Set the library folder: the same prompt as the first run, at any time |
 | `u` | Refresh the library index in the background; the title bar shows `⟳ indexing…` until it ends and the lists reload |
 | `+` / `-` | Volume up / down, 5% at a time |
-| `tab` | Switch between the library browser and the queue — inert on `Sources` |
+| `tab` | One round trip: to the queue, and back to the screen you left — `Sources`, the library at its level, or the radio view with the place you were inside |
 | `a` | Append the selection to the queue — a track, or every track of an album or genre |
 | `d` | Remove the selected entry from the queue (queue view) |
 | `J` / `K` | Move the selected entry down / up (queue view) |
@@ -144,12 +144,19 @@ directory — about 58,000 stations across 241 countries — plus the stations y
 yourself. It is a source beside your library and your Subsonic servers, not a
 replacement for either.
 
-Your favourites come first, at the top of the view: the stations you actually
-listen to are one keypress away instead of buried under a country. Under them
-come the country browser, your home country with its regions, your pinned
-places, and a section of **stations without a country** — the ones you added by
-hand and the favourites saved with no country code — so that radio is not only
-radio inside a country.
+The sections come first: the country browser, your home country with its regions,
+your pinned places, the **stations without a country** — the ones you added by hand
+and the favourites saved with no country code, so that radio is not only radio inside
+a country — and the genres and tags. The favourites sit **below all of them**, behind
+a dotted rule and their own `favourites` header, so the stations you actually listen
+to are gathered at the end of the list instead of spread across countries. Those
+sections are screens, not a single mixed list: a category lists categories, a country
+lists its own stations, and neither borrows the other's rows.
+
+A wait says so. While a directory request is in flight the list says `⟳ loading…` and
+the footer says the same, both going away when the answer lands; a live station that
+takes a while to open is named in the status line (`velo: opening <name>…`) until the
+player answers.
 
 Browse by country (your own first, and its regions when the directory records
 them), by the community's genres and tags, or search a name. Every list can be
