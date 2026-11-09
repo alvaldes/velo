@@ -53,6 +53,7 @@ Every key below is what the code does today.
 | `/` | Fuzzy search the whole library (`lofi` finds `Lo-Fi Scientists`) |
 | `space` | Pause / resume |
 | `←` / `→` (or `,` / `.`) | Seek 5 s back / forward; with `shift` on the arrow (or `<` / `>` on the comma keys) 30 s |
+| `:` | Jump to a position in the playing track: a percentage of it (`70%`), a clock position (`1:20`, `1:20:30`) or a count of seconds (`90`); refused on a live station or an empty answer |
 | `n` / `p` | Next track / previous track — `p` restarts a track already 3 s in |
 | `s` | Shuffle what is left of the queue; again to put it back in order |
 | `r` | Repeat: off → all (the queue again) → one (the track again) |

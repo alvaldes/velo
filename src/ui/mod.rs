@@ -81,6 +81,8 @@ pub enum Action {
     SetVolume(u8),
     /// Move the position by this many seconds; negative is back.
     Seek { delta_secs: i64 },
+    /// Jump to this position, in seconds from the start of the track.
+    SeekTo { secs: u64 },
     /// Play the next track of the stream.
     Next,
     /// Restart the track, or play the one before it when it just began.
@@ -166,6 +168,16 @@ struct LibraryPrompt {
     error: Option<String>,
     /// The folders the last `Tab` could not choose between.
     candidates: Vec<String>,
+}
+
+/// The seek prompt (issue #6): what is being typed at `:`, and why the last
+/// answer was refused. Nothing here touches the player.
+#[derive(Debug, Default)]
+struct SeekPrompt {
+    /// The position as typed.
+    input: String,
+    /// Why the last answer was refused, shown in the card.
+    error: Option<String>,
 }
 
 impl LibraryPrompt {
@@ -477,6 +489,8 @@ pub struct App<'lib> {
     /// Present while no library root is set (S4): the empty browser then
     /// says how to set one, and while its prompt is open every key edits it.
     library_setup: Option<LibrarySetup>,
+    /// The seek prompt (issue #6), while it is open.
+    seek_prompt: Option<SeekPrompt>,
     /// The config file a library chosen with `L` is saved to, and the file
     /// every persisted value is written to (S2).
     config_file: Option<PathBuf>,
@@ -577,6 +591,7 @@ impl<'lib> App<'lib> {
             radio_wire: None,
             radio_refusal: None,
             colors: ThemeColors::default(),
+            seek_prompt: None,
             library_setup: None,
             config_file: None,
             resolver: None,
@@ -648,6 +663,7 @@ impl<'lib> App<'lib> {
             radio_wire: None,
             radio_refusal: None,
             colors: ThemeColors::default(),
+            seek_prompt: None,
             library_setup: None,
             config_file: None,
             resolver: None,
@@ -1241,6 +1257,20 @@ impl<'lib> App<'lib> {
         self.library_root.take()
     }
 
+    /// Whether the seek prompt (issue #6) is open.
+    #[must_use]
+    pub const fn seek_prompt_open(&self) -> bool {
+        self.seek_prompt.is_some()
+    }
+
+    /// What is typed into the seek prompt, empty when it is closed.
+    #[must_use]
+    pub fn seek_prompt_input(&self) -> &str {
+        self.seek_prompt
+            .as_ref()
+            .map_or("", |prompt| prompt.input.as_str())
+    }
+
     /// The library root `u` refreshes: the configured one, or `None` when no
     /// library is set. A root accepted in the prompt replaces it.
     pub fn set_library_root(&mut self, root: Option<PathBuf>) {
@@ -1792,6 +1822,11 @@ impl<'lib> App<'lib> {
         if self.library_prompt_open() {
             return self.on_prompt_key(event.code);
         }
+        // The seek prompt owns what is typed into it, the way the library
+        // prompt does (issue #6).
+        if self.seek_prompt.is_some() {
+            return self.on_seek_key(event.code);
+        }
         // An open settings card owns every key too (S6): nothing reaches the
         // lists or the transport while it is up, `q` and `space` included.
         if self.settings.is_some() {
@@ -1885,6 +1920,10 @@ impl<'lib> App<'lib> {
             }
             KeyCode::Char('<') => Action::Seek { delta_secs: -30 },
             KeyCode::Char('>') => Action::Seek { delta_secs: 30 },
+            KeyCode::Char(':') => {
+                self.seek_prompt = Some(SeekPrompt::default());
+                Action::None
+            }
             // The plain keys keep the coarse five points; the brackets are the
             // fine gear, a point a press (issue #16). Shift cannot carry it: a
             // terminal sends the shifted *character*, and on a US layout
@@ -2185,6 +2224,7 @@ impl<'lib> App<'lib> {
             Action::Ascend => self.ascend(),
             Action::TogglePause => self.toggle_pause(),
             Action::Seek { delta_secs } => self.seek_by(delta_secs),
+            Action::SeekTo { secs } => self.seek_to(Duration::from_secs(secs)),
             Action::Next => self.skip(true),
             Action::Previous => self.skip(false),
             Action::ToggleShuffle => self.toggle_shuffle(),
@@ -2266,6 +2306,66 @@ impl<'lib> App<'lib> {
                 Action::None
             }
             _ => Action::None,
+        }
+    }
+
+    /// The keys while the seek prompt is open (issue #6): printable keys type
+    /// into it, `backspace` deletes, `enter` answers, `esc` closes it. Nothing
+    /// reaches the transport underneath, and a refused answer leaves the
+    /// prompt open with the reason under what was typed.
+    fn on_seek_key(&mut self, code: ratatui::crossterm::event::KeyCode) -> Action {
+        use ratatui::crossterm::event::KeyCode;
+
+        match code {
+            KeyCode::Esc => {
+                self.seek_prompt = None;
+                Action::None
+            }
+            KeyCode::Backspace => {
+                if let Some(prompt) = self.seek_prompt.as_mut() {
+                    prompt.input.pop();
+                    prompt.error = None;
+                }
+                Action::None
+            }
+            KeyCode::Char(character) => {
+                if let Some(prompt) = self.seek_prompt.as_mut() {
+                    prompt.input.push(character);
+                    prompt.error = None;
+                }
+                Action::None
+            }
+            KeyCode::Enter => self.answer_seek_prompt(),
+            _ => Action::None,
+        }
+    }
+
+    /// Answers the seek prompt: a position on the clock becomes the jump, and a
+    /// percentage is turned into one here, where the track's length is known
+    /// (issue #6). A refused answer stays in the card with its reason.
+    fn answer_seek_prompt(&mut self) -> Action {
+        let Some(typed) = self.seek_prompt.as_ref().map(|prompt| prompt.input.clone()) else {
+            return Action::None;
+        };
+        let answer = match parse_seek(&typed) {
+            Ok(SeekPosition::Secs(secs)) => Ok(secs),
+            Ok(SeekPosition::Percent(percent)) => self
+                .current_track_duration()
+                .map(|duration| duration.mul_f64(f64::from(percent) / 100.0).as_secs())
+                .ok_or("a percentage needs a track that knows its length"),
+            Err(reason) => Err(reason),
+        };
+        match answer {
+            Ok(secs) => {
+                self.seek_prompt = None;
+                Action::SeekTo { secs }
+            }
+            Err(reason) => {
+                if let Some(prompt) = self.seek_prompt.as_mut() {
+                    prompt.error = Some(reason.to_owned());
+                }
+                Action::None
+            }
         }
     }
 
@@ -2628,6 +2728,9 @@ impl<'lib> App<'lib> {
         }
         if let Some(prompt) = self.library_prompt() {
             Self::draw_library_prompt(frame, area, prompt, &self.theme);
+        }
+        if let Some(prompt) = &self.seek_prompt {
+            Self::draw_seek_prompt(frame, area, prompt, &self.theme);
         }
     }
 
@@ -3582,6 +3685,37 @@ impl<'lib> App<'lib> {
         );
     }
 
+    /// The seek prompt (issue #6): a card like the library's, with the position
+    /// being typed, the forms it accepts, and why the last one was refused.
+    fn draw_seek_prompt(frame: &mut Frame, area: Rect, prompt: &SeekPrompt, theme: &Theme) {
+        let width = area.width.saturating_sub(8).clamp(20, 48);
+        let box_area = centered(area, width, 7);
+        let text = vec![
+            Line::styled("Jump to where?", Style::new().fg(theme.text)),
+            Line::styled("70% · 1:20 · 1:20:30 · 90", Style::new().fg(theme.dim)),
+            Line::from(vec![
+                Span::styled(prompt.input.clone(), Style::new().fg(theme.accent)),
+                Span::styled("▏", Style::new().fg(theme.secondary)),
+            ]),
+            prompt.error.as_ref().map_or_else(
+                || Line::styled("enter jump · esc cancel", Style::new().fg(theme.dim)),
+                |error| Line::styled(error.clone(), Style::new().fg(theme.secondary)),
+            ),
+        ];
+        frame.render_widget(Clear, box_area);
+        frame.render_widget(
+            Paragraph::new(text).block(
+                Block::bordered()
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::new().fg(theme.accent))
+                    .title(Span::styled(" seek ", Style::new().fg(theme.accent).bold()))
+                    .padding(ratatui::widgets::Padding::new(1, 1, 1, 0))
+                    .style(Style::new().bg(theme.background)),
+            ),
+            box_area,
+        );
+    }
+
     /// How many rows the current level has.
     fn row_count(&self) -> usize {
         match &self.position {
@@ -4233,11 +4367,7 @@ impl<'lib> App<'lib> {
     /// delta, clamped to the track, then the player rebuilt from that offset
     /// (T6). A few milliseconds of silence are expected; a click is not.
     fn seek_by(&mut self, delta_secs: i64) {
-        // A live station has no position to seek within (S3): the seek path
-        // says so instead of rebuilding the player — which would refetch the
-        // stream — and never reaches the rebuild below.
-        if matches!(self.playing_entry(), Some(Entry::Station { .. })) {
-            "velo: nothing to seek in a live station".clone_into(&mut self.status);
+        if self.refuse_live_seek() {
             return;
         }
         let Some(player) = &self.player else {
@@ -4247,6 +4377,31 @@ impl<'lib> App<'lib> {
         let duration = self.current_track_duration();
         let target = seek_target(position, delta_secs, duration);
         self.start_at(target);
+    }
+
+    /// Jumps to an absolute position (issue #6), clamped to the end of the
+    /// track, and refused by a live station with the sentence the relative
+    /// seek already says.
+    fn seek_to(&mut self, target: Duration) {
+        if self.refuse_live_seek() {
+            return;
+        }
+        if self.player.is_none() {
+            return;
+        }
+        let duration = self.current_track_duration();
+        self.start_at(duration.map_or(target, |duration| target.min(duration)));
+    }
+
+    /// Whether a live station refused the seek (S3): it has no position to seek
+    /// within, and saying so is cheaper than rebuilding the player — which
+    /// would refetch the stream. One answer, both gears.
+    fn refuse_live_seek(&mut self) -> bool {
+        if matches!(self.playing_entry(), Some(Entry::Station { .. })) {
+            self.note("velo: nothing to seek in a live station");
+            return true;
+        }
+        false
     }
 
     /// Mixes what is left of the queue, or puts it back in the order it came
@@ -4672,13 +4827,75 @@ fn pad(area: Rect) -> Rect {
     }
 }
 
+/// A position typed at the seek prompt (issue #6). A share of the track needs
+/// its length to become a position, which only the caller knows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SeekPosition {
+    /// A percentage of the track, `0..=100`.
+    Percent(u8),
+    /// A position from the start of the track, in seconds.
+    Secs(u64),
+}
+
+/// Reads what the seek prompt was given (issue #6): `70%`, `1:20`, `1:20:30`,
+/// or a bare count of seconds. The refusal says what was expected instead of
+/// leaving the card with nothing to show.
+///
+/// # Errors
+///
+/// Refuses anything else, saying which of the accepted forms was expected:
+/// an empty answer, a percentage outside `0..=100`, a clock field past 59,
+/// more than three clock fields, or text that is none of the three forms.
+pub fn parse_seek(input: &str) -> Result<SeekPosition, &'static str> {
+    const FORMS: &str = "type a position: 70%, 1:20 or 90";
+
+    let typed = input.trim();
+    if typed.is_empty() {
+        return Err(FORMS);
+    }
+    if let Some(head) = typed.strip_suffix('%') {
+        let percent: u8 = head
+            .trim()
+            .parse()
+            .map_err(|_| "a percentage is a whole number, 0 to 100")?;
+        return if percent <= 100 {
+            Ok(SeekPosition::Percent(percent))
+        } else {
+            Err("a percentage is a whole number, 0 to 100")
+        };
+    }
+    if typed.contains(':') {
+        const SHAPE: &str = "a clock position looks like 1:20 or 1:20:30";
+        let numbers = typed
+            .split(':')
+            .map(|part| part.trim().parse::<u64>())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| SHAPE)?;
+        let (hours, minutes, seconds) = match numbers.as_slice() {
+            [minutes, seconds] => (0, *minutes, *seconds),
+            [hours, minutes, seconds] => (*hours, *minutes, *seconds),
+            _ => return Err(SHAPE),
+        };
+        if minutes > 59 || seconds > 59 {
+            return Err("the minutes and the seconds of a clock position stop at 59");
+        }
+        return hours
+            .checked_mul(3600)
+            .and_then(|total| total.checked_add(minutes * 60))
+            .and_then(|total| total.checked_add(seconds))
+            .map(SeekPosition::Secs)
+            .ok_or("that position is past the end of any track");
+    }
+    typed.parse().map(SeekPosition::Secs).map_err(|_| FORMS)
+}
+
 fn mmss(duration: Duration) -> String {
     let seconds = duration.as_secs();
     format!("{:02}:{:02}", seconds / 60, seconds % 60)
 }
 
 /// Every row of the help card: the key, then what it does.
-const HELP_ROWS: [(&str, &str); 30] = [
+const HELP_ROWS: [(&str, &str); 31] = [
     ("j / Down", "move down"),
     ("k / Up", "move up"),
     ("g", "first track"),
@@ -4692,6 +4909,7 @@ const HELP_ROWS: [(&str, &str); 30] = [
     ("space", "pause / resume"),
     ("← / →", "seek 5 s back / forward; shift: 30 s"),
     (", / .", "seek 5 s back / forward; < / >: 30 s"),
+    (":", "jump to a position: 70%, 1:20 or 90"),
     ("n / p", "next / previous track"),
     ("s", "shuffle what is left of the queue"),
     ("r", "repeat: off, all, one"),
