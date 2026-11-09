@@ -144,7 +144,8 @@ Configuration: $XDG_CONFIG_HOME/velo/config.toml, or
     [theme] (every colour, as \"#rrggbb\"), [ui] (cover_art, spectrum, hints,
     top_bar, advisories, view_numbers) and the optional [subsonic] table (url,
     user, api_key, insecure) for a Subsonic-compatible server; `velo
-    --subsonic-test` answers \"can I use this server?\" and works over ssh.
+    --subsonic-test` answers \"can I use this server?\" and works over ssh;
+    `velo --radio-test <URL>` probes one live station URL the same way.
     When the file is missing, velo writes it with every key at its default and
     a comment per key; an unknown key is an error. library (and --library)
     takes an absolute path, ~/... or a path relative to the current directory.
@@ -190,6 +191,15 @@ pub struct Cli {
     /// advertises and which authentication worked, then exit.
     #[arg(long)]
     pub subsonic_test: bool,
+
+    /// Probe one live radio stream URL (issue #13): resolve one wrapper
+    /// level, report the URL it really points at, the response headers that
+    /// matter (`content-type`, `icy-metaint`, redirects), the codec, whether
+    /// this build can play it and the result of decoding the first seconds
+    /// of audio, then exit. Exit 0 when the URL plays end to end, 1 with a
+    /// one-line reason when it does not.
+    #[arg(long, value_name = "URL")]
+    pub radio_test: Option<String>,
 
     /// Sync the configured Subsonic server into the library index: fetch
     /// every album, write the rows, print the counts per source, then exit.

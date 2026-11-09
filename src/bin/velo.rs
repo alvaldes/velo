@@ -77,6 +77,11 @@ fn main() -> ExitCode {
     if cli.subsonic_test {
         return subsonic_test(&settings, home.as_deref());
     }
+    // The station probe is headless the same way: no terminal, no library,
+    // no server — one URL in, a report out (issue #13).
+    if let Some(url) = &cli.radio_test {
+        return radio_test(url);
+    }
     // The sync needs no terminal either — it runs over ssh like the probe.
     if cli.sync {
         return sync_library(&settings, home.as_deref());
@@ -288,6 +293,89 @@ fn cache_clean(xdg_cache_home: Option<&OsStr>, home: Option<&OsStr>) -> ExitCode
             dir.display()
         );
     }
+    ExitCode::SUCCESS
+}
+
+/// How much audio the station probe decodes before it reports: long enough
+/// that a broken demux or a wrong codec shows up, short enough that the
+/// probe answers at once.
+const RADIO_TEST_SECONDS: usize = 2;
+
+/// Answers "can I listen to this station?" (issue #13) in the shape and tone
+/// of [`subsonic_test`]: plain fact lines on stdout, exit 0 when the URL
+/// plays end to end, and on any failure one `velo: ` line on stderr with
+/// exit 1 — a report half-printed would be worse than a reason.
+fn radio_test(url: &str) -> ExitCode {
+    let (mut stream, probe) =
+        match velo::radio::stream::probe(url, velo::radio::stream::Timeouts::default()) {
+            Ok(opened) => opened,
+            Err(error) => {
+                eprintln!("velo: {error}");
+                return ExitCode::FAILURE;
+            }
+        };
+
+    // The decode probe: the first seconds, read exactly as the player reads
+    // them — the same blocks, the same demux. A station that answers with
+    // headers but no audio is not playable, whatever its headers say.
+    let spec = stream.spec();
+    let target = RADIO_TEST_SECONDS
+        .saturating_mul(usize::try_from(spec.sample_rate).unwrap_or(0))
+        .saturating_mul(usize::from(spec.channels));
+    let channels = usize::from(spec.channels).max(1);
+    let mut frames = 0_usize;
+    loop {
+        match stream.read_block() {
+            Ok(Some(block)) => {
+                frames += block.len() / channels;
+                if frames * channels >= target {
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(error) => {
+                eprintln!("velo: {error}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    if frames == 0 {
+        eprintln!("velo: the station decoded no audio");
+        return ExitCode::FAILURE;
+    }
+
+    // The report, in the order the issue lists its facts (S2).
+    println!("url: {url}");
+    println!(
+        "wrapper: {}",
+        probe.resolved_url.as_deref().unwrap_or("none")
+    );
+    if probe.redirects.is_empty() {
+        println!("redirects: none");
+    } else {
+        for hop in &probe.redirects {
+            println!("redirect: {hop}");
+        }
+    }
+    println!(
+        "content-type: {}",
+        probe.content_type.as_deref().unwrap_or("none")
+    );
+    if let Some(metaint) = probe.metaint {
+        println!("icy-metaint: {metaint}");
+    }
+    let codec = stream.codec_name().unwrap_or("unknown");
+    println!("codec: {codec} — this build can play it");
+    // A station's frame count stays far below the exact integer range of f64.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a decode probe holds fewer frames than f64 represents exactly"
+    )]
+    let seconds = frames as f64 / f64::from(spec.sample_rate);
+    println!(
+        "decode: {seconds:.1} s, {} Hz, {} ch",
+        spec.sample_rate, spec.channels
+    );
     ExitCode::SUCCESS
 }
 

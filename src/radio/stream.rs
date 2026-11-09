@@ -211,6 +211,13 @@ impl StationStream {
         self.track.spec()
     }
 
+    /// The codec the station decodes, when it has a name — what the one-shot
+    /// probe prints (issue #13).
+    #[must_use]
+    pub fn codec_name(&self) -> Option<&'static str> {
+        self.track.codec_name()
+    }
+
     /// A live station never declares a duration.
     #[must_use]
     pub fn duration(&self) -> Option<Duration> {
@@ -266,12 +273,21 @@ impl<R: Read> Read for Observed<R> {
 
 /// Performs one GET with `Icy-MetaData: 1` sent before the body, checks the
 /// status, parses `Icy-Metaint` case-insensitively, and returns the owned
-/// body reader plus the interval. Used for the station URL and, at most
-/// once more, for a wrapper's resolved entry.
-fn fetch(
-    agent: &ureq::Agent,
-    url: &str,
-) -> Result<(impl Read + use<>, Option<usize>), StreamError> {
+/// body reader plus the response facts the one-shot probe reports. Used for
+/// the station URL and, at most once more, for a wrapper's resolved entry.
+struct Fetched<R> {
+    body: R,
+    metaint: Option<usize>,
+    /// The `Content-Type` the response declared, when it did.
+    content_type: Option<String>,
+    /// The URLs this fetch was redirected to, in order: the request URL
+    /// itself is never listed, only the hops after it.
+    redirects: Vec<String>,
+}
+
+fn fetch(agent: &ureq::Agent, url: &str) -> Result<Fetched<impl Read + use<>>, StreamError> {
+    use ureq::ResponseExt as _;
+
     let response = agent
         .get(url)
         .header("Icy-MetaData", "1")
@@ -316,8 +332,26 @@ fn fetch(
 
     // `into_reader` is the owned, `'static` body reader: it keeps reading
     // the live connection after `response` is dropped here.
+    let content_type = response
+        .headers()
+        .get("Content-Type")
+        .and_then(|value| value.to_str().ok().map(str::to_owned));
+    let redirects = response
+        .get_redirect_history()
+        .map_or_else(Vec::new, |history| {
+            history
+                .iter()
+                .skip(1)
+                .map(std::string::ToString::to_string)
+                .collect()
+        });
     let (_, body) = response.into_parts();
-    Ok((body.into_reader(), metaint))
+    Ok(Fetched {
+        body: body.into_reader(),
+        metaint,
+        content_type,
+        redirects,
+    })
 }
 
 /// The first [`WRAPPER_CAP`] bytes of `body`, with `body` itself handed back
@@ -369,6 +403,101 @@ fn map_lists(error: &ListsError) -> StreamError {
     }
 }
 
+/// The facts gathered on the way through one open, for the one-shot probe
+/// (issue #13). Nothing here changes what the player gets: [`open`] computes
+/// the same things and throws this record away.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Probe {
+    /// The URL the station really points at after one wrapper level: `None`
+    /// when the body was audio from the start.
+    pub resolved_url: Option<String>,
+    /// Every URL the station was redirected to, in order, across both
+    /// fetches when a wrapper was resolved; empty when there were none.
+    pub redirects: Vec<String>,
+    /// The `Content-Type` the final response declared, when it did.
+    pub content_type: Option<String>,
+    /// The `Icy-Metaint` the final response declared, when it did.
+    pub metaint: Option<usize>,
+}
+
+/// Opens a live station and reports what happened on the way: the same open
+/// the player takes — one GET with `Icy-MetaData: 1`, one wrapper level
+/// resolved, the body wired into [`TrackSource::open_stream`] — plus the
+/// [`Probe`] record of the response facts. The redirect history is kept
+/// (`save_redirect_history(true)`), which only records URLs: nothing the
+/// player reads behaves differently.
+///
+/// # Errors
+///
+/// The same errors as [`open`].
+pub fn probe(url: &str, timeouts: Timeouts) -> Result<(StationStream, Probe), StreamError> {
+    let agent = ureq::Agent::config_builder()
+        .timeout_connect(Some(timeouts.connect))
+        .timeout_recv_response(Some(timeouts.response))
+        .timeout_per_read(Some(timeouts.read))
+        .save_redirect_history(true)
+        .build()
+        .new_agent();
+
+    let fetched = fetch(&agent, url)?;
+    let mut redirects = fetched.redirects;
+    let (prefix, body, complete) = bounded_prefix(fetched.body);
+    let (prefix, body, metaint, content_type, resolved_url) = if complete {
+        match lists::unwrap_station(&prefix) {
+            Err(ListsError::NotAPlaylist) => {
+                (prefix, body, fetched.metaint, fetched.content_type, None)
+            }
+            Err(lists_error) => return Err(map_lists(&lists_error)),
+            Ok(entry) => {
+                // One level only: fetch the resolved entry once more, with
+                // the same timeouts and the same headers, and whatever the
+                // body turns out to be is final. A wrapper here is an
+                // error naming that, never another hop.
+                let resolved = fetch(&agent, &entry)?;
+                redirects.extend(resolved.redirects);
+                let (prefix, body, complete) = bounded_prefix(resolved.body);
+                let (prefix, body, metaint) = if complete {
+                    sniff(&prefix, body, resolved.metaint)?
+                } else {
+                    (prefix, body, resolved.metaint)
+                };
+                (prefix, body, metaint, resolved.content_type, Some(entry))
+            }
+        }
+    } else {
+        // The inspection was cut off by the read bound: an audio-shaped
+        // stall, not a playlist. Decode from what arrived; the stall
+        // surfaces through the normal read path.
+        (prefix, body, fetched.metaint, fetched.content_type, None)
+    };
+
+    let state = Arc::new(Mutex::new(DemuxState::default()));
+    let observed = Observed {
+        demux: IcyReader::new(Cursor::new(prefix).chain(body), metaint),
+        last_seq: 0,
+        state: Arc::clone(&state),
+    };
+    let track =
+        TrackSource::open_stream(Box::new(ReadOnlySource::new(observed))).map_err(|error| {
+            StreamError::NotAudio {
+                detail: match error {
+                    AudioError::Unsupported(detail) | AudioError::Decode(detail) => detail,
+                    other => other.to_string(),
+                },
+            }
+        })?;
+
+    Ok((
+        StationStream { track, state },
+        Probe {
+            resolved_url,
+            redirects,
+            content_type,
+            metaint,
+        },
+    ))
+}
+
 /// Opens a live station: one GET with `Icy-MetaData: 1`, `Icy-Metaint`
 /// validation, and the body wired into a non-seekable
 /// [`TrackSource::open_stream`]. The agent uses per-operation timeouts
@@ -391,57 +520,7 @@ fn map_lists(error: &ListsError) -> StreamError {
 /// [`StreamError::NotAudio`] when the body does not decode and no wrapper
 /// explains it.
 pub fn open(url: &str, timeouts: Timeouts) -> Result<StationStream, StreamError> {
-    let agent = ureq::Agent::config_builder()
-        .timeout_connect(Some(timeouts.connect))
-        .timeout_recv_response(Some(timeouts.response))
-        .timeout_per_read(Some(timeouts.read))
-        .build()
-        .new_agent();
-
-    let (body, metaint) = fetch(&agent, url)?;
-    let (prefix, body, complete) = bounded_prefix(body);
-    let (prefix, body, metaint) = if complete {
-        match lists::unwrap_station(&prefix) {
-            Err(ListsError::NotAPlaylist) => (prefix, body, metaint),
-            Err(lists_error) => return Err(map_lists(&lists_error)),
-            Ok(entry) => {
-                // One level only: fetch the resolved entry once more, with
-                // the same timeouts and the same headers, and whatever the
-                // body turns out to be is final. A wrapper here is an
-                // error naming that, never another hop.
-                let (body, metaint) = fetch(&agent, &entry)?;
-                let (prefix, body, complete) = bounded_prefix(body);
-                if complete {
-                    sniff(&prefix, body, metaint)?
-                } else {
-                    (prefix, body, metaint)
-                }
-            }
-        }
-    } else {
-        // The inspection was cut off by the read bound: an audio-shaped
-        // stall, not a playlist. Decode from what arrived; the stall
-        // surfaces through the normal read path.
-        (prefix, body, metaint)
-    };
-
-    let state = Arc::new(Mutex::new(DemuxState::default()));
-    let observed = Observed {
-        demux: IcyReader::new(Cursor::new(prefix).chain(body), metaint),
-        last_seq: 0,
-        state: Arc::clone(&state),
-    };
-    let track =
-        TrackSource::open_stream(Box::new(ReadOnlySource::new(observed))).map_err(|error| {
-            StreamError::NotAudio {
-                detail: match error {
-                    AudioError::Unsupported(detail) | AudioError::Decode(detail) => detail,
-                    other => other.to_string(),
-                },
-            }
-        })?;
-
-    Ok(StationStream { track, state })
+    probe(url, timeouts).map(|(stream, _)| stream)
 }
 
 /// The queue's view of an opened station (T5c2a): the producer reads it

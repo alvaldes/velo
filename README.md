@@ -214,6 +214,27 @@ no location service, and a `n` leaves the feature off for good. It is a
 convenience for finding your own country in a list of 241, not a gate: the country
 browser, the pins and the catalogue work the same either way.
 
+One-shot probe: `velo --radio-test <URL>` answers "can I listen to this station?"
+without the interface — headless, so it works over ssh like `--subsonic-test`. It
+resolves one wrapper level and prints the URL the station really points at, each
+redirect hop, the response's `content-type` and `icy-metaint`, the codec it
+decoded and whether this build can play it, then decodes the first seconds of
+audio and reports how much came out and at what sample rate and channel count:
+
+```
+url: http://stream.example.com/live
+wrapper: http://stream.example.com/audio
+redirects: none
+content-type: audio/mpeg
+icy-metaint: 8192
+codec: mp3 — this build can play it
+decode: 2.0 s, 44100 Hz, 2 ch
+```
+
+It exits `0` when the URL plays end to end, `1` with a one-line reason on
+stderr when it does not (a 404, an unreachable server, an HLS manifest, a body
+nothing here can decode), and `2` when the URL is missing.
+
 What it does not do: no radius search around your location (the directory records
 coordinates for about 12% of stations, so such a search would silently hide most of
 the catalogue), no scrobbling to a remote account, and no station art — the
