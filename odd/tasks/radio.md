@@ -714,3 +714,22 @@ Two things had to change besides text, and both are the session's recurring defe
 With this, the radio feature is complete and documented on the branch. What remains is not
 code: `T5d` (a real station, end to end, which needs the human's ears), the merge into
 `main`, and the version that follows it.
+
+**L28** — **T5d passed, by the human, on a real station.** The engine decoded a live stream
+end to end on their machine: it played, the clock row read `● live`, the ICY title changed
+with the songs, and nothing stuttered. That is the only evidence in this logbook that the
+radio engine *works* rather than merely *does not break*, and it came from outside the test
+suite.
+
+One case went unobserved: no station in the catalogue they browsed was marked `✗`, so the
+unplayable-station path (HLS, or a codec this build lacks) was not exercised by hand. It
+stays covered by the directory tests and by `is_playable_station`; a manual sighting can
+wait for a station that deserves it.
+
+**The next direction is issue #3**, not work: velo should open on a **sources** view
+(`Local library` / `Radio`) instead of dropping straight into the library; radio should
+keep its countries, regions, genres and tags, gain a section for stations that belong to no
+country, and put favourites at the top; and `esc` should walk back to the sources view.
+Filed as https://github.com/alvaldes/velo/issues/3 at the human's request — the standing
+rule from now on is that a reported problem becomes an issue first, and only an issue
+produces a pull request.
