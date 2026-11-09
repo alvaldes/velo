@@ -21,6 +21,7 @@ pub mod radio;
 pub mod radio_data;
 pub mod search;
 pub mod shuffle;
+pub mod sources;
 pub mod theme;
 
 pub use ratatui;
@@ -266,6 +267,10 @@ pub enum View {
     Library,
     /// The queue, in play order.
     Queue,
+    /// The sources — the first screen (issue #3), one level above the
+    /// library and the radio: it names what velo can play. Not a tab —
+    /// `Tab` keeps toggling the two below it.
+    Sources,
 }
 
 /// Where playback stands, for the header and the footer.
@@ -303,6 +308,9 @@ pub fn plural(count: usize, one: &str, many: &str) -> String {
 )]
 pub struct App<'lib> {
     position: Position,
+    /// The first screen (issue #3): which source the cursor is on, while
+    /// the sources view is up.
+    sources: sources::Sources,
     /// The files given on the command line, in [`Position::Files`].
     argv: Vec<PathBuf>,
     library: Option<&'lib Library>,
@@ -391,6 +399,10 @@ pub struct App<'lib> {
     /// `None` until the first `R` opens the radio; built once, kept for
     /// the session so loaded indexes survive closing the view.
     radio_wire: Option<Box<dyn radio_data::RadioWire>>,
+    /// The screen the radio was opened from, so closing it lands there (S6):
+    /// `Sources` when it was chosen there, the library or the queue when `R`
+    /// opened it over them.
+    radio_from: View,
     /// The palette as the `[theme]` table wrote it (S4): what the settings
     /// card rebuilds with one role replaced when a colour is cycled.
     colors: ThemeColors,
@@ -455,6 +467,8 @@ impl<'lib> App<'lib> {
     pub fn new(tracks: Vec<PathBuf>) -> App<'static> {
         App {
             position: Position::Files,
+            sources: sources::Sources::default(),
+            radio_from: View::Library,
             argv: tracks,
             library: None,
             browse_by: BrowseBy::Artists,
@@ -521,6 +535,8 @@ impl<'lib> App<'lib> {
     pub fn browse(library: Option<&'lib Library>) -> Self {
         let mut app = Self {
             position: Position::Artists,
+            sources: sources::Sources::default(),
+            radio_from: View::Library,
             argv: Vec::new(),
             library,
             browse_by: BrowseBy::Artists,
@@ -593,6 +609,33 @@ impl<'lib> App<'lib> {
     #[must_use]
     pub const fn view(&self) -> View {
         self.view
+    }
+
+    /// Opens the sources screen (issue #3): the first screen, one level
+    /// above the library and the radio. The flat command-line list has no
+    /// source to choose from, so a file launch stays on its list.
+    pub fn open_sources(&mut self) {
+        if !matches!(self.position, Position::Files) {
+            self.view = View::Sources;
+        }
+    }
+
+    /// Whether the radio view is open (T6a).
+    #[must_use]
+    pub const fn radio_open(&self) -> bool {
+        self.radio.is_some()
+    }
+
+    /// The rows of the sources screen, in the order it shows them.
+    #[must_use]
+    pub fn sources_labels(&self) -> Vec<String> {
+        self.sources.labels()
+    }
+
+    /// The row of the sources screen the cursor is on.
+    #[must_use]
+    pub const fn sources_selected(&self) -> usize {
+        self.sources.selected()
     }
 
     /// The selected row of the queue view.
@@ -787,18 +830,54 @@ impl<'lib> App<'lib> {
         toml::Value::String(value.to_owned()).to_string()
     }
 
+    /// Opens the radio view over its wiring (T6a, T6b): the store and the
+    /// country load at once (one small file read, no network), the directory
+    /// follows lazily as the sections are entered.
+    fn open_radio(&mut self) -> Action {
+        let wire = self.radio_wire.get_or_insert_with(|| {
+            let store_path = self
+                .config_file
+                .as_ref()
+                .map(|config| config.with_file_name("radio.toml"));
+            Box::new(radio_data::RadioData::open(store_path))
+        });
+        self.radio_from = self.view;
+        self.radio = Some(wire.view());
+        Action::None
+    }
+
+    /// Opens the source the sources screen's cursor is on (issue #3): the
+    /// library comes back with the tab the session saved, the radio opens
+    /// over its wiring.
+    fn open_source(&mut self) -> Action {
+        match self.sources.current() {
+            sources::Source::Library => {
+                self.view = if self.saved.view == View::Queue {
+                    View::Queue
+                } else {
+                    View::Library
+                };
+                Action::None
+            }
+            sources::Source::Radio => self.open_radio(),
+        }
+    }
+
     /// Saves the tab, but only when it leaves what the file says. Called
     /// from the two user paths that move it — the tab key and a number key
     /// from the queue — never from `browse_view` itself, which the launch
     /// restore and the reload fallback also call and which must write
     /// nothing.
     fn remember_view(&mut self) {
-        if self.view == self.saved.view {
+        // The sources screen is never persisted (issue #3): it is above the
+        // session's tab, not one of its views.
+        if self.view == View::Sources || self.view == self.saved.view {
             return;
         }
         let label = match self.view {
             View::Library => "library",
             View::Queue => "queue",
+            View::Sources => return,
         };
         self.saved.view = self.view;
         self.remember(Some("state"), "view", &Self::toml_string(label));
@@ -1630,6 +1709,14 @@ impl<'lib> App<'lib> {
         {
             return action;
         }
+        // The sources screen (issue #3) owns its list keys while it is up;
+        // the keys it does not claim keep reaching the transport and the
+        // global commands.
+        if self.view == View::Sources
+            && let Some(action) = self.sources_key(event.code)
+        {
+            return action;
+        }
 
         match event.code {
             KeyCode::Char('j') | KeyCode::Down => {
@@ -1711,21 +1798,8 @@ impl<'lib> App<'lib> {
                 Action::None
             }
             // The radio view (T6a): `R` opens it closed, and its own key
-            // handler closes it again once it is open. T6b opens it over
-            // its wiring: the store and the country load at once (one
-            // small file read, no network), the directory follows lazily
-            // as the sections are entered.
-            KeyCode::Char('R') => {
-                let wire = self.radio_wire.get_or_insert_with(|| {
-                    let store_path = self
-                        .config_file
-                        .as_ref()
-                        .map(|config| config.with_file_name("radio.toml"));
-                    Box::new(radio_data::RadioData::open(store_path))
-                });
-                self.radio = Some(wire.view());
-                Action::None
-            }
+            // handler closes it again once it is open.
+            KeyCode::Char('R') => self.open_radio(),
             KeyCode::Char('/') if self.library.is_some() => {
                 self.open_search();
                 Action::None
@@ -1743,6 +1817,42 @@ impl<'lib> App<'lib> {
         }
     }
 
+    /// The keys the sources screen owns (issue #3); `None` lets the key
+    /// fall through to the rest of the keymap, so the transport, `q`, `?`,
+    /// `o`, `s`, `r` and the seek keys stay global (S7).
+    fn sources_key(&mut self, code: ratatui::crossterm::event::KeyCode) -> Option<Action> {
+        use ratatui::crossterm::event::KeyCode;
+
+        match code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.sources.select_next();
+                Some(Action::None)
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.sources.select_previous();
+                Some(Action::None)
+            }
+            KeyCode::Char('g') => {
+                self.sources.select_first();
+                Some(Action::None)
+            }
+            KeyCode::Char('G') => {
+                self.sources.select_last();
+                Some(Action::None)
+            }
+            KeyCode::Enter => Some(self.open_source()),
+            // The way out is where you are (S6): `Esc` stays on the sources
+            // screen, which is already the top. The library's keys and the
+            // tab are not this screen's to act on (S7): while it is up they
+            // arrive as no-ops.
+            KeyCode::Esc
+            | KeyCode::Backspace
+            | KeyCode::Tab
+            | KeyCode::Char('1'..='4' | 'a' | 'd' | 'J' | 'K' | '/') => Some(Action::None),
+            _ => None,
+        }
+    }
+
     /// The keys the open radio view owns (T6a); `None` lets the key fall
     /// through to the rest of the keymap.
     fn radio_key(&mut self, event: ratatui::crossterm::event::KeyEvent) -> Option<Action> {
@@ -1756,6 +1866,12 @@ impl<'lib> App<'lib> {
             radio::RadioOutcome::Handled => Some(Action::None),
             radio::RadioOutcome::Close => {
                 self.radio = None;
+                // Closing lands where the radio was opened from (S6): the
+                // sources screen when it was chosen there, the library or the
+                // queue when `R` opened it over them — the way out is the way
+                // in. The flat command-line list has no sources screen, and
+                // the radio can only be opened over the library there.
+                self.view = self.radio_from;
                 Some(Action::None)
             }
             radio::RadioOutcome::ToQueue => {
@@ -2585,6 +2701,11 @@ impl<'lib> App<'lib> {
                 format!("Search /{}", search.query()),
                 plural(self.search_results.len(), "match", "matches"),
             )
+        } else if self.view == View::Sources {
+            (
+                "Sources".to_owned(),
+                plural(sources::Source::ALL.len(), "source", "sources"),
+            )
         } else if self.view == View::Queue {
             (
                 "Queue".to_owned(),
@@ -2678,6 +2799,8 @@ impl<'lib> App<'lib> {
                 return;
             }
             (self.search_rows(width), self.search_selected)
+        } else if self.view == View::Sources {
+            (self.source_rows(width), self.sources.selected())
         } else if self.view == View::Queue {
             if self.queue.is_empty() {
                 draw_empty(
@@ -2703,6 +2826,30 @@ impl<'lib> App<'lib> {
             .highlight_style(Style::new().bg(self.theme.accent).fg(self.theme.ink));
         let mut state = ListState::default().with_selected(Some(selected));
         frame.render_stateful_widget(list, area, &mut state);
+    }
+
+    /// The rows of the sources screen (issue #3): one per source, in the
+    /// order it shows them.
+    fn source_rows(&self, width: u16) -> Vec<ListItem<'static>> {
+        let digits = digits(sources::Source::ALL.len());
+        sources::Source::ALL
+            .into_iter()
+            .enumerate()
+            .map(|(index, source)| {
+                ListItem::new(list_row(
+                    ListRow {
+                        playing: false,
+                        number: index + 1,
+                        digits,
+                        name: source.label().to_owned(),
+                        note: String::new(),
+                        fact: String::new(),
+                    },
+                    width,
+                    &self.theme,
+                ))
+            })
+            .collect()
     }
 
     /// The rows of the current level, as they are on screen.
@@ -3398,7 +3545,9 @@ impl<'lib> App<'lib> {
     /// How many rows the view the keys act on holds.
     fn view_len(&self) -> usize {
         match self.view {
-            View::Library => self.row_count(),
+            // The sources screen's list is its own; the keys that reach here
+            // never do while it is up (issue #3), so it follows the library.
+            View::Library | View::Sources => self.row_count(),
             View::Queue => self.queue.len(),
         }
     }
@@ -3406,14 +3555,16 @@ impl<'lib> App<'lib> {
     /// The selected row of the view the keys act on.
     const fn view_selection(&self) -> usize {
         match self.view {
-            View::Library => self.selected,
+            // Unreachable while the sources screen is up (issue #3).
+            View::Library | View::Sources => self.selected,
             View::Queue => self.queue_selected,
         }
     }
 
     fn set_view_selection(&mut self, index: usize) {
         match self.view {
-            View::Library => self.selected = index,
+            // Unreachable while the sources screen is up (issue #3).
+            View::Library | View::Sources => self.selected = index,
             View::Queue => self.queue_selected = index,
         }
     }
@@ -3442,7 +3593,7 @@ impl<'lib> App<'lib> {
     /// status line so the screen says where the keys went.
     fn toggle_view(&mut self) {
         self.view = match self.view {
-            View::Library => View::Queue,
+            View::Library | View::Sources => View::Queue,
             View::Queue => View::Library,
         };
         match self.view {
@@ -3453,7 +3604,7 @@ impl<'lib> App<'lib> {
                     plural(self.queue.len(), "track", "tracks")
                 );
             }
-            View::Library => self.status.clear(),
+            View::Library | View::Sources => self.status.clear(),
         }
         // The tab is persisted (S3), but only when it changed.
         self.remember_view();
@@ -3712,7 +3863,11 @@ impl<'lib> App<'lib> {
             | Position::AllAlbums
             | Position::AllTracks
             | Position::Genres => {
-                // Already at the top of the view: ascending stays there.
+                // Already at the top of the library: one step back is the
+                // sources screen (S6). The flat command-line list has none.
+                if self.view == View::Library && !matches!(self.position, Position::Files) {
+                    self.view = View::Sources;
+                }
             }
             Position::Albums { .. } => {
                 self.position = Position::Artists;

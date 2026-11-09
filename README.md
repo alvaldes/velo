@@ -46,8 +46,9 @@ Every key below is what the code does today.
 |:--|:--|
 | `j` / `↓`, `k` / `↑` | Move down / up |
 | `g` / `G` | First / last row |
-| `enter` | Open an artist, album or genre; play from the selected track onwards through the list it is in |
-| `esc` / `backspace` | Back one level (browse), close the help overlay |
+| `enter` (sources) | Open the source under the cursor: `Local library` or `Radio` |
+| `enter` (library) | Open an artist, album or genre; play from the selected track onwards through the list it is in |
+| `esc` / `backspace` | Back one level; from the top of the library, or when the radio closes, back to `Sources`. Closes the help overlay |
 | `1` `2` `3` `4` | Library view: artists (artist → album → track), every album, every track, genres |
 | `/` | Fuzzy search the whole library (`lofi` finds `Lo-Fi Scientists`) |
 | `space` | Pause / resume |
@@ -58,14 +59,14 @@ Every key below is what the code does today.
 | `L` | Set the library folder: the same prompt as the first run, at any time |
 | `u` | Refresh the library index in the background; the title bar shows `⟳ indexing…` until it ends and the lists reload |
 | `+` / `-` | Volume up / down, 5% at a time |
-| `tab` | Switch between the library browser and the queue |
+| `tab` | Switch between the library browser and the queue — inert on `Sources` |
 | `a` | Append the selection to the queue — a track, or every track of an album or genre |
 | `d` | Remove the selected entry from the queue (queue view) |
 | `J` / `K` | Move the selected entry down / up (queue view) |
 | `enter` (queue view) | Play the queue from the selected entry |
 | `?` | Help card: `j`/`k` (or `↓`/`↑`) scroll it and `g`/`G` jump to its ends; `/` filters it by key or description (`enter` keeps the filter, `esc` clears it, a second `esc` or `?` closes the help). The card keeps its full size however few rows the filter leaves, and every other key waits until it closes — `q` and `space` included |
 | `o` | Settings card: everything in `config.toml` — replay gain, repeat, shuffle, the seven `[theme]` colours, the six `[ui]` switches and the library folder (the volume is not a row: it stays on `+`/`-`). `j`/`k` (or `↓`/`↑`) move between the settings (the `sound`/`theme`/`screen`/`library` headers are never focused), `g`/`G` jump to the ends, `enter` or `←`/`→` step the focused row (colours cycle a short preset list, the `folder` row opens the library prompt), `esc` closes — and every other key waits until it does, `q` and `space` included |
-| `R` | Radio view: the Radio Browser directory, your favourites and your own stations |
+| `R` | Radio view, straight from either screen: the shortcut for `Sources` → `Radio` |
 | `f` (radio view) | Favourite the selected station, or pin the selected country or region |
 | `N` (radio view) | The country list, with your own country first when it knows it |
 | `ctrl+r` (radio view) | Refetch the directory for the place you are in: the country list, a region's stations or a tag's |
@@ -76,6 +77,14 @@ While a search is open, every printable key types into the query,
 cancels — leaving the browser exactly where it was. The queue only lets you
 edit entries after the one playing: the playing entry cannot be removed and
 nothing moves across it, and each refusal explains itself in the status line.
+
+The first screen is `Sources`: `Local library` and `Radio`, with the cursor
+already on the library. `esc` walks back one level at a time; the top of the
+library and the radio both land there, and a radio opened with `R` from the
+library comes back to the library — the way out is always the way in. A
+source's own keys stay its own once it is open. A launch that names files on
+the command line skips the first screen: those files are what plays, and
+there is no source to choose between.
 
 ## Install
 
@@ -129,10 +138,18 @@ velo --play song.flac song.mp3 # play and exit when finished
 
 ## Radio
 
-Press `R` for internet radio: the [Radio Browser](https://www.radio-browser.info/)
+From `Sources`, choose `Radio` — or press `R` anywhere — for internet radio: the
+[Radio Browser](https://www.radio-browser.info/)
 directory — about 58,000 stations across 241 countries — plus the stations you add
 yourself. It is a source beside your library and your Subsonic servers, not a
 replacement for either.
+
+Your favourites come first, at the top of the view: the stations you actually
+listen to are one keypress away instead of buried under a country. Under them
+come the country browser, your home country with its regions, your pinned
+places, and a section of **stations without a country** — the ones you added by
+hand and the favourites saved with no country code — so that radio is not only
+radio inside a country.
 
 Browse by country (your own first, and its regions when the directory records
 them), by the community's genres and tags, or search a name. Every list can be
@@ -226,13 +243,15 @@ alone.
 | `volume` | Start level, `0..=100` | `100` |
 | `shuffle` | Whether the queue is shuffled | `false` |
 | `repeat` | What follows the end of a track: `off`, `all` or `one` | `off` |
-| `view` | The tab that was open: `library` or `queue` | `library` |
+| `view` | The tab to come back to inside `Local library`: `library` or `queue` | `library` |
 | `browse_by` | The library view: `artists`, `albums`, `tracks` or `genres` | `artists` |
 | `artist`, `album`, `genre` | The node that was open inside that view — `album` always belongs to `artist` | absent |
 
 velo keeps this table up to date as you listen: the volume when it changes,
 the tab and the node when you move, the shuffle and the repeat when you toggle
-them. The next launch comes back to it. The queue and the track that was
+them. The next launch opens on `Sources` and comes back to this when you enter
+`Local library`. A hand-written `sources` in `view` is accepted and ignored:
+every launch opens there. The queue and the track that was
 playing are not kept. `volume` used to live at the top level of the file; it
 is still read there and moves under `[state]` the first time velo saves one.
 

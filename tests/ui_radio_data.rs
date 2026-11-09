@@ -763,6 +763,74 @@ fn a_failing_states_request_reports_once_and_leaves_the_countries_usable() {
     );
 }
 
+// ---- the stations without a country (S4) ------------------------------------
+
+#[test]
+fn the_no_country_section_never_requests_the_directory() {
+    let dir = TempDir::new("no-country");
+    std::fs::write(
+        dir.radio_toml(),
+        "[[station]]\n\
+         name = \"Night FM\"\n\
+         url = \"http://night.example/live\"\n\
+         \n\
+         [[favorite]]\n\
+         name = \"Free Radio\"\n\
+         url = \"https://free.example/stream\"\n\
+         countrycode = \"\"\n\
+         codec = \"\"\n",
+    )
+    .expect("the store is written");
+    let canned = Arc::new(Canned::new());
+    let mut data = RadioData::new(
+        Some(Client::new(Shared(Arc::clone(&canned)))),
+        Some(dir.radio_toml()),
+        None,
+    );
+    let mut view = data.view();
+
+    let section = view
+        .labels()
+        .iter()
+        .position(|label| label == "Stations without a country")
+        .expect("the no-country section is listed");
+    for _ in 0..section {
+        press(&mut view, KeyCode::Char('j'));
+    }
+    press(&mut view, KeyCode::Enter);
+    for _ in 0..5 {
+        data.poll(&mut view);
+    }
+
+    assert_eq!(
+        view.place(),
+        &velo::ui::radio::Place::NoCountry,
+        "the section is its own place, got: {:?}",
+        view.place()
+    );
+    assert_eq!(
+        view.labels(),
+        ["Night FM", "★ Free Radio"],
+        "the store's own rows land in the view, got: {:?}",
+        view.labels()
+    );
+    assert!(
+        canned.calls().is_empty(),
+        "an empty or a full no-country section asks the directory for nothing, got: {:?}",
+        canned.calls()
+    );
+
+    // Ctrl+R there re-requests nothing either: there is no request to
+    // refresh.
+    let _ = view.key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+    data.poll(&mut view);
+    assert!(
+        canned.calls().is_empty(),
+        "ctrl-r in the no-country place asks for nothing, got: {:?}",
+        canned.calls()
+    );
+}
+
 // ---- the preference store ---------------------------------------------------
 
 #[test]

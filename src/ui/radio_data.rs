@@ -13,7 +13,9 @@
 //! index when `Browse genres & tags` is entered, a place's stations when
 //! the place is opened — capped at [`crate::radio::directory::STATION_CAP`]
 //! through [`loadable_stations`] — and `Ctrl+R` re-requests only what the
-//! place on screen needs. The home country's state index
+//! place on screen needs. The stations that belong to no country (S4) are
+//! the user's own data, so that place never requests anything. The home
+//! country's state index
 //! (`/states/<home>/`, T6d) loads beside the country index, for the home
 //! country only and never for another; with no home country — the question
 //! unanswered or declined — no states request is made at all. An index
@@ -124,7 +126,9 @@ fn place_key(place: &Place) -> Option<CatalogKey> {
             state: state.clone(),
         }),
         Place::Tag { name } => Some(CatalogKey::Tag { name: name.clone() }),
-        Place::Top | Place::Countries | Place::Tags => None,
+        // The no-country place is the user's own data (S4): never a
+        // directory request, so an empty section must not produce one.
+        Place::Top | Place::Countries | Place::Tags | Place::NoCountry => None,
     }
 }
 
@@ -360,7 +364,9 @@ impl<T: Transport + Send + Sync + 'static> RadioData<T> {
     /// running one.
     fn refresh(&mut self, view: &mut RadioView) {
         match view.place() {
-            Place::Top => return,
+            // The top and the no-country place (S4) hold nothing the
+            // directory answered: there is nothing to refresh.
+            Place::Top | Place::NoCountry => return,
             Place::Countries => {
                 self.countries_loaded = false;
                 self.states_loaded = false;
