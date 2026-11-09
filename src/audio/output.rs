@@ -1144,7 +1144,7 @@ fn build_stream(
             config,
             move |out: &mut [f32], _info: &cpal::OutputCallbackInfo| {
                 let target = if playing.load(Ordering::Relaxed) {
-                    f32::from(volume.load(Ordering::Relaxed)) / 100.0
+                    volume_amplitude(volume.load(Ordering::Relaxed))
                 } else {
                     0.0
                 };
@@ -1189,6 +1189,31 @@ fn build_stream(
             None,
         )
         .map_err(|error| AudioError::Device(error.to_string()))
+}
+
+/// Turns the volume percentage into the amplitude the samples are multiplied
+/// by: the cubic perceptual curve `(percent / 100)³` (issue #39). Hearing is
+/// roughly logarithmic in amplitude, so the old linear knob squeezed
+/// everything audible into its last few points — 100→90 was about a decibel,
+/// 10→0 was twenty. The curve it must match, so the next reader does not
+/// re-derive it:
+///
+/// | percent | amplitude | dB      |
+/// |--------:|----------:|---------|
+/// |     100 |     1.000 |       0 |
+/// |      75 |     0.422 |    −7.5 |
+/// |      50 |     0.125 |     −18 |
+/// |      25 |     0.016 |     −36 |
+/// |      10 |     0.001 |     −60 |
+/// |       0 |     0     | silence |
+///
+/// The stored and shown volume stays 0–100; only this mapping is curved.
+/// Bit-perfect never scales samples: its volume is pinned to 100, where the
+/// amplitude is exactly 1.0.
+#[must_use]
+pub fn volume_amplitude(percent: u8) -> f32 {
+    let percent = f32::from(percent.min(100)) / 100.0;
+    percent * percent * percent
 }
 
 /// Folds every whole frame of `samples` into one value that every channel of
