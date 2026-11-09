@@ -64,6 +64,49 @@ Library browsing, the radio view, the queue, the history and the settings
 behave exactly as they do today. `f` keeps meaning "favourite a station /
 pin a place" inside the radio view.
 
+**S6 — The store's `[[playlist]]` is filled: a name and its tracks, in
+order.**
+A name is unique, compared verbatim — no trimming, no case folding, the same
+identity rule a favourite's path follows: saving or renaming onto a name that
+is already saved is refused, never a silent merge, never a duplicate. The
+store's writes stay atomic and best effort, like every other write there. The
+verbs: save a new playlist, append one track to its end, rename (keeping the
+tracks and the file's row order), delete, and move one track by swapping it
+with its neighbour. Appending to an unknown name appends nothing — the store
+never invents a playlist.
+
+**S7 — `Playlists` is a source, LAST.**
+`Sources` gains a `Playlists` row after `Favourites`, so `j` from the top
+still lands on `Radio` and `Favourites` keeps its place. Opening it lists the
+saved names, one row each with its track count; `enter` on a name opens that
+playlist as a track list — playable from the row, `a` queues, the same list
+conventions as `Favourites` — and `esc` walks back to the names list, then to
+`Sources`. An empty store opens an empty list that says so. A playlist's rows
+are the store's paths, read as the store stands (not a snapshot), so an edit
+is on screen the frame after it is saved; a track the store also holds as a
+favourite keeps its `★` there.
+
+**S8 — Creating: `S` saves the queue, `S` appends a track.**
+`S` in the queue view saves the queue as a new playlist, asking for a name
+with a prompt in the style of the seek/library prompts (a card, `enter save`,
+`esc cancel`). An empty queue is refused on the status line, and so is a
+queue that holds a station — a playlist's tracks are paths, and a station has
+none. A refused name (taken, or empty) keeps the prompt open with the reason
+under what was typed, the way a refused seek does. `S` on a library track row
+opens a small overlay listing the saved names; `enter` appends the row's path
+— exactly the path the row carries — to the chosen one and `esc` cancels. No
+saved names, nothing to choose from: one status line says so.
+
+**S9 — `J`/`K` reorder inside a playlist; `d` deletes; `e` renames.**
+Inside a playlist's track list, `J`/`K` move the selected track down/up and
+the move is written to the file at once — the queue view already reorders
+with those keys, and there is no playing entry to protect here, only the
+list's ends. In the names list, `d` deletes the playlist under the cursor and
+says so in the status line, and `e` renames it with the same prompt, opened
+with the name as it stands; `esc` cancels. Nothing else changes: `f`, `a`,
+`S` and the rest keep their meaning elsewhere — `f` does nothing on a
+playlist row, `a` still queues it.
+
 ## Tasks
 
 | ID | Spec | Route | Task | Commit |
@@ -71,6 +114,7 @@ pin a place" inside the radio view.
 | T1 | S1 | parent | `src/saved.rs`: both tables, `path_beside`, lenient load, atomic save, toggle by path | |
 | T2 | S2, S3 | parent | `App::set_config_file` loads the store, `f` toggles a library track row and saves at once, `★` before the title in every library list | |
 | T3 | S4 | parent | `Favourites` as the last source, its `Position` and `Level`, playing, queueing, `esc`, the empty list, and the docs | |
+| T4 | S6–S9, issue #4 | `feat/playlists` | the store's playlist verbs with their tests, `Playlists` as the last source with its two lists, the write verbs (`S` save, `S` append, `J`/`K`, `d`, `e`), and the docs |
 
 ## Log
 
@@ -93,3 +137,17 @@ never rewritten, never reordered. The template is all `#` comment lines (a
 short sentence about the file and the whole-file rewrite, then one commented
 `[[favorite]]` and one commented `[[playlist]]` example), so an untouched
 template parses as an empty store.
+
+**L4** — issue #4's own words: "Named playlists that outlive the process —
+created, renamed, added to, reordered, and played like a queue — stored in
+their own file under `~/.config/velo` rather than mixed into `config.toml`."
+The file was already decided: `library.toml`, one file for marked tracks and
+playlists (L2), and its `[[playlist]]` table has existed since that slice —
+filling it needed no format change.
+## Slices
+
+One commit for this issue, on purpose: the store verbs, the `Playlists` screen and
+the write keys share the same match arms in `src/ui/mod.rs`, so any split leaves a
+tree that does not compile or a screen without the verbs that justify it. The slice
+is large; the review reads it as store → screen → keys → tests, in that order.
+

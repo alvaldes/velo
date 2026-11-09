@@ -190,6 +190,34 @@ struct SeekPrompt {
     error: Option<String>,
 }
 
+/// The playlist-name prompt (issue #4): what is being typed and why the
+/// last answer was refused. The same card the seek prompt draws, a question
+/// over the typed name and the reason a refused one stays.
+#[derive(Debug)]
+struct PlaylistPrompt {
+    /// The name as typed.
+    input: String,
+    /// Why the last answer was refused, shown in the card.
+    error: Option<String>,
+    /// The name being renamed, when the prompt renames (issue #4, S5):
+    /// `None` saves the queue as a new playlist (S3).
+    rename: Option<String>,
+}
+
+/// The small overlay `S` opens on a library track row (issue #4, S3): the
+/// saved playlists' names, one row each; `enter` appends the row's track to
+/// the chosen one, `esc` cancels.
+#[derive(Debug)]
+struct PlaylistPicker {
+    /// The track the cursor was on, exactly the path the row carries — a
+    /// `subsonic://` path stays itself, the way a favourite's does.
+    track: String,
+    /// The saved names, in the store's order, cloned in when it opened.
+    names: Vec<String>,
+    /// The row the cursor is on.
+    selected: usize,
+}
+
 impl LibraryPrompt {
     fn new() -> Self {
         Self {
@@ -258,6 +286,15 @@ pub enum Level {
     /// The saved store's favourites (issue #7): the `Favourites` source, not
     /// a level of the index.
     Favourites,
+    /// The saved store's playlists (issue #4): the `Playlists` source, not
+    /// a level of the index.
+    Playlists,
+    /// The tracks of one saved playlist (issue #4), in the order the store
+    /// holds them.
+    Playlist {
+        /// The playlist's name, the store's identity for it.
+        name: String,
+    },
 }
 
 /// Where the interface stands, including the flat command-line list.
@@ -287,6 +324,19 @@ enum Position {
     /// Not a level of the index: its rows are the store's entries, cloned in
     /// when the source opens, and nothing here is persisted as a node.
     Favourites,
+    /// The saved store's playlists (issue #4) — the `Playlists` source: the
+    /// names, one row each. Not a level of the index: its rows are the
+    /// store's playlists, cloned in when the source opens, and nothing here
+    /// is persisted as a node.
+    Playlists,
+    /// One saved playlist's tracks (issue #4), in the order the store holds
+    /// them. The rows are read from the store as it stands, so a move is on
+    /// screen the frame after it is saved, and nothing here is persisted as
+    /// a node.
+    Playlist {
+        /// The playlist's name, the store's identity for it.
+        name: String,
+    },
 }
 
 /// Where the stream that is playing came from. The row it plays is found by
@@ -560,6 +610,17 @@ pub struct App<'lib> {
     /// The rows the `Favourites` screen stands on (issue #7): the store's
     /// favourites as the file holds them, cloned in when the source opens.
     favourite_rows: Vec<crate::saved::Favorite>,
+    /// The rows the `Playlists` screen stands on (issue #4): the store's
+    /// playlists — name and tracks — cloned in when the source opens. The
+    /// track list of the open playlist is not here: its rows are read from
+    /// the store as it stands, so a move is on screen the frame after it is
+    /// saved.
+    playlist_rows: Vec<crate::saved::Playlist>,
+    /// The playlist-name prompt (issue #4), while it is open: saving the
+    /// queue as a new playlist, or renaming one.
+    playlist_prompt: Option<PlaylistPrompt>,
+    /// The append-to-playlist overlay (issue #4), while it is open.
+    playlist_picker: Option<PlaylistPicker>,
     /// Turns queue entries into files just before the producer opens them
     /// (T12c): the remote rows' `subsonic://…` entries resolve through the
     /// subsonic cache. `None` (a local-only launch) means every entry already
@@ -673,6 +734,9 @@ impl<'lib> App<'lib> {
             recent_rows: Vec::new(),
             favourites: crate::saved::Saved::default(),
             favourite_rows: Vec::new(),
+            playlist_rows: Vec::new(),
+            playlist_prompt: None,
+            playlist_picker: None,
             resolver: None,
             covers: None,
             pending_cover: None,
@@ -755,6 +819,9 @@ impl<'lib> App<'lib> {
             recent_rows: Vec::new(),
             favourites: crate::saved::Saved::default(),
             favourite_rows: Vec::new(),
+            playlist_rows: Vec::new(),
+            playlist_prompt: None,
+            playlist_picker: None,
             resolver: None,
             covers: None,
             pending_cover: None,
@@ -1113,6 +1180,10 @@ impl<'lib> App<'lib> {
                 self.open_favourites();
                 Action::None
             }
+            sources::Source::Playlists => {
+                self.open_playlists();
+                Action::None
+            }
         }
     }
 
@@ -1135,6 +1206,48 @@ impl<'lib> App<'lib> {
     #[must_use]
     pub fn favourite_rows(&self) -> &[crate::saved::Favorite] {
         &self.favourite_rows
+    }
+
+    /// Opens the `Playlists` source (issue #4): the saved store's playlists,
+    /// one row per name, in the order the file holds them — cloned in here,
+    /// never re-read while the screen is open. This is not a level of the
+    /// library and never becomes a `BrowseBy`: nothing here is persisted as
+    /// a node.
+    fn open_playlists(&mut self) {
+        self.playlist_rows = self.favourites.playlist.clone();
+        self.view = View::Library;
+        self.position = Position::Playlists;
+        self.selected = 0;
+        self.queue_selected = 0;
+    }
+
+    /// The rows the `Playlists` screen stands on (issue #4): the store's
+    /// playlists as the file holds them, in the order they were saved.
+    /// Empty outside that screen.
+    #[must_use]
+    pub fn playlist_rows(&self) -> &[crate::saved::Playlist] {
+        &self.playlist_rows
+    }
+
+    /// Opens one playlist's track list (issue #4): its name is the store's
+    /// identity, and the rows are read from the store as it stands, so a
+    /// move or an append is on screen the frame after it is saved.
+    fn open_playlist(&mut self, name: String) {
+        self.position = Position::Playlist { name };
+        self.selected = 0;
+    }
+
+    /// The tracks of the playlist on screen (issue #4): empty when no
+    /// playlist is open or the name is no longer in the store.
+    fn open_playlist_tracks(&self) -> &[String] {
+        match &self.position {
+            Position::Playlist { name } => self
+                .favourites
+                .playlist(name)
+                .map(|playlist| playlist.track.as_slice())
+                .unwrap_or_default(),
+            _ => &[],
+        }
     }
 
     /// `f` on a track row of the library views (issue #7): marks the row's
@@ -1169,6 +1282,220 @@ impl<'lib> App<'lib> {
         };
         let file = crate::saved::path_beside(&config_file);
         let _ = self.favourites.save(&file);
+    }
+
+    /// `S` in the queue view (issue #4, S3): opens the name prompt when the
+    /// queue holds something to save; an empty queue is refused on the
+    /// status line, and so is a queue that holds a station — a playlist's
+    /// `[[playlist]] track` entries are paths, and a station has none.
+    fn ask_to_save_queue_as_playlist(&mut self) {
+        if self.queue.is_empty() {
+            self.status = String::from("velo: the queue is empty — nothing to save");
+            return;
+        }
+        if self.queue.iter().any(|entry| entry.as_path().is_none()) {
+            self.status =
+                String::from("velo: the queue holds a station — a playlist carries tracks only");
+            return;
+        }
+        self.playlist_prompt = Some(PlaylistPrompt {
+            input: String::new(),
+            error: None,
+            rename: None,
+        });
+    }
+
+    /// `S` on a library track row (issue #4, S3): opens the append overlay
+    /// listing the saved names, the row's path captured exactly as the row
+    /// carries it. No saved names, nothing to choose from: the status line
+    /// says so.
+    fn ask_to_append_to_playlist(&mut self) {
+        let names: Vec<String> = self
+            .favourites
+            .playlist
+            .iter()
+            .map(|playlist| playlist.name.clone())
+            .collect();
+        if names.is_empty() {
+            self.status = String::from("velo: no playlists yet — save the queue with S");
+            return;
+        }
+        let Some(track) = self.tracks.get(self.selected) else {
+            return;
+        };
+        self.playlist_picker = Some(PlaylistPicker {
+            track: track.path.to_string_lossy().into_owned(),
+            names,
+            selected: 0,
+        });
+    }
+
+    /// `e` on a playlist row of the names list (issue #4, S5): opens the
+    /// rename prompt with the name as it stands, so the edit starts from
+    /// what is already there. `esc` cancels; nothing is written until
+    /// `enter`.
+    fn ask_to_rename_playlist(&mut self) {
+        let Some(entry) = self.playlist_rows.get(self.selected) else {
+            return;
+        };
+        self.playlist_prompt = Some(PlaylistPrompt {
+            input: entry.name.clone(),
+            error: None,
+            rename: Some(entry.name.clone()),
+        });
+    }
+
+    /// `d` on a playlist row of the names list (issue #4, S5): deletes it
+    /// from the store and says so in the status line. The store's write is
+    /// best effort: a file that cannot be written loses the change, not the
+    /// session — the same courtesy rule every store write follows.
+    fn delete_playlist(&mut self) {
+        let Some(entry) = self.playlist_rows.get(self.selected) else {
+            return;
+        };
+        let name = entry.name.clone();
+        if self.favourites.delete_playlist(&name) {
+            self.playlist_rows.remove(self.selected);
+            self.selected = self
+                .selected
+                .min(self.playlist_rows.len().saturating_sub(1));
+            self.save_marks();
+            self.status = format!("velo: deleted playlist {name}");
+        }
+    }
+
+    /// `J`/`K` inside a playlist's track list (issue #4, S4): the selected
+    /// track swaps with its neighbour and the store is written at once — the
+    /// move survives the process like the list does. A refused move (at
+    /// either end) changes nothing; the store's write is best effort.
+    fn move_in_playlist(&mut self, delta: i64) {
+        let name = match &self.position {
+            Position::Playlist { name } => name.clone(),
+            _ => return,
+        };
+        if let Some(selected) = self
+            .favourites
+            .move_in_playlist(&name, self.selected, delta)
+        {
+            self.selected = selected;
+            self.save_marks();
+        }
+    }
+
+    /// The keys while the playlist-name prompt is open (issue #4): printable
+    /// keys type into it, `backspace` deletes, `enter` answers, `esc` closes
+    /// it. Nothing reaches the lists underneath.
+    fn on_playlist_prompt_key(&mut self, code: ratatui::crossterm::event::KeyCode) -> Action {
+        use ratatui::crossterm::event::KeyCode;
+
+        match code {
+            KeyCode::Esc => {
+                self.playlist_prompt = None;
+            }
+            KeyCode::Backspace => {
+                if let Some(prompt) = self.playlist_prompt.as_mut() {
+                    prompt.input.pop();
+                    prompt.error = None;
+                }
+            }
+            KeyCode::Char(character) => {
+                if let Some(prompt) = self.playlist_prompt.as_mut() {
+                    prompt.input.push(character);
+                    prompt.error = None;
+                }
+            }
+            KeyCode::Enter => self.answer_playlist_prompt(),
+            _ => return Action::None,
+        }
+        Action::None
+    }
+
+    /// Answers the playlist-name prompt (issue #4): the typed name saves the
+    /// queue as a new playlist, or renames the one the prompt carries. A
+    /// taken name is refused — the prompt stays open with the reason under
+    /// what was typed, the way a refused seek stays (S1: never a silent
+    /// merge, never a duplicate) — and an empty answer is refused the same
+    /// way. The names list, when it is on screen, follows the store.
+    fn answer_playlist_prompt(&mut self) {
+        let (name, rename) = match &self.playlist_prompt {
+            Some(prompt) => (prompt.input.clone(), prompt.rename.clone()),
+            None => return,
+        };
+        if name.is_empty() {
+            if let Some(prompt) = &mut self.playlist_prompt {
+                prompt.error = Some(String::from("a name is needed"));
+            }
+            return;
+        }
+        let outcome = match rename {
+            // The queue's file entries become the playlist's tracks, in play
+            // order; the ask already refused a station, so there is nothing
+            // to skip here.
+            None => {
+                let tracks: Vec<String> = self
+                    .queue
+                    .iter()
+                    .filter_map(|entry| entry.as_path())
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .collect();
+                let count = tracks.len();
+                self.favourites.save_playlist(&name, tracks).map(|()| {
+                    format!(
+                        "velo: saved playlist {name}, {}",
+                        plural(count, "track", "tracks")
+                    )
+                })
+            }
+            Some(original) => self
+                .favourites
+                .rename_playlist(&original, &name)
+                .map(|()| format!("velo: renamed playlist {original} to {name}")),
+        };
+        match outcome {
+            Ok(message) => {
+                self.playlist_prompt = None;
+                self.status = message;
+                self.playlist_rows = self.favourites.playlist.clone();
+                self.save_marks();
+            }
+            Err(crate::saved::DuplicateName) => {
+                if let Some(prompt) = &mut self.playlist_prompt {
+                    prompt.error = Some(format!("a playlist called {name} already exists"));
+                }
+            }
+        }
+    }
+
+    /// The keys while the append overlay is open (issue #4): `j`/`k` move
+    /// between the saved names, `enter` appends the captured track to the
+    /// chosen one, `esc` cancels. Nothing reaches the lists underneath.
+    fn on_playlist_picker_key(&mut self, code: ratatui::crossterm::event::KeyCode) -> Action {
+        use ratatui::crossterm::event::KeyCode;
+
+        let Some(picker) = self.playlist_picker.as_mut() else {
+            return Action::None;
+        };
+        match code {
+            KeyCode::Esc => self.playlist_picker = None,
+            KeyCode::Char('j') | KeyCode::Down => {
+                picker.selected = (picker.selected + 1).min(picker.names.len() - 1);
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                picker.selected = picker.selected.saturating_sub(1);
+            }
+            KeyCode::Char('g') => picker.selected = 0,
+            KeyCode::Char('G') => picker.selected = picker.names.len() - 1,
+            KeyCode::Enter => {
+                let track = picker.track.clone();
+                let name = picker.names[picker.selected].clone();
+                self.playlist_picker = None;
+                self.favourites.append_to_playlist(&name, &track);
+                self.save_marks();
+                self.status = format!("velo: added to playlist {name}");
+            }
+            _ => return Action::None,
+        }
+        Action::None
     }
 
     /// Opens the `Recently played` source (issue #5): the history's entries,
@@ -1306,6 +1633,8 @@ impl<'lib> App<'lib> {
             }),
             Position::Recent => Some(Level::Recent),
             Position::Favourites => Some(Level::Favourites),
+            Position::Playlists => Some(Level::Playlists),
+            Position::Playlist { name } => Some(Level::Playlist { name: name.clone() }),
         }
     }
 
@@ -1355,6 +1684,22 @@ impl<'lib> App<'lib> {
                 .iter()
                 .map(|favorite| PathBuf::from(&favorite.path))
                 .collect(),
+            // A playlist's track list (issue #4): from the selected track
+            // onwards, in the order the store holds, exactly as the store
+            // says it — the stream is built from the store's paths.
+            Position::Playlist { name } => self
+                .favourites
+                .playlist(name)
+                .map(|playlist| {
+                    playlist
+                        .track
+                        .get(from..)
+                        .unwrap_or_default()
+                        .iter()
+                        .map(PathBuf::from)
+                        .collect()
+                })
+                .unwrap_or_default(),
             _ => Vec::new(),
         }
     }
@@ -2061,7 +2406,12 @@ impl<'lib> App<'lib> {
     fn read_level(&mut self, library: &Library) -> Result<(), crate::library::LibraryError> {
         self.artists = library.artists()?;
         match &self.position {
-            Position::Files | Position::Artists | Position::Recent | Position::Favourites => {}
+            Position::Files
+            | Position::Artists
+            | Position::Recent
+            | Position::Favourites
+            | Position::Playlists
+            | Position::Playlist { .. } => {}
             Position::Albums { artist } => self.albums = library.albums_of(artist)?,
             Position::Tracks { artist, album } => {
                 self.tracks = library.tracks_of(artist, album)?;
@@ -2109,6 +2459,13 @@ impl<'lib> App<'lib> {
                 .favourite_rows
                 .get(index)
                 .map(|favorite| favorite.path.clone()),
+            // A playlist row's identity is its name (issue #4); a track row's
+            // is its path, exactly as the store holds it.
+            Position::Playlists => self
+                .playlist_rows
+                .get(index)
+                .map(|playlist| playlist.name.clone()),
+            Position::Playlist { .. } => self.open_playlist_tracks().get(index).cloned(),
             Position::Genres => self.genres.get(index).map(|entry| entry.name.clone()),
         }
     }
@@ -2183,6 +2540,16 @@ impl<'lib> App<'lib> {
         if self.seek_prompt.is_some() {
             return self.on_seek_key(event.code);
         }
+        // The playlist-name prompt owns what is typed into it (issue #4),
+        // the way the seek prompt does.
+        if self.playlist_prompt.is_some() {
+            return self.on_playlist_prompt_key(event.code);
+        }
+        // The append overlay owns every key too (issue #4): `j`/`k` move
+        // between the saved names, `enter` applies, `esc` cancels.
+        if self.playlist_picker.is_some() {
+            return self.on_playlist_picker_key(event.code);
+        }
         // An open settings card owns every key too (S6): nothing reaches the
         // lists or the transport while it is up, `q` and `space` included.
         if self.settings.is_some() {
@@ -2251,8 +2618,38 @@ impl<'lib> App<'lib> {
                 self.toggle_favourite();
                 Action::None
             }
+            // `S` in the queue view saves the queue as a new playlist
+            // (issue #4, S3), asking for a name with the seek prompt's card.
+            KeyCode::Char('S') if self.view == View::Queue => {
+                self.ask_to_save_queue_as_playlist();
+                Action::None
+            }
+            // `S` on a library track row appends the row's track to a
+            // playlist chosen from the saved names (issue #4, S3).
+            KeyCode::Char('S')
+                if self.view == View::Library
+                    && matches!(
+                        self.position,
+                        Position::Tracks { .. } | Position::AllTracks | Position::Genre { .. }
+                    ) =>
+            {
+                self.ask_to_append_to_playlist();
+                Action::None
+            }
             KeyCode::Char('d') if self.view == View::Queue => {
                 self.remove_from_queue();
+                Action::None
+            }
+            // `d` on a playlist row of the names list deletes it (issue #4,
+            // S5), and the status line says so.
+            KeyCode::Char('d') if matches!(self.position, Position::Playlists) => {
+                self.delete_playlist();
+                Action::None
+            }
+            // `e` on a playlist row of the names list renames it (issue #4,
+            // S5), with the seek prompt's card; `esc` cancels.
+            KeyCode::Char('e') if matches!(self.position, Position::Playlists) => {
+                self.ask_to_rename_playlist();
                 Action::None
             }
             KeyCode::Char('J') if self.view == View::Queue => {
@@ -2261,6 +2658,19 @@ impl<'lib> App<'lib> {
             }
             KeyCode::Char('K') if self.view == View::Queue => {
                 self.move_in_queue(-1);
+                Action::None
+            }
+            // Inside a playlist's track list (issue #4, S4): the queue's own
+            // reordering keys, saved to the store at once. The queue's arms
+            // above take the queue view; a playlist's list is the library
+            // view's rows, and the store is the queue's only constraint —
+            // there is no playing entry to protect here.
+            KeyCode::Char('J') if matches!(self.position, Position::Playlist { .. }) => {
+                self.move_in_playlist(1);
+                Action::None
+            }
+            KeyCode::Char('K') if matches!(self.position, Position::Playlist { .. }) => {
+                self.move_in_playlist(-1);
                 Action::None
             }
             KeyCode::Enter if self.view == View::Queue => {
@@ -2661,6 +3071,8 @@ impl<'lib> App<'lib> {
                 play
             }
             Position::Favourites if !self.favourite_rows.is_empty() => play,
+            Position::Playlists if !self.playlist_rows.is_empty() => Action::Descend,
+            Position::Playlist { .. } if !self.open_playlist_tracks().is_empty() => play,
             Position::Artists if !self.artists.is_empty() => Action::Descend,
             Position::Albums { .. } | Position::AllAlbums if !self.albums.is_empty() => {
                 Action::Descend
@@ -3226,6 +3638,12 @@ impl<'lib> App<'lib> {
         if let Some(prompt) = &self.seek_prompt {
             Self::draw_seek_prompt(frame, area, prompt, &self.theme);
         }
+        if let Some(prompt) = &self.playlist_prompt {
+            Self::draw_playlist_prompt(frame, area, prompt, &self.theme);
+        }
+        if let Some(picker) = &self.playlist_picker {
+            Self::draw_playlist_picker(frame, area, picker, &self.theme);
+        }
     }
 
     /// Renders the cover at the left of the now-playing block, fitting the source image into the
@@ -3634,7 +4052,9 @@ impl<'lib> App<'lib> {
             | Position::AllTracks
             | Position::Genre { .. }
             | Position::Recent
-            | Position::Favourites => ("track", "tracks"),
+            | Position::Favourites
+            | Position::Playlist { .. } => ("track", "tracks"),
+            Position::Playlists => ("playlist", "playlists"),
             Position::Artists => ("artist", "artists"),
             Position::Albums { .. } | Position::AllAlbums => ("album", "albums"),
             Position::Genres => ("genre", "genres"),
@@ -3740,6 +4160,12 @@ impl<'lib> App<'lib> {
                 .get(index)
                 .is_some_and(|entry| self.favourites.is_favorite(&entry.path.to_string_lossy())),
             Position::Favourites => true,
+            // A playlist's rows are track rows too (issue #4): a track that
+            // is also a favourite keeps its star there.
+            Position::Playlist { .. } => self
+                .open_playlist_tracks()
+                .get(index)
+                .is_some_and(|path| self.favourites.is_favorite(path)),
             _ => false,
         };
         if starred {
@@ -3828,6 +4254,28 @@ impl<'lib> App<'lib> {
                     favorite.album.as_deref(),
                     favorite.title.as_deref(),
                 );
+                (self.starred_name(index, name), note, fact)
+            }
+            // The names list (issue #4): the name, and its track count
+            // against the right edge.
+            Position::Playlists => {
+                let entry = &self.playlist_rows[index];
+                (
+                    entry.name.clone(),
+                    String::new(),
+                    plural(entry.track.len(), "track", "tracks"),
+                )
+            }
+            // A playlist's track list (issue #4): the same row convention as
+            // the recent list, over a path the store holds with no metadata —
+            // the file's own name names it.
+            Position::Playlist { .. } => {
+                let path = self
+                    .open_playlist_tracks()
+                    .get(index)
+                    .map(String::as_str)
+                    .unwrap_or_default();
+                let (name, note, fact) = file_entry_text(path, None, None, None);
                 (self.starred_name(index, name), note, fact)
             }
             Position::Genres => {
@@ -4273,6 +4721,87 @@ impl<'lib> App<'lib> {
         );
     }
 
+    /// The playlist-name prompt (issue #4), drawn in the seek prompt's
+    /// style: a question, the typed name, and `enter save · esc cancel` — or
+    /// the reason the last answer was refused under what was typed.
+    fn draw_playlist_prompt(frame: &mut Frame, area: Rect, prompt: &PlaylistPrompt, theme: &Theme) {
+        let width = area.width.saturating_sub(8).clamp(20, 48);
+        let box_area = centered(area, width, 7);
+        let question = if prompt.rename.is_some() {
+            "Rename the playlist"
+        } else {
+            "Save the queue as a new playlist"
+        };
+        let text = vec![
+            Line::styled(question, Style::new().fg(theme.text)),
+            Line::styled(
+                "a name is the playlist's identity",
+                Style::new().fg(theme.dim),
+            ),
+            Line::from(vec![
+                Span::styled(prompt.input.clone(), Style::new().fg(theme.accent)),
+                Span::styled("▏", Style::new().fg(theme.secondary)),
+            ]),
+            prompt.error.as_ref().map_or_else(
+                || Line::styled("enter save · esc cancel", Style::new().fg(theme.dim)),
+                |error| Line::styled(error.clone(), Style::new().fg(theme.secondary)),
+            ),
+        ];
+        frame.render_widget(Clear, box_area);
+        frame.render_widget(
+            Paragraph::new(text).block(
+                Block::bordered()
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::new().fg(theme.accent))
+                    .title(Span::styled(
+                        " playlist ",
+                        Style::new().fg(theme.accent).bold(),
+                    ))
+                    .padding(ratatui::widgets::Padding::new(1, 1, 1, 0))
+                    .style(Style::new().bg(theme.background)),
+            ),
+            box_area,
+        );
+    }
+
+    /// The append overlay (issue #4): a small card listing the saved names,
+    /// the cursor highlighted, `enter add · esc cancel` at its foot.
+    fn draw_playlist_picker(frame: &mut Frame, area: Rect, picker: &PlaylistPicker, theme: &Theme) {
+        let height = (u16::try_from(picker.names.len()).unwrap_or(12) + 4).min(12);
+        let width = area.width.saturating_sub(8).clamp(24, 40);
+        let box_area = centered(area, width, height);
+        let mut text = vec![Line::styled(
+            "Add to which playlist?",
+            Style::new().fg(theme.text),
+        )];
+        text.extend(picker.names.iter().enumerate().map(|(index, name)| {
+            if index == picker.selected {
+                Line::styled(name.clone(), Style::new().fg(theme.accent).bold())
+            } else {
+                Line::styled(name.clone(), Style::new().fg(theme.text))
+            }
+        }));
+        text.push(Line::styled(
+            "enter add · esc cancel",
+            Style::new().fg(theme.dim),
+        ));
+        frame.render_widget(Clear, box_area);
+        frame.render_widget(
+            Paragraph::new(text).block(
+                Block::bordered()
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::new().fg(theme.accent))
+                    .title(Span::styled(
+                        " add to playlist ",
+                        Style::new().fg(theme.accent).bold(),
+                    ))
+                    .padding(ratatui::widgets::Padding::new(1, 1, 1, 0))
+                    .style(Style::new().bg(theme.background)),
+            ),
+            box_area,
+        );
+    }
+
     /// How many rows the current level has.
     fn row_count(&self) -> usize {
         match &self.position {
@@ -4284,6 +4813,8 @@ impl<'lib> App<'lib> {
             }
             Position::Recent => self.recent_rows.len(),
             Position::Favourites => self.favourite_rows.len(),
+            Position::Playlists => self.playlist_rows.len(),
+            Position::Playlist { .. } => self.open_playlist_tracks().len(),
             Position::Genres => self.genres.len(),
         }
     }
@@ -4297,6 +4828,8 @@ impl<'lib> App<'lib> {
             _ if self.row_count() > 0 => None,
             Position::Recent => Some("nothing played yet"),
             Position::Favourites => Some("nothing favourited yet"),
+            Position::Playlists => Some("no playlists yet — save the queue with S"),
+            Position::Playlist { .. } => Some("the playlist is empty"),
             Position::Artists | Position::AllAlbums | Position::AllTracks | Position::Genres
                 if self.library_setup.is_some() =>
             {
@@ -4354,10 +4887,17 @@ impl<'lib> App<'lib> {
                     .iter()
                     .position(|favorite| favorite.path == path.to_string_lossy())
             }
+            Position::Playlist { .. } => {
+                let path = self.playing_path()?;
+                self.open_playlist_tracks()
+                    .iter()
+                    .position(|track| *track == path.to_string_lossy())
+            }
             Position::Artists
             | Position::Albums { .. }
             | Position::AllAlbums
-            | Position::Genres => None,
+            | Position::Genres
+            | Position::Playlists => None,
         }
     }
 
@@ -4689,6 +5229,17 @@ impl<'lib> App<'lib> {
     /// entry, and the producer resolves it through the cache when it is
     /// reached — appending never starts a download.
     fn append_selection(&mut self) {
+        // A playlist's track list (issue #4) is its own list, not `tracks`:
+        // a row appends the store's path verbatim, like a favourite's.
+        if matches!(self.position, Position::Playlist { .. }) {
+            let Some(path) = self.open_playlist_tracks().get(self.selected) else {
+                return;
+            };
+            let path = PathBuf::from(path);
+            self.edit_queue(|queue| queue.push(Entry::from(path)));
+            self.status = format!("velo: added {}", plural(1, "track", "tracks"));
+            return;
+        }
         // The favourites list (issue #7) is its own list, not `tracks`: a
         // row appends the store's path verbatim.
         if matches!(self.position, Position::Favourites) {
@@ -4772,8 +5323,16 @@ impl<'lib> App<'lib> {
                 return;
             }
             // The recent and favourites lists are answered above: their rows
-            // are the store's entries, not `tracks` rows (issue #33, #7).
-            (Position::Recent | Position::Favourites, _) => return,
+            // are the store's entries, not `tracks` rows (issue #33, #7). The
+            // playlists' lists are their own too (issue #4): the track list
+            // is answered above, and the names list has no track to add.
+            (
+                Position::Recent
+                | Position::Favourites
+                | Position::Playlists
+                | Position::Playlist { .. },
+                _,
+            ) => return,
         };
         if paths.is_empty() {
             return;
@@ -4856,6 +5415,16 @@ impl<'lib> App<'lib> {
                     Err(error) => self.status = format!("velo: {error}"),
                 }
             }
+            // The names list (issue #4) descends into the chosen playlist's
+            // track list — no index query, the rows are the store's.
+            Position::Playlists => {
+                let Some(entry) = self.playlist_rows.get(self.selected) else {
+                    return;
+                };
+                let name = entry.name.clone();
+                self.open_playlist(name);
+                return;
+            }
             // `Files` does not descend; track lists are the deepest levels
             // and answer with `Action::Play` instead.
             Position::Files
@@ -4863,7 +5432,8 @@ impl<'lib> App<'lib> {
             | Position::AllTracks
             | Position::Genre { .. }
             | Position::Recent
-            | Position::Favourites => {}
+            | Position::Favourites
+            | Position::Playlist { .. } => {}
         }
         // The open node is persisted (S3), but only when it changed.
         self.remember_node();
@@ -4903,14 +5473,22 @@ impl<'lib> App<'lib> {
                 self.position = Position::Genres;
                 self.selected = 0;
             }
-            // The recent list (issue #5) and the favourites list (issue #7)
-            // are their own lists, not levels of the library: there is no
-            // parent snapshot to keep — `open_recent`/`open_favourites`
-            // replaced the tracks — so ascending lands on `Sources` over the
-            // top of the library view, read again from the index, the way the
-            // top of the library reaches `Sources` (S6). The saved node was
-            // never these lists' to walk out of, so nothing is persisted.
-            Position::Recent | Position::Favourites => {
+            // A playlist's track list climbs to the names list (issue #4):
+            // the names are their own rows, still held from when the source
+            // opened — a playlist is one level above the favourites' walk.
+            Position::Playlist { .. } => {
+                self.position = Position::Playlists;
+                self.selected = 0;
+            }
+            // The recent list (issue #5), the favourites list (issue #7) and
+            // the playlists names list (issue #4) are their own lists, not
+            // levels of the library: there is no parent snapshot to keep —
+            // `open_recent`/`open_favourites`/`open_playlists` replaced the
+            // tracks — so ascending lands on `Sources` over the top of the
+            // library view, read again from the index, the way the top of
+            // the library reaches `Sources` (S6). The saved node was never
+            // these lists' to walk out of, so nothing is persisted.
+            Position::Recent | Position::Favourites | Position::Playlists => {
                 self.position = match self.browse_by {
                     BrowseBy::Artists => Position::Artists,
                     BrowseBy::Albums => Position::AllAlbums,
@@ -4947,8 +5525,12 @@ impl<'lib> App<'lib> {
         };
         // The recent list is not `tracks` (issue #33): its rows are the
         // history's entries and the library snapshot is somebody else's, so
-        // the describing pool keeps what it had.
-        if !matches!(self.position, Position::Files | Position::Recent) {
+        // the describing pool keeps what it had. A playlist's track list is
+        // the same kind of guest (issue #4): its rows are the store's paths.
+        if !matches!(
+            self.position,
+            Position::Files | Position::Recent | Position::Playlist { .. }
+        ) {
             self.played = self.tracks[from..].to_vec();
         }
         self.start_stream(paths.into_iter().map(Entry::from).collect(), playback);
@@ -5628,7 +6210,7 @@ fn mmss(duration: Duration) -> String {
 }
 
 /// Every row of the help card: the key, then what it does.
-const HELP_ROWS: [(&str, &str); 34] = [
+const HELP_ROWS: [(&str, &str); 36] = [
     ("j / Down", "move down"),
     ("k / Up", "move up"),
     ("g", "first track"),
@@ -5660,8 +6242,13 @@ const HELP_ROWS: [(&str, &str); 34] = [
     ),
     ("a", "add the selection to the queue"),
     ("f", "on a track: mark it as a favourite"),
-    ("d", "remove from the queue"),
-    ("J / K", "move it down / up"),
+    (
+        "S",
+        "save the queue as a playlist; on a track: add it to one",
+    ),
+    ("d", "in the queue: remove it; on a playlist: delete it"),
+    ("e", "in playlists: rename the one under the cursor"),
+    ("J / K", "move it down / up, in the queue or in a playlist"),
     ("R", "radio: the directory, your favourites, your stations"),
     ("f", "in radio: favourite a station, pin a place"),
     ("F", "in radio: filter what is already loaded"),
