@@ -250,7 +250,7 @@ alone.
 | `volume` | Start level, `0..=100` | `100` |
 | `shuffle` | Whether the queue is shuffled | `false` |
 | `repeat` | What follows the end of a track: `off`, `all` or `one` | `off` |
-| `view` | The tab to come back to inside `Local library`: `library` or `queue` | `library` |
+| `view` | The tab the last session ended on: `library` or `queue`. Recorded, and read back for compatibility; it does not choose the screen — a launch opens `Sources` and `Local library` always starts at the library | `library` |
 | `browse_by` | The library view: `artists`, `albums`, `tracks` or `genres` | `artists` |
 | `artist`, `album`, `genre` | The node that was open inside that view — `album` always belongs to `artist` | absent |
 
