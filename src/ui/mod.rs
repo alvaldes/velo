@@ -4900,7 +4900,7 @@ fn mmss(duration: Duration) -> String {
 }
 
 /// Every row of the help card: the key, then what it does.
-const HELP_ROWS: [(&str, &str); 31] = [
+const HELP_ROWS: [(&str, &str); 32] = [
     ("j / Down", "move down"),
     ("k / Up", "move up"),
     ("g", "first track"),
@@ -4909,7 +4909,7 @@ const HELP_ROWS: [(&str, &str); 31] = [
     ("esc", "back one level / close help"),
     (
         "/",
-        "search the whole library; in radio: filter what is loaded",
+        "search the whole library; in radio: the directory, by name",
     ),
     ("space", "pause / resume"),
     ("← / →", "seek 5 s back / forward; shift: 30 s"),
@@ -4934,6 +4934,7 @@ const HELP_ROWS: [(&str, &str); 31] = [
     ("J / K", "move it down / up"),
     ("R", "radio: the directory, your favourites, your stations"),
     ("f", "in radio: favourite a station, pin a place"),
+    ("F", "in radio: filter what is already loaded"),
     ("N", "in radio: the country list"),
     ("ctrl+r", "in radio: refetch the place you are in"),
     ("i", "in radio: report a station that cannot play"),

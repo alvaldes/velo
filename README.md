@@ -50,7 +50,7 @@ Every key below is what the code does today.
 | `enter` (library) | Open an artist, album or genre; play from the selected track onwards through the list it is in |
 | `esc` / `backspace` | Back one level; from the top of the library, or when the radio closes, back to `Sources`. Closes the help overlay |
 | `1` `2` `3` `4` | Library view: artists (artist → album → track), every album, every track, genres |
-| `/` | Fuzzy search the whole library (`lofi` finds `Lo-Fi Scientists`) |
+| `/` | Fuzzy search the whole library (`lofi` finds `Lo-Fi Scientists`); in the radio view, ask the directory for stations by name, across every country |
 | `space` | Pause / resume |
 | `←` / `→` (or `,` / `.`) | Seek 5 s back / forward; with `shift` on the arrow (or `<` / `>` on the comma keys) 30 s |
 | `:` | Jump to a position in the playing track: a percentage of it (`70%`), a clock position (`1:20`, `1:20:30`) or a count of seconds (`90`); refused on a live station or an empty answer |
@@ -69,6 +69,7 @@ Every key below is what the code does today.
 | `o` | Settings card: everything in `config.toml` — replay gain, repeat, shuffle, the seven `[theme]` colours, the six `[ui]` switches and the library folder (the volume is not a row: it stays on `+`/`-`). `j`/`k` (or `↓`/`↑`) move between the settings (the `sound`/`theme`/`screen`/`library` headers are never focused), `g`/`G` jump to the ends, `enter` or `←`/`→` step the focused row (colours cycle a short preset list, the `folder` row opens the library prompt), `esc` closes — and every other key waits until it does, `q` and `space` included |
 | `R` | Radio view, straight from either screen: the shortcut for `Sources` → `Radio` |
 | `f` (radio view) | Favourite the selected station, or pin the selected country or region |
+| `F` (radio view) | Filter the list already loaded, without asking the directory — `enter` keeps the filter, `esc` clears it |
 | `N` (radio view) | The country list, with your own country first when it knows it |
 | `ctrl+r` (radio view) | Refetch the directory for the place you are in: the country list, a region's stations or a tag's |
 | `i` (radio view) | On a station marked `✗`: open a prefilled bug report in your browser — the station's name, codec and URL, the reason velo gave, and your velo version and platform. Nothing is posted: read the draft and send it |

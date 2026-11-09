@@ -98,6 +98,14 @@ fn station_search(place: &Place, order: Order) -> StationSearch {
             order,
             ..StationSearch::default()
         },
+        // A name search is not bound to a country, a region or a tag: the
+        // directory matches the name alone, so a station is found without
+        // guessing where it is filed (S9, issue #15).
+        Place::Search { name } => StationSearch {
+            name: Some(name.clone()),
+            order,
+            ..StationSearch::default()
+        },
         Place::Top | Place::Countries | Place::Tags | Place::NoCountry => {
             unreachable!("a place without a directory request never searches")
         }
@@ -109,7 +117,10 @@ fn station_search(place: &Place, order: Order) -> StationSearch {
 /// empty section must not produce one — and the top and the two indexes
 /// are not station places at all.
 fn requests_stations(place: &Place) -> bool {
-    matches!(place, Place::Country { .. } | Place::Tag { .. })
+    matches!(
+        place,
+        Place::Country { .. } | Place::Tag { .. } | Place::Search { .. }
+    )
 }
 
 /// The radio data: the client, the store and its file, and the one request
@@ -384,7 +395,9 @@ impl<T: Transport + Send + Sync + 'static> RadioData<T> {
                 self.states_loaded = false;
             }
             Place::Tags => self.tags_loaded = false,
-            Place::Country { .. } | Place::Tag { .. } => self.requested = None,
+            Place::Country { .. } | Place::Tag { .. } | Place::Search { .. } => {
+                self.requested = None;
+            }
         }
         self.request(view);
     }
