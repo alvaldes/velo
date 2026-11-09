@@ -1765,6 +1765,15 @@ impl<'lib> App<'lib> {
         }
     }
 
+    /// Whether the radio view is what the keys act on: it is open, and the
+    /// queue is not the screen the round trip left us on (issue #23) — while
+    /// the queue is what the keys act on, the radio's keys must not act
+    /// behind it. The help card also reads this to open on the radio's rows
+    /// (issue #31).
+    fn radio_on_screen(&self) -> bool {
+        self.radio.is_some() && self.view != View::Queue
+    }
+
     /// Applies one key press. Pure with respect to the terminal and the
     /// library: it only moves state and answers with an [`Action`].
     #[expect(
@@ -1798,8 +1807,7 @@ impl<'lib> App<'lib> {
         // A queue on screen keeps it asleep (issue #23): the round trip holds
         // the radio alive underneath, and while the queue is what the keys
         // act on, the radio's keys must not act behind it.
-        if self.radio.is_some()
-            && self.view != View::Queue
+        if self.radio_on_screen()
             && let Some(action) = self.radio_key(event)
         {
             return action;
@@ -1895,7 +1903,10 @@ impl<'lib> App<'lib> {
                 Action::SetRepeat(self.repeat)
             }
             KeyCode::Char('?') => {
-                self.help = Some(Help::default());
+                self.help = Some(Help::for_radio(
+                    self.radio_on_screen(),
+                    self.seen_area.get(),
+                ));
                 Action::None
             }
             KeyCode::Char('o') => {
@@ -4654,21 +4665,24 @@ fn mmss(duration: Duration) -> String {
 }
 
 /// Every row of the help card: the key, then what it does.
-const HELP_ROWS: [(&str, &str); 29] = [
+const HELP_ROWS: [(&str, &str); 30] = [
     ("j / Down", "move down"),
     ("k / Up", "move up"),
     ("g", "first track"),
     ("G", "last track"),
     ("enter", "open, or play from the selection"),
     ("esc", "back one level / close help"),
-    ("/", "search the whole library"),
+    (
+        "/",
+        "search the whole library; in radio: filter what is loaded",
+    ),
     ("space", "pause / resume"),
     ("← / →", "seek 5 s back / forward"),
     (", / .", "seek 5 s back / forward"),
     ("n / p", "next / previous track"),
     ("s", "shuffle what is left of the queue"),
     ("r", "repeat: off, all, one"),
-    ("+ / -", "volume up / down"),
+    ("+ / -", "volume up / down; [ / ] a point at a time"),
     ("?", "toggle this help"),
     ("o", "settings"),
     ("tab", "library / queue"),
@@ -4686,6 +4700,7 @@ const HELP_ROWS: [(&str, &str); 29] = [
     ("f", "in radio: favourite a station, pin a place"),
     ("N", "in radio: the country list"),
     ("ctrl+r", "in radio: refetch the place you are in"),
+    ("i", "in radio: report a station that cannot play"),
     ("q", "quit"),
 ];
 
@@ -4703,6 +4718,29 @@ struct Help {
 }
 
 impl Help {
+    /// The card opens on the rows that belong to the screen it is over
+    /// (issue #31): with the radio view showing, it starts at the radio's own
+    /// keys instead of making the person scroll past the library's to find
+    /// them. Every other screen starts at the top, and a window too short for
+    /// the jump keeps the card scrolled to its last page, exactly what it
+    /// would have drawn anyway.
+    fn for_radio(radio: bool, area: Rect) -> Self {
+        let mut help = Self::default();
+        if radio {
+            help.top = Self::first_radio_row().min(help.last_top(area));
+        }
+        help
+    }
+
+    /// Where the radio's keys begin, found by their own label: a row added
+    /// above them cannot silently move where the card starts.
+    fn first_radio_row() -> usize {
+        HELP_ROWS
+            .iter()
+            .position(|(_, label)| label.starts_with("in radio:"))
+            .unwrap_or(0)
+    }
+
     /// The rows the filter keeps, in their order.
     fn rows(&self) -> Vec<(&'static str, &'static str)> {
         let needle = self.filter.to_lowercase();

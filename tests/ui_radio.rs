@@ -2352,3 +2352,34 @@ fn the_shell_marks_no_radio_row_for_a_file_or_for_silence() {
         "nothing plays: no radio row is marked"
     );
 }
+
+#[test]
+fn the_help_card_covers_the_radio_view_it_is_opened_over() {
+    let mut app = App::new(Vec::new());
+    app.set_radio_wire(Box::new(RadioData::<HttpTransport>::new(None, None, None)));
+    shell(&mut app, KeyCode::Char('R'));
+    // A session always has a frame on screen before `?` is pressed, and the
+    // card sizes the jump against the window it has to fit in.
+    let _ = app_screen(&app);
+    shell(&mut app, KeyCode::Char('?'));
+
+    // The card is taller than an 80×24 window, so where it starts decides
+    // what the person reads. Opened over the radio it starts on the radio's
+    // own keys (issue #31) instead of the library's.
+    let screen = app_screen(&app);
+    for (key, what) in [
+        ("f", "in radio: favourite a station, pin a place"),
+        ("N", "in radio: the country list"),
+        ("ctrl+r", "in radio: refetch the place you are in"),
+        ("i", "in radio: report a station that cannot play"),
+    ] {
+        assert!(
+            screen.contains(what),
+            "the card documents `{key}`, got:\n{screen}"
+        );
+    }
+    assert!(
+        !screen.contains("move down"),
+        "the card starts on the radio's rows, not the library's, got:\n{screen}"
+    );
+}
