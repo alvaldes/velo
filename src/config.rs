@@ -742,6 +742,52 @@ pub fn themes_dir(config_file: &Path) -> PathBuf {
         .map_or_else(|| PathBuf::from("themes"), |dir| dir.join("themes"))
 }
 
+/// What a fresh install finds in `themes/default.toml`: velo's own palette,
+/// which is also the built-in one, so the folder documents the format without
+/// changing how anything looks. A test pins it to [`ThemeColors::default`], so
+/// the file cannot drift from the palette it claims to be.
+pub const DEFAULT_THEME_TEMPLATE: &str = r##"# velo's own palette, which is also the built-in one: this file is here to
+# show the format. Copy it under another name to make a theme, then select it
+# with `name` in the [theme] table of config.toml or from the settings card
+# (`o`), where `left`/`right` preview each one before `enter` applies it.
+#
+# Every colour is "#rrggbb". "reset" is the terminal's own colour and is only
+# allowed for background and text. A line you delete keeps the built-in value,
+# and a colour in config.toml's [theme] table that differs from the built-in
+# still wins over this file.
+background = "reset"
+text = "reset"
+dim = "#767676"
+accent = "#af00af"
+secondary = "#5f87d7"
+border = "#767676"
+ink = "#000000"
+"##;
+
+/// Writes [`DEFAULT_THEME_TEMPLATE`] into `dir/default.toml` when nothing is
+/// there, creating the folder when it is missing. An existing file is never
+/// touched, so an edited `default.toml` and every other theme survive every
+/// launch. Answers whether it wrote.
+///
+/// # Errors
+/// Fails when the folder or the file cannot be created.
+pub fn write_default_theme(dir: &Path) -> std::io::Result<bool> {
+    fs::create_dir_all(dir)?;
+    let path = dir.join(format!("{DEFAULT_THEME_NAME}.toml"));
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path);
+    match file {
+        Ok(mut file) => {
+            std::io::Write::write_all(&mut file, DEFAULT_THEME_TEMPLATE.as_bytes())?;
+            Ok(true)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 /// The Radio Browser host the directory asks through: `host` in the
 /// `[radio]` table of the config file at `path`, else [`DEFAULT_RADIO_HOST`]
 /// (issue #14).
@@ -806,7 +852,8 @@ browse_by = \"artists\"
 
 # The theme to use, by name: a TOML file with these same colour keys in the
 # themes/ folder beside this one (themes/<name>.toml), which you can hand to
-# another person. \"default\" is built in and always there.
+# another person. \"default\" is built in and always there; the folder ships it
+# as themes/default.toml, which documents the format velo already draws with.
 #
 # Every colour, as \"#rrggbb\". \"reset\" is the terminal's own colour and is
 # the default for background and text only. A colour here that differs from

@@ -1287,7 +1287,9 @@ fn mono_is_a_session_flag_and_never_a_config_key() {
 
 // ------------------------------------------------ theme files (issue #10)
 
-use velo::config::{DEFAULT_THEME_NAME, LoadedTheme, ThemeKeys, select_theme, themes_dir};
+use velo::config::{
+    DEFAULT_THEME_NAME, LoadedTheme, ThemeKeys, select_theme, themes_dir, write_default_theme,
+};
 
 /// Writes a theme file into `<dir>/themes/` and returns the folder's path.
 fn write_theme(dir: &Path, name: &str, contents: &str) -> PathBuf {
@@ -1693,5 +1695,64 @@ fn selecting_default_or_no_name_keeps_todays_layering() {
         assert_eq!(selection.applied, DEFAULT_THEME_NAME);
         assert_eq!(selection.palette, ThemeColors::default());
     }
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// --------------------------------------- the theme a fresh install finds
+
+#[test]
+fn a_fresh_install_finds_its_own_palette_as_a_theme_file() {
+    let dir = temp_dir("theme-template");
+    let themes = themes_dir(&dir.join("config.toml"));
+
+    assert!(
+        write_default_theme(&themes).unwrap(),
+        "the template is written when the folder has nothing"
+    );
+    let file = themes.join(format!("{DEFAULT_THEME_NAME}.toml"));
+    assert!(file.is_file(), "it is default.toml");
+
+    // It has to be velo's own palette, not a copy that drifted: the file is
+    // documentation of the format, and the format's first reader is velo.
+    let selection = select_theme(Some(&themes), &ThemeKeys::default());
+    assert_eq!(selection.themes[0].name, DEFAULT_THEME_NAME);
+    assert_eq!(
+        selection.themes[0].colors,
+        ThemeColors::default(),
+        "the shipped theme is exactly the built-in one"
+    );
+    assert_eq!(
+        selection.palette,
+        ThemeColors::default(),
+        "and a launch with it looks the same as one without it"
+    );
+    assert!(selection.notices.is_empty(), "{:?}", selection.notices);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_shipped_theme_never_touches_one_you_edited() {
+    let dir = temp_dir("theme-template-keep");
+    let themes = write_theme(
+        &dir,
+        DEFAULT_THEME_NAME,
+        "background = \"#101010\"\ntext = \"#eeeeee\"\ndim = \"#777777\"\n\
+         accent = \"#00afff\"\nsecondary = \"#5f87d7\"\nborder = \"#444444\"\nink = \"#000000\"\n",
+    );
+    let file = themes.join(format!("{DEFAULT_THEME_NAME}.toml"));
+    let before = fs::read_to_string(&file).unwrap();
+
+    assert!(
+        !write_default_theme(&themes).unwrap(),
+        "nothing is written over an edited theme"
+    );
+    assert_eq!(fs::read_to_string(&file).unwrap(), before, "byte for byte");
+    assert_ne!(
+        select_theme(Some(&themes), &ThemeKeys::default()).themes[0].colors,
+        ThemeColors::default(),
+        "an edited default.toml is the user's, and it wins"
+    );
+
     let _ = fs::remove_dir_all(&dir);
 }

@@ -306,7 +306,7 @@ config.toml      # everything below, written on the first launch
 radio.toml       # the stations you kept, and the format to add one by hand
 library.toml     # marked tracks and saved playlists, with the format
 history.toml     # what played, newest first — appears with the first track
-themes/*.toml    # one file per theme you drop in
+themes/*.toml    # one file per theme; default.toml ships with velo's palette
 ```
 
 The first three are written when velo starts for the first time and never over
