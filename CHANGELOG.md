@@ -1,6 +1,10 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.32.0] - 2026-11-09
+
+### Features
+- **theme:** The card shows the theme, and a picker previews it live
 ## [0.31.0] - 2026-11-09
 
 ### Features
