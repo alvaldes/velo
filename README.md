@@ -44,7 +44,7 @@ Every key below is what the code does today.
 
 | Key | Action |
 |:--|:--|
-| `j` / `↓`, `k` / `↑` | Move down / up |
+| `j` / `↓`, `k` / `↑` | Move down / up; the lists wrap at their ends — `j` on the last row lands on the first, `k` on the first on the last — except the queue, which stops at its ends |
 | `g` / `G` | First / last row |
 | `enter` (sources) | Open the source under the cursor: `Local library`, `Radio`, `Recently played`, `Favourites` or `Playlists` |
 | `enter` (library) | Open an artist, album or genre; play from the selected track onwards through the list it is in |

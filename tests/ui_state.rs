@@ -32,8 +32,10 @@ fn press(app: &mut App<'_>, code: KeyCode) {
     app.apply(action);
 }
 
+/// `j` walks down and wraps from the last row to the first (issue #36):
+/// the lists that are for going through wrap at their ends.
 #[test]
-fn j_moves_down_and_clamps_at_the_last_row() {
+fn j_moves_down_and_wraps_from_the_last_row_to_the_first() {
     let mut app = app_with_three_tracks();
     assert_eq!(app.selected(), 0);
 
@@ -42,9 +44,9 @@ fn j_moves_down_and_clamps_at_the_last_row() {
     app.on_key(key(KeyCode::Char('j')));
     assert_eq!(app.selected(), 2);
 
-    // At the last row `j` stays put instead of panicking or wrapping.
+    // From the last row `j` wraps to the first.
     assert_eq!(app.on_key(key(KeyCode::Char('j'))), Action::None);
-    assert_eq!(app.selected(), 2);
+    assert_eq!(app.selected(), 0);
 
     // `Down` is the same movement.
     let mut app = app_with_three_tracks();
@@ -52,8 +54,9 @@ fn j_moves_down_and_clamps_at_the_last_row() {
     assert_eq!(app.selected(), 1);
 }
 
+/// `k` walks up and wraps from the first row to the last (issue #36).
 #[test]
-fn k_moves_up_and_clamps_at_the_first_row() {
+fn k_moves_up_and_wraps_from_the_first_row_to_the_last() {
     let mut app = app_with_three_tracks();
     app.on_key(key(KeyCode::Char('j')));
     app.on_key(key(KeyCode::Char('j')));
@@ -64,15 +67,59 @@ fn k_moves_up_and_clamps_at_the_first_row() {
     app.on_key(key(KeyCode::Char('k')));
     assert_eq!(app.selected(), 0);
 
-    // At the first row `k` stays put.
+    // From the first row `k` wraps to the last.
     assert_eq!(app.on_key(key(KeyCode::Char('k'))), Action::None);
-    assert_eq!(app.selected(), 0);
+    assert_eq!(app.selected(), 2);
 
     // `Up` is the same movement.
     let mut app = app_with_three_tracks();
     app.on_key(key(KeyCode::Down));
     app.on_key(key(KeyCode::Up));
     assert_eq!(app.selected(), 0);
+}
+
+/// A library list wraps at both ends too (issue #36): the artists of a
+/// browsed index behave like every navigation list.
+#[test]
+fn a_library_list_wraps_at_both_ends() {
+    let temp = TempLibrary::new("wrap-library");
+    temp.write_wav("Tide/2019 - Harbor/01 - Dawn.wav");
+    temp.write_wav("Nujabes/2015 - Modal Soul/01 - Luv.wav");
+    temp.index();
+    let mut app = App::browse(Some(&temp.library));
+    assert_eq!(app.artists().len(), 2);
+
+    app.on_key(key(KeyCode::Char('G')));
+    assert_eq!(app.selected(), 1, "G lands on the last artist");
+    app.on_key(key(KeyCode::Char('j')));
+    assert_eq!(
+        app.selected(),
+        0,
+        "j wraps from the last artist to the first"
+    );
+    app.on_key(key(KeyCode::Char('k')));
+    assert_eq!(
+        app.selected(),
+        1,
+        "k wraps from the first artist to the last"
+    );
+}
+
+/// The queue never wraps (issue #36): `j` at the last entry and `k` at the
+/// first both stay put, because its entries get removed and reordered.
+#[test]
+fn the_queue_still_clamps_at_both_ends() {
+    let mut app = app_with_a_queue_of_three();
+    app.on_key(key(KeyCode::Tab));
+    app.on_key(key(KeyCode::Char('G')));
+    assert_eq!(app.queue_selected(), 2);
+
+    app.on_key(key(KeyCode::Char('j')));
+    assert_eq!(app.queue_selected(), 2, "j at the last entry stays put");
+    app.on_key(key(KeyCode::Char('g')));
+    assert_eq!(app.queue_selected(), 0);
+    app.on_key(key(KeyCode::Char('k')));
+    assert_eq!(app.queue_selected(), 0, "k at the first entry stays put");
 }
 
 #[test]
@@ -406,13 +453,15 @@ fn left_and_right_and_comma_and_dot_seek_five_seconds() {
 // ---- the queue view (T18b, S11) -----------------------------------------
 
 /// Queues the three argv tracks in order without a device: select, append,
-/// step down, append, step down, append.
+/// step down, append, step down, append — the library selection stays on the
+/// last row, so the tests below keep a known library selection.
 fn app_with_a_queue_of_three() -> App<'static> {
     let mut app = app_with_three_tracks();
-    for _ in 0..3 {
-        app.on_key(key(KeyCode::Char('a')));
-        app.on_key(key(KeyCode::Char('j')));
-    }
+    app.on_key(key(KeyCode::Char('a')));
+    app.on_key(key(KeyCode::Char('j')));
+    app.on_key(key(KeyCode::Char('a')));
+    app.on_key(key(KeyCode::Char('j')));
+    app.on_key(key(KeyCode::Char('a')));
     app
 }
 

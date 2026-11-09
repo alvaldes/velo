@@ -149,28 +149,86 @@ fn the_sections_appear_in_order_only_when_they_have_content() {
     );
 }
 
+/// The cursor wraps at both ends (issue #36), and the wrap skips the rule
+/// and the header: `j` on the last row lands on the first row a person can
+/// act on, `k` on the first on the last.
 #[test]
-fn the_cursor_moves_and_clamps_at_both_ends() {
+fn the_cursor_wraps_at_both_ends_skipping_the_rule_and_the_header() {
     let mut view = view();
     let last = view.labels().len() - 1;
-    for _ in 0..last {
+    assert_eq!(
+        view.labels()[last],
+        "★ Jazz One [MP3] · NO",
+        "the last row is the favourite below the rule and the header"
+    );
+    let mut steps = 0;
+    while view.cursor() != last {
         press(&mut view, KeyCode::Char('j'));
+        steps += 1;
+        assert!(
+            steps <= view.labels().len(),
+            "j never walks past the last row without landing on it"
+        );
     }
     assert_eq!(view.cursor(), last, "j walks to the last row");
     press(&mut view, KeyCode::Char('j'));
-    assert_eq!(view.cursor(), last, "j clamps at the end");
-
-    for _ in 0..last {
-        press(&mut view, KeyCode::Char('k'));
-    }
-    assert_eq!(view.cursor(), 0, "k walks back to the first row");
+    assert_eq!(
+        view.cursor(),
+        0,
+        "j wraps from the last row to the first, past the rule and the header"
+    );
     press(&mut view, KeyCode::Char('k'));
-    assert_eq!(view.cursor(), 0, "k clamps at the start");
+    assert_eq!(
+        view.cursor(),
+        last,
+        "k wraps from the first row to the last, past the rule and the header"
+    );
 
-    press(&mut view, KeyCode::Char('G'));
-    assert_eq!(view.cursor(), last, "G jumps to the last row");
     press(&mut view, KeyCode::Char('g'));
     assert_eq!(view.cursor(), 0, "g jumps to the first row");
+    press(&mut view, KeyCode::Char('G'));
+    assert_eq!(view.cursor(), last, "G jumps to the last row");
+}
+
+/// A place's station list wraps at both ends too (issue #36), staying
+/// between the rows a person can act on.
+#[test]
+fn a_places_station_list_wraps_at_both_ends() {
+    let mut view = view();
+    press(&mut view, KeyCode::Enter); // Browse all countries
+    press(&mut view, KeyCode::Char('j')); // onto Germany
+    press(&mut view, KeyCode::Enter);
+    let germany = Place::Country {
+        code: "DE".to_owned(),
+        name: "Germany".to_owned(),
+        state: String::new(),
+    };
+    view.set_catalog(germany, catalog());
+    assert_eq!(
+        view.labels(),
+        ["Nova [128k] · NO", "✗ Hls One [96k] · NO"],
+        "the place lists its stations, got: {:?}",
+        view.labels()
+    );
+
+    press(&mut view, KeyCode::Char('j'));
+    assert_eq!(
+        view.labels()[view.cursor()],
+        "✗ Hls One [96k] · NO",
+        "j walks onto the last station"
+    );
+    press(&mut view, KeyCode::Char('j'));
+    assert_eq!(
+        view.labels()[view.cursor()],
+        "Nova [128k] · NO",
+        "j wraps from the last station to the first"
+    );
+    press(&mut view, KeyCode::Char('k'));
+    assert_eq!(
+        view.labels()[view.cursor()],
+        "✗ Hls One [96k] · NO",
+        "k wraps from the first station to the last"
+    );
 }
 
 /// `★ Name [codec]`: what a favourite station row's label starts and ends
@@ -255,11 +313,17 @@ fn j_k_g_and_g_never_rest_on_the_rule_or_the_header() {
     );
 
     // Walking the list in both directions rests only on rows a person can
-    // act on.
+    // act on, and wraps past the ends (issue #36).
     press(&mut view, KeyCode::Char('G'));
     assert_eq!(view.labels()[view.cursor()], "★ Jazz One [MP3] · NO");
-    for _ in 0..8 {
+    let mut steps = 0;
+    while view.cursor() != 0 {
         press(&mut view, KeyCode::Char('k'));
+        steps += 1;
+        assert!(
+            steps <= view.labels().len(),
+            "k never walks past the first row without landing on it"
+        );
         assert!(
             view.selection().is_some(),
             "k never rests on the rule or the header, at {:?}",
@@ -267,6 +331,12 @@ fn j_k_g_and_g_never_rest_on_the_rule_or_the_header() {
         );
     }
     assert_eq!(view.cursor(), 0, "k walks back to the first row");
+    press(&mut view, KeyCode::Char('k'));
+    assert_eq!(
+        view.cursor(),
+        view.labels().len() - 1,
+        "k wraps from the first row to the last"
+    );
     press(&mut view, KeyCode::Char('G'));
     assert_eq!(
         view.cursor(),
@@ -490,8 +560,7 @@ fn a_second_place_shows_nothing_from_the_first_before_its_own_answer() {
     view.back();
     view.back();
     press(&mut view, KeyCode::Enter); // country index
-    press(&mut view, KeyCode::Char('j')); // Norway
-    press(&mut view, KeyCode::Char('j')); // Germany
+    press(&mut view, KeyCode::Char('j')); // onto Germany
     press(&mut view, KeyCode::Enter);
     assert!(
         matches!(view.place(), Place::Country { code, .. } if code == "DE"),

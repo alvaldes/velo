@@ -737,25 +737,41 @@ impl RadioView {
     }
 
     /// Moves the cursor down to the next row a person can act on, skipping
-    /// the rule and the headers, and stays put past the end.
+    /// the rule and the headers; from the last one it wraps to the first
+    /// (issue #36).
     pub fn select_next(&mut self) {
-        let rows = self.visible_rows();
-        if let Some(next) =
-            (self.cursor + 1..rows.len()).find(|&index| rows[index].kind.selectable())
-        {
-            self.cursor = next;
-        }
+        self.step_cursor(true);
     }
 
     /// Moves the cursor up to the previous row a person can act on,
-    /// skipping the rule and the headers, and stays put before the start.
+    /// skipping the rule and the headers; from the first one it wraps to
+    /// the last (issue #36).
     pub fn select_prev(&mut self) {
+        self.step_cursor(false);
+    }
+
+    /// One step of the wrapped navigation (issue #36): the nearest row a
+    /// person can act on, searching from the cursor's neighbour in the
+    /// step's direction and wrapping past the ends, so the rule and the
+    /// headers are never landed on. With no row to act on at all the
+    /// cursor stays put.
+    fn step_cursor(&mut self, forward: bool) {
         let rows = self.visible_rows();
-        if let Some(previous) = (0..self.cursor.min(rows.len()))
-            .rev()
-            .find(|&index| rows[index].kind.selectable())
-        {
-            self.cursor = previous;
+        if rows.is_empty() {
+            return;
+        }
+        let len = rows.len();
+        let cursor = self.cursor.min(len - 1);
+        for offset in 1..=len {
+            let index = if forward {
+                (cursor + offset) % len
+            } else {
+                (cursor + len - offset) % len
+            };
+            if rows[index].kind.selectable() {
+                self.cursor = index;
+                return;
+            }
         }
     }
 

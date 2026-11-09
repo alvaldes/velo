@@ -5360,16 +5360,42 @@ impl<'lib> App<'lib> {
         }
     }
 
+    /// Whether the list the keys act on wraps at its ends (issue #36):
+    /// every navigation list does — the sources, the library and its
+    /// source lists, the radio — while the queue keeps stopping at its
+    /// ends, because its `j`/`k` move over entries that get removed and
+    /// reordered, and a jump from the last entry to the first reads as a
+    /// mistake.
+    const fn navigation_wraps(&self) -> bool {
+        !matches!(self.view, View::Queue)
+    }
+
     fn select_next(&mut self) {
-        let index = self.view_selection();
-        if index + 1 < self.view_len() {
-            self.set_view_selection(index + 1);
+        let len = self.view_len();
+        if len == 0 {
+            return;
         }
+        let index = self.view_selection();
+        let next = if self.navigation_wraps() {
+            (index + 1) % len
+        } else {
+            (index + 1).min(len - 1)
+        };
+        self.set_view_selection(next);
     }
 
     fn select_previous(&mut self) {
+        let len = self.view_len();
+        if len == 0 {
+            return;
+        }
         let index = self.view_selection();
-        self.set_view_selection(index.saturating_sub(1));
+        let previous = if self.navigation_wraps() {
+            (index + len - 1) % len
+        } else {
+            index.saturating_sub(1)
+        };
+        self.set_view_selection(previous);
     }
 
     fn select_first(&mut self) {

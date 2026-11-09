@@ -74,14 +74,16 @@ impl Sources {
             .collect()
     }
 
-    /// Moves down one row, and stops at the last one.
+    /// Moves down one row, wrapping from the last one to the first (issue
+    /// #36).
     pub fn select_next(&mut self) {
-        self.selected = (self.selected + 1).min(Source::ALL.len() - 1);
+        self.selected = (self.selected + 1) % Source::ALL.len();
     }
 
-    /// Moves up one row, and stops at the first one.
+    /// Moves up one row, wrapping from the first one to the last (issue
+    /// #36).
     pub fn select_previous(&mut self) {
-        self.selected = self.selected.saturating_sub(1);
+        self.selected = (self.selected + Source::ALL.len() - 1) % Source::ALL.len();
     }
 
     /// Moves to the first row.
