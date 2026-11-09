@@ -70,7 +70,7 @@ Every key below is what the code does today.
 | `e` | On a playlist in the `Playlists` names list: rename it with a prompt, opened with the name as it stands; `esc` cancels |
 | `enter` (queue view) | Play the queue from the selected entry |
 | `?` | Help card: `j`/`k` (or `↓`/`↑`) scroll it and `g`/`G` jump to its ends; `/` filters it by key or description (`enter` keeps the filter, `esc` clears it, a second `esc` or `?` closes the help). The card keeps its full size however few rows the filter leaves, and every other key waits until it closes — `q` and `space` included |
-| `o` | Settings card: everything in `config.toml` — replay gain, repeat, shuffle, the theme (with a preview before it applies, issue #10), the seven `[theme]` colours, the six `[ui]` switches and the library folder (the volume is not a row: it stays on `+`/`-`). `j`/`k` (or `↓`/`↑`) move between the settings (the `sound`/`theme`/`screen`/`library` headers are never focused), `g`/`G` jump to the ends, `enter` or `←`/`→` step the focused row (colours cycle a short preset list, the `theme` row previews with `←`/`→` and applies with `enter`, the `folder` row opens the library prompt), `esc` closes — and every other key waits until it does, `q` and `space` included |
+| `o` | Settings card: everything in `config.toml` — replay gain, repeat, shuffle, the theme, the six `[ui]` switches and the library folder (the volume is not a row: it stays on `+`/`-`; the seven `[theme]` colours are the theme's inside and stay editable in the file, not on the card). `j`/`k` (or `↓`/`↑`) move between the settings (the `sound`/`theme`/`screen`/`library` headers are never focused), `g`/`G` jump to the ends, `enter` or `←`/`→` step the focused row (`enter` on the `theme` row opens the theme picker — one row per theme, the cursor's move previews it on the spot, `enter` applies, `esc` restores — and the `folder` row opens the library prompt), `esc` closes — and every other key waits until it does, `q` and `space` included |
 | `R` | Radio view, straight from either screen: the shortcut for `Sources` → `Radio` |
 | `f` | On a track of the library: mark it as a favourite — press again to unmark; the mark is kept in `library.toml` and the track shows `★` in every library list. In the radio view: favourite the selected station, or pin the selected country or region |
 | `F` (radio view) | Filter the list already loaded, without asking the directory — `enter` keeps the filter, `esc` clears it |
@@ -391,10 +391,10 @@ key, so everything below can be changed from it; `radio.toml` and
 `library.toml` are rewritten whole each time velo saves into them, so their
 comments are a starting point. Everything below can also be changed while velo runs: `o` opens the
 settings card (a smaller card shaped like the help), where the
-ReplayGain mode, the repeat and the shuffle, every `[theme]` colour, the
-six `[ui]` switches and the library folder can be stepped through live —
-each change applies on the next frame and is written to this file key by
-key, just as if the matching key had been pressed. An existing file is
+ReplayGain mode, the repeat and the shuffle, the theme (chosen in its own
+picker), the six `[ui]` switches and the library folder can be stepped
+through live — each change applies on the next frame and is written to
+this file key by key, just as if the matching key had been pressed. An existing file is
 never overwritten or reformatted: every value velo
 saves itself is written key by key, leaving your comments and your ordering
 alone.
@@ -461,10 +461,24 @@ is not on disk falls back to the built-in and says so once; a theme file
 that does not parse, or carries a colour that does not, is reported naming
 the file and the key, and the built-in is used. velo always starts.
 
-In the settings card (`o`) a `theme` row, above the colours, steps through
-the loaded names with `←`/`→` — previewing each focused theme on screen —
-and `enter` applies the preview by writing `[theme] name`; `esc` leaves the
-previous theme applied.
+In the settings card (`o`) the `theme` row shows the theme applied right
+now, and `enter` on it opens the theme picker: a small card with one row
+per theme — `default` first, then the built-in catalogue sorted by name,
+then every theme file of the folder that is not one of them. A file named
+like a built-in takes that built-in's row, so no name is listed twice.
+Moving the cursor (`j`/`k` or the arrows, which wrap at the ends) applies
+the focused theme at once — the preview is the interface, every card and
+list repaints with it. `enter` keeps the theme and writes `[theme] name`
+(the file only when the theme actually changed); `esc` closes the picker
+and restores exactly the palette that was in force when it opened,
+`[theme]` overrides included. Every other key waits while the picker is
+open.
+
+Eleven themes are built in, embedded in the binary: `catppuccin-latte`,
+`catppuccin-mocha`, `dracula`, `gruvbox-dark`, `monokai`, `nord`,
+`one-dark`, `one-light`, `solarized-dark`, `solarized-light` and
+`tokyo-night`. `default` is not one of them — it stays the palette velo
+has always drawn with.
 
 ### `[ui]` — what is drawn
 

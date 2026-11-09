@@ -1757,8 +1757,6 @@ fn the_settings_card_draws_its_title_sections_and_focused_row_in_the_accent() {
         ("repeat", "off"),
         ("shuffle", "off"),
         ("theme", "default"),
-        ("accent", "#af00af"),
-        ("background", "reset"),
         ("cover art", "shown"),
         ("hints", "shown"),
         ("advisories", "shown"),
@@ -1835,13 +1833,35 @@ fn the_settings_card_keeps_its_height_while_the_cursor_walks_it() {
 /// (the cover follows the track that plays), so this pins the columns leg of
 /// the gate the same way `hiding_the_cover_art_leaves_no_cover_columns_and_no_explanation`
 /// does — the switch flipped from inside the card, not from the file.
+/// The theme picker (issue #37): one row per theme, `default` first, the
+/// card giving its keys over.
+#[test]
+fn the_theme_picker_draws_one_row_per_theme_over_the_settings_card() {
+    let mut app = App::new(tracks(&["one.flac"]));
+    press(&mut app, KeyCode::Char('o'));
+    for _ in 0..3 {
+        press(&mut app, KeyCode::Char('j'));
+    }
+    press(&mut app, KeyCode::Enter);
+
+    let screen = screen_at(&app, 80, 24);
+    assert!(screen.contains(" theme "), "the picker card:\n{screen}");
+    for name in ["default", "catppuccin-latte", "nord", "tokyo-night"] {
+        assert!(screen.contains(name), "{name} on:\n{screen}");
+    }
+    assert!(
+        !screen.contains(" settings "),
+        "the card gave the keys over:\n{screen}"
+    );
+}
+
 #[test]
 fn hiding_the_cover_from_the_card_removes_its_columns_on_the_next_frame() {
     let mut app = App::new(tracks(&["one.flac", "two.flac", "three.flac"]));
     app.show_artwork(Some(velo::ui::artwork::Picker::new((8, 12))));
 
     press(&mut app, KeyCode::Char('o'));
-    for _ in 0..11 {
+    for _ in 0..4 {
         press(&mut app, KeyCode::Char('j'));
     }
     assert_eq!(app.settings_focused(), "cover art");

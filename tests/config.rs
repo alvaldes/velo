@@ -1318,7 +1318,7 @@ fn mono_is_a_session_flag_and_never_a_config_key() {
 // ------------------------------------------------ theme files (issue #10)
 
 use velo::config::{
-    DEFAULT_THEME_NAME, LoadedTheme, ThemeKeys, select_theme, themes_dir, write_default_theme,
+    DEFAULT_THEME_NAME, ThemeKeys, ThemeSelection, select_theme, themes_dir, write_default_theme,
 };
 
 /// Writes a theme file into `<dir>/themes/` and returns the folder's path.
@@ -1347,6 +1347,64 @@ fn the_themes_folder_lives_beside_the_config_file() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// The picker's rows with no `themes/` folder at all (issue #37): `default`
+/// first, then the eleven built-ins sorted by name.
+const BUILT_IN_NAMES: [&str; 12] = [
+    "default",
+    "catppuccin-latte",
+    "catppuccin-mocha",
+    "dracula",
+    "gruvbox-dark",
+    "monokai",
+    "nord",
+    "one-dark",
+    "one-light",
+    "solarized-dark",
+    "solarized-light",
+    "tokyo-night",
+];
+
+fn names_of(selection: &ThemeSelection) -> Vec<String> {
+    selection
+        .themes
+        .iter()
+        .map(|theme| theme.name.clone())
+        .collect()
+}
+
+#[test]
+fn the_picker_offers_the_eleven_built_in_themes_sorted_after_default() {
+    // S8 of issue #37: the catalogue is embedded, and the picker's row
+    // order is stable with no folder and no files.
+    let selection = select_theme(None, &ThemeKeys::default());
+    assert_eq!(names_of(&selection), BUILT_IN_NAMES.to_vec());
+    assert_eq!(selection.notices, Vec::<String>::new());
+}
+
+#[test]
+fn default_stays_the_palette_velo_always_drew_with() {
+    // `default` is not one of the eleven: it is velo's own palette, and no
+    // catalogue entry may shadow it.
+    let selection = select_theme(None, &ThemeKeys::default());
+    assert_eq!(selection.themes[0].name, DEFAULT_THEME_NAME);
+    assert_eq!(selection.themes[0].colors, ThemeColors::default());
+    assert_eq!(selection.palette, ThemeColors::default());
+}
+
+#[test]
+fn a_built_in_name_selects_without_a_file() {
+    // A built-in is on disk in every way but the folder: `[theme] name`
+    // resolves against the catalogue, with no fallback notice.
+    let keys = ThemeKeys {
+        name: Some("nord".to_owned()),
+        ..ThemeKeys::default()
+    };
+    let selection = select_theme(None, &keys);
+    assert_eq!(selection.applied, "nord");
+    assert_eq!(selection.palette.accent, NORD_ACCENT, "nord's own accent");
+    assert_eq!(selection.notices, Vec::<String>::new());
+}
+
 #[test]
 fn a_missing_themes_folder_is_no_error_and_the_builtin_still_there() {
     let dir = temp_dir("themes-absent");
@@ -1354,13 +1412,7 @@ fn a_missing_themes_folder_is_no_error_and_the_builtin_still_there() {
     let selection = select_theme(Some(&dir.join("themes")), &ThemeKeys::default());
     assert_eq!(selection.applied, DEFAULT_THEME_NAME);
     assert_eq!(selection.palette, ThemeColors::default());
-    assert_eq!(
-        selection.themes,
-        vec![LoadedTheme {
-            name: "default".to_owned(),
-            colors: ThemeColors::default(),
-        }]
-    );
+    assert_eq!(names_of(&selection), BUILT_IN_NAMES.to_vec());
     assert!(
         selection.notices.is_empty(),
         "a missing folder is not an error"
@@ -1370,12 +1422,12 @@ fn a_missing_themes_folder_is_no_error_and_the_builtin_still_there() {
 
 #[test]
 fn with_no_themes_folder_and_no_theme_keys_the_builtin_is_the_whole_story() {
-    // S5: no `themes/` folder and no `[theme]` keys looks exactly as it
-    // always did.
+    // S5: no `themes/` folder and no `[theme]` keys draws exactly as it
+    // always did — the catalogue is offered, but nothing is selected.
     let selection = select_theme(None, &ThemeKeys::default());
     assert_eq!(selection.palette, ThemeColors::default());
     assert_eq!(selection.applied, DEFAULT_THEME_NAME);
-    assert_eq!(selection.themes.len(), 1);
+    assert_eq!(selection.themes.len(), BUILT_IN_NAMES.len());
     assert_eq!(selection.notices, Vec::<String>::new());
 }
 
@@ -1406,29 +1458,65 @@ fn a_theme_file_loads_by_name_and_layers_over_the_builtin() {
         "a key the file leaves out keeps the built-in"
     );
     assert_eq!(
-        selection.themes,
-        vec![
-            LoadedTheme {
-                name: "default".to_owned(),
-                colors: ThemeColors::default(),
-            },
-            LoadedTheme {
-                name: "nord".to_owned(),
-                colors: ThemeKeys {
-                    accent: Some(NORD_ACCENT),
-                    ink: Some(ThemeColor::Rgb {
-                        red: 0x2e,
-                        green: 0x34,
-                        blue: 0x40,
-                    }),
-                    ..ThemeKeys::default()
-                }
-                .resolved(),
-            },
-        ],
-        "the built-in first, then the files in name order"
+        names_of(&selection),
+        BUILT_IN_NAMES.to_vec(),
+        "one row per theme"
+    );
+    let nord = selection
+        .themes
+        .iter()
+        .find(|theme| theme.name == "nord")
+        .expect("nord is offered");
+    assert_eq!(
+        nord.colors,
+        ThemeKeys {
+            accent: Some(NORD_ACCENT),
+            ink: Some(ThemeColor::Rgb {
+                red: 0x2e,
+                green: 0x34,
+                blue: 0x40,
+            }),
+            ..ThemeKeys::default()
+        }
+        .resolved(),
+        "the file's palette, not the built-in nord's"
     );
     assert_eq!(selection.notices, Vec::<String>::new());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_toml_whose_stem_matches_a_built_in_wins_and_yields_one_row() {
+    // S7 of issue #37: a file named like a built-in takes that built-in's
+    // row — the file wins, and the picker never lists the name twice.
+    let dir = temp_dir("themes-file-over-builtin");
+    let themes = write_theme(&dir, "nord", "accent = \"#00afff\"\n");
+    let keys = ThemeKeys {
+        name: Some("nord".to_owned()),
+        ..ThemeKeys::default()
+    };
+
+    let selection = select_theme(Some(&themes), &keys);
+
+    assert_eq!(
+        names_of(&selection)
+            .iter()
+            .filter(|name| *name == "nord")
+            .count(),
+        1,
+        "one nord, not two: {}",
+        names_of(&selection).join(", ")
+    );
+    assert_eq!(names_of(&selection).len(), BUILT_IN_NAMES.len());
+    assert_eq!(
+        selection.palette.accent,
+        ThemeColor::Rgb {
+            red: 0x00,
+            green: 0xaf,
+            blue: 0xff,
+        },
+        "the file's accent wins"
+    );
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -1479,8 +1567,10 @@ fn the_config_theme_keys_win_over_the_selected_theme_file() {
 fn a_selected_theme_not_on_disk_falls_back_to_the_builtin_and_says_so() {
     let dir = temp_dir("themes-missing-name");
     let themes = dir.join("themes");
+    // A name that is neither a built-in nor a file: the catalogue made
+    // "nord" a real theme, so the fallback needs one that is not.
     let keys = ThemeKeys {
-        name: Some("nord".to_owned()),
+        name: Some("no-such-theme".to_owned()),
         ..ThemeKeys::default()
     };
 
@@ -1490,7 +1580,7 @@ fn a_selected_theme_not_on_disk_falls_back_to_the_builtin_and_says_so() {
     assert_eq!(selection.palette, ThemeColors::default());
     assert_eq!(selection.notices.len(), 1, "said once (S3)");
     assert!(
-        selection.notices[0].contains("nord"),
+        selection.notices[0].contains("no-such-theme"),
         "the notice names the theme: {}",
         selection.notices[0]
     );
@@ -1509,7 +1599,11 @@ fn a_theme_file_that_does_not_parse_is_reported_and_skipped() {
 
     let selection = select_theme(Some(&themes), &ThemeKeys::default());
 
-    assert_eq!(selection.themes.len(), 1, "the broken file is not offered");
+    assert_eq!(
+        names_of(&selection).len(),
+        BUILT_IN_NAMES.len(),
+        "the broken file is not offered"
+    );
     assert_eq!(selection.palette, ThemeColors::default());
     assert_eq!(selection.notices.len(), 1);
     assert!(
@@ -1527,7 +1621,7 @@ fn a_theme_colour_that_does_not_parse_is_reported_naming_the_file_and_the_key() 
 
     let selection = select_theme(Some(&themes), &ThemeKeys::default());
 
-    assert_eq!(selection.themes.len(), 1, "the broken file is not offered");
+    assert_eq!(names_of(&selection).len(), BUILT_IN_NAMES.len());
     assert_eq!(selection.notices.len(), 1);
     assert!(
         selection.notices[0].contains("nord.toml"),
@@ -1549,7 +1643,7 @@ fn reset_in_a_theme_file_colour_it_would_erase_is_reported() {
 
     let selection = select_theme(Some(&themes), &ThemeKeys::default());
 
-    assert_eq!(selection.themes.len(), 1);
+    assert_eq!(names_of(&selection).len(), BUILT_IN_NAMES.len());
     assert_eq!(selection.notices.len(), 1);
     assert!(
         selection.notices[0].contains("accent"),
@@ -1566,7 +1660,7 @@ fn an_unknown_key_in_a_theme_file_is_reported_naming_the_file() {
 
     let selection = select_theme(Some(&themes), &ThemeKeys::default());
 
-    assert_eq!(selection.themes.len(), 1);
+    assert_eq!(names_of(&selection).len(), BUILT_IN_NAMES.len());
     assert_eq!(selection.notices.len(), 1);
     assert!(
         selection.notices[0].contains("nord.toml"),
@@ -1592,7 +1686,14 @@ fn a_default_toml_file_replaces_the_builtin_colours_under_the_same_name() {
 
     assert_eq!(selection.applied, DEFAULT_THEME_NAME);
     assert_eq!(selection.palette.accent, NORD_ACCENT);
-    assert_eq!(selection.themes.len(), 1, "one default, not two");
+    assert_eq!(
+        names_of(&selection)
+            .iter()
+            .filter(|name| *name == DEFAULT_THEME_NAME)
+            .count(),
+        1,
+        "one default, not two"
+    );
     assert_eq!(selection.notices, Vec::<String>::new());
     let _ = fs::remove_dir_all(&dir);
 }

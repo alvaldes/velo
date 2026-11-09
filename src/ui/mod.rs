@@ -44,7 +44,7 @@ use crate::audio::output::{Entry, PathResolver, Repeat, SharedQueue, TrackFailur
 use crate::audio::spectrum::Spectrum;
 use crate::audio::{Player, seek_target, skip_target};
 use crate::config::{
-    LoadedTheme, OpenNode, ReplayGainMode, Session, ThemeColor, ThemeColors, ThemeKeys, UiParts,
+    LoadedTheme, OpenNode, ReplayGainMode, Session, ThemeColors, ThemeKeys, UiParts,
 };
 use crate::library::{AlbumEntry, ArtistEntry, GenreEntry, IndexReport, Library, TrackEntry};
 use crate::subsonic::cache::CoverArt;
@@ -589,17 +589,18 @@ pub struct App<'lib> {
     /// The palette as the `[theme]` table wrote it (S4): what the settings
     /// card rebuilds with one role replaced when a colour is cycled.
     colors: ThemeColors,
-    /// The themes the card's theme row can focus (S4, issue #10): the
-    /// built-in `default` first, then the files of the `themes/` folder.
+    /// The themes the picker offers (S2, issue #37): `default` first, then
+    /// the built-in catalogue sorted by name, then the files of the
+    /// `themes/` folder that do not override a built-in.
     theme_files: Vec<LoadedTheme>,
     /// The theme applied right now (S2): the name the config file carries,
     /// `default` when none is selected or the selected one is not on disk.
     theme_name: String,
-    /// The theme being previewed on the card's theme row (S4): set by
-    /// `←`/`→`, cleared by `enter` (applied) and by `esc` (reverted).
-    theme_preview: Option<String>,
+    /// The theme picker while it is open (issue #37): its cursor and the
+    /// palette in force when it opened, which `esc` restores.
+    theme_picker: Option<ThemePicker>,
     /// The colour keys that win over the selected theme file (S2): the
-    /// config's own at launch, plus every colour the card has cycled since.
+    /// config's own `[theme]` colour keys at launch.
     theme_overrides: ThemeKeys,
     /// The theme notice still to say (S3): a selected name not on disk or a
     /// theme file that does not parse. Delivered into the status line once,
@@ -755,9 +756,9 @@ impl<'lib> App<'lib> {
             radio_wire: None,
             radio_refusal: None,
             colors: ThemeColors::default(),
-            theme_files: Vec::new(),
+            theme_files: theme::builtins::catalogue(),
             theme_name: crate::config::DEFAULT_THEME_NAME.to_owned(),
-            theme_preview: None,
+            theme_picker: None,
             theme_overrides: ThemeKeys::default(),
             theme_notice: None,
             seek_prompt: None,
@@ -845,9 +846,9 @@ impl<'lib> App<'lib> {
             radio_wire: None,
             radio_refusal: None,
             colors: ThemeColors::default(),
-            theme_files: Vec::new(),
+            theme_files: theme::builtins::catalogue(),
             theme_name: crate::config::DEFAULT_THEME_NAME.to_owned(),
-            theme_preview: None,
+            theme_picker: None,
             theme_overrides: ThemeKeys::default(),
             theme_notice: None,
             seek_prompt: None,
@@ -983,10 +984,10 @@ impl<'lib> App<'lib> {
     }
 
     /// Wires the theme library in the way the launch paths do (S1–S4, issue
-    /// #10): the themes the card's theme row can focus, the theme applied
-    /// right now (the launch palette is already in [`App::set_theme`]), the
-    /// colour keys that win over the selected theme file, and the notice —
-    /// if any — the first tick says once.
+    /// #10): the themes the picker offers, the theme applied right now (the
+    /// launch palette is already in [`App::set_theme`]), the colour keys
+    /// that win over the selected theme file, and the notice — if any — the
+    /// first tick says once.
     pub fn set_theme_library(
         &mut self,
         selection: crate::config::ThemeSelection,
@@ -1005,10 +1006,30 @@ impl<'lib> App<'lib> {
         &self.theme_name
     }
 
-    /// The theme being previewed on the card's theme row (S4), if any.
+    /// Whether the theme picker is open (issue #37): it owns every key
+    /// while it is, the way the settings card does.
     #[must_use]
-    pub fn theme_preview(&self) -> Option<&str> {
-        self.theme_preview.as_deref()
+    pub const fn theme_picker_open(&self) -> bool {
+        self.theme_picker.is_some()
+    }
+
+    /// The row the picker's cursor is on (issue #37).
+    #[must_use]
+    pub const fn theme_picker_cursor(&self) -> usize {
+        match &self.theme_picker {
+            Some(picker) => picker.cursor,
+            None => 0,
+        }
+    }
+
+    /// The picker's rows, in order (issue #37, S2): `default` first, then
+    /// the built-ins sorted, then the folder files that override nothing.
+    #[must_use]
+    pub fn theme_picker_names(&self) -> Vec<String> {
+        self.theme_files
+            .iter()
+            .map(|theme| theme.name.clone())
+            .collect()
     }
 
     /// The palette as the `[theme]` table wrote it (S4): the colours the
@@ -2715,6 +2736,11 @@ impl<'lib> App<'lib> {
         if self.playlist_picker.is_some() {
             return self.on_playlist_picker_key(event.code);
         }
+        // The theme picker (issue #37) owns every key while it is open,
+        // exactly as the settings card it opens from does.
+        if self.theme_picker.is_some() {
+            return self.on_theme_picker_key(event.code);
+        }
         // An open settings card owns every key too (S6): nothing reaches the
         // lists or the transport while it is up, `q` and `space` included.
         if self.settings.is_some() {
@@ -3488,14 +3514,8 @@ impl<'lib> App<'lib> {
         };
         match code {
             KeyCode::Esc => {
-                // A preview that was never applied is undone (S4): `esc`
-                // leaves the previous theme applied, exactly as it leaves
-                // every other row's change alone.
-                if self.theme_preview.take().is_some() {
-                    let name = self.theme_name.clone();
-                    let colors = self.theme_colors_of(&name);
-                    self.set_theme(colors);
-                }
+                // The card holds no preview of its own (issue #37): a theme
+                // is chosen in the picker, which restores on its own `esc`.
                 self.settings = None;
             }
             KeyCode::Char('j') | KeyCode::Down => {
@@ -3517,26 +3537,20 @@ impl<'lib> App<'lib> {
             KeyCode::Enter => {
                 let key = card.focused();
                 if key == SettingsKey::Theme {
-                    self.apply_theme();
+                    // The theme is chosen in the picker (issue #37), never
+                    // stepped here.
+                    self.open_theme_picker();
                 } else {
                     self.change_setting(key, true);
                 }
             }
             KeyCode::Right => {
                 let key = card.focused();
-                if key == SettingsKey::Theme {
-                    self.preview_theme(true);
-                } else {
-                    self.change_setting(key, true);
-                }
+                self.change_setting(key, true);
             }
             KeyCode::Left => {
                 let key = card.focused();
-                if key == SettingsKey::Theme {
-                    self.preview_theme(false);
-                } else {
-                    self.change_setting(key, false);
-                }
+                self.change_setting(key, false);
             }
             _ => {}
         }
@@ -3569,8 +3583,8 @@ impl<'lib> App<'lib> {
                     &Self::toml_string(replay_gain_label(next)),
                 );
             }
-            // The theme row is never stepped through `change_setting` (S4):
-            // its `←`/`→` preview and its `enter` applies, never a cycle.
+            // The theme row is never stepped through `change_setting`
+            // (issue #37): its `enter` opens the picker.
             SettingsKey::Theme => {}
             SettingsKey::Repeat => {
                 let next = match (self.repeat, forward) {
@@ -3582,13 +3596,6 @@ impl<'lib> App<'lib> {
                 self.apply(Action::SetRepeat(next));
             }
             SettingsKey::Shuffle => self.apply(Action::ToggleShuffle),
-            SettingsKey::Accent => self.change_color(ColorRole::Accent, forward),
-            SettingsKey::Text => self.change_color(ColorRole::Text, forward),
-            SettingsKey::Dim => self.change_color(ColorRole::Dim, forward),
-            SettingsKey::Secondary => self.change_color(ColorRole::Secondary, forward),
-            SettingsKey::Border => self.change_color(ColorRole::Border, forward),
-            SettingsKey::Ink => self.change_color(ColorRole::Ink, forward),
-            SettingsKey::Background => self.change_color(ColorRole::Background, forward),
             SettingsKey::CoverArt => self.toggle_ui("cover_art", |ui| &mut ui.cover_art),
             SettingsKey::Spectrum => self.toggle_ui("spectrum", |ui| &mut ui.spectrum),
             SettingsKey::Hints => self.toggle_ui("hints", |ui| &mut ui.hints),
@@ -3606,52 +3613,98 @@ impl<'lib> App<'lib> {
         }
     }
 
-    /// Steps the theme row through the loaded themes (S4, issue #10):
-    /// `←`/`→` move around the loaded names, wrapping, and each step puts
-    /// the focused theme's palette on screen — a preview, never a write.
-    fn preview_theme(&mut self, forward: bool) {
+    /// Opens the theme picker on the theme row's `enter` (issue #37): the
+    /// cursor starts on the theme applied right now, and the palette in
+    /// force — `[theme]` overrides included — is remembered for `esc`. The
+    /// card gives every key to the picker.
+    fn open_theme_picker(&mut self) {
         if self.theme_files.is_empty() {
             return;
         }
-        let on_screen = self
-            .theme_preview
-            .clone()
-            .unwrap_or_else(|| self.theme_name.clone());
-        let count = self.theme_files.len();
-        let index = self
+        let cursor = self
             .theme_files
             .iter()
-            .position(|theme| theme.name == on_screen)
-            .map_or(0, |index| {
-                if forward {
-                    (index + 1) % count
-                } else {
-                    (index + count - 1) % count
-                }
-            });
-        let name = self.theme_files[index].name.clone();
-        let colors = self.theme_colors_of(&name);
-        self.set_theme(colors);
-        self.theme_preview = Some(name);
+            .position(|theme| theme.name == self.theme_name)
+            .unwrap_or(0);
+        self.theme_picker = Some(ThemePicker {
+            cursor,
+            snapshot: self.colors,
+        });
+        self.settings = None;
     }
 
-    /// Applies the theme the theme row shows (S4): `enter` makes the
-    /// previewed theme the applied one and writes `[theme] name` to the
-    /// config file. Without a preview there is nothing to apply and
-    /// nothing to write.
-    fn apply_theme(&mut self) {
-        let Some(name) = self.theme_preview.take() else {
-            return;
+    /// The keys while the theme picker is open (issue #37): `j`/`k` and the
+    /// arrows move and wrap at the ends, and every move APPLIES the focused
+    /// theme — the preview is the interface. `enter` keeps it and writes
+    /// `[theme] name` only when it changed; `esc` closes and restores the
+    /// palette the picker opened with. Every other key waits.
+    fn on_theme_picker_key(&mut self, code: ratatui::crossterm::event::KeyCode) -> Action {
+        use ratatui::crossterm::event::KeyCode;
+
+        let count = self.theme_files.len();
+        match code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                if let Some(picker) = self.theme_picker.as_mut()
+                    && count > 0
+                {
+                    picker.cursor = (picker.cursor + 1) % count;
+                    self.apply_picker_theme();
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if let Some(picker) = self.theme_picker.as_mut()
+                    && count > 0
+                {
+                    picker.cursor = (picker.cursor + count - 1) % count;
+                    self.apply_picker_theme();
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(picker) = self.theme_picker.take()
+                    && let Some(theme) = self.theme_files.get(picker.cursor)
+                {
+                    let name = theme.name.clone();
+                    let colors = self.theme_colors_of(&name);
+                    self.set_theme(colors);
+                    if name != self.theme_name {
+                        // The `s`/shuffle write contract: the file gets the
+                        // name only when it changed.
+                        self.remember(Some("theme"), "name", &Self::toml_string(&name));
+                        self.theme_name = name;
+                    }
+                }
+            }
+            KeyCode::Esc => {
+                if let Some(picker) = self.theme_picker.take() {
+                    // Exactly the palette in force when the picker opened
+                    // (S4): overrides included, nothing of the preview left.
+                    self.set_theme(picker.snapshot);
+                }
+            }
+            _ => {}
+        }
+        Action::None
+    }
+
+    /// Puts the focused theme's palette on screen (issue #37, S4): the move
+    /// preview IS the interface, with the colour keys that win over the
+    /// theme file on top (S2). A name that is not loaded falls back to the
+    /// built-in (S3).
+    fn apply_picker_theme(&mut self) {
+        let cursor = match self.theme_picker.as_ref() {
+            Some(picker) => picker.cursor,
+            None => return,
         };
-        let colors = self.theme_colors_of(&name);
-        self.set_theme(colors);
-        self.remember(Some("theme"), "name", &Self::toml_string(&name));
-        self.theme_name = name;
+        if let Some(theme) = self.theme_files.get(cursor) {
+            let name = theme.name.clone();
+            let colors = self.theme_colors_of(&name);
+            self.set_theme(colors);
+        }
     }
 
     /// The palette the theme named `name` gives, with the colour keys that
-    /// win over it on top (S2): what the theme row previews and applies.
-    /// A name that is not loaded falls back to the built-in (S3).
+    /// win over it on top (S2): what the picker previews and applies. A
+    /// name that is not loaded falls back to the built-in (S3).
     fn theme_colors_of(&self, name: &str) -> ThemeColors {
         match self
             .theme_files
@@ -3661,45 +3714,6 @@ impl<'lib> App<'lib> {
         {
             Some(colors) => self.theme_overrides.resolved_over(colors),
             None => self.theme_overrides.resolved(),
-        }
-    }
-
-    /// Cycles one colour role through [`COLOR_PRESETS`] (S7): forward or
-    /// back, wrapping; a colour that is not a preset — the user's own hex —
-    /// steps to the first preset going forward and to the last going back.
-    /// The palette is rebuilt from the current one with the one role
-    /// replaced, applied through [`App::set_theme`], and written to the file
-    /// under `[theme]`.
-    fn change_color(&mut self, role: ColorRole, forward: bool) {
-        let current = role.get(self.colors).to_key();
-        let next = Self::next_color(&current, role.allows_reset(), forward);
-        let Some(colour) = parse_color(next) else {
-            return;
-        };
-        let mut colors = self.colors;
-        role.set(&mut colors, colour);
-        // The card's colour is one of the keys that win over a theme file
-        // (S2): applying a theme later keeps it.
-        role.set_override(&mut self.theme_overrides, colour);
-        self.set_theme(colors);
-        self.remember(Some("theme"), role.key(), &Self::toml_string(next));
-    }
-
-    /// The colour `forward` cycles to from `current` (S7): the next preset
-    /// forward, the previous back, both wrapping; a colour that is no preset
-    /// steps to the first one forward and to the last one back. The two
-    /// roles that may be `reset` cycle it ahead of the presets.
-    fn next_color(current: &str, allows_reset: bool, forward: bool) -> &'static str {
-        let reset = ["reset"];
-        let head: &[&str] = if allows_reset { &reset } else { &[] };
-        let mut list = Vec::with_capacity(head.len() + COLOR_PRESETS.len());
-        list.extend_from_slice(head);
-        list.extend_from_slice(&COLOR_PRESETS);
-        match list.iter().position(|&colour| colour == current) {
-            Some(index) if forward => list[(index + 1) % list.len()],
-            Some(index) => list[(index + list.len() - 1) % list.len()],
-            None if forward => list[0],
-            None => list[list.len() - 1],
         }
     }
 
@@ -3732,19 +3746,8 @@ impl<'lib> App<'lib> {
             SettingsKey::ReplayGain => replay_gain_label(self.replay_gain).to_owned(),
             SettingsKey::Repeat => self.repeat.label().to_owned(),
             SettingsKey::Shuffle => if self.shuffle { "on" } else { "off" }.to_owned(),
-            // The theme row shows what is on screen (S4): the previewed
-            // theme while one is previewed, the applied one otherwise.
-            SettingsKey::Theme => self
-                .theme_preview
-                .clone()
-                .unwrap_or_else(|| self.theme_name.clone()),
-            SettingsKey::Accent => self.colors.accent.to_key(),
-            SettingsKey::Text => self.colors.text.to_key(),
-            SettingsKey::Dim => self.colors.dim.to_key(),
-            SettingsKey::Secondary => self.colors.secondary.to_key(),
-            SettingsKey::Border => self.colors.border.to_key(),
-            SettingsKey::Ink => self.colors.ink.to_key(),
-            SettingsKey::Background => self.colors.background.to_key(),
+            // The theme row shows the theme applied right now (issue #37).
+            SettingsKey::Theme => self.theme_name.clone(),
             SettingsKey::CoverArt
             | SettingsKey::Spectrum
             | SettingsKey::Hints
@@ -3887,6 +3890,9 @@ impl<'lib> App<'lib> {
         }
         if let Some(card) = &self.settings {
             self.draw_settings_card(frame, area, card);
+        }
+        if let Some(picker) = &self.theme_picker {
+            self.draw_theme_picker(frame, area, picker);
         }
         if let Some(prompt) = self.library_prompt() {
             Self::draw_library_prompt(frame, area, prompt, &self.theme);
@@ -4906,6 +4912,50 @@ impl<'lib> App<'lib> {
                     .border_style(Style::new().fg(self.theme.accent))
                     .title(Span::styled(
                         " settings ",
+                        Style::new().fg(self.theme.accent).bold(),
+                    ))
+                    .padding(ratatui::widgets::Padding::horizontal(1))
+                    .style(Style::new().bg(self.theme.background)),
+            ),
+            box_area,
+        );
+    }
+
+    /// The theme picker (issue #37): a small rounded card, centred like the
+    /// order card, one row per theme, the focused row in the accent.
+    fn draw_theme_picker(&self, frame: &mut Frame, area: Rect, picker: &ThemePicker) {
+        let names = self.theme_picker_names();
+        let width = u16::try_from(
+            names
+                .iter()
+                .map(|name| name.chars().count())
+                .max()
+                .unwrap_or(0)
+                + 4,
+        )
+        .unwrap_or(area.width);
+        let height = u16::try_from(names.len() + 2).unwrap_or(area.height);
+        let box_area = centered(area, width, height);
+        let lines = names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| {
+                let style = if index == picker.cursor {
+                    Style::new().fg(self.theme.accent)
+                } else {
+                    Style::new().fg(self.theme.text)
+                };
+                Line::styled(name.clone(), style)
+            })
+            .collect::<Vec<_>>();
+        frame.render_widget(Clear, box_area);
+        frame.render_widget(
+            Paragraph::new(lines).block(
+                Block::bordered()
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::new().fg(self.theme.accent))
+                    .title(Span::styled(
+                        " theme ",
                         Style::new().fg(self.theme.accent).bold(),
                     ))
                     .padding(ratatui::widgets::Padding::horizontal(1))
@@ -6678,22 +6728,6 @@ impl Help {
     }
 }
 
-/// The colour presets the settings card cycles a role through (S7): short,
-/// distinct, readable on a dark terminal, with the defaults the file ships
-/// with first so a cycled role can always be cycled back. `background` and
-/// `text`, whose default is the terminal's own colour, also cycle `reset`
-/// ahead of these.
-const COLOR_PRESETS: [&str; 8] = [
-    "#af00af", // the default accent — ANSI magenta
-    "#5f87d7", // the default secondary — ANSI blue
-    "#767676", // the default dim and border — bright black
-    "#000000", // the default ink
-    "#d70000", // red
-    "#00af5f", // green
-    "#d78700", // orange
-    "#00d7d7", // cyan
-];
-
 /// One setting the card can change (S7).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SettingsKey {
@@ -6701,13 +6735,6 @@ enum SettingsKey {
     Repeat,
     Shuffle,
     Theme,
-    Accent,
-    Text,
-    Dim,
-    Secondary,
-    Border,
-    Ink,
-    Background,
     CoverArt,
     Spectrum,
     Hints,
@@ -6725,13 +6752,6 @@ impl SettingsKey {
             Self::Repeat => "repeat",
             Self::Shuffle => "shuffle",
             Self::Theme => "theme",
-            Self::Accent => "accent",
-            Self::Text => "text",
-            Self::Dim => "dim",
-            Self::Secondary => "secondary",
-            Self::Border => "border",
-            Self::Ink => "ink",
-            Self::Background => "background",
             Self::CoverArt => "cover art",
             Self::Spectrum => "spectrum",
             Self::Hints => "hints",
@@ -6750,23 +6770,19 @@ enum SettingsRow {
     Setting(SettingsKey),
 }
 
-/// The card's rows, in order (S7): the headers are never focused. The volume
-/// is not a row (S7.3): it lives in `[state]` and on `+`/`-`, where it has
-/// always been changed from the keyboard.
-const SETTINGS_ROWS: [SettingsRow; 22] = [
+/// The card's rows, in order (S7): the headers are never focused. The
+/// colours are not rows (issue #37): they are the theme's inside, and the
+/// theme is chosen by name in the picker; the `[theme]` table keeps every
+/// colour editable in the file. The volume is not a row (S7.3): it lives
+/// in `[state]` and on `+`/`-`, where it has always been changed from the
+/// keyboard.
+const SETTINGS_ROWS: [SettingsRow; 15] = [
     SettingsRow::Header("sound"),
     SettingsRow::Setting(SettingsKey::ReplayGain),
     SettingsRow::Setting(SettingsKey::Repeat),
     SettingsRow::Setting(SettingsKey::Shuffle),
     SettingsRow::Header("theme"),
     SettingsRow::Setting(SettingsKey::Theme),
-    SettingsRow::Setting(SettingsKey::Accent),
-    SettingsRow::Setting(SettingsKey::Text),
-    SettingsRow::Setting(SettingsKey::Dim),
-    SettingsRow::Setting(SettingsKey::Secondary),
-    SettingsRow::Setting(SettingsKey::Border),
-    SettingsRow::Setting(SettingsKey::Ink),
-    SettingsRow::Setting(SettingsKey::Background),
     SettingsRow::Header("screen"),
     SettingsRow::Setting(SettingsKey::CoverArt),
     SettingsRow::Setting(SettingsKey::Spectrum),
@@ -6777,6 +6793,17 @@ const SETTINGS_ROWS: [SettingsRow; 22] = [
     SettingsRow::Header("library"),
     SettingsRow::Setting(SettingsKey::Folder),
 ];
+
+/// The open theme picker (issue #37): the row the cursor is on, and the
+/// palette in force when it opened, which `esc` restores exactly.
+#[derive(Debug, Clone, Copy)]
+struct ThemePicker {
+    /// The focused theme, as its index in [`App::theme_files`].
+    cursor: usize,
+    /// The palette the screen drew with when the picker opened: what `esc`
+    /// puts back, `[theme]` overrides included.
+    snapshot: ThemeColors,
+}
 
 /// The open settings card (S6): which setting the cursor is on, as its index
 /// among the focusable rows, and the first row of the table in view. The
@@ -6860,95 +6887,6 @@ impl SettingsCard {
     const fn last_top(shown: usize) -> usize {
         SETTINGS_ROWS.len().saturating_sub(shown)
     }
-}
-
-/// One colour role of the `[theme]` table the card can cycle (S7).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ColorRole {
-    Accent,
-    Text,
-    Dim,
-    Secondary,
-    Border,
-    Ink,
-    Background,
-}
-
-impl ColorRole {
-    /// The key the `[theme]` table writes the role under.
-    fn key(self) -> &'static str {
-        match self {
-            Self::Accent => "accent",
-            Self::Text => "text",
-            Self::Dim => "dim",
-            Self::Secondary => "secondary",
-            Self::Border => "border",
-            Self::Ink => "ink",
-            Self::Background => "background",
-        }
-    }
-
-    /// Replaces the role's colour among the keys that win over a theme
-    /// file (S2): the config's keys at launch, the card's since.
-    fn set_override(self, keys: &mut ThemeKeys, colour: ThemeColor) {
-        match self {
-            Self::Accent => keys.accent = Some(colour),
-            Self::Text => keys.text = Some(colour),
-            Self::Dim => keys.dim = Some(colour),
-            Self::Secondary => keys.secondary = Some(colour),
-            Self::Border => keys.border = Some(colour),
-            Self::Ink => keys.ink = Some(colour),
-            Self::Background => keys.background = Some(colour),
-        }
-    }
-
-    /// Whether the role may be `reset`, the terminal's own colour (S4):
-    /// only the screen behind everything and the body text may.
-    fn allows_reset(self) -> bool {
-        matches!(self, Self::Background | Self::Text)
-    }
-
-    /// The role's colour in the palette the app draws with.
-    fn get(self, colors: ThemeColors) -> ThemeColor {
-        match self {
-            Self::Accent => colors.accent,
-            Self::Text => colors.text,
-            Self::Dim => colors.dim,
-            Self::Secondary => colors.secondary,
-            Self::Border => colors.border,
-            Self::Ink => colors.ink,
-            Self::Background => colors.background,
-        }
-    }
-
-    /// Replaces the role's colour in a palette.
-    fn set(self, colors: &mut ThemeColors, colour: ThemeColor) {
-        match self {
-            Self::Accent => colors.accent = colour,
-            Self::Text => colors.text = colour,
-            Self::Dim => colors.dim = colour,
-            Self::Secondary => colors.secondary = colour,
-            Self::Border => colors.border = colour,
-            Self::Ink => colors.ink = colour,
-            Self::Background => colors.background = colour,
-        }
-    }
-}
-
-/// A colour as the `[theme]` table writes it (S4): `reset` or `#rrggbb`.
-fn parse_color(text: &str) -> Option<ThemeColor> {
-    if text == "reset" {
-        return Some(ThemeColor::Terminal);
-    }
-    let hex = text.strip_prefix('#')?;
-    if hex.len() != 6 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return None;
-    }
-    Some(ThemeColor::Rgb {
-        red: u8::from_str_radix(&hex[0..2], 16).ok()?,
-        green: u8::from_str_radix(&hex[2..4], 16).ok()?,
-        blue: u8::from_str_radix(&hex[4..6], 16).ok()?,
-    })
 }
 
 /// The `ReplayGain` mode in the config's own words.
