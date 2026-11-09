@@ -1,6 +1,13 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.24.0] - 2026-11-09
+
+### Features
+- **config:** A fresh install finds every file it can edit by hand
+
+### Documentation
+- **config:** The generated file names the theme and its folder
 ## [0.23.0] - 2026-11-09
 
 ### Features
