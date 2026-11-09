@@ -27,6 +27,30 @@ thing in the status line.
 The audio path already shares cells with the UI for pause and volume; mono
 follows that shape: a shared cell the producer reads at every block.
 
+**S5 — The volume knob is a perceptual curve, and bit-perfect skips it
+(issue #39).**
+The stored and shown volume stays `0..=100` and `[state] volume` keeps its
+meaning; only the mapping to amplitude changes. The samples carry
+`(percent / 100)³` — one function, `volume_amplitude`, read by the callback's
+ramp target — because hearing is roughly logarithmic in amplitude and the
+linear knob squeezed everything audible into its last few points. The table
+the decision recorded:
+
+| percent | amplitude | dB      |
+|--------:|----------:|---------|
+|     100 |     1.000 |       0 |
+|      75 |     0.422 |    −7.5 |
+|      50 |     0.125 |     −18 |
+|      25 |     0.016 |     −36 |
+|      10 |     0.001 |     −60 |
+|       0 |     0     | silence |
+
+The anti-click ramp is untouched: it still fades toward the new amplitude, it
+does not jump. With `bit_perfect` the samples are never scaled, so the curve
+does not apply — the volume is pinned to 100 there anyway, where the amplitude
+is exactly 1.0. ReplayGain, mono and the pause/resume path are untouched: the
+curve is the volume knob only.
+
 ## Slices
 
 One commit, and it is honestly one step: `play_gapless_at_full` grew the `mono`
@@ -51,3 +75,13 @@ logbook ride with it.
 flag (`--mono`) for a session, so both channels carry the whole mix. It is a step
 in the sample path before the ring, and it should say what it does to ReplayGain
 and to bit-perfect playback rather than quietly changing both."
+
+**L2** — issue #39: the volume knob was linear in amplitude, so 100→90 was
+about a decibel and 10→0 was twenty — the audible range lived in the last few
+points. Decided with the author: amplitude becomes `(percent / 100)³`, one
+function (`volume_amplitude` in `src/audio/output.rs`, table under S5),
+applied at the callback's ramp target — the only place the percentage becomes
+an amplitude; there is no separate fade-target computation. The stored and
+shown number stays 0–100, the anti-click ramp keeps its shape, and
+bit-perfect is untouched (its samples are never scaled; the volume is pinned
+to 100, whose amplitude is exactly 1.0). Pinned by `tests/volume_curve.rs`.

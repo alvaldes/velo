@@ -410,7 +410,7 @@ alone.
 
 | Key | Meaning | Default |
 |:--|:--|:--|
-| `volume` | Start level, `0..=100` | `100` |
+| `volume` | Start level, `0..=100`. The number is what you see; the samples carry its cube — the perceptual curve `(percent / 100)³` — so the steps match hearing: `0` is silence, `100` is unity, and `bit_perfect` pins it to 100 | `100` |
 | `shuffle` | Whether the queue is shuffled | `false` |
 | `repeat` | What follows the end of a track: `off`, `all` or `one` | `off` |
 | `view` | `library` or `queue`. Retired: read for compatibility — an existing value still parses — but no longer written or applied; it does not choose the screen. A launch opens `Sources` and `Local library` always starts at the library | `library` |
