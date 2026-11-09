@@ -92,6 +92,7 @@ the evening stay put — and when the queue holds no track, one status line says
 so and the station keeps playing.
 
 ## Media keys
+
 If the system has a media session to offer — macOS's media controls, a
 Linux desktop's MPRIS — velo registers with it: the OS's play/pause, next
 and previous reach the same actions the interface's `space`, `n` and `p`
