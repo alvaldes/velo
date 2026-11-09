@@ -1,6 +1,11 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.15.0] - 2026-11-09
+
+### Features
+- **ui:** A track can be seeked thirty seconds at a time
+- **ui:** `:` jumps to a position inside the playing track
 ## [0.14.0] - 2026-11-09
 
 ### Features
