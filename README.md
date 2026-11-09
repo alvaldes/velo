@@ -46,7 +46,7 @@ Every key below is what the code does today.
 |:--|:--|
 | `j` / `↓`, `k` / `↑` | Move down / up |
 | `g` / `G` | First / last row |
-| `enter` (sources) | Open the source under the cursor: `Local library`, `Radio` or `Recently played` |
+| `enter` (sources) | Open the source under the cursor: `Local library`, `Radio`, `Recently played` or `Favourites` |
 | `enter` (library) | Open an artist, album or genre; play from the selected track onwards through the list it is in |
 | `esc` / `backspace` | Back one level; from the top of the library, or when the radio closes, back to `Sources`. Closes the help overlay |
 | `1` `2` `3` `4` | Library view: artists (artist → album → track), every album, every track, genres |
@@ -69,7 +69,7 @@ Every key below is what the code does today.
 | `?` | Help card: `j`/`k` (or `↓`/`↑`) scroll it and `g`/`G` jump to its ends; `/` filters it by key or description (`enter` keeps the filter, `esc` clears it, a second `esc` or `?` closes the help). The card keeps its full size however few rows the filter leaves, and every other key waits until it closes — `q` and `space` included |
 | `o` | Settings card: everything in `config.toml` — replay gain, repeat, shuffle, the theme (with a preview before it applies, issue #10), the seven `[theme]` colours, the six `[ui]` switches and the library folder (the volume is not a row: it stays on `+`/`-`). `j`/`k` (or `↓`/`↑`) move between the settings (the `sound`/`theme`/`screen`/`library` headers are never focused), `g`/`G` jump to the ends, `enter` or `←`/`→` step the focused row (colours cycle a short preset list, the `theme` row previews with `←`/`→` and applies with `enter`, the `folder` row opens the library prompt), `esc` closes — and every other key waits until it does, `q` and `space` included |
 | `R` | Radio view, straight from either screen: the shortcut for `Sources` → `Radio` |
-| `f` (radio view) | Favourite the selected station, or pin the selected country or region |
+| `f` | On a track of the library: mark it as a favourite — press again to unmark; the mark is kept in `library.toml` and the track shows `★` in every library list. In the radio view: favourite the selected station, or pin the selected country or region |
 | `F` (radio view) | Filter the list already loaded, without asking the directory — `enter` keeps the filter, `esc` clears it |
 | `N` (radio view) | The country list, with your own country first when it knows it |
 | `ctrl+r` (radio view) | Refetch the directory for the place you are in: the country list, a region's stations or a tag's |
@@ -88,10 +88,12 @@ plays leaves it for the first track of the queue — the stations you lined up f
 the evening stay put — and when the queue holds no track, one status line says
 so and the station keeps playing.
 
-The first screen is `Sources`: `Local library`, `Radio` and `Recently played`, with
+The first screen is `Sources`: `Local library`, `Radio`, `Recently played` and `Favourites`, with
 the cursor already on the library. `Recently played` lists what `velo history`
 reports — the history file's entries, newest first — and its rows play and queue
-like any track. `esc` walks back one level at a time; the top of the
+like any track. `Favourites` lists the tracks you marked with `f`, each showing
+its `★`, playable and queueable exactly like any other track list. `esc` walks
+back one level at a time; the top of the
 library and the radio both land there, and a radio opened with `R` from the
 library comes back to the library — the way out is always the way in. A
 source's own keys stay its own once it is open. A launch that names files on
@@ -302,14 +304,17 @@ Everything velo keeps lives in one directory, `$XDG_CONFIG_HOME/velo` (else
 ```
 config.toml      # everything below, written on the first launch
 radio.toml       # the stations you kept, and the format to add one by hand
+library.toml     # marked tracks and saved playlists, with the format
 history.toml     # what played, newest first — appears with the first track
 themes/*.toml    # one file per theme you drop in
 ```
 
-The first two are written when velo starts for the first time and never over a
-file that is already there, so nothing has to be created by hand. `config.toml`
-carries every key at its default value with a short comment per key, so
-everything below can be changed from it. Everything below can also be changed while velo runs: `o` opens the
+The first three are written when velo starts for the first time and never over
+a file that is already there, so nothing has to be created by hand.
+`config.toml` carries every key at its default value with a short comment per
+key, so everything below can be changed from it; `radio.toml` and
+`library.toml` are rewritten whole each time velo saves into them, so their
+comments are a starting point. Everything below can also be changed while velo runs: `o` opens the
 settings card (a smaller card shaped like the help), where the
 ReplayGain mode, the repeat and the shuffle, every `[theme]` colour, the
 six `[ui]` switches and the library folder can be stepped through live —

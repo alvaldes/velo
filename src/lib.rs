@@ -5,5 +5,6 @@ pub mod config;
 pub mod history;
 pub mod library;
 pub mod radio;
+pub mod saved;
 pub mod subsonic;
 pub mod ui;

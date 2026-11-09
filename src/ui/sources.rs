@@ -1,7 +1,7 @@
 //! The first screen (issue #3): the sources velo can play, one row each,
-//! with the cursor already on the first one. The list is fixed — three
-//! entries that are compiled in — so this module holds the cursor and the
-//! labels, nothing else.
+//! with the cursor already on the first one. The list is fixed — entries
+//! that are compiled in — so this module holds the cursor and the labels,
+//! nothing else.
 
 /// A source the player can open: what the first screen names, one row each.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -13,11 +13,19 @@ pub enum Source {
     Radio,
     /// The history's entries (issue #5), newest first.
     RecentlyPlayed,
+    /// The saved store's favourites (issue #7): the tracks the user marked.
+    Favourites,
 }
 
 impl Source {
     /// Every source, in the order the first screen shows them (S2).
-    pub const ALL: [Self; 3] = [Self::Library, Self::Radio, Self::RecentlyPlayed];
+    /// `Favourites` is last, so `j` from the top still lands on `Radio`.
+    pub const ALL: [Self; 4] = [
+        Self::Library,
+        Self::Radio,
+        Self::RecentlyPlayed,
+        Self::Favourites,
+    ];
 
     /// The row's label, spelled as the issue names it (S2).
     #[must_use]
@@ -26,6 +34,7 @@ impl Source {
             Self::Library => "Local library",
             Self::Radio => "Radio",
             Self::RecentlyPlayed => "Recently played",
+            Self::Favourites => "Favourites",
         }
     }
 }
