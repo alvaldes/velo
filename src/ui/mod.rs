@@ -101,6 +101,10 @@ pub enum Action {
     /// Fold the mix down to mono — or back out of it — for the rest of the
     /// session (issue #8, S2). Never persisted.
     ToggleMono,
+    /// Low power for the rest of the session — or back out of it (issue
+    /// #11): a quarter of the redraw cadence and no spectrum. Remembered
+    /// under `[ui] low_power`, the way shuffle is remembered under `[state]`.
+    ToggleLowPower,
     /// Check the path typed into the library prompt; save and index it when
     /// it is a directory, otherwise say why in the prompt.
     SetLibrary,
@@ -672,6 +676,19 @@ pub struct App<'lib> {
     /// the first tick, then gone — a warning that repeats is noise, and one
     /// that only surfaces inside a skip reason is no warning at all.
     subsonic_warning: Option<String>,
+    /// The media keys (issue #12), when the launch could start them: the OS
+    /// client lives on its own thread; the tick drains its commands and
+    /// publishes what is playing. `None` — headless refusal, no session
+    /// bus, a client that said no — is a session without them, never a
+    /// session that failed (S6).
+    media: Option<crate::media_keys::MediaKeys>,
+    /// What the OS was last told is playing (issue #12, S5): a tick that
+    /// finds the same answer sends nothing, so a still session is silent.
+    media_published: Option<crate::media_keys::MediaState>,
+    /// What the config file already said about low power (issue #11, S1):
+    /// a `P` press writes only when it moves away from it, the way `s`
+    /// compares against the session.
+    saved_low_power: bool,
 }
 
 impl<'lib> App<'lib> {
@@ -742,6 +759,9 @@ impl<'lib> App<'lib> {
             pending_cover: None,
             scrobbles: None,
             subsonic_warning: None,
+            media: None,
+            media_published: None,
+            saved_low_power: false,
             saved: Session::default(),
             saved_volume: crate::config::DEFAULT_VOLUME,
             library_root: None,
@@ -827,6 +847,9 @@ impl<'lib> App<'lib> {
             pending_cover: None,
             scrobbles: None,
             subsonic_warning: None,
+            media: None,
+            media_published: None,
+            saved_low_power: false,
             saved: Session::default(),
             saved_volume: crate::config::DEFAULT_VOLUME,
             library_root: None,
@@ -978,9 +1001,40 @@ impl<'lib> App<'lib> {
     }
 
     /// Which parts of the interface are drawn, from the config's `[ui]` (S5):
-    /// the switches the layout reads, everything on by default.
+    /// the switches the layout reads, everything on by default. Also records
+    /// what the file already said about low power (issue #11, S1), so a `P`
+    /// press writes only when it moves away from it.
     pub fn set_ui(&mut self, ui: UiParts) {
+        self.saved_low_power = ui.low_power;
         self.ui = ui;
+    }
+
+    /// Starts the media keys (issue #12, S6): the OS client lives on its
+    /// own thread; the tick drains its commands and publishes what is
+    /// playing. A launch without one — headless, no session bus, a client
+    /// that refused — is a session without them, at most one status line,
+    /// never a wait.
+    pub fn set_media_keys(&mut self, media: crate::media_keys::MediaKeys) {
+        self.media = Some(media);
+    }
+
+    /// Whether low power is in force (issue #11): a quarter of the redraw
+    /// cadence and no spectrum, with playback and the layout otherwise
+    /// unchanged.
+    #[must_use]
+    pub const fn low_power(&self) -> bool {
+        self.ui.low_power
+    }
+
+    /// Applies one media-key command (issue #12, S4): the same action the
+    /// keyboard key answers, through the same [`App::apply`]. Returns the
+    /// action, the way [`App::on_key`] does, so the tests can see the
+    /// routing without a player.
+    #[doc(hidden)]
+    pub fn media_command(&mut self, command: crate::media_keys::MediaCommand) -> Action {
+        let action = crate::media_keys::action_of(command);
+        self.apply(action);
+        action
     }
 
     /// Comes back to what the config file says the last session stood at
@@ -1572,9 +1626,11 @@ impl<'lib> App<'lib> {
     /// rows go to the list instead.
     fn now_playing_rows(&self, height: u16) -> u16 {
         // Content tall enough for the spectrum tier starts at 22 rows; any
-        // shorter height keeps the block at its ordinary size.
+        // shorter height keeps the block at its ordinary size. Low power
+        // (issue #11, S2) leaves the spectrum out entirely: its rows go
+        // back to the list, the rest of the layout unchanged (S3).
         const SPECTRUM_TIER: u16 = 22;
-        now_playing_rows(if self.ui.spectrum {
+        now_playing_rows(if self.ui.spectrum && !self.ui.low_power {
             height
         } else {
             height.min(SPECTRUM_TIER - 1)
@@ -2119,6 +2175,11 @@ impl<'lib> App<'lib> {
         self.refresh_artwork();
         self.explain_hidden_art();
         self.listen();
+        // The media keys (issue #12, S6): what the OS sent reaches the same
+        // actions the keys perform, and what is playing goes back — but only
+        // when it changed. Both halves ride a channel, so the tick never
+        // waits on the OS.
+        self.media_tick();
         let path = self.playing_path().map(Path::to_path_buf);
         let (position, duration) = match &self.player {
             Some(player) => (player.position(), self.current_track_duration()),
@@ -2137,6 +2198,80 @@ impl<'lib> App<'lib> {
         // A bit-perfect fallback and its kin: one line, said once (T17).
         if let Some(notice) = player.take_notice() {
             self.status = format!("velo: {notice}");
+        }
+    }
+
+    /// The media keys' half of the tick (issue #12, S6): commands the OS
+    /// delivered since the last turn are applied, what is playing is
+    /// published when it changed, and a client that refused its own start
+    /// said its one line. Without media keys there is nothing to collect.
+    fn media_tick(&mut self) {
+        if self.media.is_none() {
+            return;
+        }
+        // The client's one word about its own start (S6), said once.
+        if let Some(message) = self
+            .media
+            .as_mut()
+            .and_then(crate::media_keys::MediaKeys::take_init_error)
+        {
+            self.status = format!("velo: {message}");
+        }
+        // What the OS sent reaches the keys' own actions.
+        for command in self
+            .media
+            .as_ref()
+            .map_or_else(Vec::new, crate::media_keys::MediaKeys::drain_commands)
+        {
+            self.media_command(command);
+        }
+        // And what plays goes back, but only when it changed: a still
+        // session sends nothing.
+        let snapshot = self.media_snapshot();
+        if self.media_published.as_ref() != Some(&snapshot)
+            && let Some(media) = self.media.as_ref()
+        {
+            media.publish(&snapshot);
+            self.media_published = Some(snapshot);
+        }
+    }
+
+    /// What the OS should show right now (issue #12, S5): the track's title
+    /// and artist when a file plays, the station's own name — or the ICY
+    /// title it is announcing — when a station plays, and nothing when
+    /// nothing does.
+    fn media_snapshot(&self) -> crate::media_keys::MediaState {
+        crate::media_keys::MediaState {
+            now: self.playing_entry().map(|entry| self.now_playing_of(entry)),
+            playing: self.state == PlayState::Playing,
+        }
+    }
+
+    /// What one queue entry means to the OS (S5): nothing is invented — a
+    /// cold file is its file name, a station without an ICY title is its
+    /// own name, an unknown artist is no artist.
+    fn now_playing_of(&self, entry: &Entry) -> crate::media_keys::NowPlaying {
+        match entry {
+            Entry::File(path) => {
+                let known = self.known_tracks().find(|track| track.path == *path);
+                let title = match known {
+                    Some(track) if !track.title.is_empty() => track.title.clone(),
+                    _ => entry.label().into_owned(),
+                };
+                let artist = known
+                    .map(|track| track.artist.clone())
+                    .filter(|artist| !artist.is_empty());
+                crate::media_keys::NowPlaying {
+                    title,
+                    artist,
+                    duration: self.current_track_duration(),
+                }
+            }
+            Entry::Station { name, .. } => crate::media_keys::NowPlaying {
+                title: self.station_title(name),
+                artist: None,
+                duration: None,
+            },
         }
     }
 
@@ -2296,13 +2431,15 @@ impl<'lib> App<'lib> {
 
     /// How long the event loop may wait for a key before drawing again:
     /// about thirty frames a second while bars on screen move, ten otherwise
-    /// — a window too short for the spectrum has nothing to animate.
+    /// — a window too short for the spectrum has nothing to animate. In low
+    /// power (issue #11) the rate is a quarter of whatever it would be.
     #[must_use]
     pub fn frame_interval(&self) -> Duration {
         cadence(
             self.spectrum_bands.get() > 0,
             self.state == PlayState::Playing,
             self.spectrum.levels().iter().any(|&level| level > 0.0),
+            self.ui.low_power,
         )
     }
 
@@ -2722,6 +2859,10 @@ impl<'lib> App<'lib> {
             // off. The refusal under bit-perfect lives in `apply`, with the
             // rest of the answers.
             KeyCode::Char('M') => Action::ToggleMono,
+            // Low power (issue #11, S1): a session switch on and off, and
+            // the key that remembers it under `[ui]`, the way `s` remembers
+            // shuffle under `[state]`.
+            KeyCode::Char('P') => Action::ToggleLowPower,
             // The library can be set again at any time (library-refresh T1);
             // the files given on the command line have none to set.
             KeyCode::Char('L') if !matches!(self.position, Position::Files) => {
@@ -3022,6 +3163,9 @@ impl<'lib> App<'lib> {
             Action::Previous => self.skip(false),
             Action::ToggleShuffle => self.toggle_shuffle(),
             Action::ToggleMono => self.toggle_mono(),
+            // Low power (issue #11, S1): the screen keeps its layout with
+            // the spectrum row gone, playback and every other key unchanged.
+            Action::ToggleLowPower => self.toggle_low_power(),
             Action::SetRepeat(mode) => {
                 if let Some(player) = &self.player {
                     player.set_repeat(mode);
@@ -5634,6 +5778,23 @@ impl<'lib> App<'lib> {
         false
     }
 
+    /// Low power (issue #11, S1–S2): the redraw cadence drops to a quarter
+    /// of its ordinary rate and the spectrum is left out entirely;
+    /// playback, the clock, the volume and every other key are untouched.
+    /// The key writes `[ui] low_power` the way `s` writes `[state] shuffle`
+    /// — once per change against what the file already said.
+    fn toggle_low_power(&mut self) {
+        self.ui.low_power = !self.ui.low_power;
+        if self.ui.low_power != self.saved_low_power {
+            self.saved_low_power = self.ui.low_power;
+            self.remember(
+                Some("ui"),
+                "low_power",
+                if self.ui.low_power { "true" } else { "false" },
+            );
+        }
+    }
+
     /// Mixes what is left of the queue, or puts it back in the order it came
     /// in. What played and what plays now never move, and the change goes
     /// through the one queue edit, so the player follows it at its next track.
@@ -5961,13 +6122,19 @@ const SPECTRUM_ROWS: u16 = 4;
 
 /// The redraw cadence: about thirty frames a second only while a spectrum is
 /// on screen and moving — the music playing, or bars still falling after it
-/// stopped. Hidden bars and still ones are drawn at ten.
-const fn cadence(visible: bool, playing: bool, falling: bool) -> Duration {
-    Duration::from_millis(if visible && (playing || falling) {
+/// stopped. Hidden bars and still ones are drawn at ten. Low power (issue
+/// #11) draws at a quarter of whatever the ordinary rate would be.
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "the four facts the cadence reads are independent: visible bars, moving music, falling bars, low power"
+)]
+const fn cadence(visible: bool, playing: bool, falling: bool, low_power: bool) -> Duration {
+    let base = if visible && (playing || falling) {
         33
     } else {
         100
-    })
+    };
+    Duration::from_millis(if low_power { base * 4 } else { base })
 }
 
 /// Partial blocks by eighths, empty to full.
@@ -6210,7 +6377,7 @@ fn mmss(duration: Duration) -> String {
 }
 
 /// Every row of the help card: the key, then what it does.
-const HELP_ROWS: [(&str, &str); 36] = [
+const HELP_ROWS: [(&str, &str); 37] = [
     ("j / Down", "move down"),
     ("k / Up", "move up"),
     ("g", "first track"),
@@ -6255,6 +6422,10 @@ const HELP_ROWS: [(&str, &str); 36] = [
     ("N", "in radio: the country list"),
     ("ctrl+r", "in radio: refetch the place you are in"),
     ("i", "in radio: report a station that cannot play"),
+    // Kept at the end so the rows the first screenful pins stay put: the
+    // tests read `u` and `q` on a small window, where a row added above
+    // them would silently scroll them off.
+    ("P", "low power: a quarter of the redraw rate, no spectrum"),
     ("q", "quit"),
 ];
 
@@ -6772,25 +6943,39 @@ mod tests {
         let (fast, slow) = (Duration::from_millis(33), Duration::from_millis(100));
 
         assert_eq!(
-            super::cadence(true, true, false),
+            super::cadence(true, true, false, false),
             fast,
             "visible and playing"
         );
         assert_eq!(
-            super::cadence(true, false, true),
+            super::cadence(true, false, true, false),
             fast,
             "visible, bars falling"
         );
         assert_eq!(
-            super::cadence(false, true, false),
+            super::cadence(false, true, false, false),
             slow,
             "playing, but hidden"
         );
-        assert_eq!(super::cadence(false, false, true), slow, "hidden, falling");
         assert_eq!(
-            super::cadence(true, false, false),
+            super::cadence(false, false, true, false),
+            slow,
+            "hidden, falling"
+        );
+        assert_eq!(
+            super::cadence(true, false, false, false),
             slow,
             "visible and still"
+        );
+        // Low power (issue #11, S2) draws at a quarter of whatever the
+        // ordinary rate would have been, fast or slow.
+        assert_eq!(
+            super::cadence(true, true, false, true),
+            Duration::from_millis(132)
+        );
+        assert_eq!(
+            super::cadence(false, false, false, true),
+            Duration::from_millis(400)
         );
     }
 

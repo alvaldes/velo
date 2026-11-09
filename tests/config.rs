@@ -57,6 +57,35 @@ fn the_cli_parses_the_cache_clean_flag() {
     assert!(!cli.info && !cli.play && !cli.index && !cli.sync && !cli.subsonic_test);
 }
 
+#[test]
+fn the_cli_parses_the_low_power_flag() {
+    let cli = Cli::try_parse_from(["velo", "--low-power"])
+        .unwrap_or_else(|error| panic!("parse failed: {error}"));
+    assert!(cli.low_power);
+    // It starts the session in low power (issue #11, S1): the merged
+    // settings carry it where the interface reads them.
+    assert!(Config::default().merged(&cli).ui.low_power);
+    // Without the flag it is off, as always.
+    assert!(!Config::default().merged(&cli_with_no_flags()).ui.low_power);
+}
+
+/// The `[ui] low_power` key remembers what `P` chose (issue #11, S1): the
+/// file alone starts a session in low power, and the flag adds to it — a
+/// flag is a request, never a refusal of the file's choice.
+#[test]
+fn low_power_is_remembered_by_the_file_and_turned_on_by_either_source() {
+    let dir = temp_dir("low-power");
+    let path = write_config(&dir, "[ui]\nlow_power = true\n");
+    let config = Config::load_from(&path).unwrap_or_else(|error| panic!("load failed: {error}"));
+    assert!(config.clone().merged(&cli_with_no_flags()).ui.low_power);
+
+    // Both on is still on.
+    let cli = Cli::try_parse_from(["velo", "--low-power"])
+        .unwrap_or_else(|error| panic!("parse failed: {error}"));
+    assert!(config.merged(&cli).ui.low_power);
+    let _ = fs::remove_dir_all(&dir);
+}
+
 // ---------------------------------------------------------------- missing file
 
 #[test]
@@ -211,6 +240,7 @@ view_numbers = false
             top_bar: false,
             advisories: false,
             view_numbers: false,
+            low_power: false,
         }
     );
     let _ = fs::remove_dir_all(&dir);

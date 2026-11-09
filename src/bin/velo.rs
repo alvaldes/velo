@@ -911,6 +911,14 @@ fn run_interface(
             settings.theme.clone(),
         );
         app.set_ui(settings.ui);
+        // The media keys (issue #12, S6): best effort, on their own thread.
+        // A launch that cannot have them — no thread for the client, a
+        // session the OS refuses — says at most one line and starts all the
+        // same.
+        match velo::media_keys::MediaKeys::spawn() {
+            Ok(media) => app.set_media_keys(media),
+            Err(message) => app.note(format!("velo: {message}")),
+        }
         app.show_artwork(picker);
         app.set_config_file(config_file);
         // The shuffle and repeat the file saved reach the files interface
@@ -963,6 +971,12 @@ fn browse_interface(
             settings.theme.clone(),
         );
         app.set_ui(settings.ui);
+        // The media keys (issue #12, S6), as the file interface starts them:
+        // best effort, one status line at most, never a wait.
+        match velo::media_keys::MediaKeys::spawn() {
+            Ok(media) => app.set_media_keys(media),
+            Err(message) => app.note(format!("velo: {message}")),
+        }
         app.show_artwork(picker);
         app.set_config_file(config_file);
         // The session comes back before anything else can move (S3), and

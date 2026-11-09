@@ -58,6 +58,7 @@ Every key below is what the code does today.
 | `s` | Shuffle what is left of the queue; again to put it back in order |
 | `r` | Repeat: off → all (the queue again) → one (the track again) |
 | `M` | Mono: both output channels carry the average of the mix — `(left + right) / 2`, never the sum, so the peak does not grow — applied after ReplayGain, before the samples reach the device, and toggled without restarting the stream. Refused while `bit_perfect` is on: the status line says so |
+| `P` | Low power: the screen redraws at a quarter of its ordinary rate and the spectrum stays out entirely — its rows go back to the list. Playback, the clock, the volume, seeking and every other key behave exactly as they do today; only the redraw cadence changes. Press again to step back out, and the last state is remembered under `[ui] low_power` the way `s` remembers shuffle |
 | `L` | Set the library folder: the same prompt as the first run, at any time |
 | `u` | Refresh the library index in the background; the title bar shows `⟳ indexing…` until it ends and the lists reload |
 | `+` / `-` | Volume up / down, 5% at a time; `[` / `]` move it a single point for the levels in between |
@@ -89,6 +90,19 @@ and the `● live` marker where a track shows its position. `next` while a stati
 plays leaves it for the first track of the queue — the stations you lined up for
 the evening stay put — and when the queue holds no track, one status line says
 so and the station keeps playing.
+
+## Media keys
+If the system has a media session to offer — macOS's media controls, a
+Linux desktop's MPRIS — velo registers with it: the OS's play/pause, next
+and previous reach the same actions the interface's `space`, `n` and `p`
+perform, and velo publishes what is playing so the OS can show it — a
+track's title and artist (its file name when the index never saw it), a
+live station's announced ICY title or its own name, and nothing when
+nothing plays. The keyboard keys themselves are untouched: the media keys
+are the OS's, not the terminal's. Starting the client is best effort — it
+lives on its own thread, never waits and never panics, and a launch
+without a media session (headless, over ssh, no session bus) starts all
+the same, saying at most one line.
 
 The first screen is `Sources`: `Local library`, `Radio`, `Recently played`, `Favourites` and `Playlists`, with
 the cursor already on the library. `Recently played` lists what `velo history`
@@ -408,6 +422,7 @@ previous theme applied.
 | `top_bar` | Draw the tabs and the `V E L O` name | `true` |
 | `advisories` | Let the status line explain why something is not drawn — today, a cover the window is too small for. Errors and ordinary messages are never silenced | `true` |
 | `view_numbers` | Number the library views in the header (`1 artists  2 albums  3 tracks  4 genres`) | `true` |
+| `low_power` | Start in low power: a quarter of the redraw cadence and no spectrum, playback unchanged. `P` toggles it while playing and writes this key | `false` |
 
 Precedence: `--library` (expanded the same way) beats the config file. With
 no library set, the interface no longer demands a folder: when a `[subsonic]`
@@ -573,6 +588,14 @@ in the sample path after ReplayGain is applied, and it is refused while
 `bit_perfect` is on — one line at startup, or the status line on `M` — instead
 of being quietly applied. Nothing about it is persisted: the setting dies with
 the session.
+
+Low power is the screen's throttle: `velo --low-power` starts a session
+that redraws at a quarter of its ordinary rate — 400 ms instead of 100 ms,
+132 ms instead of 33 ms while bars were animating — and leaves the spectrum
+out entirely, its rows going back to the list. Playback, the clock, the
+volume, seeking and every other key are unchanged. `P` toggles it while
+playing and the last state is remembered under `[ui] low_power`, the way
+shuffle is remembered under `[state]`.
 
 ## Not yet
 

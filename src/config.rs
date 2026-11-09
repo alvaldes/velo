@@ -143,10 +143,11 @@ Audio must share one channel layout: sample rates are converted to the
 Configuration: $XDG_CONFIG_HOME/velo/config.toml, or
     ~/.config/velo/config.toml — keys: library, bit_perfect, replay_gain, and
     the tables [state] (volume, shuffle, repeat and the open node),
-    [theme] (every colour, as \"#rrggbb\"), [ui] (cover_art, spectrum, hints,
-    top_bar, advisories, view_numbers) and the optional [subsonic] table (url,
-    user, api_key, insecure) for a Subsonic-compatible server; `velo
-    --subsonic-test` answers \"can I use this server?\" and works over ssh;
+    [theme] (every colour, as \"#rrggbb\"), [ui] (cover_art, spectrum,
+    low_power, hints, top_bar, advisories, view_numbers) and the optional
+    [subsonic] table (url, user, api_key, insecure) for a Subsonic-compatible
+    server; `velo --subsonic-test` answers \"can I use this server?\" and works
+    over ssh;
     `velo --radio-test <URL>` probes one live station URL the same way.
     When the file is missing, velo writes it with every key at its default and
     a comment per key; an unknown key is an error. library (and --library)
@@ -184,6 +185,14 @@ pub struct Cli {
     /// (issue #8).
     #[arg(long)]
     pub mono: bool,
+
+    /// Start this session in low power (issue #11, S1): the screen redraws
+    /// at a quarter of its ordinary rate and the spectrum stays out.
+    /// Playback and every other key are unchanged. `P` toggles it while
+    /// playing, and the last state is remembered under `[ui] low_power`,
+    /// the way shuffle is remembered under `[state]`.
+    #[arg(long)]
+    pub low_power: bool,
 
     /// Build or refresh the library index, print its counts, then exit.
     #[arg(long)]
@@ -353,7 +362,15 @@ impl Config {
                 node,
             },
             theme: self.theme,
-            ui: self.ui.resolved(),
+            // `--low-power` starts the session in low power (issue #11, S1);
+            // `[ui] low_power` remembers it across launches. Either source
+            // turns it on — the flag is a request, never a refusal of the
+            // file's choice.
+            ui: {
+                let mut ui = self.ui.resolved();
+                ui.low_power = cli.low_power || self.ui.low_power.unwrap_or(false);
+                ui
+            },
             subsonic: self.subsonic.map(|server| SubsonicConfig {
                 url: server.url,
                 user: server.user,
@@ -663,6 +680,10 @@ pub struct UiParts {
     /// The numbers of the four library views in the header (S5.5):
     /// `1 artists  2 albums  3 tracks  4 genres`.
     pub view_numbers: bool,
+    /// Low power (issue #11, S2): the redraw cadence drops to a quarter of
+    /// its ordinary rate and the spectrum is left out entirely. Playback,
+    /// the clock, the volume and the rest of the screen are unchanged.
+    pub low_power: bool,
 }
 
 impl Default for UiParts {
@@ -675,6 +696,9 @@ impl Default for UiParts {
             top_bar: true,
             advisories: true,
             view_numbers: true,
+            // Low power is a session the user asks for (issue #11): off
+            // until the flag, the file or `P` says otherwise.
+            low_power: false,
         }
     }
 }
@@ -697,6 +721,9 @@ pub struct UiKeys {
     /// `view_numbers` — whether the library header numbers its views 1–4
     /// (S5.5).
     pub view_numbers: Option<bool>,
+    /// `low_power` — whether the session starts in low power (issue #11):
+    /// a lower redraw cadence and no spectrum, remembered across launches.
+    pub low_power: Option<bool>,
 }
 
 impl UiKeys {
@@ -711,6 +738,7 @@ impl UiKeys {
             top_bar: self.top_bar.unwrap_or(default.top_bar),
             advisories: self.advisories.unwrap_or(default.advisories),
             view_numbers: self.view_numbers.unwrap_or(default.view_numbers),
+            low_power: self.low_power.unwrap_or(default.low_power),
         }
     }
 }
@@ -874,6 +902,10 @@ cover_art = true
 spectrum = true
 hints = true
 top_bar = true
+
+# Low power: the screen redraws at a quarter of its rate and the spectrum
+# stays out; playback is unchanged. `P` toggles it and writes this key.
+low_power = false
 
 # The status line that explains why something is not drawn (a cover the
 # window is too small for). Errors and messages are never silenced.
