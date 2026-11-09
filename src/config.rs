@@ -125,7 +125,7 @@ Audio must share one channel layout: sample rates are converted to the
 
 Configuration: $XDG_CONFIG_HOME/velo/config.toml, or
     ~/.config/velo/config.toml — keys: library, bit_perfect, replay_gain, and
-    the tables [state] (volume, shuffle, repeat, the tab and the open node),
+    the tables [state] (volume, shuffle, repeat and the open node),
     [theme] (every colour, as \"#rrggbb\"), [ui] (cover_art, spectrum, hints,
     top_bar, advisories, view_numbers) and the optional [subsonic] table (url,
     user, api_key, insecure) for a Subsonic-compatible server; `velo
@@ -322,15 +322,19 @@ pub struct Settings {
     pub subsonic: Option<SubsonicConfig>,
 }
 
-/// Where the next launch picks up (S3): the tab, the library view and the
-/// node that was open when velo last ran.
+/// Where the next launch picks up (S3): the library view and the node that
+/// was open when velo last ran. The recorded tab (`view`) is retired (S14):
+/// it is kept here — and read from the file — for compatibility only, and
+/// is no longer written or applied.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Session {
     /// Whether the queue is shuffled (S2).
     pub shuffle: bool,
     /// What follows the end of a track (S2).
     pub repeat: Repeat,
-    /// The tab the interface was on (S3).
+    /// The tab the file recorded, read for compatibility (S14): it still
+    /// parses, but it is no longer written and no longer applied — a launch
+    /// opens `Sources`.
     pub view: View,
     /// The library view it was showing (S3).
     pub browse_by: BrowseBy,
@@ -364,7 +368,8 @@ pub struct StateKeys {
     /// `repeat` — `off`, `all` or `one`.
     #[serde(default)]
     pub repeat: Option<Repeat>,
-    /// `view` — `library` or `queue`.
+    /// `view` — `library` or `queue`. Read for compatibility (S14): it
+    /// still parses, but it is no longer written or applied.
     #[serde(default)]
     pub view: Option<View>,
     /// `browse_by` — `artists`, `albums`, `tracks` or `genres`.
@@ -637,7 +642,6 @@ replay_gain = \"track\"
 volume = {DEFAULT_VOLUME}
 shuffle = false
 repeat = \"off\"
-view = \"library\"
 browse_by = \"artists\"
 
 # Every colour, as \"#rrggbb\". \"reset\" is the terminal's own colour and is

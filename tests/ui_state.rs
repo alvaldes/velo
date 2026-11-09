@@ -1932,8 +1932,39 @@ fn repeat_and_shuffle_are_written_when_they_change() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// S14 (decision A): `tab` is a transient round trip, not a setting — moving
+/// it to the queue and back writes nothing under `[state]`, and the file
+/// stays byte-identical.
 #[test]
-fn the_tab_the_library_view_and_the_open_node_are_written_as_you_move() {
+fn the_tab_round_trip_writes_nothing_under_state() {
+    let dir = config_dir("persist-tab-inert");
+    let config = dir.join("config.toml");
+    fs::write(&config, velo::config::default_config_text()).unwrap();
+    let mut app = App::browse(None);
+    app.set_config_file(Some(config.clone()));
+    let default = velo::config::default_config_text();
+
+    // Moving the tab writes nothing: to the queue…
+    press(&mut app, KeyCode::Tab);
+    assert_eq!(
+        fs::read_to_string(&config).unwrap(),
+        default,
+        "tab to the queue wrote nothing"
+    );
+
+    // …and back. The whole round trip leaves the file byte-identical.
+    press(&mut app, KeyCode::Tab);
+    assert_eq!(
+        fs::read_to_string(&config).unwrap(),
+        default,
+        "the round trip to the queue and back wrote nothing"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_library_view_and_the_open_node_are_written_as_you_move() {
     let temp = library_for_views("persist-move");
     let dir = config_dir("persist-move");
     let config = dir.join("config.toml");
@@ -1944,7 +1975,8 @@ fn the_tab_the_library_view_and_the_open_node_are_written_as_you_move() {
     // New node keys are appended at the end of the `[state]` table, right
     // before the next header — after the comment block that stands there —
     // which is where the writer puts an appended key (T4). Everything else
-    // is replaced in place.
+    // is replaced in place. `view` is retired (S14): it stays exactly what
+    // the default file wrote, however much you move.
     let expected = |browse_by: &str, keys: &str| {
         default
             .replace(
@@ -1958,15 +1990,7 @@ fn the_tab_the_library_view_and_the_open_node_are_written_as_you_move() {
     };
     let file = || fs::read_to_string(&config).unwrap();
 
-    // The tab: to the queue, and the file follows.
-    press(&mut app, KeyCode::Tab);
-    assert_eq!(
-        file(),
-        default.replace("view = \"library\"", "view = \"queue\"")
-    );
-
-    // A number key from the queue brings the library tab back, with the new
-    // view saved beside it.
+    // A number key changes the view, and the file follows.
     act(&mut app, KeyCode::Char('2'));
     assert_eq!(file(), expected("albums", ""));
 
@@ -2080,7 +2104,12 @@ fn a_launch_comes_back_to_what_the_file_says_and_writes_nothing() {
     );
 
     assert_eq!(app.volume(), 60);
-    assert_eq!(app.view(), View::Queue);
+    assert_eq!(
+        app.view(),
+        View::Library,
+        "the recorded tab is retired (S14): it is not applied — the launch \
+         itself opens `Sources`"
+    );
     assert_eq!(app.browse_by(), BrowseBy::Albums);
     assert_eq!(
         app.level(),
@@ -2116,6 +2145,71 @@ fn a_launch_comes_back_to_what_the_file_says_and_writes_nothing() {
             .unwrap()
             .contains("repeat = \"one\"")
     );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// S14 (decision A): the compatibility proof. A file that still carries
+/// `view = "queue"` parses, the launch opens `Sources`, and entering
+/// `Local library` lands on the library (issue #27) — the recorded tab
+/// steers nothing.
+#[test]
+fn a_recorded_view_still_parses_and_the_launch_lands_on_sources_then_the_library() {
+    let temp = library_for_views("persist-retired-view");
+    let dir = config_dir("persist-retired-view");
+    let (config, before, mut app) =
+        launched_from(&temp, &dir, "view = \"queue\"\nbrowse_by = \"albums\"\n");
+
+    assert_eq!(app.view(), View::Library, "the recorded tab is not applied");
+
+    // The shell's launch path: `Sources` first, the library behind `enter`.
+    app.open_sources();
+    assert_eq!(app.view(), View::Sources);
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.view(), View::Library);
+    assert_eq!(app.level(), Some(Level::AllAlbums));
+
+    // And the launch itself wrote nothing.
+    assert_eq!(fs::read_to_string(&config).unwrap(), before);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// S14 (decision A): a file without a `view` key parses and behaves exactly
+/// as one with it — the rest of `[state]` is restored, and the launch lands
+/// on `Sources` and then the library.
+#[test]
+fn a_file_without_the_view_key_still_parses_and_restores_the_rest() {
+    let temp = library_for_views("persist-no-view");
+    let dir = config_dir("persist-no-view");
+    let (config, before, mut app) = launched_from(
+        &temp,
+        &dir,
+        "browse_by = \"albums\"\nartist = \"Tide\"\nalbum = \"Harbor\"\n",
+    );
+
+    assert_eq!(app.browse_by(), BrowseBy::Albums);
+    assert_eq!(app.view(), View::Library, "no view key is no tab either");
+    assert_eq!(
+        app.level(),
+        Some(Level::Tracks {
+            artist: "Tide".to_owned(),
+            album: "Harbor".to_owned()
+        })
+    );
+
+    app.open_sources();
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.view(), View::Library);
+    assert_eq!(
+        app.level(),
+        Some(Level::Tracks {
+            artist: "Tide".to_owned(),
+            album: "Harbor".to_owned()
+        }),
+        "the open node survives the launch untouched"
+    );
+    assert_eq!(fs::read_to_string(&config).unwrap(), before);
 
     let _ = fs::remove_dir_all(&dir);
 }

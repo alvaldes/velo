@@ -719,7 +719,7 @@ fn run_interface(
         app.show_artwork(picker);
         app.set_config_file(config_file);
         // The shuffle and repeat the file saved reach the files interface
-        // too; the tab and the open node belong to the browser (S3), and
+        // too; the open node belongs to the browser (S3), and
         // `set_session` remembers the volume above as what the file says.
         app.set_session(settings.session.clone());
         event_loop(&mut app, None, terminal)
