@@ -261,6 +261,11 @@ The history is written by the interface; the one-shot `--play` mode writes
 nothing. `history` is a subcommand now: a file that happens to be named
 `history` is opened with a path (`velo ./history`).
 
+Radio stations are recorded here too: they are listed in `Recently played`
+beside the tracks, with their own name and the note `radio`, and opening one
+plays the live stream. In `--json` output a station carries
+`"kind":"station"` where a track carries `"kind":"file"`.
+
 ## Configuration
 
 One TOML file, read once at startup, and the only place velo keeps anything:

@@ -30,6 +30,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// rewrite on every track change.
 pub const CAP: usize = 500;
 
+/// What a history entry is: a track the queue carried, or a live radio
+/// station (issue #33).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Kind {
+    /// A track: [`Entry::path`] is the file path the queue carried.
+    #[default]
+    File,
+    /// A live station: [`Entry::path`] is the stream URL.
+    Station,
+}
+
 /// The file's name beside `config.toml`.
 const FILE_NAME: &str = "history.toml";
 
@@ -53,9 +65,15 @@ pub fn now_unix() -> u64 {
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct Entry {
-    /// The path verbatim: a `subsonic://…` row stays what the queue held,
-    /// never the cache file it resolves to.
+    /// The path verbatim, and the entry's identity: for a track, the file
+    /// path the queue held — a `subsonic://…` row stays what the queue held,
+    /// never the cache file it resolves to; for a station, the stream URL.
+    /// Never empty.
     pub path: String,
+    /// What kind of beginning this is. An entry written before the key
+    /// existed loads as a file, the way it always was.
+    #[serde(default)]
+    pub kind: Kind,
     /// Unix seconds.
     pub played_at: u64,
     /// The artist, when the index knew it.
@@ -67,6 +85,40 @@ pub struct Entry {
 }
 
 impl Entry {
+    /// A station's beginning (issue #33): the stream URL stands in the
+    /// identity field, and the station's own name is the title. A station
+    /// has no artist and no album — nothing to look up.
+    #[must_use]
+    pub fn station(url: &str, name: &str, played_at: u64) -> Self {
+        Self {
+            path: url.to_owned(),
+            kind: Kind::Station,
+            played_at,
+            artist: None,
+            album: None,
+            title: Some(name.to_owned()),
+        }
+    }
+
+    /// Whether this beginning is a live station, not a file.
+    #[must_use]
+    pub fn is_station(&self) -> bool {
+        self.kind == Kind::Station
+    }
+
+    /// The identity a beginning dedupes on: the radio store's station key
+    /// of the stream URL for a station — two writings of one station are
+    /// one entry — and the path verbatim for a file, so a station never
+    /// collapses into a file or the other way round.
+    #[must_use]
+    pub fn identity(&self) -> String {
+        if self.kind == Kind::Station {
+            format!("station:{}", crate::radio::store::station_key(&self.path))
+        } else {
+            format!("file:{}", self.path)
+        }
+    }
+
     /// How one entry is named, on screen and in `velo history`: `artist —
     /// title` when both are known, the title alone when that is all there is,
     /// and the file's own name when the index could not describe the path.
@@ -89,6 +141,14 @@ impl Entry {
     fn to_json(&self) -> String {
         let mut fields = vec![
             format!("\"path\":\"{}\"", escape(&self.path)),
+            format!(
+                "\"kind\":\"{}\"",
+                if self.kind == Kind::Station {
+                    "station"
+                } else {
+                    "file"
+                }
+            ),
             format!("\"played_at\":{}", self.played_at),
         ];
         for (key, value) in [
@@ -188,11 +248,14 @@ impl History {
         }
     }
 
-    /// Records a beginning: the entry goes to the top, any earlier entry with
-    /// the same path is dropped (playing it again moves it up instead of
-    /// duplicating it), and the list is trimmed to [`CAP`], oldest first.
+    /// Records a beginning: the entry goes to the top, any earlier entry
+    /// with the same identity is dropped (playing it again moves it up
+    /// instead of duplicating it — the same station twice is one entry,
+    /// however its URL was written), and the list is trimmed to [`CAP`],
+    /// oldest first.
     pub fn record(&mut self, begun: Entry) {
-        self.entry.retain(|entry| entry.path != begun.path);
+        let identity = begun.identity();
+        self.entry.retain(|entry| entry.identity() != identity);
         self.entry.insert(0, begun);
         self.entry.truncate(CAP);
     }
@@ -316,6 +379,7 @@ mod tests {
         let mut history = History::default();
         history.record(Entry {
             path: String::from("subsonic://music.example/rest/stream?id=42"),
+            kind: Kind::File,
             played_at: 1_762_668_000,
             artist: Some(String::from("Tide")),
             album: Some(String::from("Harbor")),
@@ -403,10 +467,79 @@ mod tests {
         assert_eq!(
             history.to_json(),
             concat!(
-                r#"[{"path":"/music/two.flac","played_at":20,"artist":"Tide","title":"Nightfall"},"#,
-                r#"{"path":"/music/one.flac","played_at":10}]"#
+                r#"[{"path":"/music/two.flac","kind":"file","played_at":20,"artist":"Tide","title":"Nightfall"},"#,
+                r#"{"path":"/music/one.flac","kind":"file","played_at":10}]"#
             )
         );
+    }
+
+    #[test]
+    fn json_says_the_kind_of_every_entry() {
+        let mut history = History::default();
+        history.record(Entry::station("https://stream.example/x", "Nova", 10));
+        history.record(entry("/music/one.flac", 20));
+        assert_eq!(
+            history.to_json(),
+            concat!(
+                r#"[{"path":"/music/one.flac","kind":"file","played_at":20},"#,
+                r#"{"path":"https://stream.example/x","kind":"station","played_at":10,"title":"Nova"}]"#
+            )
+        );
+    }
+
+    #[test]
+    fn a_station_round_trips_through_save_and_load_with_its_kind() {
+        let dir = temp_dir("station-round-trip");
+        let file = path_beside(&dir.join("config.toml"));
+        let mut history = History::default();
+        history.record(Entry::station(
+            "https://stream.example/nova",
+            "Nova",
+            1_762_668_000,
+        ));
+        history.save(&file).unwrap();
+
+        let loaded = History::load(&file).unwrap();
+        assert_eq!(loaded, history);
+        assert!(loaded.entry[0].is_station());
+        assert_eq!(loaded.entry[0].path, "https://stream.example/nova");
+        assert_eq!(loaded.entry[0].title.as_deref(), Some("Nova"));
+        assert_eq!(loaded.entry[0].artist, None, "a station has no artist");
+        assert_eq!(loaded.entry[0].album, None, "a station has no album");
+        assert_eq!(loaded.entry[0].label(), "Nova", "the name is the label");
+    }
+
+    #[test]
+    fn two_writings_of_one_station_are_one_entry_but_a_track_with_the_same_text_is_not() {
+        let mut history = History::default();
+        history.record(Entry::station("https://Stream.example:443/x", "Nova", 10));
+        history.record(Entry::station("https://stream.example/x", "Nova", 20));
+        assert_eq!(history.entry.len(), 1, "one station however it is written");
+        assert_eq!(history.entry[0].played_at, 20, "the newest moment wins");
+
+        history.record(entry("https://stream.example/x", 30));
+        assert_eq!(history.entry.len(), 2, "a file path is never a station");
+        assert!(!history.entry[0].is_station());
+        assert_eq!(history.entry[0].identity(), "file:https://stream.example/x");
+        assert_eq!(
+            history.entry[1].identity(),
+            "station:https://stream.example/x"
+        );
+    }
+
+    #[test]
+    fn an_entry_written_before_kind_existed_loads_as_a_file() {
+        let dir = temp_dir("old-kind");
+        let file = dir.join("history.toml");
+        fs::write(
+            &file,
+            "[[entry]]\npath = \"/music/one.flac\"\nplayed_at = 5\n",
+        )
+        .unwrap();
+
+        let history = History::load(&file).unwrap();
+        assert_eq!(history.entry, [entry("/music/one.flac", 5)]);
+        assert!(!history.entry[0].is_station());
     }
 
     #[test]
@@ -418,7 +551,7 @@ mod tests {
         };
         assert_eq!(
             entry.to_json(),
-            r#"{"path":"/music/quo\"te\\back\nnew\tline.flac","played_at":10}"#
+            r#"{"path":"/music/quo\"te\\back\nnew\tline.flac","kind":"file","played_at":10}"#
         );
     }
 }

@@ -203,9 +203,10 @@ struct LibrarySetup {
 }
 
 /// The recently played file (issue #5), as the interface holds it between
-/// ticks. `seen` is the path written last: the tick sees the same entry on
-/// every frame (a pause, a seek that rebuilds the player), so only a change
-/// of path counts as a beginning.
+/// ticks. `seen` is the identity written last: the tick sees the same entry
+/// on every frame (a pause, a seek that rebuilds the player), so only a
+/// change of identity — a file path or a station's URL key — counts as a
+/// beginning.
 #[derive(Debug, Default)]
 struct Recent {
     entries: crate::history::History,
@@ -514,6 +515,11 @@ pub struct App<'lib> {
     /// The recently played file (issue #5): loaded once from beside the
     /// config file, recorded into when a track begins.
     recent: Recent,
+    /// The rows the `Recently played` screen stands on (issue #5, issue
+    /// #33): the history's entries as the file holds them — tracks and
+    /// stations alike — cloned in when the source opens. The library
+    /// snapshot `tracks` holds stays where it was.
+    recent_rows: Vec<crate::history::Entry>,
     /// Turns queue entries into files just before the producer opens them
     /// (T12c): the remote rows' `subsonic://…` entries resolve through the
     /// subsonic cache. `None` (a local-only launch) means every entry already
@@ -615,6 +621,7 @@ impl<'lib> App<'lib> {
             library_setup: None,
             config_file: None,
             recent: Recent::default(),
+            recent_rows: Vec::new(),
             resolver: None,
             covers: None,
             pending_cover: None,
@@ -688,6 +695,7 @@ impl<'lib> App<'lib> {
             library_setup: None,
             config_file: None,
             recent: Recent::default(),
+            recent_rows: Vec::new(),
             resolver: None,
             covers: None,
             pending_cover: None,
@@ -996,35 +1004,15 @@ impl<'lib> App<'lib> {
     }
 
     /// Opens the `Recently played` source (issue #5): the history's entries,
-    /// newest first, as the track list the screen stands on. The list is the
-    /// in-memory snapshot the tick keeps current — the screen never re-reads
-    /// the file — and each queue entry carries the history's path verbatim,
-    /// so a `subsonic://…` row resolves through the cache at play time. This
-    /// is not a level of the library and never becomes a `BrowseBy`: nothing
+    /// newest first, as the rows the screen stands on. The rows are the
+    /// file's entries themselves (issue #33), tracks and stations alike —
+    /// cloned in here, never re-read while the screen is open — and a queue
+    /// entry built from a file row carries the history's path verbatim, so a
+    /// `subsonic://…` row resolves through the cache at play time. This is
+    /// not a level of the library and never becomes a `BrowseBy`: nothing
     /// here is persisted, and the node the file holds is left alone.
     fn open_recent(&mut self) {
-        self.tracks = self
-            .recent
-            .entries
-            .entry
-            .iter()
-            .map(|entry| TrackEntry {
-                path: PathBuf::from(&entry.path),
-                // What the file says and nothing more: a title the entry does
-                // not have stays empty here, so replaying this row cannot
-                // write a made-up title back into the history (S3). The row
-                // still shows the file's own name (see `row_text`).
-                title: entry.title.clone().unwrap_or_default(),
-                artist: entry.artist.clone().unwrap_or_default(),
-                album: entry.album.clone().unwrap_or_default(),
-                track_no: None,
-                disc_no: None,
-                duration_ms: 0,
-                source: crate::library::LOCAL_SOURCE.to_owned(),
-                remote_id: None,
-                cover_id: None,
-            })
-            .collect();
+        self.recent_rows = self.recent.entries.entry.clone();
         self.view = View::Library;
         self.position = Position::Recent;
         self.selected = 0;
@@ -1174,10 +1162,17 @@ impl<'lib> App<'lib> {
             // selected track: handing the whole list over started the stream
             // at the first file whichever one was chosen.
             Position::Files if from < self.argv.len() => self.argv[from..].to_vec(),
-            Position::Tracks { .. }
-            | Position::AllTracks
-            | Position::Genre { .. }
-            | Position::Recent => self
+            // From the file rows onwards; a station is never in a playlist
+            // slice (issue #33): it has no path to hand a stream of files.
+            Position::Recent => self
+                .recent_rows
+                .get(from..)
+                .unwrap_or_default()
+                .iter()
+                .filter(|entry| !entry.is_station())
+                .map(|entry| PathBuf::from(&entry.path))
+                .collect(),
+            Position::Tracks { .. } | Position::AllTracks | Position::Genre { .. } => self
                 .tracks
                 .get(from..)
                 .unwrap_or_default()
@@ -1596,7 +1591,8 @@ impl<'lib> App<'lib> {
             None => (Duration::ZERO, None),
         };
         self.scrobble_tick(path.clone(), position, duration);
-        self.history_tick(path);
+        let entry = self.playing_entry().cloned();
+        self.history_tick(entry.as_ref());
         let Some(player) = &self.player else {
             return;
         };
@@ -1632,54 +1628,65 @@ impl<'lib> App<'lib> {
         }
     }
 
-    /// One history write per beginning (issue #5): a path the tick has not
-    /// seen as the playing one is a beginning, and every beginning records
-    /// one entry — the same path moves to the top instead of duplicating —
-    /// and saves the file atomically. A history that cannot be written is
-    /// lost, not fatal: the save is best effort, and a tick with no path
-    /// (nothing playing) forgets what it saw, so the next beginning of the
-    /// same path counts again. Production calls this from [`App::tick`];
+    /// One history write per beginning (issue #5): a playing entry the tick
+    /// has not seen as the playing one is a beginning, and every beginning
+    /// records one entry — the same identity moves to the top instead of
+    /// duplicating — and saves the file atomically. A history that cannot be
+    /// written is lost, not fatal: the save is best effort, and a tick with
+    /// nothing playing forgets what it saw, so the next beginning of the
+    /// same entry counts again. A file beginning records the path the queue
+    /// carries, with what the index can say about it; a station beginning
+    /// (issue #33) records the stream URL and the station's own name, with
+    /// no lookup. The seen key is the entry's identity, so the same station
+    /// twice is one beginning however its URL is written, and a station
+    /// never collapses into a file. Production calls this from [`App::tick`];
     /// the tests drive it headlessly.
     #[doc(hidden)]
-    pub fn history_tick(&mut self, path: Option<PathBuf>) {
-        let Some(path) = path else {
+    pub fn history_tick(&mut self, playing: Option<&Entry>) {
+        let Some(playing) = playing else {
             self.recent.seen = None;
             return;
         };
-        let text = path.to_string_lossy().into_owned();
-        if self.recent.seen.as_deref() == Some(text.as_str()) {
+        let recorded = match playing {
+            Entry::File(path) => {
+                // What the index can say about the path: everything, when it
+                // is a library row; nothing, when it is a file the queue
+                // opened cold. An empty field is a field the index does not
+                // know: S3 keeps it out of the file instead of writing `""`.
+                let known = |text: &str| (!text.is_empty()).then(|| text.to_owned());
+                let (artist, album, title) = self
+                    .known_tracks()
+                    .find(|track| track.path == *path)
+                    .map_or((None, None, None), |track| {
+                        (
+                            known(&track.artist),
+                            known(&track.album),
+                            known(&track.title),
+                        )
+                    });
+                crate::history::Entry {
+                    path: path.to_string_lossy().into_owned(),
+                    kind: crate::history::Kind::File,
+                    played_at: crate::history::now_unix(),
+                    artist,
+                    album,
+                    title,
+                }
+            }
+            Entry::Station { url, name } => {
+                crate::history::Entry::station(url, name, crate::history::now_unix())
+            }
+        };
+        let identity = recorded.identity();
+        if self.recent.seen.as_deref() == Some(identity.as_str()) {
             return;
         }
         let Some(config_file) = self.config_file.clone() else {
             return;
         };
-        // What the index can say about the path: everything, when it is a
-        // library row; nothing, when it is a file the queue opened cold.
-        // An empty field is a field the index does not know: S3 keeps it out
-        // of the file instead of writing `""`. It matters for the rows the
-        // `Recently played` screen synthesizes, which carry empty strings
-        // where the history had nothing — replaying one from that screen must
-        // not turn an absent artist into a blank one.
-        let known = |text: &str| (!text.is_empty()).then(|| text.to_owned());
-        let (artist, album, title) = self.known_tracks().find(|track| track.path == path).map_or(
-            (None, None, None),
-            |track| {
-                (
-                    known(&track.artist),
-                    known(&track.album),
-                    known(&track.title),
-                )
-            },
-        );
         let file = crate::history::path_beside(&config_file);
-        self.recent.entries.record(crate::history::Entry {
-            path: text.clone(),
-            played_at: crate::history::now_unix(),
-            artist,
-            album,
-            title,
-        });
-        self.recent.seen = Some(text);
+        self.recent.entries.record(recorded);
+        self.recent.seen = Some(identity);
         let _ = self.recent.entries.save(&file);
     }
 
@@ -1688,6 +1695,14 @@ impl<'lib> App<'lib> {
     #[must_use]
     pub fn recently_played(&self) -> &[crate::history::Entry] {
         &self.recent.entries.entry
+    }
+
+    /// The rows the `Recently played` screen stands on (issue #5): the
+    /// history's entries as the file holds them, newest first — tracks and
+    /// stations alike (issue #33). Empty outside that screen.
+    #[must_use]
+    pub fn recent_rows(&self) -> &[crate::history::Entry] {
+        &self.recent_rows
     }
 
     /// Collects a remote cover that finished arriving (T12d): the fetch ran
@@ -1888,13 +1903,17 @@ impl<'lib> App<'lib> {
                 .albums
                 .get(index)
                 .map(|entry| format!("{}\u{0}{}", entry.artist, entry.title)),
-            Position::Tracks { .. }
-            | Position::AllTracks
-            | Position::Genre { .. }
-            | Position::Recent => self
+            Position::Tracks { .. } | Position::AllTracks | Position::Genre { .. } => self
                 .tracks
                 .get(index)
                 .map(|entry| entry.path.display().to_string()),
+            // The recent list holds the file's entries (issue #33): a row's
+            // identity is the entry's — the station key for a station, the
+            // path for a file.
+            Position::Recent => self
+                .recent_rows
+                .get(index)
+                .map(crate::history::Entry::identity),
             Position::Genres => self.genres.get(index).map(|entry| entry.name.clone()),
         }
     }
@@ -2193,23 +2212,9 @@ impl<'lib> App<'lib> {
                 self.view = View::Queue;
                 Some(Action::None)
             }
-            radio::RadioOutcome::Play { url, name } => {
-                // The stream can take a while to open (S10): the status
-                // names the station now, before the player has answered.
-                // `start_stream`'s success clears the line and its failure
-                // names the error, so a stale "opening" never lingers.
-                self.status = format!("velo: opening {name}…");
-                // The station joins the queue and plays from it (T6c): the
-                // queue is edited here, and the play action goes to the
-                // shell, which builds the player the way `enter` on a queue
-                // row does. The radio stays open.
-                self.edit_queue(|queue| queue.push(Entry::Station { url, name }));
-                let from = self.queue.len().saturating_sub(1);
-                Some(Action::PlayQueue { from })
-            }
+            radio::RadioOutcome::Play { url, name } => Some(self.play_station(url, name)),
             radio::RadioOutcome::Queue { url, name } => {
-                self.edit_queue(|queue| queue.push(Entry::Station { url, name }));
-                self.status = format!("velo: added {}", plural(1, "track", "tracks"));
+                self.queue_station(url, name);
                 Some(Action::None)
             }
             radio::RadioOutcome::ReportIssue { title, body } => {
@@ -2218,6 +2223,29 @@ impl<'lib> App<'lib> {
             }
             radio::RadioOutcome::Pass => None,
         }
+    }
+
+    /// Plays a station now: the status line names it before the player has
+    /// answered, the station joins the queue, and the play action goes to
+    /// the shell, which builds the player the way `enter` on a queue row
+    /// does (T6c). The queue edit is shared with the radio view's queue
+    /// verb — and, since issue #33, with the `Recently played` screen.
+    fn play_station(&mut self, url: String, name: String) -> Action {
+        // The stream can take a while to open (S10): the status names the
+        // station now, before the player has answered. `start_stream`'s
+        // success clears the line and its failure names the error, so a
+        // stale "opening" never lingers.
+        self.status = format!("velo: opening {name}…");
+        self.edit_queue(|queue| queue.push(Entry::Station { url, name }));
+        let from = self.queue.len() - 1;
+        Action::PlayQueue { from }
+    }
+
+    /// Appends a station to the queue without starting anything (T6c, issue
+    /// #33).
+    fn queue_station(&mut self, url: String, name: String) {
+        self.edit_queue(|queue| queue.push(Entry::Station { url, name }));
+        self.status = format!("velo: added {}", plural(1, "track", "tracks"));
     }
 
     /// The refusal of the station the radio's cursor rests on, as the status
@@ -2394,16 +2422,26 @@ impl<'lib> App<'lib> {
 
     /// What `Enter` asks for in the library view: play a track list from the
     /// selection, or open the selected artist, album or genre.
-    fn enter(&self) -> Action {
+    fn enter(&mut self) -> Action {
         let play = Action::Play {
             from: self.selected,
         };
         match &self.position {
+            // A station row plays live through the same route the radio view
+            // uses (issue #33); a file row plays from it like any other
+            // track list.
+            Position::Recent => {
+                let Some(entry) = self.recent_rows.get(self.selected).cloned() else {
+                    return Action::None;
+                };
+                if entry.is_station() {
+                    self.play_station(entry.path, entry.title.unwrap_or_default())
+                } else {
+                    play
+                }
+            }
             Position::Files if !self.argv.is_empty() => play,
-            Position::Tracks { .. }
-            | Position::AllTracks
-            | Position::Genre { .. }
-            | Position::Recent
+            Position::Tracks { .. } | Position::AllTracks | Position::Genre { .. }
                 if !self.tracks.is_empty() =>
             {
                 play
@@ -3423,20 +3461,34 @@ impl<'lib> App<'lib> {
                 (entry.title.clone(), note, Self::duration(entry.duration_ms))
             }
             Position::Recent => {
-                let entry = &self.tracks[index];
+                let entry = &self.recent_rows[index];
                 // The library's row convention (S4): the title, with
-                // `artist · album` dimmed after it; an entry with no title
-                // keeps the file's own name over its folder.
-                if entry.title.is_empty() {
-                    let (name, folder) = describe(&entry.path, []);
-                    (name, folder, String::new())
-                } else {
-                    let note = [entry.artist.as_str(), entry.album.as_str()]
-                        .into_iter()
-                        .filter(|part| !part.is_empty())
-                        .collect::<Vec<_>>()
-                        .join(" \u{b7} ");
-                    (entry.title.clone(), note, String::new())
+                // `artist · album` dimmed after it; a station shows its own
+                // name with the note `radio` (issue #33); an entry with no
+                // title keeps the file's own name over its folder.
+                match entry.kind {
+                    crate::history::Kind::Station => (
+                        entry.title.clone().unwrap_or_default(),
+                        String::from("radio"),
+                        String::new(),
+                    ),
+                    crate::history::Kind::File => match &entry.title {
+                        Some(title) if !title.is_empty() => {
+                            let note = [
+                                entry.artist.as_deref().unwrap_or(""),
+                                entry.album.as_deref().unwrap_or(""),
+                            ]
+                            .into_iter()
+                            .filter(|part| !part.is_empty())
+                            .collect::<Vec<_>>()
+                            .join(" \u{b7} ");
+                            (title.clone(), note, String::new())
+                        }
+                        _ => {
+                            let (name, folder) = describe(Path::new(&entry.path), []);
+                            (name, folder, String::new())
+                        }
+                    },
                 }
             }
             Position::Genres => {
@@ -3885,10 +3937,10 @@ impl<'lib> App<'lib> {
             Position::Files => self.argv.len(),
             Position::Artists => self.artists.len(),
             Position::Albums { .. } | Position::AllAlbums => self.albums.len(),
-            Position::Tracks { .. }
-            | Position::AllTracks
-            | Position::Genre { .. }
-            | Position::Recent => self.tracks.len(),
+            Position::Tracks { .. } | Position::AllTracks | Position::Genre { .. } => {
+                self.tracks.len()
+            }
+            Position::Recent => self.recent_rows.len(),
             Position::Genres => self.genres.len(),
         }
     }
@@ -3924,13 +3976,34 @@ impl<'lib> App<'lib> {
     /// started plus the producer's index, because a shuffled queue no longer
     /// follows the list's order.
     fn playing_row(&self) -> Option<usize> {
-        let path = self.playing_path()?;
         match &self.position {
-            Position::Files => self.argv.iter().position(|row| row == path),
-            Position::Tracks { .. }
-            | Position::AllTracks
-            | Position::Genre { .. }
-            | Position::Recent => self.tracks.iter().position(|row| row.path == path),
+            Position::Files => {
+                let path = self.playing_path()?;
+                self.argv.iter().position(|row| row == path)
+            }
+            // The recent list holds the file's entries (issue #33): a
+            // station row is marked when its station key is the playing
+            // station's; a file row compares paths as everywhere else. No
+            // new state: the playing entry is read fresh every frame.
+            Position::Recent => {
+                let playing = self.playing_entry()?;
+                self.recent_rows
+                    .iter()
+                    .position(|row| match (&row.kind, playing) {
+                        (crate::history::Kind::Station, Entry::Station { url, .. }) => {
+                            crate::radio::store::station_key(&row.path)
+                                == crate::radio::store::station_key(url)
+                        }
+                        (crate::history::Kind::File, Entry::File(path)) => {
+                            row.path == path.to_string_lossy()
+                        }
+                        _ => false,
+                    })
+            }
+            Position::Tracks { .. } | Position::AllTracks | Position::Genre { .. } => {
+                let path = self.playing_path()?;
+                self.tracks.iter().position(|row| row.path == path)
+            }
             Position::Artists
             | Position::Albums { .. }
             | Position::AllAlbums
@@ -4264,17 +4337,29 @@ impl<'lib> App<'lib> {
     /// entry, and the producer resolves it through the cache when it is
     /// reached — appending never starts a download.
     fn append_selection(&mut self) {
+        // The recent list holds the file's entries (issue #33): a station
+        // appends itself through the radio's own queue verb, a file appends
+        // its path verbatim.
+        if matches!(self.position, Position::Recent) {
+            let Some(entry) = self.recent_rows.get(self.selected).cloned() else {
+                return;
+            };
+            if entry.is_station() {
+                self.queue_station(entry.path, entry.title.unwrap_or_default());
+            } else {
+                let path = PathBuf::from(&entry.path);
+                self.edit_queue(|queue| queue.push(Entry::from(path)));
+                self.status = format!("velo: added {}", plural(1, "track", "tracks"));
+            }
+            return;
+        }
         let paths: Vec<PathBuf> = match (&self.position, self.view) {
-            (
-                Position::Tracks { .. }
-                | Position::AllTracks
-                | Position::Genre { .. }
-                | Position::Recent,
-                _,
-            ) => match self.tracks.get(self.selected) {
-                Some(entry) => vec![entry.path.clone()],
-                None => return,
-            },
+            (Position::Tracks { .. } | Position::AllTracks | Position::Genre { .. }, _) => {
+                match self.tracks.get(self.selected) {
+                    Some(entry) => vec![entry.path.clone()],
+                    None => return,
+                }
+            }
             (Position::Files, _) => self
                 .argv
                 .get(self.selected)
@@ -4323,6 +4408,9 @@ impl<'lib> App<'lib> {
                 "velo: open an album to add its tracks".clone_into(&mut self.status);
                 return;
             }
+            // The recent list is answered above: its rows are the file's
+            // entries, not `tracks` rows (issue #33).
+            (&Position::Recent, _) => return,
         };
         if paths.is_empty() {
             return;
@@ -4492,7 +4580,10 @@ impl<'lib> App<'lib> {
             Position::Tracks { .. } => Playback::Album,
             _ => Playback::List,
         };
-        if !matches!(self.position, Position::Files) {
+        // The recent list is not `tracks` (issue #33): its rows are the
+        // history's entries and the library snapshot is somebody else's, so
+        // the describing pool keeps what it had.
+        if !matches!(self.position, Position::Files | Position::Recent) {
             self.played = self.tracks[from..].to_vec();
         }
         self.start_stream(paths.into_iter().map(Entry::from).collect(), playback);

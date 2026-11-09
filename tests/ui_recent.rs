@@ -1,11 +1,12 @@
-//! The `Recently played` source (issue #5, T2): the history's entries as
-//! rows that play, queue and walk back like any other track list.
+//! The `Recently played` source (issue #5, T2; stations since T3, issue
+//! #33): the history's entries as rows that play, queue and walk back like
+//! any other track list.
 //!
 //! The history is produced without a player: `App::browse(None)` plus
 //! `set_config_file(Some(<temp>/velo/config.toml))` loads the file beside
 //! the config the way a launch does, and `history_tick` records into it
-//! headlessly. The playing marker (S4) is not tested here: `playing_path()`
-//! needs a real player, and no TUI test has one.
+//! headlessly. The playing marker (S4) is not tested here: the playing
+//! entry needs a real player, and no TUI test has one.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -89,7 +90,7 @@ const HISTORY: &str = concat!(
 /// dimmed after it, and the file's own name over its folder for a path the
 /// index never knew. The metadata is written into the file by hand, because
 /// `history_tick` can only describe a path a library row names and this
-/// test has no library.
+/// test has no library. The rows are the file's entries (issue #33).
 #[test]
 fn the_recent_list_shows_the_history_newest_first_with_the_library_row_convention() {
     let dir = temp_dir("rows");
@@ -100,15 +101,19 @@ fn the_recent_list_shows_the_history_newest_first_with_the_library_row_conventio
     assert_eq!(app.level(), Some(Level::Recent));
     assert_eq!(app.selected(), 0);
     assert_eq!(
-        app.tracks()
+        app.recent_rows()
             .iter()
-            .map(|track| track.path.as_path())
+            .map(|entry| entry.path.as_str())
             .collect::<Vec<_>>(),
         [
-            Path::new("/elsewhere/tide/01 - Nightfall.flac"),
-            Path::new("/somewhere/else/song.mp3"),
+            "/elsewhere/tide/01 - Nightfall.flac",
+            "/somewhere/else/song.mp3",
         ],
         "the entries are the history's, newest first"
+    );
+    assert!(
+        app.recent_rows().iter().all(|entry| !entry.is_station()),
+        "a hand-written file without the kind key loads as tracks"
     );
 
     let screen = screen(&app);
@@ -136,21 +141,24 @@ fn the_list_shows_what_the_tick_recorded_newest_first() {
 
     let first = PathBuf::from("/elsewhere/tide/01 - Nightfall.flac");
     let second = PathBuf::from("/elsewhere/tide/02 - Later.flac");
-    app.history_tick(Some(first.clone()));
-    app.history_tick(Some(second.clone()));
+    app.history_tick(Some(&Entry::File(first.clone())));
+    app.history_tick(Some(&Entry::File(second.clone())));
 
     open_recently_played(&mut app);
     assert_eq!(app.level(), Some(Level::Recent));
-    assert_eq!(app.tracks().len(), 2);
-    assert_eq!(app.tracks()[0].path, second, "newest first");
-    assert_eq!(app.tracks()[1].path, first);
+    assert_eq!(app.recent_rows().len(), 2);
     assert_eq!(
-        app.tracks()[0].title,
-        "",
+        app.recent_rows()[0].path,
+        second.to_string_lossy(),
+        "newest first"
+    );
+    assert_eq!(app.recent_rows()[1].path, first.to_string_lossy());
+    assert!(
+        app.recent_rows()[0].title.is_none(),
         "no title is invented: the row names the file instead"
     );
-    assert_eq!(app.tracks()[0].artist, "", "the index knew nothing");
-    assert_eq!(app.tracks()[0].album, "");
+    assert_eq!(app.recent_rows()[0].artist, None, "the index knew nothing");
+    assert_eq!(app.recent_rows()[0].album, None);
     let screen = screen(&app);
     assert!(
         screen.contains("02 - Later"),
@@ -160,8 +168,9 @@ fn the_list_shows_what_the_tick_recorded_newest_first() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-/// `enter` on a row plays from it, answering `Play` for that track (S4);
-/// the stream itself is the shell's to build, and no test has a device.
+/// `enter` on a file row plays from it, answering `Play` for that track
+/// (S4); the stream itself is the shell's to build, and no test has a
+/// device.
 #[test]
 fn enter_plays_from_the_selected_row() {
     let dir = temp_dir("enter");
@@ -225,7 +234,7 @@ fn an_empty_history_opens_an_empty_list_that_says_so() {
     open_recently_played(&mut app);
 
     assert_eq!(app.level(), Some(Level::Recent));
-    assert_eq!(app.tracks(), [] as [velo::library::TrackEntry; 0]);
+    assert_eq!(app.recent_rows(), [] as [velo::history::Entry; 0]);
     let screen = screen(&app);
     assert!(
         screen.contains("nothing played yet"),
@@ -235,9 +244,9 @@ fn an_empty_history_opens_an_empty_list_that_says_so() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-/// A `subsonic://…` entry keeps its path verbatim — in the row's track and
-/// in the queue entry `a` appends — so the resolver still caches it at play
-/// time (S5).
+/// A `subsonic://…` entry keeps its path verbatim — in the row and in the
+/// queue entry `a` appends — so the resolver still caches it at play time
+/// (S5).
 #[test]
 fn a_subsonic_entry_keeps_its_path_verbatim() {
     let dir = temp_dir("subsonic");
@@ -256,9 +265,9 @@ fn a_subsonic_entry_keeps_its_path_verbatim() {
     open_recently_played(&mut app);
 
     assert_eq!(
-        app.tracks()[0].path,
-        Path::new(url),
-        "the row's track keeps the URL as its path"
+        app.recent_rows()[0].path,
+        url,
+        "the row keeps the URL as its path"
     );
 
     press(&mut app, KeyCode::Char('a'));
@@ -272,17 +281,17 @@ fn a_subsonic_entry_keeps_its_path_verbatim() {
 }
 
 #[test]
-fn replaying_from_the_list_writes_no_metadata_the_history_did_not_have() {
+fn replaying_a_bare_path_row_records_it_without_metadata() {
     let dir = temp_dir("no-invented-metadata");
     let mut app = app_with_history(&dir, HISTORY);
     open_recently_played(&mut app);
 
-    // The second row is the entry the index never described: the screen names
-    // it from the file itself, and the row it synthesizes carries no title.
-    // Beginning that path again must not write back a made-up title, nor a
-    // blank artist: an absent field stays absent (S3).
+    // The second row is the entry the index never described: the rows are
+    // the file's entries now, and beginning that path again must not write
+    // back a made-up title, nor a blank artist — an absent field stays
+    // absent (S3).
     let path = PathBuf::from("/somewhere/else/song.mp3");
-    app.history_tick(Some(path.clone()));
+    app.history_tick(Some(&Entry::File(path.clone())));
 
     let top = &app.recently_played()[0];
     assert_eq!(
@@ -296,3 +305,155 @@ fn replaying_from_the_list_writes_no_metadata_the_history_did_not_have() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// A station entry in the file shows as its own row, its name with the note
+/// `radio`, in its place in the newest-first order (issue #33).
+#[test]
+fn a_station_entry_shows_as_a_row_with_the_radio_note() {
+    let dir = temp_dir("station-row");
+    let mut app = app_with_history(
+        &dir,
+        concat!(
+            "[[entry]]\n",
+            "path = \"/elsewhere/tide/01 - Nightfall.flac\"\n",
+            "played_at = 20\n",
+            "title = \"Nightfall\"\n",
+            "\n",
+            "[[entry]]\n",
+            "path = \"https://stream.example/nova\"\n",
+            "played_at = 10\n",
+            "kind = \"station\"\n",
+            "title = \"Nova\"\n",
+        ),
+    );
+    open_recently_played(&mut app);
+
+    assert_eq!(app.recent_rows().len(), 2);
+    assert!(app.recent_rows()[1].is_station());
+    assert_eq!(app.recent_rows()[1].path, "https://stream.example/nova");
+    assert_eq!(app.recent_rows()[1].title.as_deref(), Some("Nova"));
+
+    let screen = screen(&app);
+    assert!(
+        screen.contains("Nova"),
+        "the station shows its own name, got: {screen}"
+    );
+    assert!(
+        screen.contains("radio"),
+        "the station's row carries the radio note, got: {screen}"
+    );
+    assert!(
+        screen.contains("Nightfall"),
+        "the track beside it is untouched, got: {screen}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// `enter` on a station row puts the station into the queue as
+/// `Entry::Station` and asks the shell to play from it — the same route the
+/// radio view uses (issue #33). The play action is returned, not applied:
+/// applying it would open an audio device.
+#[test]
+fn enter_on_a_station_row_asks_to_play_the_station() {
+    let dir = temp_dir("station-enter");
+    let mut app = app_with_history(&dir, STATION_FIRST);
+    open_recently_played(&mut app);
+
+    let action = app.on_key(key(KeyCode::Enter));
+    assert_eq!(
+        action,
+        Action::PlayQueue { from: 0 },
+        "the shell is asked to start the station"
+    );
+    assert_eq!(
+        app.queue(),
+        [Entry::Station {
+            url: String::from("https://stream.example/nova"),
+            name: String::from("Nova"),
+        }],
+        "the station joined the queue as a station"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// `a` on a station row appends the same `Entry::Station` without starting
+/// anything (issue #33).
+#[test]
+fn a_on_a_station_row_appends_the_station_without_starting_it() {
+    let dir = temp_dir("station-append");
+    let mut app = app_with_history(&dir, STATION_FIRST);
+    open_recently_played(&mut app);
+
+    assert_eq!(press(&mut app, KeyCode::Char('a')), Action::None);
+    assert_eq!(
+        app.queue(),
+        [Entry::Station {
+            url: String::from("https://stream.example/nova"),
+            name: String::from("Nova"),
+        }],
+        "the station was appended as a station"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// The same station under two writings, as an old file could hold it: the
+/// screen shows what the file holds, and beginning the station again
+/// collapses it — `record` dedupes on the station key, so the file never
+/// grows a duplicate (issue #33).
+#[test]
+fn two_writings_of_one_station_never_grow_into_a_duplicate() {
+    let dir = temp_dir("station-dedupe");
+    let config = dir.join("velo").join("config.toml");
+    let mut app = app_with_history(
+        &dir,
+        concat!(
+            "[[entry]]\n",
+            "path = \"https://stream.example/nova\"\n",
+            "played_at = 20\n",
+            "kind = \"station\"\n",
+            "title = \"Nova\"\n",
+            "\n",
+            "[[entry]]\n",
+            "path = \"https://Stream.example:443/nova\"\n",
+            "played_at = 10\n",
+            "kind = \"station\"\n",
+            "title = \"Nova\"\n",
+        ),
+    );
+    open_recently_played(&mut app);
+    assert_eq!(
+        app.recent_rows().len(),
+        2,
+        "the screen shows the file as it stands"
+    );
+
+    app.history_tick(Some(&Entry::Station {
+        url: String::from("https://stream.example/nova"),
+        name: String::from("Nova"),
+    }));
+
+    assert_eq!(
+        app.recently_played().len(),
+        1,
+        "one station however its URL was written"
+    );
+    let from_disk = velo::history::History::load(&velo::history::path_beside(&config)).unwrap();
+    assert_eq!(from_disk.entry.len(), 1, "the file holds no duplicate");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+const STATION_FIRST: &str = concat!(
+    "[[entry]]\n",
+    "path = \"https://stream.example/nova\"\n",
+    "played_at = 20\n",
+    "kind = \"station\"\n",
+    "title = \"Nova\"\n",
+    "\n",
+    "[[entry]]\n",
+    "path = \"/somewhere/else/song.mp3\"\n",
+    "played_at = 10\n",
+);

@@ -2682,15 +2682,17 @@ fn the_history_tick_records_one_beginning_per_change_of_path() {
 
     let a = PathBuf::from("/music/Tide/01 - Nightfall.flac");
     let b = PathBuf::from("/music/Tide/02 - Later.flac");
+    let file_a = || Entry::File(a.clone());
+    let file_b = || Entry::File(b.clone());
 
     // The same path twice is one beginning: the tick sees the same entry on
     // every frame, and only a change counts.
-    app.history_tick(Some(a.clone()));
-    app.history_tick(Some(a.clone()));
+    app.history_tick(Some(&file_a()));
+    app.history_tick(Some(&file_a()));
     assert_eq!(app.recently_played().len(), 1);
 
     // A different path is a new beginning, on top.
-    app.history_tick(Some(b.clone()));
+    app.history_tick(Some(&file_b()));
     assert_eq!(app.recently_played().len(), 2);
     assert_eq!(app.recently_played()[0].path, b.to_string_lossy());
     assert_eq!(app.recently_played()[1].path, a.to_string_lossy());
@@ -2698,15 +2700,15 @@ fn the_history_tick_records_one_beginning_per_change_of_path() {
     // Playing the first again moves it up instead of duplicating it, with a
     // fresh moment.
     let earlier = app.recently_played()[1].played_at;
-    app.history_tick(Some(a.clone()));
+    app.history_tick(Some(&file_a()));
     assert_eq!(app.recently_played().len(), 2);
     assert_eq!(app.recently_played()[0].path, a.to_string_lossy());
     assert!(app.recently_played()[0].played_at >= earlier);
 
-    // Nothing playing resets the seen path, so the next beginning of the
-    // same path counts again — but it still dedupes to one entry.
+    // Nothing playing resets the seen identity, so the next beginning of
+    // the same path counts again — but it still dedupes to one entry.
     app.history_tick(None);
-    app.history_tick(Some(a.clone()));
+    app.history_tick(Some(&file_a()));
     assert_eq!(app.recently_played().len(), 2, "no duplicate row");
     assert_eq!(app.recently_played()[0].path, a.to_string_lossy());
 
@@ -2714,6 +2716,51 @@ fn the_history_tick_records_one_beginning_per_change_of_path() {
     let file = velo::history::path_beside(&config);
     let from_disk = velo::history::History::load(&file).unwrap();
     assert_eq!(from_disk.entry, app.recently_played());
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_station_beginning_records_one_entry_with_the_station_name() {
+    // A temp directory of the same make as the history test above: a config
+    // file whose side the history is written on.
+    let root = std::env::temp_dir().join(format!("velo-ui-history-station-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+
+    let config = root.join("velo").join("config.toml");
+    let mut app = App::browse(None);
+    app.set_config_file(Some(config));
+
+    let nova = Entry::Station {
+        url: String::from("https://stream.example/nova"),
+        name: String::from("Nova"),
+    };
+
+    // A station beginning records one entry: the stream URL as the path,
+    // the station's own name as the title, kind `station` — no library
+    // lookup, there is nothing to look up.
+    app.history_tick(Some(&nova));
+    assert_eq!(app.recently_played().len(), 1);
+    let top = &app.recently_played()[0];
+    assert_eq!(top.kind, velo::history::Kind::Station);
+    assert_eq!(top.path, "https://stream.example/nova");
+    assert_eq!(top.title.as_deref(), Some("Nova"));
+    assert_eq!(top.artist, None);
+    assert_eq!(top.album, None);
+
+    // The same station twice in a row is one beginning.
+    app.history_tick(Some(&nova));
+    assert_eq!(app.recently_played().len(), 1, "no duplicate row");
+
+    // A file whose path is the same string is a different entry: a station
+    // never collapses into a file.
+    app.history_tick(Some(&Entry::File(PathBuf::from(
+        "https://stream.example/nova",
+    ))));
+    assert_eq!(app.recently_played().len(), 2);
+    assert_eq!(app.recently_played()[0].kind, velo::history::Kind::File);
+    assert_eq!(app.recently_played()[1].kind, velo::history::Kind::Station);
 
     let _ = fs::remove_dir_all(&root);
 }
