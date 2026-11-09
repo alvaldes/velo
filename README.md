@@ -250,15 +250,16 @@ alone.
 | `volume` | Start level, `0..=100` | `100` |
 | `shuffle` | Whether the queue is shuffled | `false` |
 | `repeat` | What follows the end of a track: `off`, `all` or `one` | `off` |
-| `view` | The tab the last session ended on: `library` or `queue`. Recorded, and read back for compatibility; it does not choose the screen — a launch opens `Sources` and `Local library` always starts at the library | `library` |
+| `view` | `library` or `queue`. Retired: read for compatibility — an existing value still parses — but no longer written or applied; it does not choose the screen. A launch opens `Sources` and `Local library` always starts at the library | `library` |
 | `browse_by` | The library view: `artists`, `albums`, `tracks` or `genres` | `artists` |
 | `artist`, `album`, `genre` | The node that was open inside that view — `album` always belongs to `artist` | absent |
 
 velo keeps this table up to date as you listen: the volume when it changes,
-the tab and the node when you move, the shuffle and the repeat when you toggle
-them. The next launch opens on `Sources` and comes back to this when you enter
-`Local library`. A hand-written `sources` in `view` is accepted and ignored:
-every launch opens there. The queue and the track that was
+the library view and the node when you move, the shuffle and the repeat when
+you toggle them. The next launch opens on `Sources` and comes back to this when
+you enter `Local library`. `view` is no longer written or applied: a
+hand-written one — `library`, `queue` or even `sources` — still parses and is
+ignored, because every launch opens `Sources`. The queue and the track that was
 playing are not kept. `volume` used to live at the top level of the file; it
 is still read there and moves under `[state]` the first time velo saves one.
 

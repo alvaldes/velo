@@ -86,9 +86,10 @@ fn entering_the_local_library_lands_on_the_library_and_its_keys_still_work() {
     assert_eq!(app.level(), Some(Level::AllAlbums));
 }
 
-/// S12 (issue #27): the saved tab belongs to the queue's half of the round
-/// trip, not to the library's address — entering `Local library` lands on
-/// the library even when the session was last on the queue.
+/// S12 (issue #27) with S14: the recorded `view = "queue"` still parses but
+/// is no longer applied — the session leaves the reader where the launch put
+/// them, and entering `Local library` lands on the library, never on the
+/// queue the file recorded.
 #[test]
 fn entering_the_local_library_lands_on_the_library_even_when_the_saved_tab_was_the_queue() {
     let mut app = app_with_a_library();
@@ -98,11 +99,14 @@ fn entering_the_local_library_lands_on_the_library_even_when_the_saved_tab_was_t
     });
     assert_eq!(
         app.view(),
-        View::Queue,
-        "the session restored the saved tab"
+        View::Library,
+        "the retired tab is not applied (S14)"
     );
 
+    // The shell opens `Sources` at launch; the library entry is behind it.
     app.open_sources();
+    assert_eq!(app.view(), View::Sources);
+
     press(&mut app, KeyCode::Enter);
     assert_eq!(app.view(), View::Library);
     assert_eq!(app.level(), Some(Level::Artists));
