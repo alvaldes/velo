@@ -59,6 +59,20 @@ jobs:
       # alsa-sys with "No package 'alsa' found". Cross.toml's pre-build hook
       # installs libasound2-dev and cmake inside the container before any
       # build script runs, so no extra step is needed here.
+      # The tags from v0.28.0 to v0.30.0 carry a `Cross.toml` written before
+      # `souvlaki` existed, so their pre-build hook installs no dbus headers and
+      # `cross` reads that file from the tag, not from this branch. Add the
+      # package here when it is missing; newer tags already ship it, and the
+      # grep makes this a no-op for them.
+      - name: Add the dbus headers to the cross image (tags older than this hook)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          if ! grep -q libdbus-1-dev Cross.toml; then
+            sed -i 's/libasound2-dev:\$CROSS_DEB_ARCH cmake/libasound2-dev:\$CROSS_DEB_ARCH libdbus-1-dev:\$CROSS_DEB_ARCH cmake/' Cross.toml
+            grep -q libdbus-1-dev Cross.toml || { echo "could not patch Cross.toml"; exit 1; }
+          fi
+          grep -n libdbus-1-dev Cross.toml
+
       - name: Install cross (aarch64 Linux cross-build)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         uses: taiki-e/install-action@v2
