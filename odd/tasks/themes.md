@@ -75,3 +75,12 @@ One consequence: a user's `[theme]` accent deliberately written as `#af00af`
 — the built-in default value — is indistinguishable from the generated
 default and no longer masks a theme under a named selection. That is the
 accepted trade: the value is the default, whatever wrote it.
+
+**L4** — **the folder ships `themes/default.toml`.** The human: "si themes/ se tiene
+que crear con el tema de velo que es el que esta ahora mismo y es el que se carga por
+default". The file is velo's own palette, so it documents the format without changing
+how anything looks, and a test pins it to `ThemeColors::default()` so the shipped copy
+cannot drift from the palette it claims to be. Created like every other config-side
+template — only when missing, never over an edited one — and an edited `default.toml`
+still replaces the built-in in the picker, which is the rule above.
+
