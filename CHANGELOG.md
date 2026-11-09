@@ -1,6 +1,13 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.30.0] - 2026-11-09
+
+### Features
+- **radio:** A configured channel with songs opens as a list
+
+### Documentation
+- **readme:** Breathe after the media-keys heading
 ## [0.29.0] - 2026-11-09
 
 ### Features
