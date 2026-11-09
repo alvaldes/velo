@@ -1,6 +1,10 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.32.1] - 2026-11-09
+
+### Fixes
+- **audio:** The volume is a perceptual curve, not an amplitude
 ## [0.32.0] - 2026-11-09
 
 ### Features
