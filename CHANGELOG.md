@@ -1,6 +1,13 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.21.0] - 2026-11-09
+
+### Features
+- **radio:** `--radio-test` answers what a stream really is
+
+### Refactoring
+- **cli:** Gather the one-shot modes in one place
 ## [0.20.0] - 2026-11-09
 
 ### Features
