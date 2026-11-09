@@ -917,6 +917,11 @@ impl<'lib> App<'lib> {
         });
         self.radio_from = self.view;
         self.radio = Some(wire.view());
+        // The playing fact is handed over at birth too (S15, issue #32):
+        // the view must not wait for the next tick to learn what plays —
+        // a station already sounding when the radio opens is marked at
+        // once.
+        self.radio_poll();
         Action::None
     }
 
@@ -2111,6 +2116,18 @@ impl<'lib> App<'lib> {
     /// Never blocks — the request runs on a worker thread and lands
     /// through a channel, the pattern the library index uses.
     fn radio_poll(&mut self) {
+        // The playing fact is the shell's to give (S15, issue #32): the view
+        // is told, never guesses. A station playing marks its rows wherever
+        // they are listed; a local file or silence marks none. radio_poll
+        // runs on every tick and after every radio key, so no key can leave
+        // the marker stale.
+        let playing = match self.playing_entry() {
+            Some(Entry::Station { url, .. }) => Some(url.clone()),
+            _ => None,
+        };
+        if let Some(view) = self.radio.as_mut() {
+            view.set_playing(playing);
+        }
         if let Some((wire, view)) = self.radio_wire.as_mut().zip(self.radio.as_mut()) {
             wire.poll(view);
             if let Some(message) = wire.take_message() {

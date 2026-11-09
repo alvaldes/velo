@@ -2118,3 +2118,237 @@ fn a_playable_favourite_is_never_marked_and_cannot_be_reported() {
         "i belongs to no other row"
     );
 }
+
+// ---- the playing marker, wherever the station is listed (S15, #32) ----------
+// The library marks the row that plays (`▶` in the accent, `list_row`); the
+// radio must do the same for the station that plays, in every place its row
+// appears. The shell owns the fact and hands it in; the view only renders it.
+
+#[test]
+fn the_playing_station_is_marked_in_its_country_and_the_others_are_not() {
+    let mut view = view();
+    view.set_playing(Some(String::from("https://stream.example/nova.mp3")));
+    press(&mut view, KeyCode::Enter); // country index
+    press(&mut view, KeyCode::Enter); // Norway
+    view.set_catalog(norway(), catalog());
+
+    let played = screen(&view);
+    assert!(
+        played.contains("▶ 1. Nova [128k] · NO"),
+        "the playing station carries the marker the library uses, got:\n{played}"
+    );
+    assert!(
+        played.contains("▸ 2. ✗ Hls One [96k] · NO"),
+        "a different station in the same list keeps the idle marker, got:\n{played}"
+    );
+}
+
+#[test]
+fn the_playing_station_is_marked_inside_a_tag_too() {
+    let mut view = view();
+    view.set_playing(Some(String::from("https://stream.example/nova.mp3")));
+    for _ in 0..4 {
+        press(&mut view, KeyCode::Char('j')); // Browse genres & tags
+    }
+    press(&mut view, KeyCode::Enter); // the tag index
+    press(&mut view, KeyCode::Enter); // jazz
+    view.set_catalog(
+        Place::Tag {
+            name: String::from("jazz"),
+        },
+        catalog(),
+    );
+    assert!(
+        screen(&view).contains("▶ 1. Nova [128k] · NO"),
+        "no importa donde estemos: a tag lists the playing station marked, got:\n{}",
+        screen(&view)
+    );
+}
+
+#[test]
+fn the_playing_favourite_is_marked_in_the_favourites_section() {
+    let mut view = view();
+    view.set_playing(Some(String::from("https://jazz.example/stream")));
+    assert!(
+        screen(&view).contains("▶ 6. ★ Jazz One [MP3] · NO"),
+        "the favourite that plays is marked where it lives, got:\n{}",
+        screen(&view)
+    );
+}
+
+#[test]
+fn the_playing_hand_added_station_is_marked_without_a_country() {
+    let mut view = view();
+    view.set_playing(Some(String::from("http://night.example/live")));
+    view.open_place(Place::NoCountry);
+    assert!(
+        screen(&view).contains("▶ 1. Night FM"),
+        "the hand-added station that plays is marked, got:\n{}",
+        screen(&view)
+    );
+}
+
+#[test]
+fn the_playing_station_is_recognised_however_its_url_is_spelled() {
+    // The favourite is stored as `https://jazz.example/stream`; what the
+    // shell says is playing may spell the same station with a different
+    // host case, the default port and a trailing slash. The station key,
+    // not the string as written, decides (S6) — the same identity rule
+    // favourites and toggles already go through.
+    let mut view = view();
+    view.set_playing(Some(String::from("https://JAZZ.example:443/stream/")));
+    assert!(
+        screen(&view).contains("▶ 6. ★ Jazz One [MP3] · NO"),
+        "the station key matches the playing station however it is spelled, got:\n{}",
+        screen(&view)
+    );
+}
+
+#[test]
+fn no_playing_station_marks_no_radio_row() {
+    let mut view = view();
+    view.set_playing(None);
+    let quiet = screen(&view);
+    assert!(
+        !quiet.contains('▶'),
+        "nothing plays: no radio row is marked, got:\n{quiet}"
+    );
+}
+
+#[test]
+fn the_playing_marker_and_the_refusal_marker_can_share_a_row() {
+    // It plays, and the codec filter rejects it: two facts about one
+    // station, and neither hides the other.
+    let mut view = view();
+    view.set_playing(Some(String::from("https://stream.example/live/index.m3u8")));
+    press(&mut view, KeyCode::Enter); // country index
+    press(&mut view, KeyCode::Enter); // Norway
+    view.set_catalog(norway(), catalog());
+    let played = screen(&view);
+    assert!(
+        played.contains("▸ 1. Nova [128k] · NO"),
+        "the other station keeps the idle marker, got:\n{played}"
+    );
+    assert!(
+        played.contains("▶ 2. ✗ Hls One [96k] · NO"),
+        "the rejected station that still plays carries both markers, got:\n{played}"
+    );
+
+    // The same on a refused favourite at the top: star, cross and marker.
+    let mut view = view_with_refused_stations();
+    view.set_playing(Some(String::from("https://fav.example/live.m3u8")));
+    assert!(
+        screen(&view)
+            .lines()
+            .any(|line| line.contains('▶') && line.contains("★ ✗ Hls Fav")),
+        "a refused favourite that plays is marked without losing its ✗, got:\n{}",
+        screen(&view)
+    );
+}
+
+#[test]
+fn the_playing_marker_leaves_the_selection_highlight_alone() {
+    let mut view = view();
+    view.set_playing(Some(String::from("https://stream.example/nova.mp3")));
+    press(&mut view, KeyCode::Enter); // country index
+    press(&mut view, KeyCode::Enter); // Norway
+    view.set_catalog(norway(), catalog());
+    // The cursor still rests on Nova: the playing row is the selected one.
+    let played = screen(&view);
+    assert!(played.contains("▶ 1. Nova [128k] · NO"));
+    let row = played
+        .lines()
+        .position(|line| line.contains("1. Nova"))
+        .expect("the playing row is on screen");
+    let mut terminal =
+        velo::ui::ratatui::Terminal::new(velo::ui::ratatui::backend::TestBackend::new(80, 24))
+            .expect("a test terminal");
+    terminal
+        .draw(|frame| view.render(frame, frame.area(), &Theme::default()))
+        .expect("the frame draws");
+    let cell = terminal.backend().buffer()[(10, u16::try_from(row).unwrap())].clone();
+    assert_eq!(
+        cell.bg,
+        Theme::default().accent,
+        "the selection highlight is untouched by the marker, got: {cell:?}"
+    );
+}
+
+#[test]
+fn the_shell_tells_the_view_what_plays_and_the_row_is_marked() {
+    let mut app = App::new(Vec::new());
+    app.show_playing_for_tests(nova(), Duration::ZERO, None, None);
+    app.set_radio_wire(Box::new(RadioData::<HttpTransport>::new(None, None, None)));
+    shell(&mut app, KeyCode::Char('R'));
+    app.show_radio_catalog(
+        norway(),
+        vec![station(
+            "Nova",
+            "https://stream.example/nova.mp3",
+            "MP3",
+            128,
+            "NO",
+        )],
+    );
+    assert!(
+        app_screen(&app).contains("▶ 1. Nova [128k] · NO"),
+        "the shell hands the playing station over; the view marks the row"
+    );
+
+    // A radio key after the fact keeps the marker current: radio_poll runs
+    // after every radio key, so no key can leave it stale.
+    shell(&mut app, KeyCode::Char('j'));
+    assert!(
+        app_screen(&app).contains("▶ 1. Nova [128k] · NO"),
+        "the marker survives a radio key, got:\n{}",
+        app_screen(&app)
+    );
+}
+
+#[test]
+fn the_shell_marks_no_radio_row_for_a_file_or_for_silence() {
+    // A local file plays: the queue entry is an `Entry::File`, and no
+    // station is playing — no radio row is marked.
+    let mut app = App::new(Vec::new());
+    app.show_playing_for_tests(
+        Entry::File(PathBuf::from("/music/Tide/01 - Dawn.flac")),
+        Duration::ZERO,
+        None,
+        None,
+    );
+    app.set_radio_wire(Box::new(RadioData::<HttpTransport>::new(None, None, None)));
+    shell(&mut app, KeyCode::Char('R'));
+    app.show_radio_catalog(
+        norway(),
+        vec![station(
+            "Nova",
+            "https://stream.example/nova.mp3",
+            "MP3",
+            128,
+            "NO",
+        )],
+    );
+    assert!(
+        !app_screen(&app).contains("▶ 1. Nova"),
+        "a file plays, no station: no radio row is marked"
+    );
+
+    // Nothing plays at all: the same silence.
+    let mut app = App::new(Vec::new());
+    app.set_radio_wire(Box::new(RadioData::<HttpTransport>::new(None, None, None)));
+    shell(&mut app, KeyCode::Char('R'));
+    app.show_radio_catalog(
+        norway(),
+        vec![station(
+            "Nova",
+            "https://stream.example/nova.mp3",
+            "MP3",
+            128,
+            "NO",
+        )],
+    );
+    assert!(
+        !app_screen(&app).contains("▶ 1. Nova"),
+        "nothing plays: no radio row is marked"
+    );
+}

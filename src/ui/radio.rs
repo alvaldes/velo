@@ -38,7 +38,7 @@ use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, ListState, Para
 
 use crate::radio::client::{Country, Order, State, Station, Tag};
 use crate::radio::directory::{is_playable_codec, is_playable_station, refusal, refusal_for};
-use crate::radio::store::{Favorite, Pinned, RadioStore};
+use crate::radio::store::{Favorite, Pinned, RadioStore, station_key};
 
 use super::plural;
 use super::theme::Theme;
@@ -303,6 +303,13 @@ pub struct RadioView {
     /// Whether `ctrl-r` asked the caller for a fresh directory, not yet
     /// taken.
     refresh_wanted: bool,
+    /// The URL of the station the shell says is playing, when it plays a
+    /// station (S15, issue #32). The shell owns the fact — the queue and
+    /// the player are its — and hands it in through
+    /// [`RadioView::set_playing`] on every tick and after every radio key;
+    /// the view knows nothing about players and only renders what it was
+    /// told. `None` — a local file, or nothing at all — marks no row.
+    playing: Option<String>,
 }
 
 impl RadioView {
@@ -335,6 +342,7 @@ impl RadioView {
             country_ask: None,
             dirty: false,
             refresh_wanted: false,
+            playing: None,
         }
     }
 
@@ -373,6 +381,15 @@ impl RadioView {
     #[must_use]
     pub fn pending_place(&self) -> Option<&Place> {
         self.pending.as_ref()
+    }
+
+    /// Says which station the shell is playing, if it plays a station: the
+    /// shell owns that fact and refreshes it on every tick and after every
+    /// radio key (S15, issue #32). `None` — a local file playing, or
+    /// nothing at all — marks no row. The view never guesses: it marks
+    /// exactly the station it was told, wherever its row appears.
+    pub fn set_playing(&mut self, url: Option<String>) {
+        self.playing = url;
     }
 
     /// Replaces the country index, as `/countries` answered (T6b). An
@@ -1286,6 +1303,12 @@ impl RadioView {
             // The rule and the headers take no number: the numbering counts
             // only the rows a person can act on (S5, #22).
             let numbered = visible.iter().filter(|row| row.kind.selectable()).count();
+            // The playing marker matches on the station key (S15, #32): the
+            // same station reached through a favourite, the store or the
+            // catalogue can be spelled differently — host case, a default
+            // port, a trailing slash — and the key, never the string as
+            // written, decides.
+            let playing_key = self.playing.as_deref().map(station_key);
             let mut number = 0usize;
             let rows: Vec<ListItem<'static>> = visible
                 .iter()
@@ -1300,9 +1323,12 @@ impl RadioView {
                     )),
                     _ => {
                         number += 1;
+                        let playing = playing_key.is_some()
+                            && station_row_key(&row.kind)
+                                .is_some_and(|key| playing_key.as_deref() == Some(key.as_str()));
                         ListItem::new(list_row(
                             ListRow {
-                                playing: false,
+                                playing,
                                 number,
                                 digits: digits(numbered),
                                 name: row.label.clone(),
@@ -1386,6 +1412,19 @@ fn station_of_row(kind: &RowKind) -> Option<(String, String)> {
         RowKind::FavoriteStation { favorite } => {
             Some((favorite.url.clone(), favorite.name.clone()))
         }
+        _ => None,
+    }
+}
+
+/// The station key of the URL a station row names, when the row is a
+/// station at all: a catalog station, a hand-added one or a favourite. The
+/// playing marker matches on this key (S15, issue #32), never on the URL
+/// as written — the same identity rule the store's toggles go through.
+fn station_row_key(kind: &RowKind) -> Option<String> {
+    match kind {
+        RowKind::CatalogStation { station, .. } => Some(station_key(&station.url_resolved)),
+        RowKind::AddedStation { url, .. } => Some(station_key(url)),
+        RowKind::FavoriteStation { favorite } => Some(station_key(&favorite.url)),
         _ => None,
     }
 }
