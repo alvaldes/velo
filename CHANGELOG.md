@@ -1,10 +1,47 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
-## Unreleased
+## [0.11.0] - 2026-11-09
+
+### Features
+- **radio:** ICY metadata demux keeps the audio stream clean T1
+- **radio:** Wrapper playlists resolve to the first playable entry T2
+- **radio:** Radio Browser directory client and codec filter T3
+- **radio:** Radio.toml store with atomic saves and station identity T4
+- **radio:** The country comes from the locale, not a timezone table T7
+- **ui:** A radio view with sections, filter and order card T6a
+- **ui:** The radio view loads its data without blocking the loop T6b
+- **audio:** Decode a live stream from a media source, with one decoder factory T5a
+- **radio:** Open a station URL as a live stream with per-operation timeouts T5b1
+- **radio:** A wrapper playlist resolves one level, and HLS says so T5b2
+- **radio:** The build decides playability, and an HLS station is marked before the queue
+- **audio:** A station sits in the queue and plays T5c2a
+- **ui:** The home country's regions are reachable and pinnable T6d
+- **audio:** One retry for a live station, spent per turn T5c2b
+- **ui:** A station chosen in the radio view plays, and reads as live T6c
+
+### Fixes
+- **radio:** Read the codec capability from symphonia 0.6's audio registry
+
+### Refactoring
+- **audio:** The queue carries entries, not bare paths T5c1
 
 ### Documentation
+- **audio:** A normative pre-skip is not encoder padding
 - The cross container has neither ALSA headers nor cmake, and Cross.toml says so (#2)
+- **changelog:** Fold 0.10.1 into 0.10.2 after its tag was removed
+- **radio:** The feature, its keys and its refusal to fake a position T6c-ii
+
+### Tests
+- **ui:** Stop racing the loader in the wiring tests
+
+### Merge
+- Main into feat/radio after the seam landed upstream
+- Main into feat/radio for the opus capability
+- Main with T14b and the pre-skip fix
+
+### Style
+- **radio:** Rustfmt the radio modules and their tests
 ## [0.10.2] - 2026-11-08
 
 ### Features
