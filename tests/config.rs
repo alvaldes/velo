@@ -632,7 +632,7 @@ fn a_missing_config_file_is_written_with_every_key_and_its_default() {
         "volume",
         "shuffle",
         "repeat",
-        "view",
+        // `view` is not here: it is read for compatibility and no longer written (S14).
         "browse_by",
         "background",
         "text",

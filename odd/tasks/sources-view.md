@@ -42,6 +42,10 @@ Quoted verbatim from issue #3 (github.com/alvaldes/velo/issues/3).
   queue pero lo que debe hacer es mostrarme la ventana para poner el path".
 - **S13** (issue #25) the keymap does not collapse a modified key into its plain arm:
   `ctrl+r` never cycles repeat.
+- **S14** (human's decision A, 2026-11-09) `[state] view` is retired: it is no longer
+  written and no longer applied, and it keeps being **read** so an existing file still
+  parses. Verbatim: "A" — answering the parent's proposal to stop writing a setting that
+  "parsea pero nunca llega", the repository's own rule.
 
 ## Decisions taken from the issue (not extra requirements)
 
@@ -64,6 +68,7 @@ Quoted verbatim from issue #3 (github.com/alvaldes/velo/issues/3).
 | T7 | S10 (#21) | worker | `src/ui/radio.rs`, `src/ui/mod.rs`, `tests/ui_radio.rs`, `tests/ui_radio_data.rs` | `feat(ui): a request and a live stream say they are working` |
 | T8 | S5 (#22) | worker | `src/ui/radio.rs`, `src/ui/radio_data.rs`, `tests/ui_radio.rs` | `feat(radio): favourites below the sections, behind a header` |
 | T9 | S11 S12 S13 (#26 #27 #25) | worker | `src/ui/mod.rs`, `tests/ui_render.rs`, `tests/ui_state.rs`, `tests/ui_sources.rs` | `fix(ui): name sources in the title bar, land the library on the library` |
+| T10 | S14 (decision A) | worker | `src/ui/mod.rs`, `src/config.rs`, `tests/ui_state.rs`, `tests/ui_sources.rs`, `README.md` | `fix(config): retire the recorded tab that no longer opens a screen` |
 
 ## Log
 

@@ -761,12 +761,15 @@ impl<'lib> App<'lib> {
         self.ui = ui;
     }
 
-    /// Comes back to where the config file says the last session stood (S3):
-    /// the shuffle and repeat it saved, then — in the browser — the tab, the
-    /// library view and the node that was open. Call it after
-    /// [`App::set_volume`], as the launch paths do: the volume on the app
-    /// then is remembered as what the file says, so restoring never writes.
-    /// A node the index no longer has falls back silently to the level above.
+    /// Comes back to what the config file says the last session stood at
+    /// (S3): the shuffle and repeat it saved, then — in the browser — the
+    /// library view and the node that was open. The recorded tab is retired
+    /// (S14): it still parses, and it is never applied — the launch opens
+    /// `Sources` and the library entry lands on the library (issue #27).
+    /// Call it after [`App::set_volume`], as the launch paths do: the volume
+    /// on the app then is remembered as what the file says, so restoring
+    /// never writes. A node the index no longer has falls back silently to
+    /// the level above.
     pub fn set_session(&mut self, session: Session) {
         // Every one of these came from the file, and the change hooks below
         // compare against `saved`: nothing here is ever written back.
@@ -787,8 +790,8 @@ impl<'lib> App<'lib> {
         self.saved_volume = self.volume;
         self.shuffle = shuffle;
         self.repeat = repeat;
-        // The tab, the library view and the node belong to the browser; a
-        // flat command-line list has none of them to come back to.
+        // The library view and the node belong to the browser; a flat
+        // command-line list has neither to come back to.
         if matches!(self.position, Position::Files) {
             return;
         }
@@ -796,7 +799,6 @@ impl<'lib> App<'lib> {
         if let Some(node) = &node {
             self.reopen_node(browse_by, node);
         }
-        self.view = view;
     }
 
     /// Re-opens the saved node inside `by`, level by level, reading each
@@ -944,26 +946,6 @@ impl<'lib> App<'lib> {
             }
             sources::Source::Radio => self.open_radio(),
         }
-    }
-
-    /// Saves the tab, but only when it leaves what the file says. Called
-    /// from the two user paths that move it — the tab key and a number key
-    /// from the queue — never from `browse_view` itself, which the launch
-    /// restore and the reload fallback also call and which must write
-    /// nothing.
-    fn remember_view(&mut self) {
-        // The sources screen is never persisted (issue #3): it is above the
-        // session's tab, not one of its views.
-        if self.view == View::Sources || self.view == self.saved.view {
-            return;
-        }
-        let label = match self.view {
-            View::Library => "library",
-            View::Queue => "queue",
-            View::Sources => return,
-        };
-        self.saved.view = self.view;
-        self.remember(Some("state"), "view", &Self::toml_string(label));
     }
 
     /// The node the current position names, in the file's terms (S3).
@@ -2189,10 +2171,8 @@ impl<'lib> App<'lib> {
             Action::Browse(by) => {
                 self.browse_view(by);
                 // A number key from the queue tab brings the library tab
-                // back with the view; `browse_view` itself stays hook-free,
-                // because the launch restore and the reload fallback also
-                // call it and must write nothing.
-                self.remember_view();
+                // back with the view. The view is written inside
+                // `browse_view`; the tab itself is no longer written (S14).
             }
             // Handed to the shell, which owns the thread.
             Action::Reindex => self.library_root.clone_from(&self.refresh.root),
@@ -3853,10 +3833,8 @@ impl<'lib> App<'lib> {
         } else {
             self.status.clear();
         }
-        // The tab is persisted (S3), but only when it changed. The sources
-        // screen is never persisted, so a round trip through it writes
-        // nothing.
-        self.remember_view();
+        // The tab is a transient round trip, not a setting (S14): moving it
+        // writes nothing.
     }
 
     /// The queue index that is playing, when anything is: the player counts
