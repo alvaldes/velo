@@ -28,7 +28,7 @@ pub use ratatui;
 pub use ratatui::crossterm;
 
 use std::cell::RefCell;
-
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::TryRecvError;
 use std::sync::{Arc, Mutex};
@@ -572,6 +572,20 @@ pub struct App<'lib> {
     /// It is remembered when the queue is entered from anywhere and returned
     /// to when the queue is left. Default `View::Sources`.
     tab_origin: View,
+    /// The titles a wrapper gave its songs, keyed by the song's URL (issue
+    /// #34). Session-scoped on purpose: the names come from expanding the
+    /// channel, and a fresh session re-derives them when the channel is
+    /// opened again — a song that was never expanded in this session keeps
+    /// today's fallback, its URL. Read only by [`describe`], which names a
+    /// path for display; identity (history, favourites, playlists) stays the
+    /// URL.
+    song_titles: HashMap<String, String>,
+    /// The expansion verdicts of this session, keyed by the configured
+    /// station's URL (issue #34): opening the same channel again does not
+    /// fetch the wrapper again. A FAILED expansion is never remembered — a
+    /// transient error must stay retryable — and a `Live` verdict is not
+    /// remembered either: a plain stream never needed the probe.
+    expansion_cache: HashMap<String, crate::radio::stream::Expansion>,
     /// The palette as the `[theme]` table wrote it (S4): what the settings
     /// card rebuilds with one role replaced when a colour is cycled.
     colors: ThemeColors,
@@ -701,6 +715,8 @@ impl<'lib> App<'lib> {
             radio_from: View::Library,
             url_opener: open_url,
             tab_origin: View::Sources,
+            song_titles: HashMap::new(),
+            expansion_cache: HashMap::new(),
             argv: tracks,
             library: None,
             browse_by: BrowseBy::Artists,
@@ -789,6 +805,8 @@ impl<'lib> App<'lib> {
             radio_from: View::Library,
             url_opener: open_url,
             tab_origin: View::Sources,
+            song_titles: HashMap::new(),
+            expansion_cache: HashMap::new(),
             argv: Vec::new(),
             library,
             browse_by: BrowseBy::Artists,
@@ -2995,8 +3013,27 @@ impl<'lib> App<'lib> {
                 // queued (cliamp S1): a multi-entry wrapper opens as the
                 // songs it lists, a wrapper that cannot be expanded is one
                 // refusal line, and anything else plays live as before.
+                // The verdict is remembered for the session (S4, issue #34):
+                // a station is expanded once, and opening it again fetches
+                // nothing. Only a Songs verdict is remembered — a FAILED
+                // expansion stays retryable, and a plain stream never needed
+                // the probe.
                 let expansion = if configured {
-                    crate::radio::stream::expand(&url, crate::radio::stream::Timeouts::default())
+                    match self.expansion_cache.get(&url) {
+                        Some(cached) => Ok(cached.clone()),
+                        None => {
+                            match crate::radio::stream::expand(
+                                &url,
+                                crate::radio::stream::Timeouts::default(),
+                            ) {
+                                Ok(songs @ crate::radio::stream::Expansion::Songs(_)) => {
+                                    self.expansion_cache.insert(url.clone(), songs.clone());
+                                    Ok(songs)
+                                }
+                                other => other,
+                            }
+                        }
+                    }
                 } else {
                     Ok(crate::radio::stream::Expansion::Live)
                 };
@@ -3041,11 +3078,20 @@ impl<'lib> App<'lib> {
         match expansion {
             Ok(crate::radio::stream::Expansion::Songs(songs)) => {
                 let from = self.queue.len();
+                // The titles the wrapper gave the songs are remembered for
+                // the session (issue #34): the map is filled here, where the
+                // expansion happens, and consulted by [`describe`] alone —
+                // no title is threaded through the queue or the audio path.
+                for song in &songs {
+                    if let Some(title) = &song.title {
+                        self.song_titles.insert(song.url.clone(), title.clone());
+                    }
+                }
                 self.edit_queue(|queue| {
                     queue.extend(
                         songs
                             .into_iter()
-                            .map(|song| Entry::File(PathBuf::from(song))),
+                            .map(|song| Entry::File(PathBuf::from(song.url))),
                     );
                 });
                 return Action::PlayQueue { from };
@@ -3931,7 +3977,7 @@ impl<'lib> App<'lib> {
         // is the `live` footer (S3, T6c).
         let current = self.playing_entry();
         let (title, subtitle) = match current {
-            Some(Entry::File(path)) => describe(path, self.known_tracks()),
+            Some(Entry::File(path)) => describe(path, self.known_tracks(), &self.song_titles),
             Some(Entry::Station { name, .. }) => (self.station_title(name), String::new()),
             None => (
                 "nothing playing".to_owned(),
@@ -4393,7 +4439,7 @@ impl<'lib> App<'lib> {
         };
         match &self.position {
             Position::Files => {
-                let (name, folder) = describe(&self.argv[index], []);
+                let (name, folder) = describe(&self.argv[index], [], &self.song_titles);
                 (name, folder, String::new())
             }
             Position::Artists => {
@@ -4450,6 +4496,7 @@ impl<'lib> App<'lib> {
                         entry.artist.as_deref(),
                         entry.album.as_deref(),
                         entry.title.as_deref(),
+                        &self.song_titles,
                     ),
                 }
             }
@@ -4463,6 +4510,7 @@ impl<'lib> App<'lib> {
                     favorite.artist.as_deref(),
                     favorite.album.as_deref(),
                     favorite.title.as_deref(),
+                    &self.song_titles,
                 );
                 (self.starred_name(index, name), note, fact)
             }
@@ -4485,7 +4533,7 @@ impl<'lib> App<'lib> {
                     .get(index)
                     .map(String::as_str)
                     .unwrap_or_default();
-                let (name, note, fact) = file_entry_text(path, None, None, None);
+                let (name, note, fact) = file_entry_text(path, None, None, None, &self.song_titles);
                 (self.starred_name(index, name), note, fact)
             }
             Position::Genres => {
@@ -4511,7 +4559,7 @@ impl<'lib> App<'lib> {
                 // A station is named for itself, never resolved to a path:
                 // its own name is what the row shows.
                 let (name, note) = match entry {
-                    Entry::File(path) => describe(path, self.known_tracks()),
+                    Entry::File(path) => describe(path, self.known_tracks(), &self.song_titles),
                     Entry::Station { name, .. } => (name.clone(), String::new()),
                 };
                 let row = ListRow {
@@ -6261,6 +6309,7 @@ fn file_entry_text(
     artist: Option<&str>,
     album: Option<&str>,
     title: Option<&str>,
+    song_titles: &HashMap<String, String>,
 ) -> (String, String, String) {
     match title {
         Some(title) if !title.is_empty() => {
@@ -6272,21 +6321,31 @@ fn file_entry_text(
             (title.to_owned(), note, String::new())
         }
         _ => {
-            let (name, folder) = describe(Path::new(path), []);
+            let (name, folder) = describe(Path::new(path), [], song_titles);
             (name, folder, String::new())
         }
     }
 }
 
 /// The title and the dim subtitle of a playing file: its library row when
-/// one of `known` has its path (`artist · album`), otherwise its file name
-/// over its folder. Nothing is invented for a file the index never saw.
-fn describe<'a>(path: &Path, known: impl IntoIterator<Item = &'a TrackEntry>) -> (String, String) {
+/// one of `known` has its path (`artist · album`), otherwise the title the
+/// wrapper gave the song this session (`song_titles`, issue #34 — read only
+/// here, so every list that shows the song by path names it alike), and
+/// otherwise its file name over its folder. Nothing is invented for a file
+/// the index never saw and no wrapper ever named.
+fn describe<'a>(
+    path: &Path,
+    known: impl IntoIterator<Item = &'a TrackEntry>,
+    song_titles: &HashMap<String, String>,
+) -> (String, String) {
     if let Some(entry) = known.into_iter().find(|entry| entry.path == path) {
         return (
             entry.title.clone(),
             format!("{} · {}", entry.artist, entry.album),
         );
+    }
+    if let Some(title) = song_titles.get(path.to_string_lossy().as_ref()) {
+        return (title.clone(), String::new());
     }
     let name = path.file_name().map_or_else(
         || path.display().to_string(),
@@ -6901,11 +6960,19 @@ mod tests {
         }];
 
         assert_eq!(
-            super::describe(Path::new("/music/Tide/01.flac"), &known),
+            super::describe(
+                Path::new("/music/Tide/01.flac"),
+                &known,
+                &std::collections::HashMap::new()
+            ),
             ("Dawn".to_owned(), "Tide · Harbor".to_owned())
         );
         assert_eq!(
-            super::describe(Path::new("/elsewhere/two.flac"), &known),
+            super::describe(
+                Path::new("/elsewhere/two.flac"),
+                &known,
+                &std::collections::HashMap::new()
+            ),
             ("two.flac".to_owned(), "/elsewhere".to_owned()),
             "a file the index never saw keeps its own name, nothing invented"
         );
@@ -6929,7 +6996,7 @@ mod tests {
     // resolution injected: a real one would speak to the network, which no
     // test does.
 
-    use crate::radio::stream::{Expansion, StreamError};
+    use crate::radio::stream::{Expansion, Song, StreamError};
 
     /// The queue's paths as strings, asserting on the way: every entry a
     /// song opens as must be a file row, never a station.
@@ -6949,9 +7016,18 @@ mod tests {
     fn a_channel_of_songs_opens_as_one_file_row_per_song_in_wrapper_order() {
         let mut app = App::new(Vec::new());
         let songs = vec![
-            "https://radio.example/lofi/tracks/a".to_owned(),
-            "https://radio.example/lofi/tracks/b".to_owned(),
-            "https://radio.example/lofi/tracks/c".to_owned(),
+            Song {
+                url: "https://radio.example/lofi/tracks/a".to_owned(),
+                title: Some(String::from("Alice - First")),
+            },
+            Song {
+                url: "https://radio.example/lofi/tracks/b".to_owned(),
+                title: Some(String::from("Bob - Second")),
+            },
+            Song {
+                url: "https://radio.example/lofi/tracks/c".to_owned(),
+                title: None,
+            },
         ];
         let action = app.play_station(
             "https://radio.example/lofi/tracks.m3u".to_owned(),
@@ -6961,7 +7037,8 @@ mod tests {
         assert_eq!(action, super::Action::PlayQueue { from: 0 });
         // Identity is the URL (S3): the row's path is the song's `https://…`
         // URL, never a cache path — the cache resolves it when it plays.
-        assert_eq!(queue_paths(&app), songs, "one row per song, in order");
+        let urls: Vec<String> = songs.into_iter().map(|song| song.url).collect();
+        assert_eq!(queue_paths(&app), urls, "one row per song, in order");
     }
 
     #[test]
@@ -7000,6 +7077,274 @@ mod tests {
                 name: "Nova".to_owned(),
             }],
             "the live path is untouched (S6)"
+        );
+    }
+
+    // The wrapper's titles reach the rows (issue #34): the expansion carries
+    // each song's title beside its URL, the map is filled where the expansion
+    // happens, and the expansion verdict is remembered for the session.
+
+    #[test]
+    fn a_queue_row_reads_the_wrappers_title_and_falls_back_to_the_url() {
+        let mut app = App::new(Vec::new());
+        let action = app.play_station(
+            "https://radio.example/lofi/tracks.m3u".to_owned(),
+            "Lofi".to_owned(),
+            Ok(Expansion::Songs(vec![
+                Song {
+                    url: "https://radio.example/lofi/tracks/a".to_owned(),
+                    title: Some(String::from("Alice - First")),
+                },
+                Song {
+                    url: "https://radio.example/lofi/tracks/b".to_owned(),
+                    title: None,
+                },
+            ])),
+        );
+        assert_eq!(action, super::Action::PlayQueue { from: 0 });
+
+        // The queue view rendered as the user sees it: the titled song is
+        // named by its title, the untitled one by its URL.
+        app.view = super::View::Queue;
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol().to_owned())
+            .collect();
+        assert!(
+            screen.contains("Alice - First"),
+            "the title the wrapper gave names the row"
+        );
+        assert!(
+            !screen.contains("https://radio.example/lofi/tracks/a"),
+            "the URL is not shown when the title is known"
+        );
+        assert!(
+            screen.contains("https://radio.example/lofi/tracks"),
+            "a song whose title is unknown keeps today's fallback, the URL"
+        );
+    }
+
+    #[test]
+    fn the_now_playing_block_shows_the_same_title() {
+        use std::time::Duration;
+
+        let mut app = App::new(Vec::new());
+        let url = "https://radio.example/lofi/tracks/a".to_owned();
+        app.play_station(
+            "https://radio.example/lofi/tracks.m3u".to_owned(),
+            "Lofi".to_owned(),
+            Ok(Expansion::Songs(vec![Song {
+                url: url.clone(),
+                title: Some(String::from("Alice - First")),
+            }])),
+        );
+        app.show_playing_for_tests(
+            Entry::File(std::path::PathBuf::from(&url)),
+            Duration::ZERO,
+            None,
+            None,
+        );
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let title: String = (0..120)
+            .map(|x| buffer[(x, 2)].symbol().to_owned())
+            .collect();
+        assert!(
+            title.contains("Alice - First"),
+            "the block names the song by the wrapper's title: {title:?}"
+        );
+        assert!(
+            !title.contains("radio.example"),
+            "the URL is not shown when the title is known: {title:?}"
+        );
+    }
+
+    /// A loopback server for the expansion-cache tests, on the pattern of
+    /// `tests/radio_stream.rs`: one thread, canned routes, every request's
+    /// path recorded, unmatched paths answered 404. No test touches the
+    /// real network; the thread stops when the server drops.
+    mod cache_server {
+        use std::collections::HashMap;
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        pub struct Server {
+            base: String,
+            requests: Arc<Mutex<Vec<String>>>,
+            stop: Arc<AtomicBool>,
+        }
+
+        impl Server {
+            pub fn start(routes: Vec<(&'static str, Vec<u8>)>) -> Server {
+                let listener = TcpListener::bind("127.0.0.1:0").expect("a local port");
+                let base = format!("http://{}", listener.local_addr().expect("a local address"));
+                let routes: HashMap<String, Vec<u8>> = routes
+                    .into_iter()
+                    .map(|(path, body)| (path.to_owned(), body))
+                    .collect();
+                let requests = Arc::new(Mutex::new(Vec::new()));
+                let stop = Arc::new(AtomicBool::new(false));
+                let seen = Arc::clone(&requests);
+                let done = Arc::clone(&stop);
+                std::thread::spawn(move || {
+                    listener
+                        .set_nonblocking(true)
+                        .expect("the listener goes nonblocking");
+                    while !done.load(Ordering::Relaxed) {
+                        let Ok((mut connection, _)) = listener.accept() else {
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                            continue;
+                        };
+                        connection
+                            .set_nonblocking(false)
+                            .expect("the connection blocks");
+                        let mut request = Vec::with_capacity(4096);
+                        let mut chunk = [0_u8; 1024];
+                        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                            let read = connection.read(&mut chunk).unwrap_or(0);
+                            if read == 0 || request.len() > 4096 {
+                                break;
+                            }
+                            request.extend_from_slice(&chunk[..read]);
+                        }
+                        let request = String::from_utf8_lossy(&request).to_string();
+                        let path = request
+                            .lines()
+                            .next()
+                            .and_then(|line| line.split_whitespace().nth(1))
+                            .unwrap_or_default()
+                            .to_string();
+                        let body = routes.get(&path);
+                        seen.lock()
+                            .expect("the request log is uncontended")
+                            .push(path);
+                        if let Some(body) = body {
+                            let head = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: audio/x-mpegurl\r\n\
+                                 Content-Length: {}\r\nConnection: close\r\n\r\n",
+                                body.len()
+                            );
+                            let _ = connection.write_all(head.as_bytes());
+                            let _ = connection.write_all(body);
+                        } else {
+                            let _ = connection.write_all(
+                                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\
+                                  Connection: close\r\n\r\n",
+                            );
+                        }
+                    }
+                });
+                Server {
+                    base,
+                    requests,
+                    stop,
+                }
+            }
+
+            pub fn url(&self, path: &str) -> String {
+                format!("{}{path}", self.base)
+            }
+
+            pub fn requests(&self) -> Vec<String> {
+                self.requests
+                    .lock()
+                    .expect("the request log is uncontended")
+                    .clone()
+            }
+        }
+
+        impl Drop for Server {
+            fn drop(&mut self) {
+                self.stop.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// An app with the radio open and one favourite — the configured row
+    /// whose `enter` the shell resolves (cliamp S1) — pointing at `url`.
+    fn app_with_favourite(url: String) -> App<'static> {
+        let mut app = App::new(Vec::new());
+        let mut store = crate::radio::store::RadioStore::default();
+        store.favorite.push(crate::radio::store::Favorite {
+            name: String::from("Lofi"),
+            url,
+            countrycode: String::new(),
+            codec: String::new(),
+        });
+        app.radio = Some(super::radio::RadioView::new(
+            store,
+            Vec::new(),
+            Vec::new(),
+            None,
+        ));
+        app
+    }
+
+    #[test]
+    fn the_second_open_of_a_configured_station_fetches_nothing_new() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent};
+
+        let body = b"#EXTM3U\r\n\
+                      #EXTINF:-1,Alice - First\r\n\
+                      /channel/songs/a\r\n\
+                      #EXTINF:-1,Bob - Second\r\n\
+                      /channel/songs/b\r\n"
+            .to_vec();
+        let server = cache_server::Server::start(vec![("/channel.m3u", body)]);
+        let mut app = app_with_favourite(server.url("/channel.m3u"));
+
+        app.on_key(KeyEvent::from(KeyCode::Char('G'))); // the favourite: the last actable row
+        let action = app.on_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(action, super::Action::PlayQueue { from: 0 });
+        assert_eq!(
+            server.requests(),
+            vec!["/channel.m3u".to_owned()],
+            "one probe fetch"
+        );
+
+        // Opening it again: the verdict is remembered for the session (S4),
+        // so the wrapper is not fetched a second time.
+        app.on_key(KeyEvent::from(KeyCode::Char('G')));
+        let action = app.on_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(action, super::Action::PlayQueue { from: 2 });
+        assert_eq!(
+            server.requests(),
+            vec!["/channel.m3u".to_owned()],
+            "the second open fetched nothing new"
+        );
+    }
+
+    #[test]
+    fn a_failed_expansion_is_not_remembered_and_is_retried_on_the_next_open() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent};
+
+        let server = cache_server::Server::start(Vec::new()); // every path 404s
+        let mut app = app_with_favourite(server.url("/gone.m3u"));
+
+        app.on_key(KeyEvent::from(KeyCode::Char('G')));
+        let action = app.on_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(action, super::Action::None, "a refusal queues nothing");
+        assert!(app.queue.is_empty(), "nothing was queued");
+        assert!(app.status.contains("404"), "got: {:?}", app.status);
+
+        // The failure is not remembered: the next open fetches again, so a
+        // transient error stays retryable (S4).
+        app.on_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(
+            server.requests(),
+            vec!["/gone.m3u".to_owned(), "/gone.m3u".to_owned()],
+            "the second open fetched again"
         );
     }
 

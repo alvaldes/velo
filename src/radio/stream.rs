@@ -570,6 +570,18 @@ impl StationOpener for LiveOpener {
 /// far past any real channel's song list.
 const WRAPPER_REST_CAP: u64 = 4 * 1024 * 1024;
 
+/// One song a wrapper lists (issue #34): the resolved absolute `http(s)`
+/// URL — the song's identity, cliamp S3, and the only thing the cache and
+/// the history ever see — beside the title the wrapper gave the entry (an
+/// `.m3u`'s `#EXTINF` text, a `.pls`'s `Title<n>`), when it named one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Song {
+    /// The song's `https://…` URL, resolved against the wrapper's own URL.
+    pub url: String,
+    /// The title the wrapper declared, when it did; never invented.
+    pub title: Option<String>,
+}
+
 /// What a station URL resolved to, before anything is queued (cliamp S1):
 /// the shell asks this once for a station the user configured in
 /// `radio.toml`, and a multi-entry wrapper opens as the songs it lists — one
@@ -579,9 +591,10 @@ const WRAPPER_REST_CAP: u64 = 4 * 1024 * 1024;
 /// wrapper is: the rule keys on the body alone.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expansion {
-    /// The songs of a channel: one absolute `http(s)` URL per entry, in the
-    /// wrapper's order. Two or more — a wrapper with one entry plays live.
-    Songs(Vec<String>),
+    /// The songs of a channel: one [`Song`] per entry, in the wrapper's
+    /// order, each with its URL and the title the wrapper gave it (issue
+    /// #34). Two or more — a wrapper with one entry plays live.
+    Songs(Vec<Song>),
     /// Not a multi-entry wrapper: play live.
     Live,
 }
@@ -646,7 +659,7 @@ fn resolve_entry(base: &str, entry: &str) -> Option<String> {
 /// refusal of cliamp S5. An HLS manifest is refused on its own: its `.ts`
 /// segments are not songs. Not a wrapper at all — audio outright — is live.
 fn expansion_for(base: &str, body: &[u8]) -> Result<Expansion, StreamError> {
-    let entries = match lists::entries(body) {
+    let entries = match lists::entries_with_titles(body) {
         Ok(entries) => entries,
         // Not a wrapper, or a known format with no playable entry — for the
         // expansion both mean the same thing: this is not a song list, and
@@ -654,9 +667,9 @@ fn expansion_for(base: &str, body: &[u8]) -> Result<Expansion, StreamError> {
         Err(ListsError::NotAPlaylist | ListsError::NoStream) => return Ok(Expansion::Live),
         Err(ListsError::Hls) => return Err(StreamError::Hls),
     };
-    let songs: Vec<String> = entries
-        .iter()
-        .filter_map(|entry| resolve_entry(base, entry))
+    let songs: Vec<Song> = entries
+        .into_iter()
+        .filter_map(|(entry, title)| resolve_entry(base, &entry).map(|url| Song { url, title }))
         .collect();
     match songs.len() {
         0 => Err(StreamError::NotAudio {

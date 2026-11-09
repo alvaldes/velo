@@ -220,7 +220,14 @@ none). The rule keys on the wrapper alone, not on any service: entries that are
 relative paths resolve against the wrapper's own URL. The songs cache like any
 remote track — the first play downloads into the same cache a Subsonic server
 uses, and `velo --cache-clean` cleans it — and their identity is their
-`https://…` URL everywhere: the queue row, the history entry, a saved playlist.
+`https://…` URL everywhere: the history entry, a saved playlist. The title the
+wrapper gives a song (`Artist - Title` in an `.m3u`, `Title<n>` in a `.pls`)
+names it in the queue, the now-playing block and any list that shows it; those
+names are session-scoped on purpose — a song velo has not expanded this session
+shows its URL. Opening a channel twice probes the wrapper once: the expansion's
+verdict is remembered for the session, a failed one is never remembered (a
+transient error stays retryable), and a plain stream, which never needed the
+probe, gains nothing to remember.
 A wrapper with one entry, a plain stream URL, and a wrapper that cannot be
 expanded — unreachable, empty, no playable entry — behave as before: the first
 two play live, and the third is one status line naming the station and the

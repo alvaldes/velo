@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use symphonia::core::io::ReadOnlySource;
 use velo::audio::TrackSource;
-use velo::radio::stream::{self, StreamError, Timeouts};
+use velo::radio::stream::{self, Song, StreamError, Timeouts};
 
 /// The ICY title the fake servers embed.
 const STREAM_TITLE: &str = "Fela Kuti - Zombie";
@@ -746,13 +746,23 @@ fn a_multi_entry_wrapper_expands_to_its_songs_in_wrapper_order() {
     assert_eq!(
         expansion,
         stream::Expansion::Songs(vec![
-            format!("{base}/channel/songs/a"),
-            format!("{base}/channel/songs/b"),
+            Song {
+                url: format!("{base}/channel/songs/a"),
+                title: Some(String::from("Alice - First")),
+            },
+            Song {
+                url: format!("{base}/channel/songs/b"),
+                title: Some(String::from("Bob - Second")),
+            },
             // A directory-relative entry joins the wrapper's own directory:
             // the wrapper is at the root here, so `songs/c` sits beside it.
-            format!("{base}/songs/c"),
+            Song {
+                url: format!("{base}/songs/c"),
+                title: Some(String::from("Cara - Third")),
+            },
         ]),
-        "one absolute URL per entry, in the wrapper's order, relatives resolved"
+        "one song per entry, in the wrapper's order, relatives resolved, \
+         each named by the #EXTINF line the wrapper gave it"
     );
     // Expanding decides from the wrapper alone: no song is fetched here —
     // the cache fetches a song when the producer reaches it.
@@ -765,13 +775,17 @@ fn a_multi_entry_wrapper_expands_to_its_songs_in_wrapper_order() {
 }
 
 #[test]
-fn a_pls_with_several_entries_expands_to_them_in_order() {
+fn a_pls_with_several_entries_expands_to_them_in_order_with_their_titles() {
     let server = CountingServer::start(|base| {
         vec![(
             "/channel.pls".to_owned(),
             String::new(),
             format!(
-                "[playlist]\r\nFile1={base}/channel/songs/b\r\nFile2={base}/channel/songs/a\r\n"
+                "[playlist]\r\n\
+                 Title3=Named Third\r\n\
+                 File1={base}/channel/songs/b\r\n\
+                 File2={base}/channel/songs/a\r\n\
+                 File3={base}/channel/songs/c\r\n"
             )
             .into_bytes(),
         )]
@@ -783,10 +797,57 @@ fn a_pls_with_several_entries_expands_to_them_in_order() {
     assert_eq!(
         expansion,
         stream::Expansion::Songs(vec![
-            format!("{base}/channel/songs/b"),
-            format!("{base}/channel/songs/a"),
+            Song {
+                url: format!("{base}/channel/songs/b"),
+                title: None,
+            },
+            Song {
+                url: format!("{base}/channel/songs/a"),
+                title: None,
+            },
+            Song {
+                url: format!("{base}/channel/songs/c"),
+                title: Some(String::from("Named Third")),
+            },
         ]),
-        "a PLS's entries sort by their File<n> number"
+        "a PLS's entries sort by their File<n> number, each named by its \
+         Title<n> when the wrapper declares one"
+    );
+}
+
+#[test]
+fn a_song_without_an_extinf_line_keeps_no_title() {
+    let server = CountingServer::start(|base| {
+        vec![(
+            "/channel.m3u".to_owned(),
+            String::new(),
+            format!(
+                "#EXTM3U\r\n\
+                 #EXTINF:-1,Alice - First\r\n\
+                 {base}/channel/songs/a\r\n\
+                 {base}/channel/songs/b\r\n"
+            )
+            .into_bytes(),
+        )]
+    });
+
+    let expansion =
+        stream::expand(&server.url("/channel.m3u"), wrapper_timeouts()).expect("it expands");
+    let base = server.url("");
+    assert_eq!(
+        expansion,
+        stream::Expansion::Songs(vec![
+            Song {
+                url: format!("{base}/channel/songs/a"),
+                title: Some(String::from("Alice - First")),
+            },
+            Song {
+                url: format!("{base}/channel/songs/b"),
+                title: None,
+            },
+        ]),
+        "only an entry the wrapper named carries a title; the next unnamed \
+         entry is not given the one before it"
     );
 }
 
@@ -894,10 +955,16 @@ fn a_wrapper_larger_than_the_inspection_cap_still_expands_whole() {
     assert_eq!(
         expansion,
         stream::Expansion::Songs(vec![
-            format!("{base}/channel/songs/late"),
-            format!("{base}/channel/songs/later"),
+            Song {
+                url: format!("{base}/channel/songs/late"),
+                title: Some(String::from("Alice - Late")),
+            },
+            Song {
+                url: format!("{base}/channel/songs/later"),
+                title: Some(String::from("Bob - Later")),
+            },
         ]),
-        "the songs past the cap are resolved whole, in order"
+        "the songs past the cap are resolved whole, in order, with their titles"
     );
 }
 
@@ -923,10 +990,22 @@ fn a_directory_relative_entry_joins_the_wrappers_own_directory() {
     assert_eq!(
         expansion,
         stream::Expansion::Songs(vec![
-            format!("{base}/shared/absolute"),
-            format!("{base}/lofi/tracks/late"),
-            format!("{base}/lofi/tracks/dotted"),
-            format!("{base}/shared/up"),
+            Song {
+                url: format!("{base}/shared/absolute"),
+                title: None,
+            },
+            Song {
+                url: format!("{base}/lofi/tracks/late"),
+                title: None,
+            },
+            Song {
+                url: format!("{base}/lofi/tracks/dotted"),
+                title: None,
+            },
+            Song {
+                url: format!("{base}/shared/up"),
+                title: None,
+            },
         ]),
         "relative entries resolve against the wrapper's directory, `..` climbs"
     );
