@@ -1,6 +1,13 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.30.2] - 2026-11-09
+
+### Fixes
+- **radio:** A channel's songs are named, and a channel is probed once
+
+### Maintenance
+- **ci:** Give the old tags' cross image the dbus headers too
 ## [0.30.1] - 2026-11-09
 
 ### Fixes
