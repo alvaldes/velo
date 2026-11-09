@@ -1,6 +1,10 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.25.0] - 2026-11-09
+
+### Features
+- **saved:** Mark tracks, and a library.toml that outlives the session
 ## [0.24.0] - 2026-11-09
 
 ### Features
