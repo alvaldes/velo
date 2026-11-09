@@ -77,12 +77,13 @@ Verified against the running service, not the note: no credential anywhere.
 - One live channel — `audio/mpeg`, `Icy-Br: 128`, `Icy-Genre`, `Icy-Logo`,
   `Icy-Metaint: 8192`, no `Content-Length`, `Cache-Control: no-cache`.
 
-## Open at lane start (the human's decision)
+## Settled at lane start
 
-- **How a song is played**: cache it first through the existing Subsonic-style
-  `PathResolver` (reuses what exists, seek works on the local copy, `--cache-clean`
-  already covers it) or stream the finite remote file with byte ranges (no copy on
-  disk, but the audio path needs a remote finite source). Not decided yet.
+- **How a song is played** — the human's decision: "Cachear como Subsonic (reusar el
+  resolver)". The song resolves to the cache through the same `PathResolver` Subsonic
+  uses and the player opens it as a file, so seek, gapless and ReplayGain stay exactly
+  as they are and `--cache-clean` already knows how to clean up. Identity — favourite,
+  history entry, playlist row — stays the URL, never the cached file.
 - **Whether the songs list is one level or a queue**: settled by the note — "playlist de
   archivos finitos", so a level whose `enter` plays from that row onwards, like an album.
 
