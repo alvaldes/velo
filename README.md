@@ -258,7 +258,8 @@ velo history clear   # empty the history
 ```
 
 The history is written by the interface; the one-shot `--play` mode writes
-nothing.
+nothing. `history` is a subcommand now: a file that happens to be named
+`history` is opened with a path (`velo ./history`).
 
 ## Configuration
 
