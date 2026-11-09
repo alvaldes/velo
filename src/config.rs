@@ -804,9 +804,15 @@ shuffle = false
 repeat = \"off\"
 browse_by = \"artists\"
 
+# The theme to use, by name: a TOML file with these same colour keys in the
+# themes/ folder beside this one (themes/<name>.toml), which you can hand to
+# another person. \"default\" is built in and always there.
+#
 # Every colour, as \"#rrggbb\". \"reset\" is the terminal's own colour and is
-# the default for background and text only.
+# the default for background and text only. A colour here that differs from
+# the built-in default wins over the theme named above.
 [theme]
+name = \"default\"
 background = \"{}\"
 text = \"{}\"
 dim = \"{}\"

@@ -1248,6 +1248,18 @@ fn the_default_file_names_the_radio_table_commented_out() {
     assert!(text.contains("# host ="), "{text}");
 }
 
+#[test]
+fn the_default_file_names_the_theme_and_its_folder() {
+    // A fresh install has to learn that named themes exist at all: the file
+    // velo writes is the only documentation a new user reads.
+    let text = default_config_text();
+    assert!(text.contains("themes/<name>.toml"), "{text}");
+    assert!(
+        text.contains("[theme]\nname = \"default\""),
+        "the theme name sits inside the table it belongs to: {text}"
+    );
+}
+
 // ---------------------------------------------------------- mono (issue #8)
 
 #[test]
