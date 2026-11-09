@@ -34,6 +34,7 @@ use serde::Deserialize as _;
 use serde::de::{self, Deserializer, Visitor};
 
 use crate::audio::output::Repeat;
+use crate::ui::theme::builtins;
 use crate::ui::{BrowseBy, View};
 
 /// The volume the player has always started at (T3 kept it at full).
@@ -821,7 +822,9 @@ pub fn themes_dir(config_file: &Path) -> PathBuf {
 pub const DEFAULT_THEME_TEMPLATE: &str = r##"# velo's own palette, which is also the built-in one: this file is here to
 # show the format. Copy it under another name to make a theme, then select it
 # with `name` in the [theme] table of config.toml or from the settings card
-# (`o`), where `left`/`right` preview each one before `enter` applies it.
+# (`o`): `enter` on the `theme` row opens a picker of every theme — moving
+# the cursor previews it on the spot, `enter` applies it, `esc` puts back
+# what you had.
 #
 # Every colour is "#rrggbb". "reset" is the terminal's own colour and is only
 # allowed for background and text. A line you delete keeps the built-in value,
@@ -1450,8 +1453,11 @@ pub struct ThemeSelection {
     /// The theme the palette came from: the selected name when it was on
     /// disk, else [`DEFAULT_THEME_NAME`] (S3).
     pub applied: String,
-    /// Every theme the picker can offer (S4): `default` first, then the
-    /// files that loaded, in name order.
+    /// Every theme the picker can offer (S2, issue #37): `default` first,
+    /// then the built-in catalogue sorted by name, then every `.toml` of
+    /// the themes folder that does not carry a built-in's name. A file
+    /// whose stem matches a built-in — `default` included — takes that
+    /// built-in's row: the file wins, one row, not two.
     pub themes: Vec<LoadedTheme>,
     /// What to say once on the status line at startup (S3): a selected name
     /// that is not on disk, a file that does not parse, a colour that does
@@ -1472,18 +1478,17 @@ const THEME_FILE_KEYS: [&str; 7] = [
 ];
 
 /// Loads the `themes/` folder and resolves the launch palette (S1–S3): the
-/// built-in `default` is always there, the selected theme file layers over
-/// it, and the `[theme]` colour keys of `keys` win over both. A missing
-/// folder is normal and silent; anything broken is a notice for the status
-/// line, with the built-in used — the app starts.
+/// built-in `default` is always there, the eleven built-ins of the
+/// catalogue after it (issue #37), the selected theme file layers over its
+/// theme, and the `[theme]` colour keys of `keys` win over all of it. A
+/// missing folder is normal and silent; anything broken is a notice for
+/// the status line, with the built-in used — the app starts.
 #[must_use]
 pub fn select_theme(themes_dir: Option<&Path>, keys: &ThemeKeys) -> ThemeSelection {
     let mut selection = ThemeSelection {
         applied: DEFAULT_THEME_NAME.to_owned(),
-        themes: vec![LoadedTheme {
-            name: DEFAULT_THEME_NAME.to_owned(),
-            colors: ThemeColors::default(),
-        }],
+        // The picker's starting rows: `default`, then the catalogue (S3).
+        themes: builtins::catalogue(),
         ..ThemeSelection::default()
     };
 
@@ -1515,13 +1520,13 @@ pub fn select_theme(themes_dir: Option<&Path>, keys: &ThemeKeys) -> ThemeSelecti
                                 name: name.to_owned(),
                                 colors,
                             };
-                            // The built-in always exists under `default`;
-                            // a file of that name takes its place, not a
-                            // second entry beside it.
-                            if name == DEFAULT_THEME_NAME {
-                                selection.themes[0] = entry;
-                            } else {
-                                selection.themes.push(entry);
+                            // A file whose stem matches a theme already
+                            // offered — the built-in `default` or one of
+                            // the catalogue (issue #37) — takes its place:
+                            // the file wins, one row, not two.
+                            match selection.themes.iter_mut().find(|theme| theme.name == name) {
+                                Some(slot) => *slot = entry,
+                                None => selection.themes.push(entry),
                             }
                         }
                         Err(reason) => selection

@@ -16,6 +16,8 @@ use ratatui::style::Color;
 
 use crate::config::{ThemeColor, ThemeColors};
 
+pub(crate) mod builtins;
+
 /// The palette the interface draws with (S4): the seven configured roles
 /// plus the accent's bright twin, which is always derived from the accent
 /// and never configured.
