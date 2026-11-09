@@ -60,8 +60,8 @@ One commit per independently reviewable step, each green on its own:
 
 | ID | Spec | Route | Task | Commit |
 |:--|:--|:--|:--|:--|
-| T1 | S1, S2, S3, S5 | parent | `src/history.rs` (TOML, cap, dedupe, atomic save), the `App` write hook, and the `history` subcommand: plain, `--json`, `clear` | |
-| T2 | S4, S5 | parent | `Recently played` in `Sources`: the level, its rows, playing marker, and the docs | |
+| T1 | S1, S2, S3, S5 | parent | `src/history.rs` (TOML, cap, dedupe, atomic save), the `App` write hook, and the `history` subcommand: plain, `--json`, `clear` | `29caaa5`, `dea7f33`, `03ca99a` |
+| T2 | S4, S5 | parent | `Recently played` in `Sources`: the level, its rows, playing marker, and the docs | `1624e20` |
 
 ## Log
 
@@ -73,3 +73,13 @@ it), capped at a few hundred. And a way to read it without opening the TUI:
 **L2** — user, asked whether the TUI gets a screen the issue body never names:
 "Historial + una vista en la TUI" — so the deliverable is the file, the three
 commands, and a `Recently played` source (S4), in that order.
+
+**L3** — T2, three decisions worth keeping. `ascend()` out of `Position::Recent`
+restores the top of the current `BrowseBy` view and re-reads it, then returns
+before `remember_node()`: the recent list replaced the `tracks` snapshot, so
+there is no parent list to keep, and the saved node was never this list's to
+walk out of. The synthesized rows carry no invented title — the row's name comes
+from the file, and `history_tick` turns an empty field into an absent one — so
+replaying an entry from the screen cannot write back metadata the file did not
+have. The playing marker stays untested by construction: `playing_path()` needs
+a real player and no TUI test has one.
