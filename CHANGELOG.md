@@ -1,6 +1,10 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.19.0] - 2026-11-09
+
+### Features
+- **history:** Record the stations that begin playing
 ## [0.18.0] - 2026-11-09
 
 ### Features
