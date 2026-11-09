@@ -1,6 +1,20 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.12.0] - 2026-11-09
+
+### Features
+- **ui:** Open on a sources view and walk back to it
+- **radio:** Favourites first and a section for stations with no country
+- **ui:** Tab round trip, truthful radio screens and favourites below
+
+### Fixes
+- **ui:** Name sources in the title bar, land the library on the library
+
+### Documentation
+- Document the sources view and the new radio order
+- Document the tab round trip, the radio order and the waits
+- The recorded tab no longer chooses a screen
 ## [0.11.0] - 2026-11-09
 
 ### Features
