@@ -241,6 +241,23 @@ the clipping cap further up respects.
 Each file is reported as `ok`, `skipped (no audio)` or `failed (reason)`; one
 bad file never stops the run, and a read-only file is reported, not forced.
 
+## Recently played
+
+velo writes what begins playing to `~/.config/velo/history.toml` (beside
+`config.toml`, or `$XDG_CONFIG_HOME/velo/history.toml` when that is set):
+newest first, one entry per path — playing a track again moves it up instead
+of duplicating it — capped at 500 entries, and a seek is not a new beginning.
+Reading it needs no interactive terminal:
+
+```sh
+velo history         # one line per entry, newest first
+velo history --json  # the same entries as a JSON array, for a script
+velo history clear   # empty the history
+```
+
+The history is written by the interface; the one-shot `--play` mode writes
+nothing.
+
 ## Configuration
 
 One TOML file, read once at startup, and the only place velo keeps anything:
