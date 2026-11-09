@@ -96,5 +96,9 @@ jobs:
       - name: Attach archives to the GitHub Release (created if missing)
         uses: softprops/action-gh-release@v2
         with:
+          # A tag push already points `github.ref` at the tag; a manual run
+          # does not (it points at the branch), so the tag has to be named or
+          # the action refuses with "GitHub Releases requires a tag".
+          tag_name: ${{ env.TAG }}
           files: dist/*
           generate_release_notes: true
