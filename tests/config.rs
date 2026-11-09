@@ -15,8 +15,8 @@ use clap::Parser as _;
 use velo::audio::output::Repeat;
 use velo::config::{
     Cli, Config, DEFAULT_VOLUME, OpenNode, ReplayGainMode, ThemeColor, ThemeColors, UiParts,
-    config_path, default_config_text, expand_path, library_to_save, remove_value, set_library,
-    set_value, write_default_config,
+    config_path, default_config_text, expand_path, library_to_save, radio_host_from, remove_value,
+    set_library, set_value, write_default_config,
 };
 use velo::ui::{BrowseBy, View};
 
@@ -1174,4 +1174,76 @@ fn an_empty_path_does_not_expand_into_the_working_directory() {
         ),
         PathBuf::new()
     );
+}
+
+// --------------------------------------------------------------- radio (#14)
+
+#[test]
+fn the_radio_table_names_the_directory_host() {
+    let dir = temp_dir("radio-full");
+    let path = write_config(&dir, "[radio]\nhost = \"de1.api.radio-browser.info\"\n");
+    assert_eq!(radio_host_from(Some(&path)), "de1.api.radio-browser.info");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_missing_radio_table_or_key_means_the_default_host() {
+    let dir = temp_dir("radio-absent");
+    // No file at all: the default, never an error.
+    assert_eq!(
+        radio_host_from(Some(&dir.join("velo").join("absent.toml"))),
+        "all.api.radio-browser.info"
+    );
+    // A file without the table, and the table without the key.
+    let path = write_config(&dir, "bit_perfect = false\n");
+    assert_eq!(radio_host_from(Some(&path)), "all.api.radio-browser.info");
+    let path = write_config(&dir, "[radio]\n");
+    assert_eq!(radio_host_from(Some(&path)), "all.api.radio-browser.info");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn no_config_file_means_the_default_host() {
+    assert_eq!(radio_host_from(None), "all.api.radio-browser.info");
+}
+
+#[test]
+fn an_unknown_key_inside_the_radio_table_is_an_error_naming_it() {
+    let dir = temp_dir("radio-unknown-key");
+    let path = write_config(&dir, "[radio]\nhost = \"h.example\"\nurl = \"https://x\"\n");
+    let error = Config::load_from(&path).unwrap_err().to_string();
+    assert!(
+        error.contains(path.display().to_string().as_str()),
+        "error must name the file: {error}"
+    );
+    assert!(error.contains("url"), "error must name the key: {error}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_radio_host_of_the_wrong_type_names_the_file_and_the_line_at_launch() {
+    // At launch a wrong type is an error like any other bad value.
+    let dir = temp_dir("radio-bad-type");
+    let path = write_config(&dir, "[radio]\nhost = 7\n");
+    let error = Config::load_from(&path).unwrap_err().to_string();
+    assert!(error.contains("line 2"), "error: {error}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_config_broken_after_the_launch_yields_the_default_host() {
+    // The host is read when the radio view opens, long after the launch
+    // already rejected broken files; a file broken since then must not
+    // empty the directory — the default is used, never an error.
+    let dir = temp_dir("radio-broken");
+    let path = write_config(&dir, "[radio]\nhost = 7\n");
+    assert_eq!(radio_host_from(Some(&path)), "all.api.radio-browser.info");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_default_file_names_the_radio_table_commented_out() {
+    let text = default_config_text();
+    assert!(text.contains("# [radio]"), "{text}");
+    assert!(text.contains("# host ="), "{text}");
 }

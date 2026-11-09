@@ -445,15 +445,19 @@ impl<T: Transport + Send + Sync + 'static> RadioWire for RadioData<T> {
 impl RadioData<HttpTransport> {
     /// The shell's radio wiring: the real transport and the country from
     /// the real environment (`LC_ALL`, then `LC_MESSAGES`, then `LANG`).
-    /// `store_path` is the `radio.toml` beside the config file.
+    /// `store_path` is the `radio.toml` beside the config file, and `host`
+    /// is the directory host the config names
+    /// ([`crate::config::radio_host_from`]).
     ///
     /// A transport that cannot be built (none is known to fail today)
     /// leaves the view usable without a directory instead of failing the
     /// interface.
     #[must_use]
-    pub fn open(store_path: Option<PathBuf>) -> Self {
+    pub fn open(store_path: Option<PathBuf>, host: &str) -> Self {
         Self::new(
-            HttpTransport::new().ok().map(Client::new),
+            HttpTransport::new()
+                .ok()
+                .map(|transport| Client::with_host(transport, host)),
             store_path,
             crate::radio::country::detect(|key| std::env::var(key).ok()),
         )

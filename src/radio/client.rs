@@ -2,11 +2,14 @@
 //! structs.
 //!
 //! The directory service is Radio Browser, queried exactly as the CLIAMP
-//! client queries it: base [`BASE_URL`], a `User-Agent` of [`USER_AGENT`] on
-//! every request, `/stations/search` for stations and three index endpoints
-//! (`/countries`, `/states/<country>/`, `/tags`). The playback URL is
-//! `url_resolved`, never `url`. Responses carry many more fields than the
-//! ones parsed here; unknown fields are ignored, never an error.
+//! client queries it: base `https://<host>/json`, where `<host>` is the one
+//! the config names ([`Client::with_host`]) or [`DEFAULT_HOST`] — the
+//! community's round-robin across its mirrors — a `User-Agent` of
+//! [`USER_AGENT`] on every request, `/stations/search` for stations and
+//! three index endpoints (`/countries`, `/states/<country>/`, `/tags`). The
+//! playback URL is `url_resolved`, never `url`. Responses carry many more
+//! fields than the ones parsed here; unknown fields are ignored, never an
+//! error.
 //!
 //! The one network primitive is the [`Transport`] seam: the client builds
 //! the URL, the transport fetches the body as text, and every test injects
@@ -22,8 +25,11 @@ use std::fmt;
 
 use miniserde::Deserialize;
 
-/// The Radio Browser base the directory is queried through.
-pub const BASE_URL: &str = "https://de1.api.radio-browser.info/json";
+/// The Radio Browser host the directory is queried through when the config
+/// names none: the community's published round-robin across its mirrors,
+/// not one mirror's box (issue #14). The value lives in the config
+/// ([`crate::config::DEFAULT_RADIO_HOST`]); the client only names it.
+pub const DEFAULT_HOST: &str = crate::config::DEFAULT_RADIO_HOST;
 
 /// The required `User-Agent`: the API rejects requests without one.
 pub const USER_AGENT: &str = concat!("velo/", env!("CARGO_PKG_VERSION"));
@@ -35,9 +41,12 @@ pub const DEFAULT_LIMIT: u32 = 200;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     /// The service could not be reached: refused connection, DNS failure, a
-    /// non-200 answer.
+    /// non-200 answer. `detail` is the whole one-line reason, which names
+    /// the host that was tried: the client composes it around whatever the
+    /// transport observed, so the status line says where the request went
+    /// instead of only that the network failed.
     Unreachable {
-        /// What the transport observed.
+        /// The whole one-line reason, naming the host.
         detail: String,
     },
     /// The service answered but the body is not the JSON that was expected.
@@ -50,12 +59,10 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Unreachable { detail } => {
-                write!(
-                    formatter,
-                    "the station directory could not be reached: {detail}"
-                )
-            }
+            // The host already names itself in `detail`: the client composes
+            // the sentence when it wraps the transport's answer, and the
+            // one line must stay short enough for an 80-column terminal.
+            Self::Unreachable { detail } => formatter.write_str(detail),
             Self::Malformed { detail } => {
                 write!(
                     formatter,
@@ -110,8 +117,11 @@ impl Transport for HttpTransport {
             .header("User-Agent", USER_AGENT)
             .call()
             .map_err(|error| Error::Unreachable {
+                // Short on purpose: the client wraps this into the
+                // one-line sentence that names the host, and the pair has
+                // to fit an 80-column terminal together.
                 detail: match error {
-                    ureq::Error::StatusCode(status) => format!("the server answered HTTP {status}"),
+                    ureq::Error::StatusCode(status) => format!("HTTP {status}"),
                     other => other.to_string(),
                 },
             })?;
@@ -277,20 +287,42 @@ pub struct Tag {
     pub stationcount: u32,
 }
 
-/// The client over one transport. The base URL is fixed: the directory is
-/// one well-known service, not a user-configured server.
+/// The client over one transport. The host is the one the config names,
+/// else [`DEFAULT_HOST`]: the directory is Radio Browser, asked through the
+/// host the user chose (issue #14).
 #[derive(Debug)]
 pub struct Client<T> {
     /// The transport every request goes through; public so tests can read
     /// back what a canned transport recorded.
     pub transport: T,
+    /// The host every URL is built from: a bare name, no scheme, no path.
+    host: String,
 }
 
 impl<T: Transport> Client<T> {
-    /// A client for the directory over the given transport.
+    /// A client for the directory over the given transport, at the default
+    /// host ([`DEFAULT_HOST`]).
     #[must_use]
     pub fn new(transport: T) -> Self {
-        Self { transport }
+        Self::with_host(transport, DEFAULT_HOST)
+    }
+
+    /// A client for the directory at `host`, the host the config names: a
+    /// bare name, no scheme and no path — `https://{host}/json` is built
+    /// here and nowhere else.
+    #[must_use]
+    pub fn with_host(transport: T, host: &str) -> Self {
+        Self {
+            transport,
+            host: host.to_owned(),
+        }
+    }
+
+    /// The base every request is built from: the configured host over
+    /// HTTPS, under the API's `/json` root. One place, so no second copy
+    /// of the shape exists.
+    fn base(&self) -> String {
+        format!("https://{}/json", self.host)
     }
 
     /// Searches stations: builds the query, fetches it and parses the list.
@@ -300,7 +332,7 @@ impl<T: Transport> Client<T> {
     /// Fails with the transport's [`Error::Unreachable`] or
     /// [`Error::Malformed`] when the answer is not the expected JSON array.
     pub fn search_stations(&self, search: &StationSearch) -> Result<Vec<Station>, Error> {
-        let url = search_url(search);
+        let url = self.search_url(search);
         self.fetch_json(&url)
     }
 
@@ -310,7 +342,7 @@ impl<T: Transport> Client<T> {
     ///
     /// As [`Client::search_stations`].
     pub fn countries(&self) -> Result<Vec<Country>, Error> {
-        self.fetch_json(&format!("{BASE_URL}/countries"))
+        self.fetch_json(&format!("{}/countries", self.base()))
     }
 
     /// The state index of one country, by its ISO 3166-1 code.
@@ -319,7 +351,11 @@ impl<T: Transport> Client<T> {
     ///
     /// As [`Client::search_stations`].
     pub fn states(&self, country: &str) -> Result<Vec<State>, Error> {
-        self.fetch_json(&format!("{BASE_URL}/states/{}/", percent_encode(country)))
+        self.fetch_json(&format!(
+            "{}/states/{}/",
+            self.base(),
+            percent_encode(country)
+        ))
     }
 
     /// The tag index, most used first.
@@ -328,51 +364,60 @@ impl<T: Transport> Client<T> {
     ///
     /// As [`Client::search_stations`].
     pub fn tags(&self) -> Result<Vec<Tag>, Error> {
-        self.fetch_json(&tags_url())
+        self.fetch_json(&self.tags_url())
     }
 
     /// Fetches one URL through the transport and parses the JSON array.
+    /// A transport failure is wrapped here, where the host is known, so
+    /// the one-line reason names where the request went; the failure is
+    /// one status-line message, never a retry.
     fn fetch_json<T2: Deserialize>(&self, url: &str) -> Result<Vec<T2>, Error> {
-        let body = self.transport.get(url)?;
+        let body = self.transport.get(url).map_err(|error| match error {
+            Error::Unreachable { detail } => Error::Unreachable {
+                detail: format!("{} could not be reached: {detail}", self.host),
+            },
+            error @ Error::Malformed { .. } => error,
+        })?;
         parse_array(&body)
     }
-}
 
-/// Builds the `/stations/search` URL for one search. The parameter order is
-/// fixed so the query string is byte-for-byte testable.
-#[must_use]
-pub fn search_url(search: &StationSearch) -> String {
-    let mut pairs = vec![
-        format!("limit={}", search.limit),
-        format!("offset={}", search.offset),
-        format!("order={}", search.order.as_str()),
-    ];
-    if search.order.reversed() {
-        pairs.push("reverse=true".to_owned());
+    /// Builds the `/stations/search` URL for one search. The parameter
+    /// order is fixed so the query string is byte-for-byte testable.
+    fn search_url(&self, search: &StationSearch) -> String {
+        let mut pairs = vec![
+            format!("limit={}", search.limit),
+            format!("offset={}", search.offset),
+            format!("order={}", search.order.as_str()),
+        ];
+        if search.order.reversed() {
+            pairs.push("reverse=true".to_owned());
+        }
+        pairs.push("hidebroken=true".to_owned());
+        if let Some(name) = &search.name {
+            pairs.push(format!("name={}", percent_encode(name)));
+        }
+        if let Some(tag) = &search.tag {
+            pairs.push(format!("tag={}", percent_encode(tag)));
+            pairs.push("tagExact=true".to_owned());
+        }
+        if let Some(countrycode) = &search.countrycode {
+            pairs.push(format!("countrycode={}", percent_encode(countrycode)));
+        }
+        if let Some(state) = &search.state {
+            pairs.push(format!("state={}", percent_encode(state)));
+            pairs.push("stateExact=true".to_owned());
+        }
+        format!("{}/stations/search?{}", self.base(), pairs.join("&"))
     }
-    pairs.push("hidebroken=true".to_owned());
-    if let Some(name) = &search.name {
-        pairs.push(format!("name={}", percent_encode(name)));
-    }
-    if let Some(tag) = &search.tag {
-        pairs.push(format!("tag={}", percent_encode(tag)));
-        pairs.push("tagExact=true".to_owned());
-    }
-    if let Some(countrycode) = &search.countrycode {
-        pairs.push(format!("countrycode={}", percent_encode(countrycode)));
-    }
-    if let Some(state) = &search.state {
-        pairs.push(format!("state={}", percent_encode(state)));
-        pairs.push("stateExact=true".to_owned());
-    }
-    format!("{BASE_URL}/stations/search?{}", pairs.join("&"))
-}
 
-/// Builds the tag index URL: most used first, broken stations hidden, no
-/// artificial cap on the count.
-#[must_use]
-pub fn tags_url() -> String {
-    format!("{BASE_URL}/tags?order=stationcount&reverse=true&hidebroken=true&limit=100000")
+    /// Builds the tag index URL: most used first, broken stations hidden, no
+    /// artificial cap on the count.
+    fn tags_url(&self) -> String {
+        format!(
+            "{}/tags?order=stationcount&reverse=true&hidebroken=true&limit=100000",
+            self.base()
+        )
+    }
 }
 
 /// Parses one JSON array of rows, naming the body on failure instead of
