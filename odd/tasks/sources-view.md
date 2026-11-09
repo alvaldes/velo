@@ -33,6 +33,15 @@ Quoted verbatim from issue #3 (github.com/alvaldes/velo/issues/3).
   haciendo algo. Igual cuando se reproduce una radio que tarda un tin en cargar".
 - **S6** "`esc` walks back one level at a time and lands on `Sources`, so the way out of any screen is the way in."
 - **S7** "Once a source is chosen, nothing about its own keys changes: the library keys stay the library's, the radio keys stay the radio's."
+- **S11** (issue #26) the title bar names what `tab` is a round trip to: `sources` and
+  `queue`, with `sources` lit anywhere inside it — `Sources`, the library, the radio view.
+  Verbatim: "arriba sigue diciendo Library queue en vez de source queue".
+- **S12** (issue #27) entering `Local library` always lands on the library, and with no path
+  configured it opens the library prompt instead of leaving the reader somewhere else.
+  Verbatim: "si library no esta definido el path y entro por source a library me manda a
+  queue pero lo que debe hacer es mostrarme la ventana para poner el path".
+- **S13** (issue #25) the keymap does not collapse a modified key into its plain arm:
+  `ctrl+r` never cycles repeat.
 
 ## Decisions taken from the issue (not extra requirements)
 
@@ -54,6 +63,7 @@ Quoted verbatim from issue #3 (github.com/alvaldes/velo/issues/3).
 | T6 | S9 (#20) | worker | `src/ui/radio.rs`, `src/ui/radio_data.rs`, `tests/ui_radio.rs`, `tests/ui_radio_data.rs` | `fix(radio): a place shows its own stations, never another's` |
 | T7 | S10 (#21) | worker | `src/ui/radio.rs`, `src/ui/mod.rs`, `tests/ui_radio.rs`, `tests/ui_radio_data.rs` | `feat(ui): a request and a live stream say they are working` |
 | T8 | S5 (#22) | worker | `src/ui/radio.rs`, `src/ui/radio_data.rs`, `tests/ui_radio.rs` | `feat(radio): favourites below the sections, behind a header` |
+| T9 | S11 S12 S13 (#26 #27 #25) | worker | `src/ui/mod.rs`, `tests/ui_render.rs`, `tests/ui_state.rs`, `tests/ui_sources.rs` | `fix(ui): name sources in the title bar, land the library on the library` |
 
 ## Log
 
@@ -174,3 +184,18 @@ sequentially in the same files (`src/ui/mod.rs`, `src/ui/radio.rs`, `tests/ui_ra
 a per-unit split would be a hunk-level reconstruction whose intermediate commits do not
 compile. The units stay readable through the four test clusters and the issue references in
 the commit body; the price is disclosed rather than hidden.
+
+**L6 — two more findings from the human's own review of the pull requests, plus the
+`ctrl+r` observation filed as asked.**
+
+> de momento vi que arriba sigue diciendo Library queue en vez de source queue
+> otra cosa es que si library no esta definido el path y entro por source a library me
+> manda a queue pero lo que debe hacer es mostrarme la ventana para poner el path
+
+Both reproduced from the source, and the second has a cause worth naming: `open_source`
+handed the library entry to `saved.view`, and because the `tab` round trip now writes
+`queue`, the next launch's `Local library` opened the queue. The fix is not to trust the
+recorded tab for a library entry at all. That leaves `[state] view` written but no longer
+able to steer a launch — a dead setting by this repository's own rule ("settings that parse
+but never arrive are worse than missing ones"), flagged for the human rather than retired
+silently mid-review.
