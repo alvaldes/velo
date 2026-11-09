@@ -70,6 +70,7 @@ Every key below is what the code does today.
 | `f` (radio view) | Favourite the selected station, or pin the selected country or region |
 | `N` (radio view) | The country list, with your own country first when it knows it |
 | `ctrl+r` (radio view) | Refetch the directory for the place you are in: the country list, a region's stations or a tag's |
+| `i` (radio view) | On a station marked `✗`: open a prefilled bug report in your browser — the station's name, codec and URL, the reason velo gave, and your velo version and platform. Nothing is posted: read the draft and send it |
 | `q` | Quit |
 
 While a search is open, every printable key types into the query,
@@ -172,6 +173,24 @@ exactly one retry before the queue moves on, and a station never joins the next
 track as a gapless pair. A playlist wrapper (`.pls`, `.m3u`) is resolved one level
 deep; an HLS manifest is refused with its own message before anything tries to
 decode it, because its `.ts` segments are not audio this player can play.
+
+A station the directory's filter rejects is marked `✗` before you press `enter`:
+either its URL is an HLS manifest, or this build has no decoder for the codec the
+directory claims. The marker never leaves it at that: while the cursor rests on
+the row, the status line names the station, says the reason in a couple of words —
+`HLS manifest`, or `codec <name>` — and names the key that reports it
+(`velo: HLS One cannot play (HLS manifest) — i reports it`), all on a line that fits
+an 80-column terminal; the long sentence is what the report carries. It goes away
+when the cursor moves on. Your own favourites and hand-added
+stations are never **blocked** by that filter — you put them there deliberately, and
+`enter` still tries them — but a station that cannot play is marked `✗` wherever it
+appears, favourites included, and `i` reports it from there too. A station marked
+`✗` is worth reporting as an issue: press `i` on the row and velo opens a
+prefilled bug report in your browser — the station's name, codec and URL, the
+reason velo gave, and your velo version and platform, all filled in for you
+to read and send. velo itself holds no token and posts nothing; if the browser
+cannot be opened, the report's URL lands on the status line so the issue can
+still be filed by hand.
 
 Stations are **not** in the library index: they are not scanned, not searched with
 `/` from the library, and they never appear in the artist, album or genre views.

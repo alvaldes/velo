@@ -10,14 +10,17 @@
 //! follow the `tests/ui_render.rs` pattern — a ratatui `TestBackend` at a
 //! fixed size, asserted on the buffer text.
 
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use velo::audio::output::Entry;
-use velo::radio::client::{Country, Order, Station, Tag};
+use velo::radio::client::{Country, HttpTransport, Order, Station, Tag};
 use velo::radio::store::{self, Favorite, Pinned, RadioStore};
 use velo::ui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use velo::ui::radio::{Place, RadioOutcome, RadioView, RowKind};
+use velo::ui::radio_data::RadioData;
 use velo::ui::theme::Theme;
 use velo::ui::{Action, App, View};
 
@@ -1413,6 +1416,476 @@ fn the_no_country_section_exists_only_with_content() {
     );
 }
 
+// ---- the refusal of the row under the cursor (S1, issue #19) ----------------
+
+#[test]
+fn the_selected_row_says_why_the_filter_rejected_it() {
+    let mut view = view();
+    press(&mut view, KeyCode::Enter); // country index
+    press(&mut view, KeyCode::Enter); // Norway
+    view.set_catalog(norway(), catalog());
+
+    press(&mut view, KeyCode::Char('G')); // last row: Hls One
+    assert_eq!(
+        view.selected_refusal().as_deref(),
+        Some("an HLS manifest: its .ts segments cannot be decoded"),
+        "the cursor rests on the rejected station: its refusal is readable"
+    );
+
+    press(&mut view, KeyCode::Char('k')); // up onto Nova
+    assert_eq!(
+        view.selected_refusal(),
+        None,
+        "a playable station carries no refusal"
+    );
+}
+
+#[test]
+fn favourites_and_hand_added_stations_are_never_refusals() {
+    // They skip the filter by design, so their playing is never a refusal
+    // the way a rejected catalog station's is.
+    let mut view = view();
+    press(&mut view, KeyCode::Char('G')); // the favourite below the sections
+    assert_eq!(
+        view.selected_refusal(),
+        None,
+        "a favourite was put there deliberately"
+    );
+
+    // The hand-added station lives in the no-country place (S4).
+    press(&mut view, KeyCode::Char('g'));
+    let section = view
+        .labels()
+        .iter()
+        .position(|label| label == "Stations without a country")
+        .expect("the no-country section is listed");
+    for _ in 0..section {
+        press(&mut view, KeyCode::Char('j'));
+    }
+    press(&mut view, KeyCode::Enter);
+    assert_eq!(
+        view.labels()[view.cursor()],
+        "Night FM",
+        "the cursor rests on the hand-added station"
+    );
+    assert_eq!(
+        view.selected_refusal(),
+        None,
+        "a hand-added station was put there deliberately"
+    );
+}
+
+#[test]
+fn the_status_line_says_why_the_station_under_the_cursor_cannot_play() {
+    // A wire with no directory client: no request ever starts, so the
+    // refusal note is the only writer on the status line and the assertion
+    // is exact without waiting on the network.
+    let mut app = App::new(Vec::new());
+    app.set_radio_wire(Box::new(RadioData::<HttpTransport>::new(None, None, None)));
+    shell(&mut app, KeyCode::Char('R')); // the radio opens over its wiring
+    app.show_radio_catalog(norway(), catalog());
+
+    // The cursor starts on Nova: playable, nothing said.
+    assert_eq!(app.status(), "", "a playable row says nothing");
+
+    shell(&mut app, KeyCode::Char('G')); // onto Hls One
+    assert_eq!(
+        app.status(),
+        "velo: Hls One cannot play (HLS manifest) — i reports it",
+        "the status names the station and the reason while the cursor rests there"
+    );
+
+    shell(&mut app, KeyCode::Char('k')); // back onto Nova
+    assert_eq!(
+        app.status(),
+        "",
+        "the note goes away when the cursor leaves the row"
+    );
+}
+
+#[test]
+fn moving_between_rejected_stations_says_the_new_reason_not_the_old() {
+    let mut app = App::new(Vec::new());
+    app.set_radio_wire(Box::new(RadioData::<HttpTransport>::new(None, None, None)));
+    shell(&mut app, KeyCode::Char('R'));
+    app.show_radio_catalog(
+        norway(),
+        vec![
+            station(
+                "Hls One",
+                "https://stream.example/live/index.m3u8",
+                "MP3",
+                96,
+                "NO",
+            ),
+            station(
+                "Hls Two",
+                "https://stream.example/live/other.m3u8",
+                "MP3",
+                96,
+                "NO",
+            ),
+        ],
+    );
+    shell(&mut app, KeyCode::Char('j')); // onto Hls Two
+    assert_eq!(
+        app.status(),
+        "velo: Hls Two cannot play (HLS manifest) — i reports it",
+        "the note follows the cursor, got: {:?}",
+        app.status()
+    );
+}
+
+/// S1 and S3 together: the note has to carry the key, and it has to survive the
+/// width of a normal terminal — an 80-column line is where the message is read,
+/// and a hint that gets cut off by the border is a hint nobody reads.
+#[test]
+fn the_refusal_note_names_the_key_and_fits_a_standard_terminal() {
+    let mut app = App::new(Vec::new());
+    app.set_radio_wire(Box::new(RadioData::<HttpTransport>::new(None, None, None)));
+    shell(&mut app, KeyCode::Char('R'));
+    app.show_radio_catalog(norway(), catalog());
+
+    shell(&mut app, KeyCode::Char('G')); // onto Hls One
+    let status = app.status();
+    assert!(
+        status.contains('i'),
+        "the note names the key that reports it, got: {status:?}"
+    );
+    assert!(
+        status.contains("i reports it"),
+        "and says what the key does, got: {status:?}"
+    );
+    assert!(
+        status.chars().count() < 80,
+        "the note fits a standard terminal, got {} columns: {status:?}",
+        status.chars().count()
+    );
+}
+
+// ---- the report of a rejected station (S3, issue #19) ----------------------
+
+// The opener's per-thread record: thread-local because the tests run in
+// parallel threads and a fn pointer cannot capture state, so each thread
+// records into its own list.
+thread_local! {
+    // The URLs the opener of the running test's thread was handed, in order.
+    static OPENER_URLS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    // Whether the opener of this thread succeeds; a failure stands in for
+    // a system without a browser.
+    static OPENER_SUCCEEDS: Cell<bool> = const { Cell::new(true) };
+}
+
+/// A plain function pointer the shell can hold: it records the URL and
+/// answers whatever [`OPENER_SUCCEEDS`] says. No test ever spawns a browser.
+fn recording_opener(url: &str) -> Result<(), String> {
+    OPENER_URLS.with(|urls| urls.borrow_mut().push(url.to_owned()));
+    if OPENER_SUCCEEDS.with(Cell::get) {
+        Ok(())
+    } else {
+        Err(String::from("no browser here"))
+    }
+}
+
+fn reset_opener(succeeds: bool) {
+    OPENER_URLS.with(|urls| urls.borrow_mut().clear());
+    OPENER_SUCCEEDS.with(|flag| flag.set(succeeds));
+}
+
+/// The URLs the opener received, in order.
+fn opened_urls() -> Vec<String> {
+    OPENER_URLS.with(|urls| urls.borrow().clone())
+}
+
+/// A store file in the system temp directory with one favourite and one
+/// hand-added station, so the shell tests can stand on those rows. The test
+/// removes it before it ends; nothing is ever written inside the worktree.
+fn store_file() -> PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "velo-ui-radio-report-{}-{}.toml",
+        std::process::id(),
+        OPENER_CALLS.fetch_add(1, Ordering::SeqCst),
+    ));
+    std::fs::write(
+        &path,
+        "[[favorite]]\nname = \"Jazz One\"\nurl = \"https://jazz.example/stream\"\n\
+         countrycode = \"NO\"\ncodec = \"MP3\"\n\n[[station]]\nname = \"Night FM\"\n\
+         url = \"http://night.example/live\"\n",
+    )
+    .expect("the store fixture writes");
+    path
+}
+
+static OPENER_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+#[test]
+fn i_on_a_rejected_station_opens_a_prefilled_issue_in_the_browser() {
+    reset_opener(true);
+    let mut app = App::new(Vec::new());
+    app.set_url_opener(recording_opener);
+    app.set_radio_wire(Box::new(RadioData::<HttpTransport>::new(None, None, None)));
+    shell(&mut app, KeyCode::Char('R'));
+    app.show_radio_catalog(norway(), catalog());
+    shell(&mut app, KeyCode::Char('G')); // onto Hls One, marked ✗
+
+    shell(&mut app, KeyCode::Char('i'));
+
+    let version = env!("CARGO_PKG_VERSION");
+    let expected = format!(
+        "https://github.com/alvaldes/velo/issues/new?title=Radio%20station%20\
+         %22Hls%20One%22%20does%20not%20play&body=Station%3A%20Hls%20One%0A\
+         Codec%3A%20MP3%0AURL%3A%20https%3A%2F%2Fstream.example%2Flive%2F\
+         index.m3u8%0AReason%3A%20an%20HLS%20manifest%3A%20its%20.ts%20\
+         segments%20cannot%20be%20decoded%0A%0Avelo%20{version}%20on%20{}%20\
+         %28{}%29&labels=bug",
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+    );
+    assert_eq!(
+        opened_urls(),
+        [expected],
+        "the opener received the prefilled issue: title and body percent-encoded, \
+         the station's name, codec and url_resolved, the refusal from the directory, \
+         velo's version and the platform in the body, the bug label attached"
+    );
+}
+
+#[test]
+fn one_keypress_hands_over_exactly_one_report() {
+    reset_opener(true);
+    let mut app = App::new(Vec::new());
+    app.set_url_opener(recording_opener);
+    app.set_radio_wire(Box::new(RadioData::<HttpTransport>::new(None, None, None)));
+    shell(&mut app, KeyCode::Char('R'));
+    app.show_radio_catalog(norway(), catalog());
+    shell(&mut app, KeyCode::Char('G')); // onto Hls One, marked ✗
+
+    shell(&mut app, KeyCode::Char('i'));
+    assert_eq!(
+        opened_urls().len(),
+        1,
+        "one keypress, one opener call, got: {:?}",
+        opened_urls()
+    );
+
+    // Moving the cursor and pressing every other radio key opens nothing.
+    shell(&mut app, KeyCode::Char('k'));
+    shell(&mut app, KeyCode::Char('f'));
+    shell(&mut app, KeyCode::Char('j'));
+    assert_eq!(
+        opened_urls().len(),
+        1,
+        "the opener was called exactly once for the one keypress, got: {:?}",
+        opened_urls()
+    );
+}
+
+#[test]
+fn i_passes_on_every_row_but_a_rejected_catalog_station() {
+    // The full top level: every section row, the rule, the header and the
+    // favourite — `i` on each of them passes through untouched.
+    let mut view = view();
+    let top = view.labels().len();
+    for _ in 0..top {
+        assert_eq!(
+            press(&mut view, KeyCode::Char('i')),
+            RadioOutcome::Pass,
+            "on row {:?} the key falls through: no URL is built and a global \
+             binding stays free",
+            view.cursor()
+        );
+        press(&mut view, KeyCode::Char('j'));
+    }
+
+    // A playable catalog station is not reportable either.
+    press(&mut view, KeyCode::Char('g')); // back to the first row
+    press(&mut view, KeyCode::Enter); // the country index
+    press(&mut view, KeyCode::Enter); // Norway
+    view.set_catalog(norway(), catalog());
+    press(&mut view, KeyCode::Char('g')); // onto Nova, playable
+    assert_eq!(
+        press(&mut view, KeyCode::Char('i')),
+        RadioOutcome::Pass,
+        "a playable station has no report to file"
+    );
+
+    // The rejected station is the one row that answers with the report.
+    press(&mut view, KeyCode::Char('j')); // onto Hls One, marked ✗
+    let outcome = press(&mut view, KeyCode::Char('i'));
+    let RadioOutcome::ReportIssue { title, body } = outcome else {
+        panic!("the rejected station answers with the report, got: {outcome:?}")
+    };
+    assert_eq!(
+        title, "Radio station \"Hls One\" does not play",
+        "the title names the station"
+    );
+    for fact in [
+        "Station: Hls One",
+        "Codec: MP3",
+        "URL: https://stream.example/live/index.m3u8",
+        "Reason: an HLS manifest: its .ts segments cannot be decoded",
+    ] {
+        assert!(
+            body.contains(fact),
+            "the body carries {fact:?}, got: {body:?}"
+        );
+    }
+
+    // A hand-added station, down in the no-country place, is deliberate
+    // user data: it passes through too. Back out of Norway first: the top
+    // is where the section lives.
+    assert!(view.back(), "out of Norway");
+    assert!(view.back(), "out of the country index");
+    press(&mut view, KeyCode::Char('g'));
+    let section = view
+        .labels()
+        .iter()
+        .position(|label| label == "Stations without a country")
+        .expect("the no-country section is listed");
+    for _ in 0..section {
+        press(&mut view, KeyCode::Char('j'));
+    }
+    press(&mut view, KeyCode::Enter);
+    assert_eq!(
+        press(&mut view, KeyCode::Char('i')),
+        RadioOutcome::Pass,
+        "a hand-added station is not reportable"
+    );
+}
+
+#[test]
+fn i_on_any_other_row_never_reaches_an_opener_or_the_status_line() {
+    let path = store_file();
+
+    // A playable catalog station.
+    reset_opener(true);
+    let mut app = App::new(Vec::new());
+    app.set_url_opener(recording_opener);
+    app.set_radio_wire(Box::new(RadioData::<HttpTransport>::new(None, None, None)));
+    shell(&mut app, KeyCode::Char('R'));
+    app.show_radio_catalog(
+        norway(),
+        vec![station(
+            "Nova",
+            "https://stream.example/nova.mp3",
+            "MP3",
+            128,
+            "NO",
+        )],
+    );
+    shell(&mut app, KeyCode::Char('G'));
+    shell(&mut app, KeyCode::Char('i'));
+    assert!(
+        opened_urls().is_empty(),
+        "no URL for a playable station, got: {:?}",
+        opened_urls()
+    );
+    assert_eq!(app.status(), "", "the status line stays empty");
+
+    // A non-station row: the first browse row of the top level.
+    let mut app = App::new(Vec::new());
+    app.set_url_opener(recording_opener);
+    app.set_radio_wire(Box::new(RadioData::<HttpTransport>::new(None, None, None)));
+    shell(&mut app, KeyCode::Char('R'));
+    shell(&mut app, KeyCode::Char('i'));
+    assert!(
+        opened_urls().is_empty(),
+        "no URL for a browse row, got: {:?}",
+        opened_urls()
+    );
+    assert_eq!(app.status(), "", "the status line stays empty");
+
+    // A favourite and a hand-added station, from the store file: the
+    // favourite is the last row of the top, the added station the first
+    // row of the no-country place.
+    let mut app = App::new(Vec::new());
+    app.set_url_opener(recording_opener);
+    app.set_radio_wire(Box::new(RadioData::<HttpTransport>::new(
+        None,
+        Some(path.clone()),
+        None,
+    )));
+    shell(&mut app, KeyCode::Char('R'));
+    shell(&mut app, KeyCode::Char('G')); // the favourite below the sections
+    shell(&mut app, KeyCode::Char('i'));
+    assert!(
+        opened_urls().is_empty(),
+        "no URL for a favourite, got: {:?}",
+        opened_urls()
+    );
+    assert_eq!(app.status(), "", "the status line stays empty");
+
+    shell(&mut app, KeyCode::Char('g'));
+    let screen = app_screen(&app);
+    let section = screen
+        .lines()
+        .position(|line| line.contains("Stations without a country"))
+        .expect("the no-country section is on screen");
+    let _ = section;
+    // From the top: one `j` onto `Stations without a country`, `enter` in.
+    shell(&mut app, KeyCode::Char('j'));
+    shell(&mut app, KeyCode::Enter);
+    shell(&mut app, KeyCode::Char('i'));
+    assert!(
+        opened_urls().is_empty(),
+        "no URL for a hand-added station, got: {:?}",
+        opened_urls()
+    );
+    assert_eq!(app.status(), "", "the status line stays empty");
+
+    std::fs::remove_file(&path).expect("the store fixture is removed");
+}
+
+#[test]
+fn a_failed_opener_leaves_the_report_url_on_the_status_line() {
+    reset_opener(false);
+    let mut app = App::new(Vec::new());
+    app.set_url_opener(recording_opener);
+    app.set_radio_wire(Box::new(RadioData::<HttpTransport>::new(None, None, None)));
+    shell(&mut app, KeyCode::Char('R'));
+    app.show_radio_catalog(norway(), catalog());
+    shell(&mut app, KeyCode::Char('G')); // onto Hls One, marked ✗
+
+    shell(&mut app, KeyCode::Char('i'));
+
+    let status = app.status().to_owned();
+    assert!(
+        status.contains("https://github.com/alvaldes/velo/issues/new?"),
+        "nothing is lost: the status line carries the URL itself, got: {status:?}"
+    );
+    assert!(
+        status.ends_with(&opened_urls()[0]),
+        "the URL on the line is exactly the one the opener refused"
+    );
+}
+
+#[test]
+fn a_successful_report_says_it_waits_in_the_browser_untouched() {
+    reset_opener(true);
+    let mut app = App::new(Vec::new());
+    app.set_url_opener(recording_opener);
+    app.set_radio_wire(Box::new(RadioData::<HttpTransport>::new(None, None, None)));
+    shell(&mut app, KeyCode::Char('R'));
+    app.show_radio_catalog(norway(), catalog());
+    shell(&mut app, KeyCode::Char('G')); // onto Hls One, marked ✗
+
+    shell(&mut app, KeyCode::Char('i'));
+
+    let status = app.status().to_owned();
+    assert!(
+        status.contains("browser"),
+        "the status says where the report is, got: {status:?}"
+    );
+    assert!(
+        status.to_lowercase().contains("send"),
+        "sending the report is the human's to do, got: {status:?}"
+    );
+    assert!(
+        !status.to_lowercase().contains("sent"),
+        "the report is never claimed sent, got: {status:?}"
+    );
+}
+
 // ---- the render -------------------------------------------------------------
 
 fn screen(view: &RadioView) -> String {
@@ -1493,5 +1966,389 @@ fn the_radio_list_draws_its_sections_and_lights_the_selected_row() {
         cell.bg,
         Theme::default().accent,
         "the selected row is the accent, got: {cell:?}"
+    );
+}
+
+// ---- a station that cannot play is marked wherever it appears (S1) --------
+
+/// A store with the three cases the marker has to tell apart: a refused
+/// favourite, a playable favourite, and both kinds among the hand-added
+/// stations. Favourites stay playable on purpose; the marker only states the
+/// fact.
+fn store_with_refused_stations() -> RadioStore {
+    let mut store = RadioStore::default();
+    store.favorite.push(Favorite {
+        name: "Hls Fav".to_owned(),
+        url: "https://fav.example/live.m3u8".to_owned(),
+        countrycode: "NO".to_owned(),
+        codec: "MP3".to_owned(),
+    });
+    store.favorite.push(Favorite {
+        name: "Good Fav".to_owned(),
+        url: "https://fav.example/good".to_owned(),
+        countrycode: "NO".to_owned(),
+        codec: "MP3".to_owned(),
+    });
+    store.favorite.push(Favorite {
+        name: "No Country Hls".to_owned(),
+        url: "https://fav.example/nc.m3u8".to_owned(),
+        countrycode: String::new(),
+        codec: "AAC".to_owned(),
+    });
+    store.station.push(store::Station {
+        name: "Mine Hls".to_owned(),
+        url: "https://mine.example/live.m3u8".to_owned(),
+    });
+    store.station.push(store::Station {
+        name: "Mine Good".to_owned(),
+        url: "https://mine.example/good".to_owned(),
+    });
+    store
+}
+
+fn view_with_refused_stations() -> RadioView {
+    RadioView::new(store_with_refused_stations(), Vec::new(), Vec::new(), None)
+}
+
+/// The favourites section marks the one that cannot play and leaves the other
+/// alone — the fact does not depend on how the station got there.
+#[test]
+fn a_favourite_that_cannot_play_is_marked_and_a_playable_one_is_not() {
+    let view = view_with_refused_stations();
+    let labels = view.labels();
+    assert!(
+        labels.iter().any(|label| label == "★ ✗ Hls Fav [MP3] · NO"),
+        "the refused favourite is marked, got: {labels:?}"
+    );
+    assert!(
+        labels.iter().any(|label| label == "★ Good Fav [MP3] · NO"),
+        "the playable favourite is not marked, got: {labels:?}"
+    );
+}
+
+/// The hand-added stations and the no-country favourites are marked the same
+/// way inside their own section.
+#[test]
+fn a_hand_added_station_that_cannot_play_is_marked() {
+    let mut view = view_with_refused_stations();
+    view.open_place(Place::NoCountry);
+    let labels = view.labels();
+    assert!(
+        labels.iter().any(|label| label == "✗ Mine Hls"),
+        "the refused hand-added station is marked, got: {labels:?}"
+    );
+    assert!(
+        labels.iter().any(|label| label == "Mine Good"),
+        "the playable hand-added station is not marked, got: {labels:?}"
+    );
+    assert!(
+        labels
+            .iter()
+            .any(|label| label == "★ ✗ No Country Hls [AAC]"),
+        "a no-country favourite is marked too, got: {labels:?}"
+    );
+}
+
+/// The distinction the whole rule rests on: marked, and still playable — you
+/// put it there deliberately, so `enter` tries it instead of refusing.
+#[test]
+fn a_refused_favourite_is_still_playable_on_purpose() {
+    let mut view = view_with_refused_stations();
+    view.open_place(Place::NoCountry);
+    view.select_first();
+
+    assert_eq!(
+        view.labels().first().map(String::as_str),
+        Some("✗ Mine Hls")
+    );
+    assert_eq!(
+        view.key(KeyEvent::from(KeyCode::Enter)),
+        RadioOutcome::Play {
+            url: "https://mine.example/live.m3u8".to_owned(),
+            name: "Mine Hls".to_owned(),
+        },
+        "a marked favourite or hand-added station is still played on purpose"
+    );
+}
+
+/// And it can be reported: the refusal it shows is the one the report carries.
+#[test]
+fn a_refused_favourite_says_why_and_can_be_reported() {
+    let mut view = view_with_refused_stations();
+    view.open_place(Place::NoCountry);
+    view.select_first();
+
+    assert_eq!(
+        view.selected_refusal().as_deref(),
+        Some("an HLS manifest: its .ts segments cannot be decoded")
+    );
+
+    let RadioOutcome::ReportIssue { title, body } = view.key(KeyEvent::from(KeyCode::Char('i')))
+    else {
+        panic!("i on a refused station files a report");
+    };
+    assert!(title.contains("Mine Hls"), "got: {title}");
+    assert!(
+        body.contains("https://mine.example/live.m3u8"),
+        "got: {body}"
+    );
+    assert!(
+        body.contains("an HLS manifest: its .ts segments cannot be decoded"),
+        "the report carries the sentence, got: {body}"
+    );
+    assert!(
+        body.contains("unknown"),
+        "a hand-added station claims no codec, and the report says so, got: {body}"
+    );
+}
+
+/// The other side of the same rule: a playable favourite is not marked, states
+/// no refusal, and `i` passes through.
+#[test]
+fn a_playable_favourite_is_never_marked_and_cannot_be_reported() {
+    let mut view = view_with_refused_stations();
+    view.open_place(Place::NoCountry);
+    view.select_next(); // Mine Good
+
+    assert_eq!(view.labels()[1], "Mine Good");
+    assert_eq!(view.selected_refusal(), None);
+    assert_eq!(
+        view.key(KeyEvent::from(KeyCode::Char('i'))),
+        RadioOutcome::Pass,
+        "i belongs to no other row"
+    );
+}
+
+// ---- the playing marker, wherever the station is listed (S15, #32) ----------
+// The library marks the row that plays (`▶` in the accent, `list_row`); the
+// radio must do the same for the station that plays, in every place its row
+// appears. The shell owns the fact and hands it in; the view only renders it.
+
+#[test]
+fn the_playing_station_is_marked_in_its_country_and_the_others_are_not() {
+    let mut view = view();
+    view.set_playing(Some(String::from("https://stream.example/nova.mp3")));
+    press(&mut view, KeyCode::Enter); // country index
+    press(&mut view, KeyCode::Enter); // Norway
+    view.set_catalog(norway(), catalog());
+
+    let played = screen(&view);
+    assert!(
+        played.contains("▶ 1. Nova [128k] · NO"),
+        "the playing station carries the marker the library uses, got:\n{played}"
+    );
+    assert!(
+        played.contains("▸ 2. ✗ Hls One [96k] · NO"),
+        "a different station in the same list keeps the idle marker, got:\n{played}"
+    );
+}
+
+#[test]
+fn the_playing_station_is_marked_inside_a_tag_too() {
+    let mut view = view();
+    view.set_playing(Some(String::from("https://stream.example/nova.mp3")));
+    for _ in 0..4 {
+        press(&mut view, KeyCode::Char('j')); // Browse genres & tags
+    }
+    press(&mut view, KeyCode::Enter); // the tag index
+    press(&mut view, KeyCode::Enter); // jazz
+    view.set_catalog(
+        Place::Tag {
+            name: String::from("jazz"),
+        },
+        catalog(),
+    );
+    assert!(
+        screen(&view).contains("▶ 1. Nova [128k] · NO"),
+        "no importa donde estemos: a tag lists the playing station marked, got:\n{}",
+        screen(&view)
+    );
+}
+
+#[test]
+fn the_playing_favourite_is_marked_in_the_favourites_section() {
+    let mut view = view();
+    view.set_playing(Some(String::from("https://jazz.example/stream")));
+    assert!(
+        screen(&view).contains("▶ 6. ★ Jazz One [MP3] · NO"),
+        "the favourite that plays is marked where it lives, got:\n{}",
+        screen(&view)
+    );
+}
+
+#[test]
+fn the_playing_hand_added_station_is_marked_without_a_country() {
+    let mut view = view();
+    view.set_playing(Some(String::from("http://night.example/live")));
+    view.open_place(Place::NoCountry);
+    assert!(
+        screen(&view).contains("▶ 1. Night FM"),
+        "the hand-added station that plays is marked, got:\n{}",
+        screen(&view)
+    );
+}
+
+#[test]
+fn the_playing_station_is_recognised_however_its_url_is_spelled() {
+    // The favourite is stored as `https://jazz.example/stream`; what the
+    // shell says is playing may spell the same station with a different
+    // host case, the default port and a trailing slash. The station key,
+    // not the string as written, decides (S6) — the same identity rule
+    // favourites and toggles already go through.
+    let mut view = view();
+    view.set_playing(Some(String::from("https://JAZZ.example:443/stream/")));
+    assert!(
+        screen(&view).contains("▶ 6. ★ Jazz One [MP3] · NO"),
+        "the station key matches the playing station however it is spelled, got:\n{}",
+        screen(&view)
+    );
+}
+
+#[test]
+fn no_playing_station_marks_no_radio_row() {
+    let mut view = view();
+    view.set_playing(None);
+    let quiet = screen(&view);
+    assert!(
+        !quiet.contains('▶'),
+        "nothing plays: no radio row is marked, got:\n{quiet}"
+    );
+}
+
+#[test]
+fn the_playing_marker_and_the_refusal_marker_can_share_a_row() {
+    // It plays, and the codec filter rejects it: two facts about one
+    // station, and neither hides the other.
+    let mut view = view();
+    view.set_playing(Some(String::from("https://stream.example/live/index.m3u8")));
+    press(&mut view, KeyCode::Enter); // country index
+    press(&mut view, KeyCode::Enter); // Norway
+    view.set_catalog(norway(), catalog());
+    let played = screen(&view);
+    assert!(
+        played.contains("▸ 1. Nova [128k] · NO"),
+        "the other station keeps the idle marker, got:\n{played}"
+    );
+    assert!(
+        played.contains("▶ 2. ✗ Hls One [96k] · NO"),
+        "the rejected station that still plays carries both markers, got:\n{played}"
+    );
+
+    // The same on a refused favourite at the top: star, cross and marker.
+    let mut view = view_with_refused_stations();
+    view.set_playing(Some(String::from("https://fav.example/live.m3u8")));
+    assert!(
+        screen(&view)
+            .lines()
+            .any(|line| line.contains('▶') && line.contains("★ ✗ Hls Fav")),
+        "a refused favourite that plays is marked without losing its ✗, got:\n{}",
+        screen(&view)
+    );
+}
+
+#[test]
+fn the_playing_marker_leaves_the_selection_highlight_alone() {
+    let mut view = view();
+    view.set_playing(Some(String::from("https://stream.example/nova.mp3")));
+    press(&mut view, KeyCode::Enter); // country index
+    press(&mut view, KeyCode::Enter); // Norway
+    view.set_catalog(norway(), catalog());
+    // The cursor still rests on Nova: the playing row is the selected one.
+    let played = screen(&view);
+    assert!(played.contains("▶ 1. Nova [128k] · NO"));
+    let row = played
+        .lines()
+        .position(|line| line.contains("1. Nova"))
+        .expect("the playing row is on screen");
+    let mut terminal =
+        velo::ui::ratatui::Terminal::new(velo::ui::ratatui::backend::TestBackend::new(80, 24))
+            .expect("a test terminal");
+    terminal
+        .draw(|frame| view.render(frame, frame.area(), &Theme::default()))
+        .expect("the frame draws");
+    let cell = terminal.backend().buffer()[(10, u16::try_from(row).unwrap())].clone();
+    assert_eq!(
+        cell.bg,
+        Theme::default().accent,
+        "the selection highlight is untouched by the marker, got: {cell:?}"
+    );
+}
+
+#[test]
+fn the_shell_tells_the_view_what_plays_and_the_row_is_marked() {
+    let mut app = App::new(Vec::new());
+    app.show_playing_for_tests(nova(), Duration::ZERO, None, None);
+    app.set_radio_wire(Box::new(RadioData::<HttpTransport>::new(None, None, None)));
+    shell(&mut app, KeyCode::Char('R'));
+    app.show_radio_catalog(
+        norway(),
+        vec![station(
+            "Nova",
+            "https://stream.example/nova.mp3",
+            "MP3",
+            128,
+            "NO",
+        )],
+    );
+    assert!(
+        app_screen(&app).contains("▶ 1. Nova [128k] · NO"),
+        "the shell hands the playing station over; the view marks the row"
+    );
+
+    // A radio key after the fact keeps the marker current: radio_poll runs
+    // after every radio key, so no key can leave it stale.
+    shell(&mut app, KeyCode::Char('j'));
+    assert!(
+        app_screen(&app).contains("▶ 1. Nova [128k] · NO"),
+        "the marker survives a radio key, got:\n{}",
+        app_screen(&app)
+    );
+}
+
+#[test]
+fn the_shell_marks_no_radio_row_for_a_file_or_for_silence() {
+    // A local file plays: the queue entry is an `Entry::File`, and no
+    // station is playing — no radio row is marked.
+    let mut app = App::new(Vec::new());
+    app.show_playing_for_tests(
+        Entry::File(PathBuf::from("/music/Tide/01 - Dawn.flac")),
+        Duration::ZERO,
+        None,
+        None,
+    );
+    app.set_radio_wire(Box::new(RadioData::<HttpTransport>::new(None, None, None)));
+    shell(&mut app, KeyCode::Char('R'));
+    app.show_radio_catalog(
+        norway(),
+        vec![station(
+            "Nova",
+            "https://stream.example/nova.mp3",
+            "MP3",
+            128,
+            "NO",
+        )],
+    );
+    assert!(
+        !app_screen(&app).contains("▶ 1. Nova"),
+        "a file plays, no station: no radio row is marked"
+    );
+
+    // Nothing plays at all: the same silence.
+    let mut app = App::new(Vec::new());
+    app.set_radio_wire(Box::new(RadioData::<HttpTransport>::new(None, None, None)));
+    shell(&mut app, KeyCode::Char('R'));
+    app.show_radio_catalog(
+        norway(),
+        vec![station(
+            "Nova",
+            "https://stream.example/nova.mp3",
+            "MP3",
+            128,
+            "NO",
+        )],
+    );
+    assert!(
+        !app_screen(&app).contains("▶ 1. Nova"),
+        "nothing plays: no radio row is marked"
     );
 }

@@ -11,7 +11,10 @@
 use std::cell::RefCell;
 
 use velo::radio::client::{self, Client, Error, Order, StationSearch, Transport};
-use velo::radio::directory::{is_playable_codec, is_playable_station, loadable_stations};
+use velo::radio::directory::{
+    is_playable_codec, is_playable_station, loadable_stations, refusal, refusal_for,
+    refusal_tag_for,
+};
 
 /// A canned transport: records every URL it is asked to fetch and always
 /// answers with one fixed body. Tests never touch the network.
@@ -486,4 +489,83 @@ fn the_directory_rule_composes_the_codec_rule_and_hls() {
         "the codec alone would play"
     );
     assert!(!is_playable_station(&manifest), "the manifest rule refuses");
+}
+
+// --- A refusal says why (S1, issue #19) --------------------------------------
+
+#[test]
+fn an_hls_station_refuses_with_the_manifest_reason() {
+    let station = one_station("https://stream.example/live/index.m3u8");
+    assert_eq!(
+        refusal(&station).as_deref(),
+        Some("an HLS manifest: its .ts segments cannot be decoded"),
+        "the marker never says only `✗`: the URL rule names itself"
+    );
+    assert_eq!(
+        refusal(&one_station("https://stream.example/nova.mp3")),
+        None
+    );
+}
+
+#[test]
+fn a_codec_without_a_decoder_refuses_naming_the_codec() {
+    // Every codec in the spelling table has a decoder in this build, so no
+    // real `Station` can carry the codec refusal here. The decision is split:
+    // the helper takes the decodability as an argument, and the public entry
+    // point computes exactly that argument — the branch is testable without
+    // faking a build, and the public rule is not weakened.
+    assert_eq!(
+        refusal_for("opus", false, "https://stream.example/live").as_deref(),
+        Some("the codec opus is not in this build"),
+    );
+    assert_eq!(
+        refusal_for("opus", true, "https://stream.example/live"),
+        None,
+        "decodable means no refusal: the helper does not hold an opinion"
+    );
+}
+
+#[test]
+fn the_refusal_agrees_with_playability_in_both_branches() {
+    // Plays ⇔ no refusal, for the URL rule through real stations…
+    let manifest = one_station("https://stream.example/live/index.m3u8");
+    let plain = one_station("https://stream.example/nova.mp3");
+    assert_eq!(refusal(&manifest).is_none(), is_playable_station(&manifest));
+    assert_eq!(refusal(&plain).is_none(), is_playable_station(&plain));
+    // …and for the codec rule through the split helper, with the
+    // decodability the public entry point computes.
+    for decodable in [true, false] {
+        assert_eq!(
+            refusal_for("opus", decodable, "https://stream.example/live").is_none(),
+            decodable,
+        );
+    }
+}
+
+/// The tag and the sentence are two shapes of one decision: a status line gets
+/// the tag, the report gets the sentence, and they always name the same cause.
+#[test]
+fn the_refusal_tag_and_the_refusal_sentence_always_agree() {
+    let hls = "https://stream.example/live/chill.m3u8";
+    assert_eq!(
+        refusal_tag_for("MP3", true, hls).as_deref(),
+        Some("HLS manifest")
+    );
+    assert_eq!(
+        refusal_for("MP3", true, hls).as_deref(),
+        Some("an HLS manifest: its .ts segments cannot be decoded")
+    );
+
+    assert_eq!(
+        refusal_tag_for("wma", false, "https://stream.example/live").as_deref(),
+        Some("codec wma")
+    );
+    assert_eq!(
+        refusal_for("wma", false, "https://stream.example/live").as_deref(),
+        Some("the codec wma is not in this build")
+    );
+
+    // A station that plays has neither shape.
+    assert_eq!(refusal_tag_for("MP3", true, "https://s.example/live"), None);
+    assert_eq!(refusal_for("MP3", true, "https://s.example/live"), None);
 }

@@ -10,7 +10,10 @@
 //! back through [`RadioView::set_catalog`] — and it never plays on its own:
 //! `enter` on a station answers [`RadioOutcome::Play`] and `a` answers
 //! [`RadioOutcome::Queue`], and the shell — which owns the queue and the
-//! player — carries them out (T6c).
+//! player — carries them out (T6c). One key more: `i` on a station the codec
+//! filter rejected answers [`RadioOutcome::ReportIssue`], and the shell turns
+//! that into a prefilled bug report the browser opens (S3, issue #19);
+//! nothing here posts anything.
 //!
 //! The sections, in order and only when they have content: browse all
 //! countries, the user's own country (`Norway (near you)`) with its regions
@@ -34,8 +37,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, ListState, Paragraph};
 
 use crate::radio::client::{Country, Order, State, Station, Tag};
-use crate::radio::directory::is_playable_station;
-use crate::radio::store::{Favorite, Pinned, RadioStore};
+use crate::radio::directory::{is_playable_codec, is_playable_station, refusal, refusal_for};
+use crate::radio::store::{Favorite, Pinned, RadioStore, station_key};
 
 use super::plural;
 use super::theme::Theme;
@@ -66,6 +69,19 @@ pub enum RadioOutcome {
         url: String,
         /// The station's own, user-facing name.
         name: String,
+    },
+    /// `i` on a catalog station the codec filter rejected (S3, issue #19):
+    /// the facts a prefilled bug report carries, gathered from the station
+    /// and the directory's [`refusal`]. The view builds only the facts; the
+    /// shell — which knows the version and the platform — builds the URL and
+    /// hands it to the browser. Nothing is ever posted; the human reads the
+    /// draft and submits it.
+    ReportIssue {
+        /// The issue's title, naming the station.
+        title: String,
+        /// The issue's body: the station's name, codec and `url_resolved`,
+        /// and the reason the directory refused it.
+        body: String,
     },
     /// Not a radio key: the rest of the keymap may have it.
     Pass,
@@ -287,6 +303,13 @@ pub struct RadioView {
     /// Whether `ctrl-r` asked the caller for a fresh directory, not yet
     /// taken.
     refresh_wanted: bool,
+    /// The URL of the station the shell says is playing, when it plays a
+    /// station (S15, issue #32). The shell owns the fact — the queue and
+    /// the player are its — and hands it in through
+    /// [`RadioView::set_playing`] on every tick and after every radio key;
+    /// the view knows nothing about players and only renders what it was
+    /// told. `None` — a local file, or nothing at all — marks no row.
+    playing: Option<String>,
 }
 
 impl RadioView {
@@ -319,6 +342,7 @@ impl RadioView {
             country_ask: None,
             dirty: false,
             refresh_wanted: false,
+            playing: None,
         }
     }
 
@@ -357,6 +381,15 @@ impl RadioView {
     #[must_use]
     pub fn pending_place(&self) -> Option<&Place> {
         self.pending.as_ref()
+    }
+
+    /// Says which station the shell is playing, if it plays a station: the
+    /// shell owns that fact and refreshes it on every tick and after every
+    /// radio key (S15, issue #32). `None` — a local file playing, or
+    /// nothing at all — marks no row. The view never guesses: it marks
+    /// exactly the station it was told, wherever its row appears.
+    pub fn set_playing(&mut self, url: Option<String>) {
+        self.playing = url;
     }
 
     /// Replaces the country index, as `/countries` answered (T6b). An
@@ -484,6 +517,27 @@ impl RadioView {
         row.kind.selectable().then_some(row)
     }
 
+    /// Why the station under the cursor cannot play, when it is a catalog
+    /// station the codec filter rejected: the directory's own refusal
+    /// ([`crate::radio::directory::refusal`]) — the same reason `✗` marked
+    /// the row with (S1, issue #19). Every other row kind answers `None`:
+    /// favourites and hand-added stations skip the filter by design, so
+    /// their playing is never a refusal, and a playable station has none
+    /// to give.
+    #[must_use]
+    pub fn selected_refusal(&self) -> Option<String> {
+        let row = self.selection()?;
+        match row.kind {
+            RowKind::CatalogStation {
+                station,
+                playable: false,
+            } => refusal(&station),
+            RowKind::FavoriteStation { favorite } => favorite_refusal(&favorite),
+            RowKind::AddedStation { url, .. } => added_refusal(&url),
+            _ => None,
+        }
+    }
+
     /// Applies one key press. Keys the view does not own answer
     /// [`RadioOutcome::Pass`] and still reach the rest of the keymap, so
     /// `space`, the volume and `q` keep working over the radio.
@@ -537,6 +591,7 @@ impl RadioView {
                 self.toggle_mark();
                 RadioOutcome::Handled
             }
+            KeyCode::Char('i') => self.report_issue(),
             KeyCode::Char('N') => {
                 self.open_countries();
                 RadioOutcome::Handled
@@ -711,6 +766,49 @@ impl RadioView {
             url,
             name,
         })
+    }
+
+    /// `i` on the selected row: only a catalog station the codec filter
+    /// rejected answers with [`RadioOutcome::ReportIssue`] — the report's
+    /// facts, from the station and the directory's [`refusal`] (S3, issue
+    /// #19). Every other row — a playable station, a favourite, a hand-added
+    /// station, a place, the rule, a header — passes the key through
+    /// untouched, so the rest of the keymap keeps it and a future global
+    /// binding stays free.
+    fn report_issue(&self) -> RadioOutcome {
+        let Some(row) = self.selection() else {
+            return RadioOutcome::Pass;
+        };
+        // The `✗` marker was built from these same refusals: if one says no,
+        // there is no report to file.
+        let (name, codec, url, reason) = match row.kind {
+            RowKind::CatalogStation {
+                station,
+                playable: false,
+            } => {
+                let Some(reason) = refusal(&station) else {
+                    return RadioOutcome::Pass;
+                };
+                (station.name, station.codec, station.url_resolved, reason)
+            }
+            RowKind::FavoriteStation { favorite } => {
+                let Some(reason) = favorite_refusal(&favorite) else {
+                    return RadioOutcome::Pass;
+                };
+                (favorite.name, favorite.codec, favorite.url, reason)
+            }
+            RowKind::AddedStation { name, url } => {
+                let Some(reason) = added_refusal(&url) else {
+                    return RadioOutcome::Pass;
+                };
+                (name, String::from("unknown"), url, reason)
+            }
+            _ => return RadioOutcome::Pass,
+        };
+        RadioOutcome::ReportIssue {
+            title: format!("Radio station \"{name}\" does not play"),
+            body: format!("Station: {name}\nCodec: {codec}\nURL: {url}\nReason: {reason}"),
+        }
     }
 
     /// The place of one country, named from the index when it is there.
@@ -920,7 +1018,7 @@ impl RadioView {
             .station
             .iter()
             .map(|added| Row {
-                label: added.name.clone(),
+                label: marked(added.name.clone(), added_refusal(&added.url).as_ref()),
                 fact: String::new(),
                 kind: RowKind::AddedStation {
                     name: added.name.clone(),
@@ -934,7 +1032,10 @@ impl RadioView {
                 .iter()
                 .filter(|favorite| favorite.countrycode.is_empty())
                 .map(|favorite| Row {
-                    label: favorite_label(favorite),
+                    label: marked(
+                        favorite_label(favorite),
+                        favorite_refusal(favorite).as_ref(),
+                    ),
                     fact: String::new(),
                     kind: RowKind::FavoriteStation {
                         favorite: favorite.clone(),
@@ -1080,7 +1181,10 @@ impl RadioView {
         });
         for favorite in &self.store.favorite {
             rows.push(Row {
-                label: favorite_label(favorite),
+                label: marked(
+                    favorite_label(favorite),
+                    favorite_refusal(favorite).as_ref(),
+                ),
                 fact: String::new(),
                 kind: RowKind::FavoriteStation {
                     favorite: favorite.clone(),
@@ -1099,11 +1203,11 @@ impl RadioView {
                 let playable = is_playable_station(station);
                 let favorite = self.store.is_favorite(&station.url_resolved);
                 let mut label = String::new();
-                if !playable {
-                    label.push_str("✗ ");
-                }
                 if favorite {
                     label.push('★');
+                }
+                if !playable {
+                    label.push_str(if favorite { " ✗ " } else { "✗ " });
                 }
                 label.push_str(&station.name);
                 label.push_str(&station_facts(station));
@@ -1199,6 +1303,12 @@ impl RadioView {
             // The rule and the headers take no number: the numbering counts
             // only the rows a person can act on (S5, #22).
             let numbered = visible.iter().filter(|row| row.kind.selectable()).count();
+            // The playing marker matches on the station key (S15, #32): the
+            // same station reached through a favourite, the store or the
+            // catalogue can be spelled differently — host case, a default
+            // port, a trailing slash — and the key, never the string as
+            // written, decides.
+            let playing_key = self.playing.as_deref().map(station_key);
             let mut number = 0usize;
             let rows: Vec<ListItem<'static>> = visible
                 .iter()
@@ -1213,9 +1323,12 @@ impl RadioView {
                     )),
                     _ => {
                         number += 1;
+                        let playing = playing_key.is_some()
+                            && station_row_key(&row.kind)
+                                .is_some_and(|key| playing_key.as_deref() == Some(key.as_str()));
                         ListItem::new(list_row(
                             ListRow {
-                                playing: false,
+                                playing,
                                 number,
                                 digits: digits(numbered),
                                 name: row.label.clone(),
@@ -1303,9 +1416,54 @@ fn station_of_row(kind: &RowKind) -> Option<(String, String)> {
     }
 }
 
+/// The station key of the URL a station row names, when the row is a
+/// station at all: a catalog station, a hand-added one or a favourite. The
+/// playing marker matches on this key (S15, issue #32), never on the URL
+/// as written — the same identity rule the store's toggles go through.
+fn station_row_key(kind: &RowKind) -> Option<String> {
+    match kind {
+        RowKind::CatalogStation { station, .. } => Some(station_key(&station.url_resolved)),
+        RowKind::AddedStation { url, .. } => Some(station_key(url)),
+        RowKind::FavoriteStation { favorite } => Some(station_key(&favorite.url)),
+        _ => None,
+    }
+}
+
 /// `★ Name [MP3] · NO`, leaving out what the store does not know. The store
 /// keeps no bitrate, so a favourite shows its codec where a catalog station
 /// shows `128k`.
+/// The refusal for a favourite: the directory announced its codec, so both
+/// rules apply exactly as they do for a catalog station.
+fn favorite_refusal(favorite: &Favorite) -> Option<String> {
+    refusal_for(
+        &favorite.codec,
+        is_playable_codec(&favorite.codec),
+        &favorite.url,
+    )
+}
+
+/// A hand-added station carries no codec claim, so only the URL rule can refuse
+/// it: an `.m3u8` is an HLS manifest whatever the station says about itself.
+fn added_refusal(url: &str) -> Option<String> {
+    refusal_for("", true, url)
+}
+
+/// `✗ ` in front of a row whose station cannot play. The marker states a fact
+/// about the station, so it shows wherever the station appears — a favourite is
+/// still playable on purpose, and the truth is not hidden for it.
+fn marked(label: String, refusal: Option<&String>) -> String {
+    if refusal.is_none() {
+        return label;
+    }
+    // The star says what the row is, the cross says what it cannot do: read
+    // left to right, identity first, state after. A favourite that cannot play
+    // therefore reads `★ ✗ Name`, in every section it appears in.
+    match label.strip_prefix("★ ") {
+        Some(rest) => format!("★ ✗ {rest}"),
+        None => format!("✗ {label}"),
+    }
+}
+
 fn favorite_label(favorite: &Favorite) -> String {
     use std::fmt::Write as _;
 
