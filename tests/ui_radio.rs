@@ -2017,7 +2017,7 @@ fn a_favourite_that_cannot_play_is_marked_and_a_playable_one_is_not() {
     let view = view_with_refused_stations();
     let labels = view.labels();
     assert!(
-        labels.iter().any(|label| label == "✗ ★ Hls Fav [MP3] · NO"),
+        labels.iter().any(|label| label == "★ ✗ Hls Fav [MP3] · NO"),
         "the refused favourite is marked, got: {labels:?}"
     );
     assert!(
@@ -2044,7 +2044,7 @@ fn a_hand_added_station_that_cannot_play_is_marked() {
     assert!(
         labels
             .iter()
-            .any(|label| label == "✗ ★ No Country Hls [AAC]"),
+            .any(|label| label == "★ ✗ No Country Hls [AAC]"),
         "a no-country favourite is marked too, got: {labels:?}"
     );
 }

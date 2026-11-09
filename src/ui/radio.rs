@@ -1186,11 +1186,11 @@ impl RadioView {
                 let playable = is_playable_station(station);
                 let favorite = self.store.is_favorite(&station.url_resolved);
                 let mut label = String::new();
-                if !playable {
-                    label.push_str("✗ ");
-                }
                 if favorite {
                     label.push('★');
+                }
+                if !playable {
+                    label.push_str(if favorite { " ✗ " } else { "✗ " });
                 }
                 label.push_str(&station.name);
                 label.push_str(&station_facts(station));
@@ -1413,10 +1413,15 @@ fn added_refusal(url: &str) -> Option<String> {
 /// about the station, so it shows wherever the station appears — a favourite is
 /// still playable on purpose, and the truth is not hidden for it.
 fn marked(label: String, refusal: Option<&String>) -> String {
-    if refusal.is_some() {
-        format!("✗ {label}")
-    } else {
-        label
+    if refusal.is_none() {
+        return label;
+    }
+    // The star says what the row is, the cross says what it cannot do: read
+    // left to right, identity first, state after. A favourite that cannot play
+    // therefore reads `★ ✗ Name`, in every section it appears in.
+    match label.strip_prefix("★ ") {
+        Some(rest) => format!("★ ✗ {rest}"),
+        None => format!("✗ {label}"),
     }
 }
 
