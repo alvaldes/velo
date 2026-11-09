@@ -765,6 +765,10 @@ fn browse_interface(
         // The session comes back before anything else can move (S3), and
         // remembers the volume above as what the file says.
         app.set_session(settings.session.clone());
+        // The shell opens on the first screen (issue #3): the sources, one
+        // level above the library and the radio. The file-launch path
+        // (`run_interface`) has no sources to choose from.
+        app.open_sources();
         // Remote rows play through the cache (T12c); without a server this
         // stays `None` and every entry already is a file.
         app.set_resolver(resolver);

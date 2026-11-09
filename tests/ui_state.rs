@@ -819,15 +819,32 @@ fn ascending_from_the_artist_level_stays_at_the_artists() {
     }
     assert_eq!(app.level(), Some(Level::Artists));
 
-    // …and a third, plus `Backspace`, is absorbed there instead of
-    // underflowing the level stack.
+    // …and a third walks back one level more: to the sources screen (S6),
+    // the way out of the library is the way in, and the level it keeps.
     assert_eq!(app.on_key(key(KeyCode::Esc)), Action::Ascend);
     app.apply(Action::Ascend);
+    assert_eq!(app.view(), View::Sources);
     assert_eq!(app.level(), Some(Level::Artists));
 
-    assert_eq!(app.on_key(key(KeyCode::Backspace)), Action::Ascend);
-    app.apply(Action::Ascend);
+    // On the sources screen `Backspace` is inert (S6): the top of all is
+    // already where the view stands.
+    assert_eq!(app.on_key(key(KeyCode::Backspace)), Action::None);
+    app.apply(Action::None);
+    assert_eq!(app.view(), View::Sources);
     assert_eq!(app.level(), Some(Level::Artists));
+}
+
+/// `Esc` over the flat command-line list was always absorbed, and still is
+/// (issue #3): the files given have no sources screen to walk back to.
+#[test]
+fn esc_over_the_command_line_files_is_absorbed_and_stays_on_the_list() {
+    let mut app = app_with_three_tracks();
+
+    assert_eq!(app.on_key(key(KeyCode::Esc)), Action::None);
+    app.apply(Action::None);
+    assert_eq!(app.on_key(key(KeyCode::Backspace)), Action::None);
+    app.apply(Action::None);
+    assert_eq!(app.view(), View::Library);
 }
 
 // ---- the library search (T7, S9) -----------------------------------------
