@@ -317,6 +317,34 @@ beside the tracks, with their own name and the note `radio`, and opening one
 plays the live stream. In `--json` output a station carries
 `"kind":"station"` where a track carries `"kind":"file"`.
 
+## Playlists in and out
+
+Saved playlists — the ones under the `Playlists` source, stored in
+`library.toml` — can be imported from and exported to the playlist files
+other players write. Both verbs are headless: no terminal, no library index,
+so they work over ssh:
+
+```sh
+velo playlist import ~/music/noche.m3u     # .m3u, .m3u8 and .pls all read
+velo playlist export Noche ~/backup/noche.m3u
+```
+
+An import saves a new playlist named after the file's stem (`noche.m3u`
+becomes `noche`), refusing a name that is already taken. Relative entries
+resolve against the playlist file's own directory; absolute ones stay. Entries
+whose file is gone are reported, not dropped silently — and not stored:
+
+```
+1 of 3 entries are gone
+/Users/you/music/old-take.flac
+imported "noche" with 2 of 3 entries
+```
+
+A playlist whose every entry is gone is refused — nothing to save. An export
+writes an `.m3u` with `#EXTM3U`/`#EXTINF` lines and absolute paths, exactly
+the shape the import reads back, so a round trip keeps the playlist's tracks
+and their order. An unknown name is refused.
+
 ## Configuration
 
 Everything velo keeps lives in one directory, `$XDG_CONFIG_HOME/velo` (else

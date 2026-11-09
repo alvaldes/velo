@@ -179,3 +179,70 @@ fn invalid_utf8_does_not_panic() {
     let result = unwrap_station(body);
     assert!(matches!(result, Ok(_) | Err(ListsError::NoStream)));
 }
+
+// ---- every entry, for `velo playlist import` (issue #9) ---------------------
+//
+// The whole parse `unwrap_station` starts from, exposed without the
+// station-only filter: local paths and relative entries come through, in
+// order, because a saved playlist is paths. The station verdicts — which
+// format, HLS — carry over unchanged.
+
+use velo::radio::lists::entries;
+
+#[test]
+fn entries_of_a_pls_come_back_sorted_numerically_with_nothing_filtered() {
+    let body = "\
+[playlist]\n\
+NumberOfEntries=3\n\
+File3=/music/third.flac\n\
+File1=music/first.flac\n\
+File2=http://example.org/second\n\
+";
+    assert_eq!(
+        entries(body.as_bytes()).unwrap(),
+        [
+            String::from("music/first.flac"),
+            String::from("http://example.org/second"),
+            String::from("/music/third.flac"),
+        ],
+        "File1 before File2 before File3, however the file wrote them; a local path is an entry too"
+    );
+}
+
+#[test]
+fn entries_of_an_m3u_come_back_in_file_order_comments_and_blanks_skipped() {
+    let body = "\
+#EXTM3U\n\
+#EXTINF:-1,Local\n\
+music/episode-01.mp3\n\
+\n\
+#EXTINF:-1,Remote\n\
+https://example.org/stream\n\
+";
+    assert_eq!(
+        entries(body.as_bytes()).unwrap(),
+        [
+            String::from("music/episode-01.mp3"),
+            String::from("https://example.org/stream"),
+        ]
+    );
+}
+
+#[test]
+fn entries_make_the_same_verdicts_unwrap_station_makes() {
+    assert_eq!(
+        entries(b"<html>Not found</html>"),
+        Err(ListsError::NotAPlaylist)
+    );
+    assert_eq!(entries(b""), Err(ListsError::NotAPlaylist));
+    assert_eq!(
+        entries(b"#EXTM3U\n#EXT-X-TARGETDURATION:10\n"),
+        Err(ListsError::Hls)
+    );
+}
+
+#[test]
+fn entries_of_an_m3u_carrying_only_comments_come_back_empty() {
+    // Empty is the importer's "nothing to save" case, not a parse error.
+    assert_eq!(entries(b"#EXTM3U\n# only comments\n"), Ok(Vec::new()));
+}
