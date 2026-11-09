@@ -40,6 +40,15 @@ fn main() -> ExitCode {
         // no file to edit.
         eprintln!("velo: cannot write {}: {error}", path.display());
     }
+    // The files a person edits by hand exist from the first launch, with a
+    // documented template inside; one that is already there is never touched.
+    // `history.toml` is not one of them: it appears when the first track does.
+    if let Some(config_file) = &config_file {
+        let radio_file = config_file.with_file_name("radio.toml");
+        if let Err(error) = velo::radio::store::write_template_if_missing(&radio_file) {
+            eprintln!("velo: cannot write {}: {error}", radio_file.display());
+        }
+    }
     let settings = match user_settings(&cli, config_file.as_deref()) {
         Ok(settings) => settings,
         Err(error) => {

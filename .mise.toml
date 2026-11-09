@@ -1,2 +1,10 @@
 [tools]
 rust = "1.99.1"
+
+[tasks.dev]
+description = "Build velo in release mode"
+run = "cargo run --release --quiet"
+
+[tasks.index]
+description = "Index ~/Music/Library into the velo database and print the counts"
+run = "cargo run --release --quiet -- --index"

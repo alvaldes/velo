@@ -10,7 +10,10 @@
 use std::fs;
 use std::path::PathBuf;
 
-use velo::radio::store::{Favorite, Pinned, RadioStore, Station, StoreError, Toggled, station_key};
+use velo::radio::store::{
+    Favorite, Pinned, RadioStore, Station, StoreError, TEMPLATE, Toggled, station_key,
+    write_template_if_missing,
+};
 
 // ------------------------------------------------------------- infrastructure
 
@@ -280,4 +283,42 @@ fn the_station_key_normalises_the_five_shapes() {
         station_key("https://a.example/s?x=1"),
         station_key("https://a.example/s?y=1")
     );
+}
+
+// -------------------------------------------- the fresh-install template
+
+#[test]
+fn a_fresh_install_finds_a_documented_radio_file_that_holds_nothing() {
+    let scratch = Scratch::new("template");
+    let file = scratch.file();
+
+    assert!(
+        write_template_if_missing(&file).unwrap(),
+        "the template is written when nothing is there"
+    );
+    let text = fs::read_to_string(&file).unwrap();
+    assert!(
+        text.contains("[[favorite]]") && text.contains("[[station]]"),
+        "the format is shown by example: {text}"
+    );
+    assert_eq!(
+        RadioStore::load(&file).expect("the template parses"),
+        RadioStore::default(),
+        "and it holds nothing, so the first launch has no favourites"
+    );
+    assert_eq!(TEMPLATE, text, "the file is the template, byte for byte");
+}
+
+#[test]
+fn the_template_never_touches_a_file_that_is_already_there() {
+    let scratch = Scratch::new("template-keep");
+    let file = scratch.file();
+    let hand = "[[favorite]]\nname = \"Mine\"\nurl = \"https://example.com/a\"\ncountrycode = \"NO\"\ncodec = \"MP3\"\n";
+    fs::write(&file, hand).unwrap();
+
+    assert!(
+        !write_template_if_missing(&file).unwrap(),
+        "nothing is written over an existing file"
+    );
+    assert_eq!(fs::read_to_string(&file).unwrap(), hand, "byte for byte");
 }

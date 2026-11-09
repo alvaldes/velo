@@ -174,6 +174,51 @@ pub struct RadioStore {
     pub station: Vec<Station>,
 }
 
+/// What a fresh install finds in `radio.toml`: the tables the store keeps,
+/// one commented example each, so a station can be added by hand without
+/// knowing the format. Every line is a comment, so the file loads as an empty
+/// store; velo rewrites the whole file when it saves, comments and all.
+pub const TEMPLATE: &str = r#"# The stations you kept: favourites, pinned places, and the ones you added by
+# hand. velo rewrites this whole file when it saves it, so these comments are
+# a starting point, not a promise.
+#
+# [[favorite]]
+# name = "Radio Paradise"
+# url = "https://stream.radioparadise.com/mp3-192"
+# countrycode = "US"
+# codec = "MP3"
+#
+# [[pinned]]
+# code = "DE"
+# name = "Germany"
+# state = ""
+#
+# [[station]]
+# name = "My station"
+# url = "https://example.com/live.mp3"
+"#;
+
+/// Writes [`TEMPLATE`] to `path` when nothing is there, so the format is
+/// discoverable from the first launch; an existing file is never touched,
+/// never rewritten and never reordered. Answers whether it wrote.
+///
+/// # Errors
+/// Fails when the parent directory or the file cannot be created.
+pub fn write_template_if_missing(path: &Path) -> std::io::Result<bool> {
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path);
+    match file {
+        Ok(mut file) => {
+            std::io::Write::write_all(&mut file, TEMPLATE.as_bytes())?;
+            Ok(true)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 impl RadioStore {
     /// Loads the store from `path`. A missing file is an empty store; an
     /// unreadable or corrupt file is an error, so the caller can refuse to

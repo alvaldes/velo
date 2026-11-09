@@ -636,3 +636,31 @@ fn mono_without_bit_perfect_gets_past_the_startup_check() {
     );
     let _ = std::fs::remove_dir_all(&home);
 }
+
+#[test]
+fn a_fresh_home_gains_the_config_and_the_radio_template_but_no_history() {
+    // What a person who just installed velo finds: the config that documents
+    // itself, and the radio file that shows the format by example. The
+    // history is not one of them — an empty one would say nothing.
+    let home = temp_home("fresh-files");
+    let (code, stderr) = run_in(&home, &[]);
+    assert_eq!(code, 1, "a headless launch refuses the interface: {stderr}");
+
+    let config_dir = home.join(".config").join("velo");
+    assert!(
+        config_dir.join("config.toml").is_file(),
+        "the config is written on the first launch"
+    );
+    let radio = std::fs::read_to_string(config_dir.join("radio.toml"))
+        .expect("the radio template is written on the first launch");
+    assert!(
+        radio.contains("[[favorite]]") && radio.contains("[[station]]"),
+        "the radio file documents its own format: {radio}"
+    );
+    assert!(
+        !config_dir.join("history.toml").exists(),
+        "the history appears when the first track does, not before"
+    );
+
+    let _ = std::fs::remove_dir_all(&home);
+}
