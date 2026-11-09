@@ -1,6 +1,10 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.30.3] - 2026-11-09
+
+### Fixes
+- **ui:** The radio owns the header too, not only the body
 ## [0.30.2] - 2026-11-09
 
 ### Fixes
