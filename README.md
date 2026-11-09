@@ -46,7 +46,7 @@ Every key below is what the code does today.
 |:--|:--|
 | `j` / `↓`, `k` / `↑` | Move down / up |
 | `g` / `G` | First / last row |
-| `enter` (sources) | Open the source under the cursor: `Local library` or `Radio` |
+| `enter` (sources) | Open the source under the cursor: `Local library`, `Radio` or `Recently played` |
 | `enter` (library) | Open an artist, album or genre; play from the selected track onwards through the list it is in |
 | `esc` / `backspace` | Back one level; from the top of the library, or when the radio closes, back to `Sources`. Closes the help overlay |
 | `1` `2` `3` `4` | Library view: artists (artist → album → track), every album, every track, genres |
@@ -81,8 +81,10 @@ cancels — leaving the browser exactly where it was. The queue only lets you
 edit entries after the one playing: the playing entry cannot be removed and
 nothing moves across it, and each refusal explains itself in the status line.
 
-The first screen is `Sources`: `Local library` and `Radio`, with the cursor
-already on the library. `esc` walks back one level at a time; the top of the
+The first screen is `Sources`: `Local library`, `Radio` and `Recently played`, with
+the cursor already on the library. `Recently played` lists what `velo history`
+reports — the history file's entries, newest first — and its rows play and queue
+like any track. `esc` walks back one level at a time; the top of the
 library and the radio both land there, and a radio opened with `R` from the
 library comes back to the library — the way out is always the way in. A
 source's own keys stay its own once it is open. A launch that names files on
@@ -240,6 +242,24 @@ the clipping cap further up respects.
 
 Each file is reported as `ok`, `skipped (no audio)` or `failed (reason)`; one
 bad file never stops the run, and a read-only file is reported, not forced.
+
+## Recently played
+
+velo writes what begins playing to `~/.config/velo/history.toml` (beside
+`config.toml`, or `$XDG_CONFIG_HOME/velo/history.toml` when that is set):
+newest first, one entry per path — playing a track again moves it up instead
+of duplicating it — capped at 500 entries, and a seek is not a new beginning.
+Reading it needs no interactive terminal:
+
+```sh
+velo history         # one line per entry, newest first
+velo history --json  # the same entries as a JSON array, for a script
+velo history clear   # empty the history
+```
+
+The history is written by the interface; the one-shot `--play` mode writes
+nothing. `history` is a subcommand now: a file that happens to be named
+`history` is opened with a path (`velo ./history`).
 
 ## Configuration
 

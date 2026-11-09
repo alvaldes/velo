@@ -2665,3 +2665,55 @@ fn a_refused_answer_leaves_the_seek_prompt_open() {
         "`j` was typed into the prompt"
     );
 }
+
+// ---- the recently played write hook (issue #5) --------------------------------
+
+#[test]
+fn the_history_tick_records_one_beginning_per_change_of_path() {
+    // A temp directory of the same make as `TempLibrary`, for a config file
+    // whose side the history is written on. Plain paths that need not exist.
+    let root = std::env::temp_dir().join(format!("velo-ui-history-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+
+    let config = root.join("velo").join("config.toml");
+    let mut app = App::browse(None);
+    app.set_config_file(Some(config.clone()));
+
+    let a = PathBuf::from("/music/Tide/01 - Nightfall.flac");
+    let b = PathBuf::from("/music/Tide/02 - Later.flac");
+
+    // The same path twice is one beginning: the tick sees the same entry on
+    // every frame, and only a change counts.
+    app.history_tick(Some(a.clone()));
+    app.history_tick(Some(a.clone()));
+    assert_eq!(app.recently_played().len(), 1);
+
+    // A different path is a new beginning, on top.
+    app.history_tick(Some(b.clone()));
+    assert_eq!(app.recently_played().len(), 2);
+    assert_eq!(app.recently_played()[0].path, b.to_string_lossy());
+    assert_eq!(app.recently_played()[1].path, a.to_string_lossy());
+
+    // Playing the first again moves it up instead of duplicating it, with a
+    // fresh moment.
+    let earlier = app.recently_played()[1].played_at;
+    app.history_tick(Some(a.clone()));
+    assert_eq!(app.recently_played().len(), 2);
+    assert_eq!(app.recently_played()[0].path, a.to_string_lossy());
+    assert!(app.recently_played()[0].played_at >= earlier);
+
+    // Nothing playing resets the seen path, so the next beginning of the
+    // same path counts again — but it still dedupes to one entry.
+    app.history_tick(None);
+    app.history_tick(Some(a.clone()));
+    assert_eq!(app.recently_played().len(), 2, "no duplicate row");
+    assert_eq!(app.recently_played()[0].path, a.to_string_lossy());
+
+    // The file on disk is the list in memory.
+    let file = velo::history::path_beside(&config);
+    let from_disk = velo::history::History::load(&file).unwrap();
+    assert_eq!(from_disk.entry, app.recently_played());
+
+    let _ = fs::remove_dir_all(&root);
+}

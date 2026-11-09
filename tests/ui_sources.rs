@@ -31,12 +31,15 @@ fn press(app: &mut App<'_>, code: KeyCode) -> Action {
 /// S1, S2: the first screen lists what velo can play, with the cursor
 /// already on the first row.
 #[test]
-fn the_sources_screen_names_both_sources_with_the_cursor_on_the_first() {
+fn the_sources_screen_names_the_three_sources_with_the_cursor_on_the_first() {
     let mut app = app();
     app.open_sources();
 
     assert_eq!(app.view(), View::Sources);
-    assert_eq!(app.sources_labels(), ["Local library", "Radio"]);
+    assert_eq!(
+        app.sources_labels(),
+        ["Local library", "Radio", "Recently played"]
+    );
     assert_eq!(
         app.sources_selected(),
         0,
@@ -53,11 +56,13 @@ fn the_source_cursor_moves_with_the_list_keys_and_clamps() {
     press(&mut app, KeyCode::Char('j'));
     assert_eq!(app.sources_selected(), 1);
     press(&mut app, KeyCode::Char('j'));
-    assert_eq!(app.sources_selected(), 1, "j stops at the last source");
+    assert_eq!(app.sources_selected(), 2);
+    press(&mut app, KeyCode::Char('j'));
+    assert_eq!(app.sources_selected(), 2, "j stops at the last source");
     press(&mut app, KeyCode::Char('k'));
-    assert_eq!(app.sources_selected(), 0);
-    press(&mut app, KeyCode::Char('G'));
     assert_eq!(app.sources_selected(), 1);
+    press(&mut app, KeyCode::Char('G'));
+    assert_eq!(app.sources_selected(), 2);
     press(&mut app, KeyCode::Char('g'));
     assert_eq!(app.sources_selected(), 0);
 }

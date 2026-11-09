@@ -27,7 +27,7 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use serde::Deserialize as _;
 use serde::de::{self, Deserializer, Visitor};
 
@@ -84,6 +84,7 @@ pub struct SubsonicConfig {
 #[command(
     name = "velo",
     version,
+    args_conflicts_with_subcommands = true,
     about = "A fast, single-binary music player for your terminal",
     long_about = "A fast, single-binary music player for your terminal.
 
@@ -109,6 +110,13 @@ Subsonic:
                                      covers), print per cache how many
                                      files and how much space were freed,
                                      then exit
+History:
+    velo history                 What was played recently, newest first, one
+                                     line per entry, then exit
+    velo history --json          The same entries as a JSON array, for a
+                                     script, then exit
+    velo history clear           Empty the history file, then exit — all
+                                     three run without a terminal
 ReplayGain:
     velo --replaygain-scan <file>...   Measure each file (all files in one
                                      invocation are one album) and print the
@@ -201,6 +209,33 @@ pub struct Cli {
     /// Library root to index or browse; overrides `library` in the config file.
     #[arg(long, value_name = "PATH")]
     pub library: Option<PathBuf>,
+
+    /// A headless answer, `velo history …`. Every other mode stays a flag.
+    #[command(subcommand)]
+    pub command: Option<Command>,
+}
+
+/// The one subcommand the command line carries: `velo history`, in its three
+/// shapes — plain, `--json`, `clear`.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum Command {
+    /// What was played recently, newest first.
+    #[command(args_conflicts_with_subcommands = true)]
+    History {
+        /// Print the entries as a JSON array instead of one line each.
+        #[arg(long)]
+        json: bool,
+        /// Empty the history.
+        #[command(subcommand)]
+        action: Option<HistoryAction>,
+    },
+}
+
+/// A history action: today only emptying the file.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum HistoryAction {
+    /// Empty the history file.
+    Clear,
 }
 
 /// The config file as the user wrote it: every key optional, nothing filled in.

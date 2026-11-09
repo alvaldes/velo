@@ -8,7 +8,8 @@
 use std::process::Command;
 
 use clap::Parser as _;
-use velo::config::Cli;
+use velo::config::Command as HistoryCommand;
+use velo::config::{Cli, HistoryAction};
 
 #[test]
 fn the_positional_files_parse_in_order() {
@@ -440,5 +441,153 @@ fn a_broken_file_fails_without_stopping_the_run() {
         stdout.contains("good.wav") && stdout.contains("track gain"),
         "the run continued with the good file:\n{stdout}"
     );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+// ----------------------------------------------------- the history (issue #5)
+
+#[test]
+fn the_history_subcommand_parses_in_its_three_shapes() {
+    let cli = Cli::try_parse_from(["velo", "history"])
+        .unwrap_or_else(|error| panic!("parse failed: {error}"));
+    assert_eq!(
+        cli.command,
+        Some(HistoryCommand::History {
+            json: false,
+            action: None
+        })
+    );
+
+    let cli = Cli::try_parse_from(["velo", "history", "--json"])
+        .unwrap_or_else(|error| panic!("parse failed: {error}"));
+    assert_eq!(
+        cli.command,
+        Some(HistoryCommand::History {
+            json: true,
+            action: None
+        })
+    );
+
+    let cli = Cli::try_parse_from(["velo", "history", "clear"])
+        .unwrap_or_else(|error| panic!("parse failed: {error}"));
+    assert_eq!(
+        cli.command,
+        Some(HistoryCommand::History {
+            json: false,
+            action: Some(HistoryAction::Clear)
+        })
+    );
+
+    assert!(
+        Cli::try_parse_from(["velo", "history", "bogus"]).is_err(),
+        "an unknown history action is a usage error"
+    );
+}
+
+/// Writes a two-entry history, newest first: the top entry with artist and
+/// title, the one below with only its path.
+fn write_two_entry_history(home: &std::path::Path) {
+    let dir = home.join(".config").join("velo");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("history.toml"),
+        concat!(
+            "[[entry]]\n",
+            "path = \"/music/Tide/01 - Nightfall.flac\"\n",
+            "played_at = 1762668000\n",
+            "artist = \"Tide\"\n",
+            "title = \"Nightfall\"\n",
+            "\n",
+            "[[entry]]\n",
+            "path = \"/music/other/02 - Bare.flac\"\n",
+            "played_at = 1762660000\n",
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
+fn velo_history_prints_one_line_per_entry_newest_first() {
+    let home = temp_home("history-plain");
+    write_two_entry_history(&home);
+
+    let (code, stdout, stderr) = run_capture(&home, &["history"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(stdout, "Tide \u{2014} Nightfall\n02 - Bare\n");
+    assert_eq!(stderr, "");
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn velo_history_json_prints_the_same_order_as_one_array() {
+    let home = temp_home("history-json");
+    write_two_entry_history(&home);
+
+    let (code, stdout, stderr) = run_capture(&home, &["history", "--json"]);
+    assert_eq!(code, 0);
+    assert_eq!(
+        stdout,
+        concat!(
+            "[{\"path\":\"/music/Tide/01 - Nightfall.flac\",\"played_at\":1762668000,",
+            "\"artist\":\"Tide\",\"title\":\"Nightfall\"},",
+            "{\"path\":\"/music/other/02 - Bare.flac\",\"played_at\":1762660000}]\n"
+        )
+    );
+    assert_eq!(stderr, "");
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn velo_history_clear_empties_the_file_and_stays_a_success_when_empty() {
+    let home = temp_home("history-clear");
+    write_two_entry_history(&home);
+
+    let (code, _, stderr) = run_capture(&home, &["history", "clear"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let (code, stdout, _) = run_capture(&home, &["history"]);
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "", "the file was emptied");
+    let (code, _, _) = run_capture(&home, &["history", "clear"]);
+    assert_eq!(code, 0, "a second clear is still a success");
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn velo_history_without_a_file_prints_nothing_and_exits_zero() {
+    let home = temp_home("history-missing");
+
+    let (code, stdout, stderr) = run_capture(&home, &["history"]);
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "");
+    assert!(
+        !stderr.contains("interactive terminal"),
+        "history needs no terminal: {stderr}"
+    );
+
+    let (code, stdout, _) = run_capture(&home, &["history", "--json"]);
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "[]\n");
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn a_corrupt_history_file_is_reported_not_ignored() {
+    let home = temp_home("history-corrupt");
+    let dir = home.join(".config").join("velo");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("history.toml"), "[[entry]]\npath = ").unwrap();
+
+    let (code, stdout, stderr) = run_capture(&home, &["history"]);
+    assert_eq!(code, 1, "stderr: {stderr}");
+    assert_eq!(stdout, "");
+    assert!(
+        stderr.contains("cannot read") && stderr.contains("history.toml"),
+        "the error names the file: {stderr}"
+    );
+
     let _ = std::fs::remove_dir_all(&home);
 }

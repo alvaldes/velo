@@ -10,7 +10,7 @@ use velo::audio::loudness;
 use velo::audio::output::{Entry, PathResolver};
 use velo::audio::replay_gain::{GainTags, format_gain_db, format_peak, write_tags};
 use velo::audio::{Player, TrackSource};
-use velo::config::{self, Cli, Config, Settings};
+use velo::config::{self, Cli, Command, Config, HistoryAction, Settings};
 use velo::library::Library;
 use velo::subsonic;
 use velo::subsonic::cache::{Cache, CoverArt, SubsonicResolver, Unconfigured, cache_dir};
@@ -94,6 +94,16 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         };
         return index_library(&root);
+    }
+
+    // The history subcommand is the same kind of headless chore as
+    // `--cache-clean`: no terminal, no library, works over ssh.
+    if let Some(Command::History { json, action }) = &cli.command {
+        return history_command(
+            config_file.as_deref(),
+            *json,
+            matches!(action, Some(HistoryAction::Clear)),
+        );
     }
 
     if cli.files.is_empty() {
@@ -268,6 +278,46 @@ fn cache_clean(xdg_cache_home: Option<&OsStr>, home: Option<&OsStr>) -> ExitCode
             human_bytes(bytes),
             dir.display()
         );
+    }
+    ExitCode::SUCCESS
+}
+
+/// The `velo history` subcommand: one line per entry, newest first, `--json`
+/// as a JSON array, `clear` to empty the file. Needs no terminal and never
+/// exits 2 — reading and clearing a history is a courtesy, not a session.
+fn history_command(config_file: Option<&Path>, json: bool, clear: bool) -> ExitCode {
+    // No config directory (no HOME/XDG) means nothing was ever recorded, and
+    // there is nowhere a `clear` could write either.
+    let Some(config_file) = config_file else {
+        if json {
+            println!("[]");
+        }
+        return ExitCode::SUCCESS;
+    };
+    let file = velo::history::path_beside(config_file);
+    if clear {
+        // A missing file is cleared all the same: the empty document is
+        // written, so the answer to "clear" is always success or a named
+        // write error, never "nothing to do".
+        if let Err(error) = velo::history::History::clear(&file) {
+            eprintln!("velo: cannot clear {}: {error}", file.display());
+            return ExitCode::FAILURE;
+        }
+        return ExitCode::SUCCESS;
+    }
+    let history = match velo::history::History::load(&file) {
+        Ok(history) => history,
+        Err(error) => {
+            eprintln!("velo: cannot read {}: {error}", file.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    if json {
+        println!("{}", history.to_json());
+    } else {
+        for entry in &history.entry {
+            println!("{}", entry.label());
+        }
     }
     ExitCode::SUCCESS
 }
