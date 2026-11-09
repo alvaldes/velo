@@ -58,7 +58,7 @@ Every key below is what the code does today.
 | `r` | Repeat: off → all (the queue again) → one (the track again) |
 | `L` | Set the library folder: the same prompt as the first run, at any time |
 | `u` | Refresh the library index in the background; the title bar shows `⟳ indexing…` until it ends and the lists reload |
-| `+` / `-` | Volume up / down, 5% at a time |
+| `+` / `-` | Volume up / down, 5% at a time; `[` / `]` move it a single point for the levels in between |
 | `tab` | One round trip: to the queue, and back to the screen you left — `Sources`, the library at its level, or the radio view with the place you were inside |
 | `a` | Append the selection to the queue — a track, or every track of an album or genre |
 | `d` | Remove the selected entry from the queue (queue view) |
