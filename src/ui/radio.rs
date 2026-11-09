@@ -37,7 +37,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, ListState, Paragraph};
 
 use crate::radio::client::{Country, Order, State, Station, Tag};
-use crate::radio::directory::{is_playable_station, refusal};
+use crate::radio::directory::{is_playable_codec, is_playable_station, refusal, refusal_for};
 use crate::radio::store::{Favorite, Pinned, RadioStore};
 
 use super::plural;
@@ -510,14 +510,15 @@ impl RadioView {
     #[must_use]
     pub fn selected_refusal(&self) -> Option<String> {
         let row = self.selection()?;
-        let RowKind::CatalogStation {
-            station,
-            playable: false,
-        } = row.kind
-        else {
-            return None;
-        };
-        refusal(&station)
+        match row.kind {
+            RowKind::CatalogStation {
+                station,
+                playable: false,
+            } => refusal(&station),
+            RowKind::FavoriteStation { favorite } => favorite_refusal(&favorite),
+            RowKind::AddedStation { url, .. } => added_refusal(&url),
+            _ => None,
+        }
     }
 
     /// Applies one key press. Keys the view does not own answer
@@ -761,24 +762,35 @@ impl RadioView {
         let Some(row) = self.selection() else {
             return RadioOutcome::Pass;
         };
-        let RowKind::CatalogStation {
-            station,
-            playable: false,
-        } = row.kind
-        else {
-            return RadioOutcome::Pass;
-        };
-        let Some(reason) = refusal(&station) else {
-            // The `✗` marker was built from this same refusal: if it says
-            // no, there is no report to file.
-            return RadioOutcome::Pass;
+        // The `✗` marker was built from these same refusals: if one says no,
+        // there is no report to file.
+        let (name, codec, url, reason) = match row.kind {
+            RowKind::CatalogStation {
+                station,
+                playable: false,
+            } => {
+                let Some(reason) = refusal(&station) else {
+                    return RadioOutcome::Pass;
+                };
+                (station.name, station.codec, station.url_resolved, reason)
+            }
+            RowKind::FavoriteStation { favorite } => {
+                let Some(reason) = favorite_refusal(&favorite) else {
+                    return RadioOutcome::Pass;
+                };
+                (favorite.name, favorite.codec, favorite.url, reason)
+            }
+            RowKind::AddedStation { name, url } => {
+                let Some(reason) = added_refusal(&url) else {
+                    return RadioOutcome::Pass;
+                };
+                (name, String::from("unknown"), url, reason)
+            }
+            _ => return RadioOutcome::Pass,
         };
         RadioOutcome::ReportIssue {
-            title: format!("Radio station \"{}\" does not play", station.name),
-            body: format!(
-                "Station: {}\nCodec: {}\nURL: {}\nReason: {reason}",
-                station.name, station.codec, station.url_resolved,
-            ),
+            title: format!("Radio station \"{name}\" does not play"),
+            body: format!("Station: {name}\nCodec: {codec}\nURL: {url}\nReason: {reason}"),
         }
     }
 
@@ -989,7 +1001,7 @@ impl RadioView {
             .station
             .iter()
             .map(|added| Row {
-                label: added.name.clone(),
+                label: marked(added.name.clone(), added_refusal(&added.url).as_ref()),
                 fact: String::new(),
                 kind: RowKind::AddedStation {
                     name: added.name.clone(),
@@ -1003,7 +1015,10 @@ impl RadioView {
                 .iter()
                 .filter(|favorite| favorite.countrycode.is_empty())
                 .map(|favorite| Row {
-                    label: favorite_label(favorite),
+                    label: marked(
+                        favorite_label(favorite),
+                        favorite_refusal(favorite).as_ref(),
+                    ),
                     fact: String::new(),
                     kind: RowKind::FavoriteStation {
                         favorite: favorite.clone(),
@@ -1149,7 +1164,10 @@ impl RadioView {
         });
         for favorite in &self.store.favorite {
             rows.push(Row {
-                label: favorite_label(favorite),
+                label: marked(
+                    favorite_label(favorite),
+                    favorite_refusal(favorite).as_ref(),
+                ),
                 fact: String::new(),
                 kind: RowKind::FavoriteStation {
                     favorite: favorite.clone(),
@@ -1375,6 +1393,33 @@ fn station_of_row(kind: &RowKind) -> Option<(String, String)> {
 /// `★ Name [MP3] · NO`, leaving out what the store does not know. The store
 /// keeps no bitrate, so a favourite shows its codec where a catalog station
 /// shows `128k`.
+/// The refusal for a favourite: the directory announced its codec, so both
+/// rules apply exactly as they do for a catalog station.
+fn favorite_refusal(favorite: &Favorite) -> Option<String> {
+    refusal_for(
+        &favorite.codec,
+        is_playable_codec(&favorite.codec),
+        &favorite.url,
+    )
+}
+
+/// A hand-added station carries no codec claim, so only the URL rule can refuse
+/// it: an `.m3u8` is an HLS manifest whatever the station says about itself.
+fn added_refusal(url: &str) -> Option<String> {
+    refusal_for("", true, url)
+}
+
+/// `✗ ` in front of a row whose station cannot play. The marker states a fact
+/// about the station, so it shows wherever the station appears — a favourite is
+/// still playable on purpose, and the truth is not hidden for it.
+fn marked(label: String, refusal: Option<&String>) -> String {
+    if refusal.is_some() {
+        format!("✗ {label}")
+    } else {
+        label
+    }
+}
+
 fn favorite_label(favorite: &Favorite) -> String {
     use std::fmt::Write as _;
 

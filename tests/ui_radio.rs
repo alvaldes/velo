@@ -1968,3 +1968,153 @@ fn the_radio_list_draws_its_sections_and_lights_the_selected_row() {
         "the selected row is the accent, got: {cell:?}"
     );
 }
+
+// ---- a station that cannot play is marked wherever it appears (S1) --------
+
+/// A store with the three cases the marker has to tell apart: a refused
+/// favourite, a playable favourite, and both kinds among the hand-added
+/// stations. Favourites stay playable on purpose; the marker only states the
+/// fact.
+fn store_with_refused_stations() -> RadioStore {
+    let mut store = RadioStore::default();
+    store.favorite.push(Favorite {
+        name: "Hls Fav".to_owned(),
+        url: "https://fav.example/live.m3u8".to_owned(),
+        countrycode: "NO".to_owned(),
+        codec: "MP3".to_owned(),
+    });
+    store.favorite.push(Favorite {
+        name: "Good Fav".to_owned(),
+        url: "https://fav.example/good".to_owned(),
+        countrycode: "NO".to_owned(),
+        codec: "MP3".to_owned(),
+    });
+    store.favorite.push(Favorite {
+        name: "No Country Hls".to_owned(),
+        url: "https://fav.example/nc.m3u8".to_owned(),
+        countrycode: String::new(),
+        codec: "AAC".to_owned(),
+    });
+    store.station.push(store::Station {
+        name: "Mine Hls".to_owned(),
+        url: "https://mine.example/live.m3u8".to_owned(),
+    });
+    store.station.push(store::Station {
+        name: "Mine Good".to_owned(),
+        url: "https://mine.example/good".to_owned(),
+    });
+    store
+}
+
+fn view_with_refused_stations() -> RadioView {
+    RadioView::new(store_with_refused_stations(), Vec::new(), Vec::new(), None)
+}
+
+/// The favourites section marks the one that cannot play and leaves the other
+/// alone — the fact does not depend on how the station got there.
+#[test]
+fn a_favourite_that_cannot_play_is_marked_and_a_playable_one_is_not() {
+    let view = view_with_refused_stations();
+    let labels = view.labels();
+    assert!(
+        labels.iter().any(|label| label == "✗ ★ Hls Fav [MP3] · NO"),
+        "the refused favourite is marked, got: {labels:?}"
+    );
+    assert!(
+        labels.iter().any(|label| label == "★ Good Fav [MP3] · NO"),
+        "the playable favourite is not marked, got: {labels:?}"
+    );
+}
+
+/// The hand-added stations and the no-country favourites are marked the same
+/// way inside their own section.
+#[test]
+fn a_hand_added_station_that_cannot_play_is_marked() {
+    let mut view = view_with_refused_stations();
+    view.open_place(Place::NoCountry);
+    let labels = view.labels();
+    assert!(
+        labels.iter().any(|label| label == "✗ Mine Hls"),
+        "the refused hand-added station is marked, got: {labels:?}"
+    );
+    assert!(
+        labels.iter().any(|label| label == "Mine Good"),
+        "the playable hand-added station is not marked, got: {labels:?}"
+    );
+    assert!(
+        labels
+            .iter()
+            .any(|label| label == "✗ ★ No Country Hls [AAC]"),
+        "a no-country favourite is marked too, got: {labels:?}"
+    );
+}
+
+/// The distinction the whole rule rests on: marked, and still playable — you
+/// put it there deliberately, so `enter` tries it instead of refusing.
+#[test]
+fn a_refused_favourite_is_still_playable_on_purpose() {
+    let mut view = view_with_refused_stations();
+    view.open_place(Place::NoCountry);
+    view.select_first();
+
+    assert_eq!(
+        view.labels().first().map(String::as_str),
+        Some("✗ Mine Hls")
+    );
+    assert_eq!(
+        view.key(KeyEvent::from(KeyCode::Enter)),
+        RadioOutcome::Play {
+            url: "https://mine.example/live.m3u8".to_owned(),
+            name: "Mine Hls".to_owned(),
+        },
+        "a marked favourite or hand-added station is still played on purpose"
+    );
+}
+
+/// And it can be reported: the refusal it shows is the one the report carries.
+#[test]
+fn a_refused_favourite_says_why_and_can_be_reported() {
+    let mut view = view_with_refused_stations();
+    view.open_place(Place::NoCountry);
+    view.select_first();
+
+    assert_eq!(
+        view.selected_refusal().as_deref(),
+        Some("an HLS manifest: its .ts segments cannot be decoded")
+    );
+
+    let RadioOutcome::ReportIssue { title, body } = view.key(KeyEvent::from(KeyCode::Char('i')))
+    else {
+        panic!("i on a refused station files a report");
+    };
+    assert!(title.contains("Mine Hls"), "got: {title}");
+    assert!(
+        body.contains("https://mine.example/live.m3u8"),
+        "got: {body}"
+    );
+    assert!(
+        body.contains("an HLS manifest: its .ts segments cannot be decoded"),
+        "the report carries the sentence, got: {body}"
+    );
+    assert!(
+        body.contains("unknown"),
+        "a hand-added station claims no codec, and the report says so, got: {body}"
+    );
+}
+
+/// The other side of the same rule: a playable favourite is not marked, states
+/// no refusal, and `i` passes through.
+#[test]
+fn a_playable_favourite_is_never_marked_and_cannot_be_reported() {
+    let mut view = view_with_refused_stations();
+    view.open_place(Place::NoCountry);
+    view.select_next(); // Mine Good
+
+    assert_eq!(view.labels()[1], "Mine Good");
+    assert_eq!(view.selected_refusal(), None);
+    assert_eq!(
+        view.key(KeyEvent::from(KeyCode::Char('i'))),
+        RadioOutcome::Pass,
+        "i belongs to no other row"
+    );
+}

@@ -182,7 +182,9 @@ the row, the status line names the station, says the reason in a couple of words
 (`velo: HLS One cannot play (HLS manifest) — i reports it`), all on a line that fits
 an 80-column terminal; the long sentence is what the report carries. It goes away
 when the cursor moves on. Your own favourites and hand-added
-stations are never marked: they were put there deliberately. A station marked
+stations are never **blocked** by that filter — you put them there deliberately, and
+`enter` still tries them — but a station that cannot play is marked `✗` wherever it
+appears, favourites included, and `i` reports it from there too. A station marked
 `✗` is worth reporting as an issue: press `i` on the row and velo opens a
 prefilled bug report in your browser — the station's name, codec and URL, the
 reason velo gave, and your velo version and platform, all filled in for you
