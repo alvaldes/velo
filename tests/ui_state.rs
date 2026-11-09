@@ -523,6 +523,72 @@ fn k_then_j_moves_a_pending_entry_and_the_selection_moves_with_it() {
     assert_eq!(app.queue_selected(), 2);
 }
 
+/// Issue #17: the playing entry is refused whatever it is — a station that
+/// plays has the same protection a track that plays has always had, and
+/// nothing moves across it. The fixture stands in for the player, as it does
+/// for the transport tests: production sets `playing` and the player
+/// together, so the queue edits read the station as the playing entry.
+#[test]
+fn d_j_and_k_refuse_on_the_playing_station_as_on_a_track() {
+    let labels = |app: &App| -> Vec<String> {
+        app.queue()
+            .iter()
+            .map(|entry| entry.label().into_owned())
+            .collect()
+    };
+    let mut app = App::new(vec![PathBuf::from("/library/artist/one.flac")]);
+    app.show_playing_for_tests(
+        Entry::Station {
+            url: String::from("https://stream.example/nova.mp3"),
+            name: String::from("Radio Nova"),
+        },
+        std::time::Duration::ZERO,
+        None,
+        None,
+    );
+    press(&mut app, KeyCode::Char('a')); // one.flac queues after the station
+    press(&mut app, KeyCode::Tab); // into the queue, on the station
+
+    // `d` refuses the playing station…
+    assert_eq!(app.on_key(key(KeyCode::Char('d'))), Action::None);
+    assert_eq!(
+        app.status(),
+        "velo: cannot remove the track that is playing"
+    );
+    assert_eq!(labels(&app), ["Radio Nova", "one.flac"]);
+
+    // …and `J` and `K` refuse to move it.
+    assert_eq!(app.on_key(key(KeyCode::Char('J'))), Action::None);
+    assert_eq!(
+        app.status(),
+        "velo: cannot remove the track that is playing"
+    );
+    assert_eq!(app.on_key(key(KeyCode::Char('K'))), Action::None);
+    assert_eq!(
+        app.status(),
+        "velo: cannot remove the track that is playing"
+    );
+    assert_eq!(labels(&app), ["Radio Nova", "one.flac"]);
+    assert_eq!(
+        app.queue_selected(),
+        0,
+        "the selection stays on the station"
+    );
+
+    // Nothing moves across the playing station either…
+    app.on_key(key(KeyCode::Char('j'))); // onto one.flac, the entry after it
+    assert_eq!(app.on_key(key(KeyCode::Char('K'))), Action::None);
+    assert_eq!(
+        app.status(),
+        "velo: cannot move past the track that is playing"
+    );
+    assert_eq!(labels(&app), ["Radio Nova", "one.flac"]);
+
+    // …while the entries after it stay editable, station or not.
+    app.on_key(key(KeyCode::Char('d')));
+    assert_eq!(app.status(), "velo: removed one.flac");
+}
+
 #[test]
 fn tab_switches_the_view_and_the_status_names_it() {
     let mut app = app_with_a_queue_of_three();

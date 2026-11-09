@@ -54,7 +54,7 @@ Every key below is what the code does today.
 | `space` | Pause / resume |
 | `←` / `→` (or `,` / `.`) | Seek 5 s back / forward; with `shift` on the arrow (or `<` / `>` on the comma keys) 30 s |
 | `:` | Jump to a position in the playing track: a percentage of it (`70%`), a clock position (`1:20`, `1:20:30`) or a count of seconds (`90`); refused on a live station or an empty answer |
-| `n` / `p` | Next track / previous track — `p` restarts a track already 3 s in |
+| `n` / `p` | Next track / previous track — `p` restarts a track already 3 s in; from a live station, `n` goes to the first track of the queue |
 | `s` | Shuffle what is left of the queue; again to put it back in order |
 | `r` | Repeat: off → all (the queue again) → one (the track again) |
 | `M` | Mono: both output channels carry the average of the mix — `(left + right) / 2`, never the sum, so the peak does not grow — applied after ReplayGain, before the samples reach the device, and toggled without restarting the stream. Refused while `bit_perfect` is on: the status line says so |
@@ -80,7 +80,13 @@ While a search is open, every printable key types into the query,
 `backspace` deletes, `enter` plays from the selected result, and `esc`
 cancels — leaving the browser exactly where it was. The queue only lets you
 edit entries after the one playing: the playing entry cannot be removed and
-nothing moves across it, and each refusal explains itself in the status line.
+nothing moves across it, and each refusal explains itself in the status line —
+the same refusal when the entry that plays is a station. A station queued among
+the tracks keeps its place and reads as live: its row shows the station's name
+and the `● live` marker where a track shows its position. `next` while a station
+plays leaves it for the first track of the queue — the stations you lined up for
+the evening stay put — and when the queue holds no track, one status line says
+so and the station keeps playing.
 
 The first screen is `Sources`: `Local library`, `Radio` and `Recently played`, with
 the cursor already on the library. `Recently played` lists what `velo history`

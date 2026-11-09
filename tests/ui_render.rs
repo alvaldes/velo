@@ -9,6 +9,7 @@
 use std::fs;
 use std::path::PathBuf;
 
+use velo::audio::output::Entry;
 use velo::library::Library;
 use velo::ui::App;
 use velo::ui::crossterm::event::{KeyCode, KeyEvent};
@@ -863,6 +864,50 @@ fn the_queue_view_draws_the_queued_file_names_and_empty_state() {
     assert!(
         !screen.contains("nothing queued"),
         "the empty-state hint is gone once something is queued"
+    );
+}
+
+// ---- a station row reads as live (issue #17) -------------------------------
+
+/// A station queued among the tracks keeps its row and reads as live: the
+/// station's name where a file's name stands, and `● live` — the same fact
+/// the transport shows for a live stream — where a track shows its position.
+#[test]
+fn a_station_row_in_the_queue_reads_as_live() {
+    let mut app = App::new(tracks(&["one.flac"]));
+    // A station plays (the fixture stands in for the player): it heads the
+    // queue, and the file queued after it keeps its track row.
+    app.show_playing_for_tests(
+        Entry::Station {
+            url: String::from("https://stream.example/nova.mp3"),
+            name: String::from("Radio Nova"),
+        },
+        std::time::Duration::ZERO,
+        None,
+        None,
+    );
+    press(&mut app, KeyCode::Char('a')); // one.flac queues after the station
+    press(&mut app, KeyCode::Tab); // into the queue
+
+    // One row per line, so the marker is read on the station's own row.
+    let screen = screen_at(&app, 90, 12);
+    // The queue row is the one that carries the station's position in the
+    // queue (`1. `) — the fact a track shows there and a station does not.
+    let station_row = screen
+        .lines()
+        .find(|line| line.contains("1. ") && line.contains("Radio Nova"))
+        .expect("the queue shows the station by its name");
+    assert!(
+        station_row.contains("● live"),
+        "the station row reads as live where a track shows its position, got: {station_row:?}"
+    );
+    let track_row = screen
+        .lines()
+        .find(|line| line.contains("2. ") && line.contains("one.flac"))
+        .expect("the queued file keeps its track row");
+    assert!(
+        !track_row.contains("● live"),
+        "a track row is not live, got: {track_row:?}"
     );
 }
 
