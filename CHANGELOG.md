@@ -1,6 +1,13 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.20.0] - 2026-11-09
+
+### Features
+- **audio:** Force a stereo file to play as mono
+
+### Maintenance
+- **ci:** Name the tag in the manual release path
 ## [0.19.0] - 2026-11-09
 
 ### Features
