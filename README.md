@@ -76,7 +76,8 @@ Every key below is what the code does today.
 | `P` | Low power: the screen redraws at a quarter of its ordinary rate and the spectrum stays out entirely — its rows go back to the list. Playback, the clock, the volume, seeking and every other key behave exactly as they do today; only the redraw cadence changes. Press again to step back out, and the last state is remembered under `[ui] low_power` the way `z` remembers shuffle |
 | `o` (or `ctrl+l`) | Set the library folder: the same prompt as the first run, at any time, tab completion included |
 | `L` | The saved playlists source, straight from the library |
-| `u` | Refresh the library index in the background; the title bar shows `⟳ indexing…` until it ends and the lists reload |
+| `I` | Refresh the library index in the background; the title bar shows `⟳ indexing…` until it ends and the lists reload |
+| `u` | Open a URL prompt: type an `http`/`https` URL and press `enter`. A plain stream — or a wrapper with a single entry — plays live as a radio station (`● live`); a wrapper listing several songs queues them as one finite list of tracks, the URL of each song its path. Nothing is saved — no station in `radio.toml` |
 | `+` / `-` | Volume up / down, 5% at a time; `[` / `]` move it a single point for the levels in between |
 | `tab` | One round trip: to the queue, and back to the screen you left — `Sources`, the library at its level, or the radio view with the place you were inside |
 | `p` | The queue view — the working list, where `x` removes and `shift+↑`/`shift+↓` move; `tab` is the way back out |
@@ -177,7 +178,7 @@ velo --library /path/to/your/music           # open the browser
 
 Every launch refreshes the index in the background: the interface is usable
 at once, the title bar shows `⟳ indexing…` while the scan runs, and the lists
-reload with the counts in the status line when it ends. `u` runs the same
+reload with the counts in the status line when it ends. `I` runs the same
 refresh at any time.
 
 Then, inside the interface: `enter` into an artist, into an album, `enter`
@@ -261,7 +262,9 @@ uses, and `velo --cache-clean` cleans it — and their identity is their
 wrapper gives a song (`Artist - Title` in an `.m3u`, `Title<n>` in a `.pls`)
 names it in the queue, the now-playing block and any list that shows it; those
 names are session-scoped on purpose — a song velo has not expanded this session
-shows its URL. Opening a channel twice probes the wrapper once: the expansion's
+shows its URL. The same rule answers a one-off URL typed at `u`: a plain stream
+plays live, a wrapper listing songs opens as those songs — and nothing is
+saved, the visit leaves no station behind. Opening a channel twice probes the wrapper once: the expansion's
 verdict is remembered for the session, a failed one is never remembered (a
 transient error stays retryable), and a plain stream, which never needed the
 probe, gains nothing to remember.
