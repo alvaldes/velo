@@ -2333,8 +2333,8 @@ fn the_playing_station_is_marked_in_its_country_and_the_others_are_not() {
         "the playing station carries the marker the library uses, got:\n{played}"
     );
     assert!(
-        played.contains("▸ 2. ✗ Hls One [96k] · NO"),
-        "a different station in the same list keeps the idle marker, got:\n{played}"
+        played.contains("  2. ✗ Hls One [96k] · NO"),
+        "a different station in the same list carries no marker, got:\n{played}"
     );
 }
 
@@ -2421,8 +2421,8 @@ fn the_playing_marker_and_the_refusal_marker_can_share_a_row() {
     view.set_catalog(norway(), catalog());
     let played = screen(&view);
     assert!(
-        played.contains("▸ 1. Nova [128k] · NO"),
-        "the other station keeps the idle marker, got:\n{played}"
+        played.contains("  1. Nova [128k] · NO"),
+        "the other station carries no marker, got:\n{played}"
     );
     assert!(
         played.contains("▶ 2. ✗ Hls One [96k] · NO"),

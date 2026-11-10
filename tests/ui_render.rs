@@ -964,6 +964,46 @@ fn a_station_row_in_the_queue_reads_as_live() {
 
 // ---- cover art (T8, S10) ---------------------------------------------------
 
+/// The marker is only for the row that plays (issue #52): an idle row
+/// carries two spaces where the glyph was, so numbers, names and facts stay
+/// in their columns — the selection already has its own background.
+#[test]
+fn an_idle_row_carries_no_marker_and_the_playing_row_keeps_its_glyph() {
+    let mut app = App::new(tracks(&["one.flac", "two.flac"]));
+    // two.flac plays (the fixture stands in for the player) and heads the
+    // queue; one.flac queues after it, idle.
+    app.show_playing_for_tests(
+        Entry::File(PathBuf::from("/music/two.flac")),
+        std::time::Duration::ZERO,
+        None,
+        None,
+    );
+    press(&mut app, KeyCode::Char('a')); // one.flac queues after it
+    press(&mut app, KeyCode::Tab); // into the queue
+
+    let screen = screen_at(&app, 80, 24);
+    let playing_row = screen
+        .lines()
+        .find(|line| line.contains("1. two.flac"))
+        .expect("the queue shows the playing row first");
+    assert!(
+        playing_row.contains("▶"),
+        "the row that plays keeps its marker, got: {playing_row:?}"
+    );
+    let idle_row = screen
+        .lines()
+        .find(|line| line.contains("2. one.flac"))
+        .expect("the queued file keeps its row");
+    assert!(
+        !idle_row.contains('▸'),
+        "an idle row carries no marker, got: {idle_row:?}"
+    );
+    assert!(
+        idle_row.contains("  2. one.flac"),
+        "the two spaces keep the number in its column, got: {idle_row:?}"
+    );
+}
+
 /// The interface's whole 80×24 screen with no image protocol. Cover art may
 /// not move a single cell of it: no protocol is ever attached to a
 /// [`TestBackend`]-backed app. Re-recorded on purpose whenever the design
@@ -981,9 +1021,9 @@ const SCREEN_WITHOUT_COVER_ART: &str = concat!(
     "│  ◂◂   ▶ play   ▸▸    shuffle  repeat off     RG track   VOL ━━━━━━━━━━━● 100 │\n",
     "│                                                                              │\n",
     "│ ▸─ Files  [3 tracks]                                                         │\n",
-    "│ ▸ 1. one.flac  /music                                                        │\n",
-    "│ ▸ 2. two.flac  /music                                                        │\n",
-    "│ ▸ 3. three.flac  /music                                                      │\n",
+    "│   1. one.flac  /music                                                        │\n",
+    "│   2. two.flac  /music                                                        │\n",
+    "│   3. three.flac  /music                                                      │\n",
     "│                                                                              │\n",
     "│                                                                              │\n",
     "│                                                                              │\n",

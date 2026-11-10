@@ -19,9 +19,9 @@ queue make it a player you actually drive, not a playlist viewer.
 │  ◂◂   ▶ play   ▸▸    shuffle  repeat off     RG track   VOL ━━━━━━━━━━━● 100 │
 │                                                                              │
 │ ▸─ 1 artists  2 albums  3 tracks  4 genres   [3 artists]                     │
-│ ▸ 1. Lo-Fi Scientists                                    2 albums · 3 tracks │
-│ ▸ 2. Nujabes                                               1 album · 1 track │
-│ ▸ 3. Poldoore                                             1 album · 2 tracks │
+│   1. Lo-Fi Scientists                                    2 albums · 3 tracks │
+│   2. Nujabes                                               1 album · 1 track │
+│   3. Poldoore                                             1 album · 2 tracks │
 │                                                                              │
 │ j/k move  enter play  space pause  ←/→ seek  / search  ? help  q quit        │
 ╰──────────────────────────────────────────────────────────────────────────────╯
@@ -40,6 +40,12 @@ of its own.
 velo wears your terminal's colors: its background (translucency included)
 and text, and the ANSI palette for everything else — magenta for the
 accent, blue for keys and counts, bright black for what can be dimmed.
+
+Every list marks the row that plays, and no other row: `▶` stands in the
+first column of the row the transport stands on, while every idle row
+carries two spaces there — the selection already has its own background, so
+a bare `▸` would only repeat it, and the numbers, names and facts of the
+rows beside it never move.
 
 ## Keys
 

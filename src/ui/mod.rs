@@ -6764,10 +6764,10 @@ struct ListRow {
     fact: String,
 }
 
-/// `▸ 3. Dawn  Tide · Harbor ……… 4:12`: the marker (`▶` in the accent on
-/// the row that plays), the number, the name, the note, and the fact against
-/// the right edge when it fits beside the rest; a fact that does not fit is
-/// the part left out, never the name.
+/// `▶ 3. Dawn  Tide · Harbor ……… 4:12`: the marker — `▶` in the accent, on
+/// the row that plays and on no other row (issue #52): an idle row carries
+/// two spaces where the glyph was, so the numbers, names and facts of the
+/// rows beside it never move — the selection already has its own background.
 fn list_row(row: ListRow, width: u16, theme: &Theme) -> Line<'static> {
     let (marker, number, name) = if row.playing {
         (
@@ -6784,7 +6784,7 @@ fn list_row(row: ListRow, width: u16, theme: &Theme) -> Line<'static> {
     };
     let digits = row.digits;
     let mut spans = vec![
-        Span::styled(if row.playing { "▶ " } else { "▸ " }, marker),
+        Span::styled(if row.playing { "▶ " } else { "  " }, marker),
         Span::styled(format!("{:>digits$}. ", row.number), number),
         Span::styled(row.name, name),
     ];
