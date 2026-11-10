@@ -1,6 +1,10 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.39.0] - 2026-11-10
+
+### Features
+- **ui:** `ctrl+s` keeps a remote track as a copy out
 ## [0.38.1] - 2026-11-10
 
 ### Fixes
