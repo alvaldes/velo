@@ -204,7 +204,21 @@ replacement for either. The directory's host is configurable — a `host` in a
 and defaults to the community's round-robin across its mirrors,
 `all.api.radio-browser.info`, so no single mirror's outage empties the view.
 
-The sections come first: the country browser, your home country with its regions,
+The first section is **cliamp radio** (issue #48): the channels of the
+[cliamp](https://radio.cliamp.stream) radio service, another project's — shown
+numbered `1.`, above the directory's own sections. Entering it asks the service for
+its channels (`N tracks · ● M listening now` on each row) and entering a channel
+lists its songs, `artist · album` beside each title. A song is an ordinary remote
+**file**: `enter` plays from it and `a` queues it, both as a cached track — the
+transport shows a position, never `● live`. The section asks the service for two
+requests when it opens and again on `ctrl+r`, and nothing on a timer; if the
+service is down, a failing channel list leaves the section present but empty with
+one line naming the reason, and a failing listener count only drops the `●`
+numbers. Because the service is not velo's, the config carries a switch:
+`cliamp = false` in the `[radio]` table hides the section entirely (shown by
+default), so a dead service needs a config line, not a release.
+
+The directory's sections come after it: the country browser, your home country with its regions,
 your pinned places, the **stations without a country** — the ones you added by hand
 and the favourites saved with no country code, so that radio is not only radio inside
 a country — and the genres and tags. The favourites sit **below all of them**, behind

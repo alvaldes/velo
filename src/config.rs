@@ -897,17 +897,37 @@ pub fn write_default_theme(dir: &Path) -> std::io::Result<bool> {
 /// not empty the directory.
 #[must_use]
 pub fn radio_host_from(config_path: Option<&Path>) -> String {
-    let Some(path) = config_path else {
-        return DEFAULT_RADIO_HOST.to_owned();
-    };
+    radio_table_from(config_path)
+        .and_then(|radio| radio.host)
+        .unwrap_or_else(|| DEFAULT_RADIO_HOST.to_owned())
+}
+
+/// Whether the cliamp section shows in the radio: `cliamp` in the `[radio]`
+/// table of the config file at `path`, shown when absent — the default —
+/// hidden when the file says `false` (issue #48, S1).
+///
+/// Never fails, the way [`radio_host_from`] never fails: the switch is read
+/// when the radio view opens, long after the launch already rejected broken
+/// files, so a file broken since then must not decide the section — the
+/// default is used, never an error.
+#[must_use]
+pub fn radio_cliamp_from(config_path: Option<&Path>) -> bool {
+    radio_table_from(config_path)
+        .and_then(|radio| radio.cliamp)
+        .unwrap_or(true)
+}
+
+/// The `[radio]` table of the config file at `path`, when there is one and
+/// it parses; a missing path, an unreadable file or a broken one yields
+/// `None` — the callers use their defaults, never an error.
+fn radio_table_from(config_path: Option<&Path>) -> Option<RadioFile> {
+    let path = config_path?;
     let Ok(text) = fs::read_to_string(path) else {
-        return DEFAULT_RADIO_HOST.to_owned();
+        return None;
     };
     toml::from_str::<Config>(&text)
         .ok()
         .and_then(|config| config.radio)
-        .and_then(|radio| radio.host)
-        .unwrap_or_else(|| DEFAULT_RADIO_HOST.to_owned())
 }
 
 /// The config file velo writes when there is none: every key at its default,
@@ -988,6 +1008,11 @@ view_numbers = true
 # velo asks the community's round-robin across the directory's mirrors.
 # [radio]
 # host = \"all.api.radio-browser.info\"
+
+# The cliamp radio section in the radio view: shown unless you turn it off
+# here. It is another project's service; when it changes or dies, the section
+# alone degrades — this line is what you write then, no release needed.
+# cliamp = true
 
 # A Subsonic-compatible server (Navidrome and friends), optional. Uncomment
 # the table to browse a remote server; `velo --subsonic-test` checks it and
@@ -1414,11 +1439,15 @@ where
 /// The serde shape of the `[radio]` table: the same keys and nothing else.
 /// `host` is a bare host name — no scheme, no path — and an absent table,
 /// or a table without `host`, means [`DEFAULT_RADIO_HOST`] (issue #14).
+/// `cliamp` shows or hides the cliamp section in the radio (issue #48, S1):
+/// an absent table, or a table without the key, shows it.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RadioFile {
     #[serde(default)]
     host: Option<String>,
+    #[serde(default)]
+    cliamp: Option<bool>,
 }
 
 /// The serde shape of the `[subsonic]` table: the same keys and nothing

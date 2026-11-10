@@ -92,6 +92,48 @@ Verified against the running service, not the note: no credential anywhere.
 - **Whether the songs list is one level or a queue**: settled by the note — "playlist de
   archivos finitos", so a level whose `enter` plays from that row onwards, like an album.
 
+## Issue #48 — the cliamp section, shown (reversing Decisión 9)
+
+The author decided otherwise after #29 shipped: "el radio cliamp quiero que se
+muestre como opcion \"1. cliamp radio\" dentro del source radio y que se vea como
+en la app cliamp". This reverses Decisión 9 by the author's own decision, with
+the `[radio] cliamp` switch as the mitigation the old argument keeps — the
+service is still another project's, so a dead one needs a config line, not a
+release.
+
+**S7 — the section leads.** The radio top level shows `cliamp radio` first,
+numbered `1.`, above `Browse all countries`; the directory's sections keep
+their order below it. `[radio] cliamp = false` hides the section entirely
+(default shown).
+
+**S8 — the channels and their songs.** Opening the section asks
+`GET https://radio.cliamp.stream/stations`: the channel name as the label and,
+as the row's dim fact, `N tracks` and `● M listening now`, the count from
+`GET /statistics` (`stations.<id>.active_listeners`). Entering a channel asks
+`GET /<id>/tracks` and lists its songs in the service's order, the title as the
+label and `artist · album` as the dim note.
+
+**S9 — a song is a file, never a station.** `enter` plays from it and `a`
+queues it, both through the queue as a FILE entry — the URL is the path, the
+cache resolver fetches it — so the transport shows a position, not `● live`.
+Identity is the URL, as everywhere else.
+
+**S10 — two requests, and the two failures.** Opening the section makes two
+requests (`/stations` and `/statistics`) and `Ctrl+R` makes two more; no
+polling, nothing on a timer. A failing `/stations` is one status line naming
+the reason and leaves the section present but empty; a failing `/statistics`
+drops only the `●` counts, says so once, and the channels still list.
+
+**S11 — one host, one switch.** The host is a constant in one place
+(`radio::cliamp::HOST`) with a doc comment saying it is another project's
+service and what happens when it changes (the section degrades, the rest of
+velo does not); the `[radio] cliamp` switch exists so a dead service needs a
+config line, not a release.
+
+**S12 — nothing else changes.** The directory, `Place::NoCountry`, favourites
+and pins, the queue's live semantics, history, playlists and the keys are
+untouched.
+
 ## Slices
 
 One pass, and deliberately small: no new source, no new dependency, no
@@ -153,6 +195,23 @@ transient error stays retryable) and a `Live` verdict is never remembered
 `src/audio/output.rs` is untouched, and identity — history, favourites,
 playlists — stays the URL.
 
+**Issue #48 (S7–S12), one slice on top, reversing Decisión 9:** the section
+ships. `src/radio/cliamp.rs` holds the host constant ([`HOST`], with the doc
+comment S11 asks for) and the three request shapes over the directory's
+existing `Transport` seam — no new JSON crate, `miniserde` parses the
+derived structs and the `/statistics` id-keyed map is walked as a
+`miniserde::json::Value`. The view gained `Place::Cliamp` and
+`Place::CliampChannel { id, name }`, their `RowKind`s, and the two new
+outcomes `PlaySongs`/`QueueSong`; the shell turns both into `Entry::File`
+rows whose path is the song's URL (S9), the titles feeding the same
+`song_titles` map T3 built, so the queue names the songs. The data wiring
+asks `/stations` then `/statistics` when the section opens and again on
+`Ctrl+R`, one request in flight at a time and nothing on a timer (S10), each
+failure its own one-line message; the `[radio] cliamp` switch is read once
+beside the directory host (`radio_cliamp_from`) and handed to the wiring.
+S12 held: the directory's own tests run unchanged with the fixture hiding
+the section, which pins the switch's off state against the old layout.
+
 ## Log
 
 **L1** — the issue: "A second radio source beside the Radio Browser directory, so `Radio`
@@ -187,3 +246,15 @@ twice fetches the wrapper once. A FAILED expansion is not remembered — a trans
 must be retryable — and nothing is remembered for a plain stream that never needed a
 probe. The maps are session-scoped on purpose (S3): no persistence, no eviction beyond
 the session, and a fresh session shows the URL until the channel is opened again.
+
+**L5** — the issue (#48), in the author's words: "el radio cliamp quiero que se
+muestre como opcion \"1. cliamp radio\" dentro del source radio y que se vea
+como en la app cliamp". This deliberately reverses Decisión 9 — by the
+author's own decision, the note's old rule yields — and the mitigation the
+old argument asked for is the `[radio] cliamp` switch: the service is still
+another project's (the host is the one constant, `radio::cliamp::HOST`, whose
+doc comment says what happens when it changes), so a dead service needs a
+config line, not a release. The section is cliamp-shaped, as the quote asks:
+channels with track counts and live listener counts, and a channel's songs
+listed `artist · album` like the app's, each song playing and queueing as a
+cached file, never a live stream (S7–S12 above).

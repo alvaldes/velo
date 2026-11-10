@@ -1317,8 +1317,11 @@ impl<'lib> App<'lib> {
             Box::new({
                 // The host the config names, else the community's
                 // round-robin — decided here and nowhere else (issue #14).
+                // The cliamp switch is decided here too (issue #48, S1):
+                // shown unless the config says `false`.
                 let host = crate::config::radio_host_from(self.config_file.as_deref());
-                radio_data::RadioData::open(store_path, &host)
+                let cliamp = crate::config::radio_cliamp_from(self.config_file.as_deref());
+                radio_data::RadioData::open(store_path, &host, cliamp)
             })
         });
         self.radio_from = self.view;
@@ -2232,6 +2235,24 @@ impl<'lib> App<'lib> {
         if let Some(view) = self.radio.as_mut() {
             view.open_place(place.clone());
             view.set_catalog(place, stations);
+        }
+    }
+
+    /// Stands the open radio view in one cliamp channel's place and sets
+    /// its songs (issue #48): the integration tests' hook, because no
+    /// fixture can reach a song row through the real wiring — that needs
+    /// the cliamp service. Production never calls this, which is why it is
+    /// hidden from the docs; the wiring sets the songs through
+    /// [`radio_data::RadioWire::poll`] instead.
+    #[doc(hidden)]
+    pub fn show_radio_cliamp_songs(
+        &mut self,
+        place: crate::ui::radio::Place,
+        songs: Vec<crate::radio::cliamp::Song>,
+    ) {
+        if let Some(view) = self.radio.as_mut() {
+            view.open_place(place.clone());
+            view.set_cliamp_songs(place, songs);
         }
     }
 
@@ -3326,6 +3347,37 @@ impl<'lib> App<'lib> {
             }
             radio::RadioOutcome::Queue { url, name } => {
                 self.queue_station(url, name);
+                Some(Action::None)
+            }
+            radio::RadioOutcome::PlaySongs { songs, from } => {
+                // The cliamp songs are finite remote files (issue #48, S3):
+                // they join the queue as file entries — the URL is the
+                // path, the resolver caches them — and the player starts
+                // at the selected one, the way `enter` on a queue row
+                // plays from it. Never a live station (S3): the transport
+                // shows a position, not `● live`.
+                let start = self.queue.len() + from;
+                for song in &songs {
+                    if !song.title.is_empty() {
+                        self.song_titles
+                            .insert(song.url.clone(), song.title.clone());
+                    }
+                }
+                self.edit_queue(|queue| {
+                    queue.extend(
+                        songs
+                            .into_iter()
+                            .map(|song| Entry::File(PathBuf::from(song.url))),
+                    );
+                });
+                Some(Action::PlayQueue { from: start })
+            }
+            radio::RadioOutcome::QueueSong { url, title } => {
+                if !title.is_empty() {
+                    self.song_titles.insert(url.clone(), title.clone());
+                }
+                self.edit_queue(|queue| queue.push(Entry::File(PathBuf::from(url))));
+                self.status = format!("velo: added {}", plural(1, "track", "tracks"));
                 Some(Action::None)
             }
             radio::RadioOutcome::ReportIssue { title, body } => {

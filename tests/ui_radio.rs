@@ -90,6 +90,11 @@ fn view() -> RadioView {
         Some("NO".to_owned()),
     );
     view.set_catalog(norway(), catalog());
+    // The directory suite pins the directory's own layout, so its fixture
+    // hides the cliamp section (issue #48): `[radio] cliamp = false` is
+    // exactly this — the top as it was before the section shipped, and the
+    // section's own tests live in `tests/ui_cliamp.rs`.
+    view.set_cliamp_enabled(false);
     view
 }
 
@@ -141,7 +146,8 @@ fn the_sections_appear_in_order_only_when_they_have_content() {
     );
 
     // Nothing has content: no section, no row.
-    let empty = RadioView::empty();
+    let mut empty = RadioView::empty();
+    empty.set_cliamp_enabled(false);
     assert!(
         empty.labels().is_empty(),
         "an empty view shows no sections, got: {:?}",
@@ -288,6 +294,7 @@ fn with_no_favourites_there_is_no_rule_and_no_header() {
     });
     let mut view = RadioView::new(store, Vec::new(), Vec::new(), None);
     view.show_browse_rows();
+    view.set_cliamp_enabled(false);
     assert_eq!(
         view.labels(),
         ["Browse all countries", "★ Germany", "Browse genres & tags"],
@@ -367,6 +374,7 @@ fn enter_f_and_a_on_the_rule_or_the_header_change_nothing() {
         codec: "MP3".to_owned(),
     });
     let mut rule_view = RadioView::new(store, Vec::new(), Vec::new(), None);
+    rule_view.set_cliamp_enabled(false);
     assert_eq!(
         rule_view.labels(),
         ["", "favourites", "★ Jazz One [MP3] · NO"],
@@ -1566,6 +1574,7 @@ fn the_no_country_section_lists_own_stations_then_no_country_favourites() {
         url: "http://night.example/live".to_owned(),
     });
     let mut view = RadioView::new(store, Vec::new(), Vec::new(), None);
+    view.set_cliamp_enabled(false);
 
     // The sections come first; the favourites — including the one with no
     // country — close the list behind the rule and the header (S5, #22).
