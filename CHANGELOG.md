@@ -1,6 +1,10 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.38.0] - 2026-11-10
+
+### Features
+- **ui:** `ctrl+i` says what the playing file is
 ## [0.37.0] - 2026-11-10
 
 ### Features
