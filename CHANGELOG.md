@@ -1,6 +1,10 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.36.0] - 2026-11-10
+
+### Features
+- **theme:** The factory theme is `velo`, and the terminal's own colours ship too
 ## [0.35.0] - 2026-11-10
 
 ### Features
