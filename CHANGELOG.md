@@ -1,6 +1,13 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.34.2] - 2026-11-10
+
+### Fixes
+- **radio:** Enter answers the country question
+
+### Documentation
+- **readme:** Name the servers velo already speaks to
 ## [0.34.1] - 2026-11-10
 
 ### Fixes
