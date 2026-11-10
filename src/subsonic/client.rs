@@ -184,9 +184,15 @@ impl HttpTransport {
         if insecure {
             tls = tls.disable_verification(true);
         }
+        // Per-operation timeouts, never a global one (issue #56): the same
+        // agent fetches the API's JSON and a track's whole body, and a
+        // `timeout_global` bounds both — a six-megabyte song on a slow link
+        // died halfway with "timeout: global". Connecting has its own limit,
+        // and reading fails only when the server stops sending.
         let agent = ureq::Agent::config_builder()
             .tls_config(tls.build())
-            .timeout_global(Some(std::time::Duration::from_secs(30)))
+            .timeout_connect(Some(std::time::Duration::from_secs(15)))
+            .timeout_recv_body(Some(std::time::Duration::from_secs(30)))
             .build()
             .new_agent();
         Ok(Self { agent })
