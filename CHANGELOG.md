@@ -1,6 +1,10 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.40.1] - 2026-11-10
+
+### Fixes
+- **subsonic:** Bound the download by progress, not by a deadline
 ## [0.40.0] - 2026-11-10
 
 ### Features
