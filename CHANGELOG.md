@@ -1,6 +1,10 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.40.0] - 2026-11-10
+
+### Features
+- **audio:** `d` picks the output device, and the choice is remembered
 ## [0.39.0] - 2026-11-10
 
 ### Features
