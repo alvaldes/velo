@@ -79,6 +79,7 @@ Every key below is what the code does today.
 | `I` | Refresh the library index in the background; the title bar shows `⟳ indexing…` until it ends and the lists reload |
 | `u` | Open a URL prompt: type an `http`/`https` URL and press `enter`. A plain stream — or a wrapper with a single entry — plays live as a radio station (`● live`); a wrapper listing several songs queues them as one finite list of tracks, the URL of each song its path. Nothing is saved — no station in `radio.toml` |
 | `ctrl+i` | Describe the track in question — the one playing, or the row under the cursor when nothing plays — in a card: the path or remote URI, the format header's facts (container, codec, bitrate, rate, channels, length), what the index knows and the file's ReplayGain tags. `esc` closes it |
+| `ctrl+s` | Save a remote track out — the one playing, or the row the cursor marks in the queue or in a list that holds tracks. A prompt asks for the destination, prefilled `~/Downloads/<the file's own name>` (the title the index or a wrapper carries when one is known, else the URL's own last segment); `enter` copies the cached bytes there off the event loop, the status line shows the progress it can honestly report and one last line says where the file landed, `esc` cancels. A local file — it is already on disk, copying it is `cp` — and a live station — a stream does not end, so there is nothing to save — are refused with their own lines; a destination that is already a file is refused in the card with the name kept, velo never overwrites; a failed copy says why and leaves no half file behind. The library and the cache are untouched either way: a copy out, not a move |
 | `+` / `-` | Volume up / down, 5% at a time; `[` / `]` move it a single point for the levels in between |
 | `tab` | One round trip: to the queue, and back to the screen you left — `Sources`, the library at its level, or the radio view with the place you were inside |
 | `p` | The queue view — the working list, where `x` removes and `shift+↑`/`shift+↓` move; `tab` is the way back out |
@@ -603,6 +604,10 @@ and pressing `enter` (or `a`, to queue one) plays a remote track like a
 local one.
 
 ### How remote playback works
+
+| `ctrl+s` | Save a remote track out — the one playing, or the row the cursor marks in the queue or in a list that holds tracks. A prompt asks for the destination, prefilled `~/Downloads/<the file's own name>` (the title the index or a wrapper carries when one is known, else the URL's own last segment); `enter` copies the cached bytes there off the event loop, the status line shows the progress it can honestly report and one last line says where the file landed, `esc` cancels. A local file — it is already on disk, copying it is `cp` — and a live station — a stream does not end, so there is nothing to save — are refused with their own lines; a destination that is already a file is refused in the card with the name kept, velo never overwrites; a failed copy says why and leaves no half file behind. The library and the cache are untouched either way: a copy out, not a move |
+track is a copy out, never a move: `ctrl+s` names a destination and the
+cached bytes are copied there (a cache hit costs no network, a miss is the
 
 Playing a remote track is cache-on-play: the track's original bytes are
 fetched once with `stream?id=<id>&format=raw` (the server is asked for no
