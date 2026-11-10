@@ -16,6 +16,7 @@ use velo::ui::crossterm::event::{KeyCode, KeyEvent};
 use velo::ui::ratatui::Terminal;
 use velo::ui::ratatui::backend::TestBackend;
 use velo::ui::ratatui::buffer::{Buffer, Cell};
+use velo::ui::visualizer::Visualizer;
 
 fn render(app: &App) -> String {
     let mut terminal = Terminal::new(TestBackend::new(90, 12)).expect("a test terminal");
@@ -383,18 +384,13 @@ fn lines_at(app: &App, width: u16, height: u16) -> Vec<String> {
         .collect()
 }
 
+/// A tall window keeps the band area between the clock and the progress bar
+/// even though nothing plays draws nothing in it: silence renders nothing
+/// for every visualizer (issue #40).
 #[test]
-fn a_tall_window_draws_the_spectrum_as_a_quiet_baseline_when_nothing_plays() {
-    use velo::ui::theme::Theme;
-
-    let theme = Theme::default();
-
+fn a_tall_window_keeps_the_band_between_the_clock_and_the_progress_bar() {
     let app = App::new(tracks(&["one.flac"]));
     let tall = lines_at(&app, 100, 32);
-    let baseline = tall
-        .iter()
-        .position(|line| line.contains("▁ ▁ ▁ ▁"))
-        .unwrap_or_else(|| panic!("a baseline of bars, got:\n{}", tall.join("\n")));
     let clock = tall
         .iter()
         .position(|line| line.contains("■ stopped"))
@@ -404,18 +400,19 @@ fn a_tall_window_draws_the_spectrum_as_a_quiet_baseline_when_nothing_plays() {
         .position(|line| line.starts_with("│ ──────"))
         .unwrap();
     assert!(
-        clock < baseline && baseline < progress,
-        "the bars sit between the clock and the progress bar"
+        clock + 1 < progress,
+        "rows for the band sit between the clock and the progress bar"
     );
-    let x = tall[baseline].chars().position(|c| c == '▁').unwrap();
-    assert_eq!(
-        cell_at_size(&app, 100, 32, x, baseline).fg,
-        theme.border,
-        "silence is drawn as quietly as the frame"
-    );
+    // Silence draws nothing at all (issue #40): no bars, no baseline.
+    for row in tall.iter().skip(clock + 1).take(progress - clock - 1) {
+        assert!(
+            !row.contains("▁") && !row.contains("█"),
+            "silence draws nothing, got: {row}"
+        );
+    }
 
-    // The 80×24 window keeps its seven-row block: no spectrum there.
-    assert!(!screen_at(&app, 80, 24).contains("▁ ▁ ▁"));
+    // The 80×24 window keeps its seven-row block: no band there either.
+    assert!(!screen_at(&app, 80, 24).contains("▁"));
 }
 
 #[test]
@@ -444,9 +441,10 @@ fn low_power_quarters_the_redraw_cadence() {
 #[test]
 fn low_power_leaves_the_spectrum_out_and_gives_its_rows_back() {
     let mut app = App::new(tracks(&["one.flac", "two.flac", "three.flac"]));
-    let tall = screen_at(&app, 100, 32);
-    assert!(tall.contains("▁ ▁ ▁"), "ordinary power draws the spectrum");
-    let rows_before = tall
+    // The band's rows are reserved whenever a visualizer is in force, even
+    // though silence draws nothing (issue #40): the layout is what low
+    // power changes, so the list's rows are the observable.
+    let rows_before = screen_at(&app, 100, 32)
         .lines()
         .filter(|line| line.contains("one.flac"))
         .count();
@@ -457,10 +455,10 @@ fn low_power_leaves_the_spectrum_out_and_gives_its_rows_back() {
     });
     let tall = screen_at(&app, 100, 32);
     assert!(
-        !tall.contains("▁ ▁ ▁"),
-        "low power leaves the spectrum out, got:\n{tall}"
+        !tall.contains("▁") && !tall.contains("█"),
+        "low power leaves the visualizer out, got:\n{tall}"
     );
-    // The rows the spectrum gave up hold list rows again.
+    // The rows the band gave up hold list rows again.
     let rows_after = tall
         .lines()
         .filter(|line| line.contains("one.flac") || line.contains("two.flac"))
@@ -1444,8 +1442,8 @@ fn a_help_that_fits_shows_no_position() {
     let mut app = App::new(tracks(&["one.flac"]));
     press(&mut app, KeyCode::Char('?'));
     // Tall enough for the whole card: the property is "no position line when the
-    // whole table fits", not "the table has 25 rows".
-    let screen = screen_at(&app, 80, 40);
+    // whole table fits", not "the table has N rows".
+    let screen = screen_at(&app, 80, 45);
     assert!(
         screen.contains("quit") && screen.contains("j / Down"),
         "{screen}"
@@ -1594,8 +1592,9 @@ fn hiding_the_hints_keeps_the_status_row_and_no_empty_line() {
     assert!(lines[23].starts_with('╰') && lines[23].ends_with('╯'));
 }
 
-/// The spectrum hidden never reserves its rows: the list starts where the
-/// bars were, four rows higher than with the bars drawn.
+/// The spectrum switched off resolves to `none` (issue #40, S5): the band
+/// area is never reserved, so the list starts four rows higher than with
+/// `bars` in force.
 #[test]
 fn hiding_the_spectrum_gives_its_rows_to_the_list() {
     let shown = lines_at(&app_with_ui(UiParts::default()), 80, 30);
@@ -1603,14 +1602,9 @@ fn hiding_the_spectrum_gives_its_rows_to_the_list() {
         .iter()
         .position(|line| line.contains("▸─ Files"))
         .expect("the list header");
-    assert!(
-        shown.iter().any(|line| line.contains("▁")),
-        "with the switch on the bars are drawn, got:\n{}",
-        shown.join("\n")
-    );
 
     let hidden = app_with_ui(UiParts {
-        spectrum: false,
+        visualizer: Visualizer::None,
         ..UiParts::default()
     });
     let screen = screen_at(&hidden, 80, 30);
@@ -1672,12 +1666,12 @@ fn hiding_the_cover_art_leaves_no_cover_columns_and_no_explanation() {
 fn hiding_every_part_at_once_still_draws_a_coherent_window() {
     let app = app_with_ui(UiParts {
         cover_art: false,
-        spectrum: false,
         hints: false,
         top_bar: false,
         advisories: true,
         view_numbers: true,
         low_power: false,
+        visualizer: Visualizer::None,
     });
     let screen = screen_at(&app, 80, 24);
     let lines: Vec<&str> = screen.lines().collect();

@@ -35,6 +35,7 @@ use serde::de::{self, Deserializer, Visitor};
 
 use crate::audio::output::Repeat;
 use crate::ui::theme::builtins;
+use crate::ui::visualizer::Visualizer;
 use crate::ui::{BrowseBy, View};
 
 /// The volume the player has always started at (T3 kept it at full).
@@ -155,7 +156,7 @@ Configuration: $XDG_CONFIG_HOME/velo/config.toml, or
     ~/.config/velo/config.toml — keys: library, bit_perfect, replay_gain, and
     the tables [state] (volume, shuffle, repeat and the open node),
     [theme] (every colour, as \"#rrggbb\"), [ui] (cover_art, spectrum,
-    low_power, hints, top_bar, advisories, view_numbers) and the optional
+    visualizer, low_power, hints, top_bar, advisories, view_numbers) and the optional
     [subsonic] table (url, user, api_key, insecure) for a Subsonic-compatible
     server; `velo --subsonic-test` answers \"can I use this server?\" and works
     over ssh;
@@ -412,7 +413,7 @@ impl Config {
             // turns it on — the flag is a request, never a refusal of the
             // file's choice.
             ui: {
-                let mut ui = self.ui.resolved();
+                let mut ui = self.ui.clone().resolved();
                 ui.low_power = cli.low_power || self.ui.low_power.unwrap_or(false);
                 ui
             },
@@ -712,8 +713,6 @@ impl ThemeKeys {
 pub struct UiParts {
     /// The cover art pane, when the terminal can show one.
     pub cover_art: bool,
-    /// The spectrum bars in the now-playing block.
-    pub spectrum: bool,
     /// The key hints on the last row.
     pub hints: bool,
     /// The tabs and the `V E L O` name on the first row.
@@ -729,6 +728,10 @@ pub struct UiParts {
     /// its ordinary rate and the spectrum is left out entirely. Playback,
     /// the clock, the volume and the rest of the screen are unchanged.
     pub low_power: bool,
+    /// Which shape the spectrum draws (issue #40, S1): one of the nine
+    /// visualizers, `bars` unless the file or the picker says otherwise.
+    /// `none` draws nothing and gives the band's rows back.
+    pub visualizer: Visualizer,
 }
 
 impl Default for UiParts {
@@ -736,7 +739,6 @@ impl Default for UiParts {
     fn default() -> Self {
         Self {
             cover_art: true,
-            spectrum: true,
             hints: true,
             top_bar: true,
             advisories: true,
@@ -744,12 +746,15 @@ impl Default for UiParts {
             // Low power is a session the user asks for (issue #11): off
             // until the flag, the file or `P` says otherwise.
             low_power: false,
+            // The bars are what the spectrum has always drawn (issue #40).
+            visualizer: Visualizer::default(),
         }
     }
 }
 
 /// The `[ui]` table as the file writes it (S5): every key optional.
-#[derive(Debug, Clone, Copy, Default, serde::Deserialize)]
+/// Not `Copy`: `visualizer` carries the written name verbatim (issue #40).
+#[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UiKeys {
     /// `cover_art` — whether the cover art pane is drawn at all.
@@ -769,21 +774,40 @@ pub struct UiKeys {
     /// `low_power` — whether the session starts in low power (issue #11):
     /// a lower redraw cadence and no spectrum, remembered across launches.
     pub low_power: Option<bool>,
+    /// `visualizer` — which shape the spectrum draws (issue #40): one of
+    /// the nine names, `none` included. Absent, the old `spectrum` switch
+    /// still decides: `false` is `none`, `true` and absent are `bars`.
+    pub visualizer: Option<String>,
 }
 
 impl UiKeys {
-    /// The table with its defaults filled in.
+    /// The table with its defaults filled in. The visualizer (issue #40,
+    /// S5) resolves from the new key when the file carries one — a name no
+    /// visualizer answers falls back to `bars` — and from the old
+    /// `spectrum` switch when it does not.
     #[must_use]
     pub fn resolved(self) -> UiParts {
         let default = UiParts::default();
+        let visualizer = self
+            .visualizer
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .and_then(Visualizer::from_name);
         UiParts {
             cover_art: self.cover_art.unwrap_or(default.cover_art),
-            spectrum: self.spectrum.unwrap_or(default.spectrum),
             hints: self.hints.unwrap_or(default.hints),
             top_bar: self.top_bar.unwrap_or(default.top_bar),
             advisories: self.advisories.unwrap_or(default.advisories),
             view_numbers: self.view_numbers.unwrap_or(default.view_numbers),
             low_power: self.low_power.unwrap_or(default.low_power),
+            visualizer: visualizer.unwrap_or_else(|| {
+                if self.spectrum.unwrap_or(true) {
+                    default.visualizer
+                } else {
+                    Visualizer::None
+                }
+            }),
         }
     }
 }

@@ -31,8 +31,11 @@ While a track plays, the block on top names it — by its library tags, or by
 its file name when it was given on the command line — counts the
 clock against its length, fills the progress bar, and the primary button
 turns into `❚❚ pause`. On a tall terminal a spectrum of the music sits
-between the clock and the progress bar. On a short terminal the block
-shrinks to three rows, then to one, before the list gives up any of its own.
+between the clock and the progress bar — in one of nine shapes: `bars`,
+`bars-outline`, `wave`, `scatter`, `flame`, `matrix`, `scope`, `mirror`, or
+`none`, chosen with `v`, the picker or the config file. On a short terminal
+the block shrinks to three rows, then to one, before the list gives up any
+of its own.
 
 velo wears your terminal's colors: its background (translucency included)
 and text, and the ANSI palette for everything else — magenta for the
@@ -68,9 +71,12 @@ Every key below is what the code does today.
 | `J` / `K` | Move the selected entry down / up (queue view); move the selected track down / up inside a playlist's track list, saved to `library.toml` at once |
 | `S` | In the queue view: save the queue as a new playlist — a prompt asks for the name, `enter` saves, `esc` cancels, a taken name is refused in the card. On a track of the library: append that track to a playlist chosen from a small overlay of the saved names (`enter` applies, `esc` cancels) |
 | `e` | On a playlist in the `Playlists` names list: rename it with a prompt, opened with the name as it stands; `esc` cancels |
+| `v` | Cycle the visualizer — the shape the spectrum draws — through `bars`, `bars-outline`, `wave`, `scatter`, `flame`, `matrix`, `scope`, `mirror` and `none`, wrapping back to `bars`; the choice is written to `[ui] visualizer` |
+| `ctrl+v` | Visualizer picker: one row per shape, `none` first. Moving the cursor applies the focused shape on the spot — the preview is the interface — `enter` keeps it and writes the choice, `esc` restores what was in force; every other key waits |
+| `V` | The visualizer over the whole body: no list, no now-playing block, but the header and the footer stay. `V` again — or `esc` — returns to exactly the view it came from, and the transport keys keep working full screen: `space` still pauses, the arrows still seek, `n`/`p` still skip, the volume and `q` are not swallowed |
 | `enter` (queue view) | Play the queue from the selected entry |
 | `?` | Help card: `j`/`k` (or `↓`/`↑`) scroll it and `g`/`G` jump to its ends; `/` filters it by key or description (`enter` keeps the filter, `esc` clears it, a second `esc` or `?` closes the help). The card keeps its full size however few rows the filter leaves, and every other key waits until it closes — `q` and `space` included |
-| `o` | Settings card: everything in `config.toml` — replay gain, repeat, shuffle, the theme, the six `[ui]` switches and the library folder (the volume is not a row: it stays on `+`/`-`; the seven `[theme]` colours are the theme's inside and stay editable in the file, not on the card). `j`/`k` (or `↓`/`↑`) move between the settings (the `sound`/`theme`/`screen`/`library` headers are never focused), `g`/`G` jump to the ends, `enter` or `←`/`→` step the focused row (`enter` on the `theme` row opens the theme picker — one row per theme, the cursor's move previews it on the spot, `enter` applies, `esc` restores — and the `folder` row opens the library prompt), `esc` closes — and every other key waits until it does, `q` and `space` included |
+| `o` | Settings card: everything in `config.toml` — replay gain, repeat, shuffle, the theme, the `[ui]` switches and the visualizer and the library folder (the volume is not a row: it stays on `+`/`-`; the seven `[theme]` colours are the theme's inside and stay editable in the file, not on the card). `j`/`k` (or `↓`/`↑`) move between the settings (the `sound`/`theme`/`screen`/`library` headers are never focused), `g`/`G` jump to the ends, `enter` or `←`/`→` step the focused row (`enter` on the `theme` row opens the theme picker — one row per theme, the cursor's move previews it on the spot, `enter` applies, `esc` restores —, `enter` on the `spectrum` row opens the visualizer picker the same way, and the `folder` row opens the library prompt), `esc` closes — and every other key waits until it does, `q` and `space` included |
 | `R` | Radio view, straight from either screen: the shortcut for `Sources` → `Radio` |
 | `f` | On a track of the library: mark it as a favourite — press again to unmark; the mark is kept in `library.toml` and the track shows `★` in every library list. In the radio view: favourite the selected station, or pin the selected country or region |
 | `F` (radio view) | Filter the list already loaded, without asking the directory — `enter` keeps the filter, `esc` clears it |
@@ -392,7 +398,8 @@ key, so everything below can be changed from it; `radio.toml` and
 comments are a starting point. Everything below can also be changed while velo runs: `o` opens the
 settings card (a smaller card shaped like the help), where the
 ReplayGain mode, the repeat and the shuffle, the theme (chosen in its own
-picker), the six `[ui]` switches and the library folder can be stepped
+picker), the visualizer (its own picker too) and the `[ui]` switches and the
+library folder can be stepped
 through live — each change applies on the next frame and is written to
 this file key by key, just as if the matching key had been pressed. An existing file is
 never overwritten or reformatted: every value velo
@@ -485,12 +492,13 @@ has always drawn with.
 | Key | Meaning | Default |
 |:--|:--|:--|
 | `cover_art` | Draw the cover art pane at all | `true` |
-| `spectrum` | Draw the spectrum under the now-playing block | `true` |
+| `spectrum` | Legacy switch for the spectrum band. When `[ui] visualizer` is absent: `false` is the `none` visualizer, `true` and absent are `bars`. When `visualizer` is present it wins | `true` |
 | `hints` | Draw the key hints on the last row | `true` |
 | `top_bar` | Draw the tabs and the `V E L O` name | `true` |
 | `advisories` | Let the status line explain why something is not drawn — today, a cover the window is too small for. Errors and ordinary messages are never silenced | `true` |
 | `view_numbers` | Number the library views in the header (`1 artists  2 albums  3 tracks  4 genres`) | `true` |
 | `low_power` | Start in low power: a quarter of the redraw cadence and no spectrum, playback unchanged. `P` toggles it while playing and writes this key | `false` |
+| `visualizer` | The shape the spectrum draws: `bars` (filled bars per band), `bars-outline`, `wave` (one line undulating with the envelope), `scatter` (a dot per band), `flame` (peaks falling back over time), `matrix` (columns raining down), `scope` (the raw waveform), `mirror` (bars mirrored from the centre) or `none` (the band's rows go back to the list). `v` cycles and writes this key; the picker applies on the spot and writes on `enter` | `bars` |
 
 Precedence: `--library` (expanded the same way) beats the config file. With
 no library set, the interface no longer demands a folder: when a `[subsonic]`

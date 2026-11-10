@@ -18,6 +18,7 @@ use velo::config::{
     config_path, default_config_text, expand_path, library_to_save, radio_host_from, remove_value,
     set_library, set_value, write_default_config,
 };
+use velo::ui::visualizer::Visualizer;
 use velo::ui::{BrowseBy, View};
 
 /// Makes `<temp>/<name>`, verifies the directory can be removed, and returns
@@ -235,12 +236,12 @@ view_numbers = false
         settings.ui,
         UiParts {
             cover_art: false,
-            spectrum: false,
             hints: false,
             top_bar: false,
             advisories: false,
             view_numbers: false,
             low_power: false,
+            visualizer: Visualizer::None,
         }
     );
     let _ = fs::remove_dir_all(&dir);
@@ -261,7 +262,11 @@ fn every_new_table_is_optional_and_defaults_to_what_velo_did_before() {
         settings.ui.cover_art,
         "the cover is drawn unless told not to"
     );
-    assert!(settings.ui.spectrum);
+    assert_eq!(
+        settings.ui.visualizer,
+        Visualizer::Bars,
+        "the bars are what the spectrum draws unless told otherwise"
+    );
     assert!(settings.ui.hints);
     assert!(settings.ui.top_bar);
     // A file written before the two switches existed draws what it drew: the
