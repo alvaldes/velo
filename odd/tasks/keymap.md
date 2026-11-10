@@ -48,6 +48,7 @@ style: one status line, nothing else moved.
 **L1** — the author, on the issue: "tratar de mantener los keymaps de cliamp
 para que sea mas facil usar la app para usuarios que vengan de ahi".
 
+<<<<<<< HEAD
 **L2** — issue #42 moved one key to make room and took the freed one:
 `I` now refreshes the library index (the work `u` did, `i` staying the
 radio's report key), and `u` opens a URL prompt — a one-off `http`/`https`
@@ -56,3 +57,11 @@ and `play_station`'s outcomes: a plain stream plays live, a multi-entry
 wrapper opens as the songs it lists, a refusal is one status line, and
 nothing is persisted. The moved rows (code, `HELP_ROWS`, README keys table,
 reindex tests) went together, so no key is left half-moved.
+||||||| parent of fd783bc (feat(ui): `ctrl+i` says what the playing file is)
+=======
+**L3** — issue #43: `ctrl+i` opens the info card over whatever screen is on —
+the track playing, or the row the cursor marks in a list that holds tracks —
+the path or remote URI verbatim, the format header's facts, what the index
+knew and the file's ReplayGain tags; `esc` closes it and every other key
+waits, the overlays' rule standing (S2).
+>>>>>>> fd783bc (feat(ui): `ctrl+i` says what the playing file is)
