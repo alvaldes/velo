@@ -1,6 +1,10 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.43.0] - 2026-11-10
+
+### Features
+- **radio:** A cliamp channel leads with its live stream
 ## [0.42.3] - 2026-11-10
 
 ### Fixes
