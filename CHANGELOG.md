@@ -1,6 +1,10 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.38.1] - 2026-11-10
+
+### Fixes
+- **docs:** Restore the README a conflict resolution emptied
 ## [0.38.0] - 2026-11-10
 
 ### Features
