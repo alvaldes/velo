@@ -1,6 +1,13 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.42.3] - 2026-11-10
+
+### Fixes
+- **theme:** The values velo used to write stop masking a theme
+
+### Refactoring
+- **ui:** One owner per row shape, so a star cannot be spelled twice
 ## [0.42.2] - 2026-11-10
 
 ### Fixes
