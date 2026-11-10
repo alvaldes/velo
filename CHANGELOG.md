@@ -1,6 +1,10 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.42.1] - 2026-11-10
+
+### Fixes
+- **ui:** Starting a remote track no longer blocks the interface
 ## [0.42.0] - 2026-11-10
 
 ### Features
