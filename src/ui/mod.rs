@@ -42,14 +42,19 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, ListState, Paragraph};
 
 use crate::audio::output::{Entry, PathResolver, Repeat, SharedQueue, TrackFailure};
+use crate::audio::replay_gain::{Loudness, parse_db, parse_peak};
 use crate::audio::spectrum::Spectrum;
-use crate::audio::{Player, seek_target, skip_target};
+use crate::audio::{Player, TrackSource, seek_target, skip_target};
 use crate::config::{
     LoadedTheme, OpenNode, ReplayGainMode, Session, ThemeColors, ThemeKeys, UiParts,
 };
 use crate::library::{AlbumEntry, ArtistEntry, GenreEntry, IndexReport, Library, TrackEntry};
 use crate::subsonic::cache::CoverArt;
 use crate::subsonic::scrobble::{ScrobbleTracker, Scrobbles};
+
+use lofty::file::{AudioFile, FileType, TaggedFileExt};
+use lofty::probe::Probe;
+use lofty::tag::ItemKey;
 
 use self::artwork::{Artwork, Picker, StatefulImage, StatefulProtocol};
 use self::search::Search;
@@ -550,6 +555,9 @@ pub struct App<'lib> {
     help: Option<Help>,
     /// The settings card while it is open: its cursor and its scroll (S6).
     settings: Option<SettingsCard>,
+    /// The info card while it is open (issue #43): the rows it shows,
+    /// gathered once at the key press, never re-read afterwards.
+    info: Option<InfoCard>,
     /// The open radio view (T6a): `None` while only the library and the
     /// queue are on screen.
     radio: Option<radio::RadioView>,
@@ -785,6 +793,7 @@ impl<'lib> App<'lib> {
             protocol: RefCell::new(None),
             help: None,
             settings: None,
+            info: None,
             radio: None,
             transport_fixture: None,
             radio_wire: None,
@@ -881,6 +890,7 @@ impl<'lib> App<'lib> {
             protocol: RefCell::new(None),
             help: None,
             settings: None,
+            info: None,
             radio: None,
             transport_fixture: None,
             radio_wire: None,
@@ -2941,6 +2951,16 @@ impl<'lib> App<'lib> {
         if self.settings.is_some() {
             return self.on_settings_key(event.code);
         }
+        // The info card (issue #43): `ctrl+i` opens it over whatever screen
+        // is on — the sources screen and the radio's lists included — and
+        // while it is open it owns every key its own `esc` does not.
+        if self.info.is_some() {
+            return self.on_info_key(event.code);
+        }
+        if event.modifiers.contains(KeyModifiers::CONTROL) && event.code == KeyCode::Char('i') {
+            self.open_info_card();
+            return Action::None;
+        }
         // An open help owns every key too, so `j`/`k` scroll it and never
         // the list underneath.
         if self.help.is_some() {
@@ -4009,6 +4029,88 @@ impl<'lib> App<'lib> {
         Action::None
     }
 
+    /// The keys while the info card is open (issue #43): `esc` closes it and
+    /// every other key is inert — the card holds no state of its own to
+    /// change. Nothing reaches the lists or the transport while it is up,
+    /// `q` and `space` included.
+    fn on_info_key(&mut self, code: ratatui::crossterm::event::KeyCode) -> Action {
+        if code == ratatui::crossterm::event::KeyCode::Esc {
+            self.info = None;
+        }
+        Action::None
+    }
+
+    /// Opens the info card (issue #43): the track it describes is the one
+    /// the player stands on, or — when nothing plays — the row the cursor
+    /// marks in a list that holds tracks. A screen with no track under the
+    /// cursor opens nothing and says so in one status line. Reading the
+    /// card's facts is local and cheap: the format header and the tags, a
+    /// decode of no block but the one a container hides its format in.
+    fn open_info_card(&mut self) {
+        let Some(entry) = self
+            .playing_entry()
+            .cloned()
+            .or_else(|| self.cursor_entry())
+        else {
+            "velo: nothing to describe here".clone_into(&mut self.status);
+            return;
+        };
+        let index = entry.as_path().and_then(|path| {
+            self.known_tracks()
+                .find(|track| track.path == path)
+                .cloned()
+        });
+        self.info = Some(InfoCard::for_entry(&entry, index.as_ref()));
+    }
+
+    /// The row the cursor marks, as the entry a card would describe: the
+    /// queue's when the queue is on screen, the row's own where the list
+    /// under it holds tracks. A screen whose rows are names — the sources,
+    /// the artists, the albums, the genres, the playlist names — holds no
+    /// track: `None`.
+    fn cursor_entry(&self) -> Option<Entry> {
+        if self.radio_on_screen() {
+            // The radio's rows are stations, not files: its own keys own
+            // that screen and `ctrl+i` there describes what plays.
+            return None;
+        }
+        match self.view {
+            View::Queue => self.queue.get(self.queue_selected).cloned(),
+            View::Sources | View::Library => match &self.position {
+                Position::Files => self.argv.get(self.selected).cloned().map(Entry::from),
+                Position::Tracks { .. } | Position::AllTracks | Position::Genre { .. } => self
+                    .tracks
+                    .get(self.selected)
+                    .map(|entry| Entry::from(entry.path.clone())),
+                Position::Favourites => self
+                    .favourite_rows
+                    .get(self.selected)
+                    .map(|favorite| Entry::from(PathBuf::from(&favorite.path))),
+                Position::Playlist { .. } => self
+                    .open_playlist_tracks()
+                    .get(self.selected)
+                    .cloned()
+                    .map(|path| Entry::from(PathBuf::from(path))),
+                Position::Recent => self.recent_rows.get(self.selected).map(|row| {
+                    if row.is_station() {
+                        Entry::Station {
+                            url: row.path.clone(),
+                            name: row.title.clone().unwrap_or_default(),
+                        }
+                    } else {
+                        Entry::from(PathBuf::from(&row.path))
+                    }
+                }),
+                // The names lists have no track a card could read.
+                Position::Artists
+                | Position::Albums { .. }
+                | Position::AllAlbums
+                | Position::Genres
+                | Position::Playlists => None,
+            },
+        }
+    }
+
     /// Steps the focused setting one step forward or back (S7.1): every
     /// change applies at once through the same hooks the keys use, and is
     /// written to the file by those hooks, never from here. A step always
@@ -4490,6 +4592,9 @@ impl<'lib> App<'lib> {
         }
         if let Some(card) = &self.settings {
             self.draw_settings_card(frame, area, card);
+        }
+        if let Some(info) = &self.info {
+            self.draw_info_card(frame, area, info);
         }
         if let Some(picker) = &self.theme_picker {
             self.draw_theme_picker(frame, area, picker);
@@ -5572,6 +5677,60 @@ impl<'lib> App<'lib> {
                     .border_style(Style::new().fg(self.theme.accent))
                     .title(Span::styled(
                         " settings ",
+                        Style::new().fg(self.theme.accent).bold(),
+                    ))
+                    .padding(ratatui::widgets::Padding::horizontal(1))
+                    .style(Style::new().bg(self.theme.background)),
+            ),
+            box_area,
+        );
+    }
+
+    /// The info card (issue #43): a rounded, accent-bordered, centred block
+    /// titled ` info `, one row per fact the track has: the path or the
+    /// remote URI verbatim, the file's header facts, what the index knew and
+    /// the `ReplayGain` tags the file carries. A field the sources do not
+    /// hold has no row; the card itself reads nothing.
+    fn draw_info_card(&self, frame: &mut Frame, area: Rect, card: &InfoCard) {
+        let label_width = card
+            .rows
+            .iter()
+            .map(|(field, _)| field.chars().count())
+            .max()
+            .unwrap_or(0);
+        let value_width = card
+            .rows
+            .iter()
+            .map(|(_field, value)| value.chars().count())
+            .max()
+            .unwrap_or(0);
+        // Two border columns, one of air per side, two between the columns.
+        let width = u16::try_from(label_width + 2 + value_width + 4).unwrap_or(area.width);
+        let height = u16::try_from(card.rows.len() + 2).unwrap_or(area.height);
+        let box_area = centered(area, width, height);
+
+        let lines: Vec<Line> = card
+            .rows
+            .iter()
+            .map(|(field, value)| {
+                Line::from(vec![
+                    Span::styled(
+                        format!("{field:<label_width$}  "),
+                        Style::new().fg(self.theme.dim),
+                    ),
+                    Span::styled(value.clone(), Style::new().fg(self.theme.text)),
+                ])
+            })
+            .collect();
+
+        frame.render_widget(Clear, box_area);
+        frame.render_widget(
+            Paragraph::new(lines).block(
+                Block::bordered()
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::new().fg(self.theme.accent))
+                    .title(Span::styled(
+                        " info ",
                         Style::new().fg(self.theme.accent).bold(),
                     ))
                     .padding(ratatui::widgets::Padding::horizontal(1))
@@ -7816,10 +7975,190 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
     }
 }
 
+/// The open info card (issue #43): the rows it shows, gathered once at the
+/// key press. Nothing here touches the filesystem, and every key but its
+/// own `esc` waits while it is up.
+#[derive(Debug, Default)]
+struct InfoCard {
+    /// The card's body, `field` then its value — in the order the brief
+    /// walks them: the file's own facts, then what the index knew.
+    rows: Vec<(&'static str, String)>,
+}
+
+impl InfoCard {
+    /// The card one entry describes (issue #43), resolved now: the path or
+    /// the remote URI verbatim, the header facts read without decoding,
+    /// the `ReplayGain` tags the file carries and what the index knew. A
+    /// file that cannot be read answers with its reason inside the card,
+    /// and a station — which lives in no file — with its URI alone.
+    fn for_entry(entry: &Entry, index: Option<&TrackEntry>) -> Self {
+        let head = entry.as_path().map(read_head_facts);
+        Self {
+            rows: info_rows(entry, index, head),
+        }
+    }
+}
+
+/// What a file's header says about one track (issue #43), read before the
+/// card composes its rows: the format header and the tags, never a decode
+/// of the samples — that is `--info`'s report, not this one's.
+#[derive(Debug, Default)]
+struct HeadFacts {
+    /// The container lofty recognized the file by, as the card prints it.
+    container: Option<String>,
+    /// The codec the container declared, through [`TrackSource::codec_name`].
+    codec: Option<&'static str>,
+    /// The audio bitrate, in kilobits per second, when the header states it.
+    bitrate_kbps: Option<u32>,
+    /// The sample rate, in hertz.
+    sample_rate: Option<u32>,
+    /// The channel count.
+    channels: Option<u16>,
+    /// The duration the container declares.
+    duration: Option<Duration>,
+    /// The `ReplayGain` tags the file carries, when it has them.
+    loudness: Option<Loudness>,
+}
+
+/// Reads the header facts one card shows (issue #43): [`TrackSource::open`]
+/// for the format header — the one block it decodes, for a container that
+/// hides its format, is what playback itself pays — and one read through
+/// lofty for what the header does not name: the container's own kind, the
+/// bitrate and the `ReplayGain` tags, parsed by the same [`parse_db`] and
+/// [`parse_peak`] the gain path applies. A file lofty cannot parse keeps
+/// its header rows; `Err` carries the reason the file cannot be read at all.
+fn read_head_facts(path: &Path) -> Result<HeadFacts, String> {
+    let source = TrackSource::open(path).map_err(|error| error.to_string())?;
+    let spec = source.spec();
+    let mut head = HeadFacts {
+        codec: source.codec_name(),
+        sample_rate: Some(spec.sample_rate),
+        channels: Some(spec.channels),
+        duration: source.duration(),
+        ..HeadFacts::default()
+    };
+    if let Ok(tagged) = Probe::open(path).and_then(Probe::read) {
+        head.container = container_name(tagged.file_type()).map(str::to_owned);
+        head.bitrate_kbps = tagged.properties().audio_bitrate();
+        let tag = tagged.primary_tag().or_else(|| tagged.first_tag());
+        head.loudness = Some(Loudness {
+            track_gain_db: tag
+                .and_then(|tag| tag.get_string(ItemKey::ReplayGainTrackGain))
+                .and_then(parse_db),
+            track_peak: tag
+                .and_then(|tag| tag.get_string(ItemKey::ReplayGainTrackPeak))
+                .and_then(parse_peak),
+            album_gain_db: tag
+                .and_then(|tag| tag.get_string(ItemKey::ReplayGainAlbumGain))
+                .and_then(parse_db),
+            album_peak: tag
+                .and_then(|tag| tag.get_string(ItemKey::ReplayGainAlbumPeak))
+                .and_then(parse_peak),
+        });
+    }
+    Ok(head)
+}
+
+/// The container a [`FileType`] names, as the card prints it (issue #43).
+/// The type is `#[non_exhaustive]`, so an unmatched kind is not named: the
+/// row is left out, never a wrong name.
+fn container_name(file_type: FileType) -> Option<&'static str> {
+    match file_type {
+        FileType::Aac => Some("aac"),
+        FileType::Aiff => Some("aiff"),
+        FileType::Ape => Some("ape"),
+        FileType::Flac => Some("flac"),
+        FileType::Mpeg => Some("mpeg"),
+        FileType::Mp4 => Some("mp4"),
+        FileType::Mpc => Some("mpc"),
+        FileType::Opus => Some("opus"),
+        FileType::Speex => Some("speex"),
+        FileType::Vorbis => Some("ogg"),
+        FileType::Wav => Some("wav"),
+        FileType::WavPack => Some("wavpack"),
+        _ => None,
+    }
+}
+
+/// The rows one info card shows (issue #43), pure so the rules are testable
+/// headlessly: a field whose value is not known is left out, never a label
+/// with nothing after it, and a file that cannot be read shows its reason
+/// in place of its header facts. `head` is `None` for a station, whose only
+/// fact is the URI it streams from.
+fn info_rows(
+    what: &Entry,
+    index: Option<&TrackEntry>,
+    head: Option<Result<HeadFacts, String>>,
+) -> Vec<(&'static str, String)> {
+    let mut rows = vec![(
+        "path",
+        match what {
+            Entry::File(path) => path.to_string_lossy().into_owned(),
+            Entry::Station { url, .. } => url.clone(),
+        },
+    )];
+    let loudness = match head {
+        Some(Ok(head)) => {
+            if let Some(container) = head.container {
+                rows.push(("container", container));
+            }
+            if let Some(codec) = head.codec {
+                rows.push(("codec", codec.to_owned()));
+            }
+            if let Some(bitrate) = head.bitrate_kbps {
+                rows.push(("bitrate", format!("{bitrate} kbps")));
+            }
+            if let Some(rate) = head.sample_rate {
+                rows.push(("rate", format!("{rate} Hz")));
+            }
+            if let Some(channels) = head.channels {
+                rows.push(("channels", channels.to_string()));
+            }
+            if let Some(duration) = head.duration {
+                rows.push(("duration", mmss(duration)));
+            }
+            head.loudness
+        }
+        Some(Err(reason)) => {
+            rows.push(("error", reason));
+            None
+        }
+        // A station lives nowhere on disk: its URI is the whole truth.
+        None => return rows,
+    };
+    if let Some(entry) = index {
+        rows.push(("artist", entry.artist.clone()));
+        rows.push(("album", entry.album.clone()));
+        rows.push(("title", entry.title.clone()));
+        if let Some(track_no) = entry.track_no {
+            rows.push(("track", track_no.to_string()));
+        }
+    }
+    if let Some(loudness) = loudness {
+        if let Some(gain) = loudness.track_gain_db {
+            rows.push(("track gain", format!("{gain:+.2} dB")));
+        }
+        if let Some(peak) = loudness.track_peak {
+            rows.push(("track peak", format!("{peak:.6}")));
+        }
+        if let Some(gain) = loudness.album_gain_db {
+            rows.push(("album gain", format!("{gain:+.2} dB")));
+        }
+        if let Some(peak) = loudness.album_peak {
+            rows.push(("album peak", format!("{peak:.6}")));
+        }
+    }
+    rows
+}
+
 #[cfg(test)]
 mod tests {
     use super::App;
+    use super::HeadFacts;
+    use super::info_rows;
     use crate::audio::output::Entry;
+    use std::path::PathBuf;
+    use std::time::Duration;
 
     // The playing-entry refusals of T18b cannot be driven through `App::on_key`
     // without a sound device: marking an entry as playing means opening one.
@@ -7827,6 +8166,163 @@ mod tests {
     // `move_in_queue` both read, so it is pinned here, and the wiring from
     // `on_key` into `App::status` is pinned headlessly in `tests/ui_state.rs`
     // through the empty-queue refusal, which walks the same code path.
+
+    // ---- the info card (issue #43): the pure rules of its rows ----------
+    //
+    // The card's key wiring is pinned headlessly in `tests/ui_info.rs`
+    // through a real fixture file; these pin the rules of what the rows
+    // themselves may say.
+
+    fn info_entry() -> crate::library::TrackEntry {
+        crate::library::TrackEntry {
+            artist: "Tide".to_owned(),
+            album: "Harbor".to_owned(),
+            title: "Dawn".to_owned(),
+            track_no: Some(1),
+            disc_no: None,
+            duration_ms: 1000,
+            path: PathBuf::from("/music/Tide/01.flac"),
+            source: crate::library::LOCAL_SOURCE.to_owned(),
+            remote_id: None,
+            cover_id: None,
+        }
+    }
+
+    /// A field the source does not know is left out, never an empty line
+    /// with a label and nothing after it (issue #43).
+    #[test]
+    fn a_field_the_source_does_not_know_is_left_out_of_the_card() {
+        let mut entry = info_entry();
+        entry.track_no = None;
+        let known = info_rows(
+            &Entry::from(PathBuf::from("/music/Tide/01.flac")),
+            Some(&entry),
+            Some(Ok(HeadFacts::default())),
+        );
+
+        assert_eq!(
+            known.first().map(|(field, value)| (*field, value.as_str())),
+            Some(("path", "/music/Tide/01.flac"))
+        );
+        assert!(
+            !known.iter().any(|(field, _)| *field == "track"),
+            "no track number in the index, no track row"
+        );
+        assert!(
+            known.iter().all(|(_field, value)| !value.trim().is_empty()),
+            "a row is never a label with nothing after it: {known:?}"
+        );
+        assert!(
+            !known.iter().any(|(field, _)| *field == "container"),
+            "an unreadable header leaves its facts out too"
+        );
+    }
+
+    /// What the index never saw adds no rows: a file outside the index is
+    /// described by its header alone (issue #43).
+    #[test]
+    fn a_file_outside_the_index_names_no_tags() {
+        let rows = info_rows(
+            &Entry::from(PathBuf::from("/elsewhere/two.flac")),
+            None,
+            Some(Ok(HeadFacts::default())),
+        );
+        assert!(
+            !rows
+                .iter()
+                .any(|(field, _)| matches!(*field, "artist" | "album" | "title" | "track"))
+        );
+    }
+
+    /// A file that cannot be read shows its reason in the card instead of
+    /// the header rows (issue #43), and the key press does not fail.
+    #[test]
+    fn an_unreadable_file_shows_its_reason_in_the_card() {
+        let rows = info_rows(
+            &Entry::from(PathBuf::from("/gone/track.flac")),
+            None,
+            Some(Err("cannot read the file: permission denied".to_owned())),
+        );
+        assert_eq!(rows.first().map(|(field, _)| *field), Some("path"));
+        let reason = rows.iter().find(|(field, _)| *field == "error");
+        assert_eq!(
+            reason.map(|(_field, value)| value.as_str()),
+            Some("cannot read the file: permission denied")
+        );
+        assert!(!rows.iter().any(|(field, _)| *field == "codec"));
+    }
+
+    /// A station is described by its URI alone — it lives in no file's
+    /// header (issue #43).
+    #[test]
+    fn a_station_is_described_by_its_uri_alone() {
+        let rows = info_rows(
+            &Entry::Station {
+                url: "https://radio.example/stream".to_owned(),
+                name: "Radio Example".to_owned(),
+            },
+            None,
+            None,
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0], ("path", "https://radio.example/stream".to_owned()));
+    }
+
+    /// The card keeps every known fact: the header rows and the index rows
+    /// in place, with the duration as the lists write durations.
+    #[test]
+    fn a_fully_known_track_is_described_in_full() {
+        let head = HeadFacts {
+            container: Some("flac".to_owned()),
+            codec: Some("flac"),
+            bitrate_kbps: Some(962),
+            sample_rate: Some(44_100),
+            channels: Some(2),
+            duration: Some(Duration::from_secs(198)),
+            loudness: None,
+        };
+        let rows = info_rows(
+            &Entry::from(PathBuf::from("/music/Tide/01.flac")),
+            Some(&info_entry()),
+            Some(Ok(head)),
+        );
+
+        let values: std::collections::HashMap<&str, &str> = rows
+            .iter()
+            .map(|(field, value)| (*field, value.as_str()))
+            .collect();
+        assert_eq!(values.get("container"), Some(&"flac"));
+        assert_eq!(values.get("codec"), Some(&"flac"));
+        assert_eq!(values.get("bitrate"), Some(&"962 kbps"));
+        assert_eq!(values.get("rate"), Some(&"44100 Hz"));
+        assert_eq!(values.get("channels"), Some(&"2"));
+        assert_eq!(values.get("duration"), Some(&"03:18"));
+        assert_eq!(values.get("artist"), Some(&"Tide"));
+        assert_eq!(values.get("track"), Some(&"1"));
+
+        // The order the brief walks: the file's own facts first, then what
+        // the index knew.
+        let order: Vec<&str> = rows.iter().map(|(field, _)| *field).collect();
+        let files = [
+            "container",
+            "codec",
+            "bitrate",
+            "rate",
+            "channels",
+            "duration",
+        ];
+        let head_last = files
+            .iter()
+            .filter_map(|field| order.iter().position(|row_field| row_field == field))
+            .max()
+            .expect("header rows present");
+        let index_first = ["artist", "album", "title", "track"]
+            .iter()
+            .filter_map(|field| order.iter().position(|row_field| row_field == field))
+            .min()
+            .expect("index rows present");
+        assert!(head_last < index_first);
+    }
 
     #[test]
     fn a_playing_file_is_named_by_its_library_row_or_else_by_its_file() {
