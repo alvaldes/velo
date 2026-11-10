@@ -891,19 +891,27 @@ pub fn themes_dir(config_file: &Path) -> PathBuf {
 pub const DEFAULT_THEME_TEMPLATE: &str = r##"# velo's own palette, which is also the built-in one: this file ships as
 # themes/velo.toml to show the format. Copy it under another name to make a
 # theme, then select it with `name` in the [theme] table of config.toml or
-# from the settings card (`o`): `enter` on the `theme` row opens a picker of
+# from the settings card (`ctrl+p`): `enter` on the `theme` row opens a picker of
 # every theme — moving the cursor previews it on the spot, `enter` applies
 # it, `esc` puts back what you had.
 #
 # Every colour is "#rrggbb", or "reset" for the terminal's own colour. A
 # line you delete keeps the built-in value, and a colour in config.toml's
 # [theme] table that differs from the built-in still wins over this file.
+# The screen behind everything. `transparent_background = true` in config.toml
+# shows the terminal's own instead.
 background = "#141c28"
+# The body text: row names and values, the now-playing title.
 text = "#f4f0e2"
+# What recedes: hints, section headers, the facts on the right, the footer's keys.
 dim = "#767676"
+# The frame's titles, the selected row's background, the playing marker.
 accent = "#f4baa3"
+# The transport's buttons and small controls, and the paused icon.
 secondary = "#a6c8e2"
+# The window's frame and the dotted rules.
 border = "#767676"
+# The colour drawn ON the accent, so the selected row's own text stays readable.
 ink = "#000000"
 "##;
 
@@ -913,18 +921,25 @@ ink = "#000000"
 pub const DEFAULT_TERMINAL_TEMPLATE: &str = r##"# The terminal's own colours: every slot is "reset", so velo draws with
 # whatever palette your terminal already has — theme and terminal agree by
 # construction. Select it with `name = "default terminal"` in the [theme]
-# table of config.toml, or from the settings card (`o`): `enter` on the
-# `theme` row opens a picker of every theme.
+# table of config.toml, or from the settings card (`ctrl+p`): `enter` on
+# the `theme` row opens a picker of every theme.
 #
 # Every colour is "#rrggbb", or "reset" for the terminal's own colour. A
 # line you delete keeps the built-in value, and a colour in config.toml's
 # [theme] table that differs from the built-in still wins over this file.
+# The screen behind everything.
 background = "reset"
+# The body text: row names and values, the now-playing title.
 text = "reset"
+# What recedes: hints, section headers, the facts on the right, the footer's keys.
 dim = "reset"
+# The frame's titles, the selected row's background, the playing marker.
 accent = "reset"
+# The transport's buttons and small controls, and the paused icon.
 secondary = "reset"
+# The window's frame and the dotted rules.
 border = "reset"
+# The colour drawn ON the accent, so the selected row's own text stays readable.
 ink = "reset"
 "##;
 
