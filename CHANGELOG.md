@@ -1,6 +1,10 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.37.0] - 2026-11-10
+
+### Features
+- **ui:** `u` plays a URL, and refreshing the index moves to `I`
 ## [0.36.2] - 2026-11-10
 
 ### Fixes
