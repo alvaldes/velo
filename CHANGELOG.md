@@ -1,6 +1,10 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.33.0] - 2026-11-10
+
+### Features
+- **ui:** The spectrum becomes a choice of nine visualizers
 ## [0.32.1] - 2026-11-09
 
 ### Fixes
