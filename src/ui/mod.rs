@@ -43,7 +43,7 @@ use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, ListState, Paragraph};
 
-use crate::audio::output::{Entry, PathResolver, Repeat, SharedQueue, TrackFailure};
+use crate::audio::output::{DeviceList, Entry, PathResolver, Repeat, SharedQueue, TrackFailure};
 use crate::audio::replay_gain::{Loudness, parse_db, parse_peak};
 use crate::audio::spectrum::Spectrum;
 use crate::audio::{Player, TrackSource, seek_target, skip_target};
@@ -954,6 +954,23 @@ pub struct App<'lib> {
     /// a `P` press writes only when it moves away from it, the way `s`
     /// compares against the session.
     saved_low_power: bool,
+    /// The output device this session opens (issue #44, S3): the config's
+    /// `[audio] device` at launch, the picker's choice afterwards. `None`
+    /// is the system's default output. Every player this session builds
+    /// opens it.
+    audio_device: Option<String>,
+    /// What the config file already said about the device (issue #44, S3):
+    /// a switch writes only when it moves away from it, the way the
+    /// visualizer writes only when it changed.
+    saved_audio_device: Option<String>,
+    /// The device picker while it is open (issue #44, S1): the machine's
+    /// outputs, the one in use marked; `enter` switches, `esc` closes
+    /// without changing anything.
+    device_picker: Option<DevicePicker>,
+    /// The machine's audio outputs, as the device picker lists them: a
+    /// function so the tests can install a fixture list — no test
+    /// enumerates real devices, the way no test opens a browser.
+    device_lister: Box<dyn Fn() -> DeviceList>,
 }
 
 impl<'lib> App<'lib> {
@@ -1038,6 +1055,10 @@ impl<'lib> App<'lib> {
             media: None,
             media_published: None,
             saved_low_power: false,
+            audio_device: None,
+            saved_audio_device: None,
+            device_picker: None,
+            device_lister: Box::new(crate::audio::output::output_devices),
             saved: Session::default(),
             saved_volume: crate::config::DEFAULT_VOLUME,
             library_root: None,
@@ -1137,6 +1158,10 @@ impl<'lib> App<'lib> {
             media: None,
             media_published: None,
             saved_low_power: false,
+            audio_device: None,
+            saved_audio_device: None,
+            device_picker: None,
+            device_lister: Box::new(crate::audio::output::output_devices),
             saved: Session::default(),
             saved_volume: crate::config::DEFAULT_VOLUME,
             library_root: None,
@@ -1354,6 +1379,64 @@ impl<'lib> App<'lib> {
     #[must_use]
     pub const fn visualizer_fullscreen(&self) -> bool {
         self.visualizer_fullscreen.is_some()
+    }
+
+    /// Whether the device picker is open (issue #44): it owns every key
+    /// while it is, the way the theme and visualizer pickers do.
+    #[must_use]
+    pub const fn device_picker_open(&self) -> bool {
+        self.device_picker.is_some()
+    }
+
+    /// The row the device picker's cursor is on (issue #44, S1).
+    #[must_use]
+    pub const fn device_picker_cursor(&self) -> usize {
+        match &self.device_picker {
+            Some(picker) => picker.cursor,
+            None => 0,
+        }
+    }
+
+    /// The picker's rows, in the order the machine's outputs were listed
+    /// (issue #44, S1).
+    #[must_use]
+    pub fn device_picker_names(&self) -> Vec<String> {
+        match &self.device_picker {
+            Some(picker) => picker.names.clone(),
+            None => Vec::new(),
+        }
+    }
+
+    /// The device the picker marks as in use (issue #44, S1): the player's
+    /// own while one plays, else the session's choice, else the default.
+    #[must_use]
+    pub fn device_picker_in_use(&self) -> Option<String> {
+        self.device_picker
+            .as_ref()
+            .map(|picker| picker.in_use.clone())
+    }
+
+    /// The output device the session opens (issue #44, S3); `None` is the
+    /// system's default output.
+    #[must_use]
+    pub fn audio_device(&self) -> Option<&str> {
+        self.audio_device.as_deref()
+    }
+
+    /// The output device every player this session builds opens (issue
+    /// #44, S3): the config's `[audio] device` at launch. Also records
+    /// what the file already said, so a switch writes only when it moved
+    /// away from it, the way [`App::set_ui`] records low power.
+    pub fn set_audio_device(&mut self, device: Option<String>) {
+        self.saved_audio_device.clone_from(&device);
+        self.audio_device = device;
+    }
+
+    /// Installs the device list the picker offers (issue #44, S1): a
+    /// function so the tests can stand in for the machine's outputs, the
+    /// way [`App::set_url_opener`] stands in for the browser.
+    pub fn set_device_lister(&mut self, lister: impl Fn() -> DeviceList + 'static) {
+        self.device_lister = Box::new(lister);
     }
 
     /// The palette as the `[theme]` table wrote it (S4): the colours the
@@ -3185,6 +3268,11 @@ impl<'lib> App<'lib> {
         if self.visualizer_picker.is_some() {
             return self.on_visualizer_picker_key(event.code);
         }
+        // The device picker (issue #44) owns every key while it is open,
+        // the same way.
+        if self.device_picker.is_some() {
+            return self.on_device_picker_key(event.code);
+        }
         // The full-screen visualizer (issue #40, S4) gives up every key but
         // its own two: `V` and `esc` leave it — to exactly the view it came
         // from — and everything else, the transport and the volume and `q`
@@ -3507,6 +3595,13 @@ impl<'lib> App<'lib> {
             // be set again at any time (library-refresh T1).
             KeyCode::Char('o') if !matches!(self.position, Position::Files) => {
                 self.ask_for_library(self.config_file.clone());
+                Action::None
+            }
+            // The audio output picker (issue #44, S1): `d` lists every
+            // output the machine has, the one in use marked; `enter` moves
+            // the playback there, `esc` closes without changing anything.
+            KeyCode::Char('d') => {
+                self.open_device_picker();
                 Action::None
             }
             // The saved playlists source (issue #38): cliamp's `L`. The
@@ -4820,6 +4915,157 @@ impl<'lib> App<'lib> {
         }
     }
 
+    /// Opens the device picker (issue #44, S1): the machine's outputs, one
+    /// row each — a machine with one device still lists it — with the
+    /// cursor starting on the one in use. A machine with no output says so
+    /// instead of opening an empty card.
+    fn open_device_picker(&mut self) {
+        let list = (self.device_lister)();
+        if list.names.is_empty() {
+            self.note("velo: no audio output device");
+            return;
+        }
+        let in_use = self.device_in_use(&list);
+        let cursor = list
+            .names
+            .iter()
+            .position(|name| *name == in_use)
+            .unwrap_or(0);
+        self.device_picker = Some(DevicePicker {
+            names: list.names,
+            in_use,
+            cursor,
+        });
+    }
+
+    /// The device in use: the player's own while one runs — a switch may
+    /// have chosen a device the config does not carry — else the session's
+    /// choice, else the system default.
+    fn device_in_use(&self, list: &DeviceList) -> String {
+        if let Some(player) = &self.player {
+            return player.device_name().to_owned();
+        }
+        self.audio_device
+            .clone()
+            .or_else(|| list.default.clone())
+            .unwrap_or_else(|| list.names.first().cloned().unwrap_or_default())
+    }
+
+    /// The keys while the device picker is open (issue #44, S1): `j`/`k`
+    /// and the arrows move and wrap at the ends; `enter` moves the playback
+    /// to the focused device; `esc` closes without changing anything —
+    /// there is no preview to restore, a device is heard, not seen. Every
+    /// other key waits.
+    fn on_device_picker_key(&mut self, code: ratatui::crossterm::event::KeyCode) -> Action {
+        use ratatui::crossterm::event::KeyCode;
+
+        let count = self
+            .device_picker
+            .as_ref()
+            .map_or(0, |picker| picker.names.len());
+        match code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                if let Some(picker) = self.device_picker.as_mut()
+                    && count > 0
+                {
+                    picker.cursor = (picker.cursor + 1) % count;
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if let Some(picker) = self.device_picker.as_mut()
+                    && count > 0
+                {
+                    picker.cursor = (picker.cursor + count - 1) % count;
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(picker) = self.device_picker.take()
+                    && let Some(name) = picker.names.get(picker.cursor)
+                {
+                    self.switch_audio_device(name);
+                }
+            }
+            KeyCode::Esc => {
+                self.device_picker = None;
+            }
+            _ => {}
+        }
+        Action::None
+    }
+
+    /// Moves the playback to `name` (issue #44, S2–S4), or only remembers
+    /// the choice when nothing is playing. A playing stream is rebuilt at
+    /// the position it reached — the same rebuild a seek does — so a file
+    /// keeps its place in the current track and a live station reopens from
+    /// the current moment, never from its start. The new player is opened
+    /// *before* the old one is stopped: a device that cannot be opened
+    /// leaves the current output playing and says why in one status line
+    /// (S4). Switching to the device already in use is a close, not a
+    /// rebuild — a gap for nothing is not a switch.
+    fn switch_audio_device(&mut self, name: &str) {
+        let in_use = self.device_in_use(&(self.device_lister)());
+        if name == in_use {
+            self.status = format!("output: {name}");
+            return;
+        }
+        let at = self
+            .player
+            .as_ref()
+            .map(|player| (player.current_index(), player.position()));
+        let Some((track, offset)) = at else {
+            self.adopt_device(name);
+            return;
+        };
+        if self.queue.is_empty() || track >= self.queue.len() {
+            self.adopt_device(name);
+            return;
+        }
+        let queue = Arc::new(Mutex::new(self.queue.clone()));
+        // The probe: the new player is opened while the old one still
+        // plays, so a failure here costs a status line, never the music (S4).
+        match Player::play_gapless_at_full(
+            Arc::clone(&queue),
+            track,
+            offset,
+            self.replay_gain,
+            self.repeat,
+            self.mono,
+            self.bit_perfect,
+            Some(name),
+            self.resolver.clone(),
+        ) {
+            Ok(player) => {
+                if let Some(old) = self.player.take() {
+                    old.stop();
+                }
+                // A rebuilt player starts at its own default level; without
+                // this a switch would silently jump the volume back to it.
+                player.set_volume(self.volume);
+                self.shared = Some(queue);
+                self.player = Some(player);
+                self.state = PlayState::Playing;
+                self.adopt_device(name);
+            }
+            Err(error) => {
+                // The old player was never touched: the music keeps playing
+                // on the device it was on (S4).
+                self.status = format!("velo: {error}");
+            }
+        }
+    }
+
+    /// Adopts the chosen device for the rest of the session and remembers
+    /// it in the config file, written only when it changed (issue #44, S3)
+    /// — the way `z` writes shuffle and the visualizer writes its own key.
+    fn adopt_device(&mut self, name: &str) {
+        self.audio_device = Some(name.to_owned());
+        if self.saved_audio_device.as_deref() != Some(name) {
+            self.saved_audio_device = Some(name.to_owned());
+            self.remember(Some("audio"), "device", &Self::toml_string(name));
+        }
+        self.status = format!("output: {name}");
+    }
+
     /// Takes the visualizer to the whole body (issue #40, S4), remembering
     /// the screen it came from: `V` and `esc` land back there exactly.
     fn open_visualizer_fullscreen(&mut self) {
@@ -5067,6 +5313,9 @@ impl<'lib> App<'lib> {
         }
         if let Some(picker) = &self.visualizer_picker {
             Self::draw_visualizer_picker(frame, area, picker, &self.theme);
+        }
+        if let Some(picker) = &self.device_picker {
+            self.draw_device_picker(frame, area, picker);
         }
         if let Some(prompt) = self.library_prompt() {
             Self::draw_library_prompt(frame, area, prompt, &self.theme);
@@ -6305,6 +6554,59 @@ impl<'lib> App<'lib> {
         );
     }
 
+    /// The device picker (issue #44): the theme picker's card, one row per
+    /// output, the focused row in the accent and the one in use marked with
+    /// the live dot, titled ` output `.
+    fn draw_device_picker(&self, frame: &mut Frame, area: Rect, picker: &DevicePicker) {
+        let width = u16::try_from(
+            picker
+                .names
+                .iter()
+                .map(|name| name.chars().count() + 2)
+                .max()
+                .unwrap_or(0)
+                + 4,
+        )
+        .unwrap_or(area.width);
+        let height = u16::try_from(picker.names.len() + 2).unwrap_or(area.height);
+        let box_area = centered(area, width, height);
+        let lines = picker
+            .names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| {
+                let style = if index == picker.cursor {
+                    Style::new().fg(self.theme.accent)
+                } else {
+                    Style::new().fg(self.theme.text)
+                };
+                // The one in use carries the live dot the radio's footer
+                // uses; the rest are indented to keep the rows straight.
+                let label = if *name == picker.in_use {
+                    format!("\u{25cf} {name}")
+                } else {
+                    format!("  {name}")
+                };
+                Line::styled(label, style)
+            })
+            .collect::<Vec<_>>();
+        frame.render_widget(Clear, box_area);
+        frame.render_widget(
+            Paragraph::new(lines).block(
+                Block::bordered()
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::new().fg(self.theme.accent))
+                    .title(Span::styled(
+                        " output ",
+                        Style::new().fg(self.theme.accent).bold(),
+                    ))
+                    .padding(ratatui::widgets::Padding::horizontal(1))
+                    .style(Style::new().bg(self.theme.background)),
+            ),
+            box_area,
+        );
+    }
+
     /// The library prompt: a rounded card, centred like the help, with the
     /// path being typed and, under it, why the last one was refused.
     fn draw_library_prompt(frame: &mut Frame, area: Rect, prompt: &LibraryPrompt, theme: &Theme) {
@@ -7418,6 +7720,9 @@ impl<'lib> App<'lib> {
             self.repeat,
             self.mono,
             self.bit_perfect,
+            // The session's device (issue #44, S3): the config's choice at
+            // launch, the picker's after a switch.
+            self.audio_device.as_deref(),
             self.resolver.clone(),
         ) {
             Ok(player) => {
@@ -7593,6 +7898,10 @@ impl<'lib> App<'lib> {
             self.repeat,
             self.mono,
             self.bit_perfect,
+            // The session's device (issue #44, S3): a seek and a skip stay
+            // on the device the session chose, exactly as they keep the
+            // volume and the gain mode.
+            self.audio_device.as_deref(),
             self.resolver.clone(),
         ) {
             Ok(player) => {
@@ -8365,6 +8674,21 @@ struct VisualizerPicker {
     /// The visualizer the session drew with when the picker opened: what
     /// `esc` puts back.
     snapshot: Visualizer,
+}
+
+/// The open device picker (issue #44, S1): the machine's outputs as the
+/// lister returned them when it opened, and the one in use, marked in the
+/// drawing. There is no preview — a device is heard, not seen — so a move
+/// touches nothing; `enter` switches, `esc` closes without changing
+/// anything.
+struct DevicePicker {
+    /// The offered names, frozen at open: the machine's outputs, in the
+    /// order the lister gave them.
+    names: Vec<String>,
+    /// The device in use when the picker opened: the row the mark sits on.
+    in_use: String,
+    /// The focused row.
+    cursor: usize,
 }
 
 /// The open theme picker (issue #37): the row the cursor is on, and the

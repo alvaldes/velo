@@ -80,6 +80,7 @@ Every key below is what the code does today.
 | `u` | Open a URL prompt: type an `http`/`https` URL and press `enter`. A plain stream — or a wrapper with a single entry — plays live as a radio station (`● live`); a wrapper listing several songs queues them as one finite list of tracks, the URL of each song its path. Nothing is saved — no station in `radio.toml` |
 | `ctrl+i` | Describe the track in question — the one playing, or the row under the cursor when nothing plays — in a card: the path or remote URI, the format header's facts (container, codec, bitrate, rate, channels, length), what the index knows and the file's ReplayGain tags. `esc` closes it |
 | `ctrl+s` | Save a remote track out — the one playing, or the row the cursor marks in the queue or in a list that holds tracks. A prompt asks for the destination, prefilled `~/Downloads/<the file's own name>` (the title the index or a wrapper carries when one is known, else the URL's own last segment); `enter` copies the cached bytes there off the event loop, the status line shows the progress it can honestly report and one last line says where the file landed, `esc` cancels. A local file — it is already on disk, copying it is `cp` — and a live station — a stream does not end, so there is nothing to save — are refused with their own lines; a destination that is already a file is refused in the card with the name kept, velo never overwrites; a failed copy says why and leaves no half file behind. The library and the cache are untouched either way: a copy out, not a move |
+| `d` | Choose the audio output: a list of the machine's devices with the one in use marked, `enter` moves playback there keeping the position in the track, `esc` closes. The choice is remembered in `[audio] device` |
 | `+` / `-` | Volume up / down, 5% at a time; `[` / `]` move it a single point for the levels in between |
 | `tab` | One round trip: to the queue, and back to the screen you left — `Sources`, the library at its level, or the radio view with the place you were inside |
 | `p` | The queue view — the working list, where `x` removes and `shift+↑`/`shift+↓` move; `tab` is the way back out |
@@ -435,7 +436,7 @@ a file that is already there, so nothing has to be created by hand.
 `config.toml` carries every key at its default value with a short comment per
 key, so everything below can be changed from it; `radio.toml` and
 `library.toml` are rewritten whole each time velo saves into them, so their
-comments are a starting point. Everything below can also be changed while velo runs: `o` opens the
+comments are a starting point. Everything below can also be changed while velo runs: `ctrl+p` opens the
 settings card (a smaller card shaped like the help), where the
 ReplayGain mode, the repeat and the shuffle, the theme (chosen in its own
 picker), the visualizer (its own picker too) and the `[ui]` switches and the
@@ -562,6 +563,17 @@ saved to the file as `library = "~/<what you typed>"` (every other line
 is kept) and indexed right away; `esc` skips it. `velo --index` without a
 library exits 2 and names the key and the flag. An unknown key is an error
 naming the key; a bad value names the file and the line.
+
+### `[audio]` — the output device
+
+| Key | Meaning | Default |
+|:--|:--|:--|
+| `device` | The audio output to open, by the name the system reports for it — the one `d` lists. Blank or absent means the default device | none — the system's default |
+
+`d` changes it while velo runs, keeping the position in the track, and writes
+the name here only when it changed. A name the machine no longer has falls back
+to the default device with one notice in the status line, never a refusal to
+start; a device that refuses to open leaves the current output playing.
 
 ### Subsonic servers (early access)
 

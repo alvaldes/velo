@@ -320,6 +320,9 @@ pub struct Player {
     /// tick. A skipped track is not a sequence error, so it never reaches
     /// [`Player::wait_until_finished`] as one.
     failures: Arc<Mutex<VecDeque<TrackFailure>>>,
+    /// The name of the device the stream is playing on (issue #44, S1): the
+    /// row the device picker marks while this player runs.
+    device_name: String,
     /// How deep into its first track the stream began, in interleaved
     /// samples — the same unit as the played counter, which is what made a
     /// stereo seek report half its position when this was stored as frames.
@@ -601,6 +604,7 @@ impl Player {
             repeat,
             /* mono = */ false,
             /* bit_perfect = */ false,
+            /* device = */ None,
             /* resolver = */ None,
         )
     }
@@ -619,6 +623,13 @@ impl Player {
     /// both channels carry the average of the mix, applied after `ReplayGain`
     /// and before the ring; [`Player::set_mono`] changes it while playing.
     ///
+    /// `device` (issue #44, S3) names the output device to open: `None` is
+    /// the system's default, a name is looked up among the machine's
+    /// outputs. A name that is no longer present falls back to the default
+    /// device and says so once through [`Player::take_notice`] — never a
+    /// refusal to start. Under bit-perfect (S5) the chosen device is the one
+    /// reopened at each track's own rate, and the fallback to converting is
+    /// announced exactly as at launch.
     /// `resolver` (T12c) turns queue entries into files just before the
     /// producer opens them: `None` means every entry already is a file, which
     /// is today's behaviour. A remote entry's fetch failure past the first
@@ -645,6 +656,7 @@ impl Player {
         repeat: Repeat,
         mono: bool,
         bit_perfect: bool,
+        device: Option<&str>,
         resolver: Option<Arc<dyn PathResolver>>,
     ) -> Result<Self, AudioError> {
         let (is_empty, len, first) = {
@@ -695,11 +707,15 @@ impl Player {
         let offset_frames = duration_to_frames(offset, track_spec.sample_rate);
 
         let requested_bit_perfect = bit_perfect;
-        let (device, config, spec, opened_bit_perfect) = open_output(track_spec, bit_perfect)?;
+        // The notices live from the first open on (issue #44, S3): a device
+        // that was configured and has vanished is announced here, before a
+        // single sample exists.
+        let notices = Arc::new(Mutex::new(VecDeque::new()));
+        let (device_handle, config, spec, opened_bit_perfect, device_name) =
+            open_output(device, track_spec, bit_perfect, &notices)?;
         // Bit-perfect survives only when the device took the track's rate; a
         // fallback is the converted path, announced once (T17).
         let bit_perfect = bit_perfect && opened_bit_perfect;
-        let notices = Arc::new(Mutex::new(VecDeque::new()));
         if requested_bit_perfect && !opened_bit_perfect {
             push_notice(
                 &notices,
@@ -747,7 +763,7 @@ impl Player {
         let (tap, tap_reader) = RingBuffer::<f32>::new(
             usize::try_from(spec.sample_rate).unwrap_or(48_000) / TAP_DIVISOR,
         );
-        let stream = build_stream(&device, config, consumer, tap, &wires)?;
+        let stream = build_stream(&device_handle, config, consumer, tap, &wires)?;
         let cell = Arc::new(StreamCell {
             stream: Mutex::new(Some(stream)),
             spec: Mutex::new(spec),
@@ -789,7 +805,7 @@ impl Player {
                         mono: &mono,
                     };
                     let mut out = StreamOut {
-                        device,
+                        device: device_handle,
                         cell,
                         wires,
                         ring,
@@ -821,6 +837,7 @@ impl Player {
             producer: Some(producer),
             cell,
             notices,
+            device_name,
             mono,
             bit_perfect,
             repeat,
@@ -871,6 +888,13 @@ impl Player {
     #[must_use]
     pub fn spec(&self) -> TrackSpec {
         self.cell.spec()
+    }
+
+    /// The name of the device the stream is playing on (issue #44, S1): the
+    /// one the device picker marks as in use while this player runs.
+    #[must_use]
+    pub fn device_name(&self) -> &str {
+        &self.device_name
     }
 
     /// Blocks until every queued track has been produced and played.
@@ -2425,19 +2449,114 @@ fn duration_to_frames(offset: Duration, sample_rate: u32) -> u64 {
     offset.as_secs() * rate + u64::from(offset.subsec_millis()) * rate / 1000
 }
 
-/// Opens the default output device at `track`'s own format when it accepts it,
+/// The machine's audio outputs (issue #44, S1): the names the device picker
+/// offers, in the order cpal lists them, and the default's own name, so the
+/// picker can mark the one in use before a player exists.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DeviceList {
+    /// Every output device's name. Duplicates by name are dropped: two
+    /// same-named entries open the same first match, so offering one device
+    /// twice would be one choice that is not.
+    pub names: Vec<String>,
+    /// The default output's name, when the machine has one.
+    pub default: Option<String>,
+}
+
+/// Lists the default host's audio outputs (issue #44, S1).
+#[must_use]
+pub fn output_devices() -> DeviceList {
+    output_devices_on(&cpal::default_host())
+}
+
+/// [`output_devices`] for one host, so the resolution below answers from a
+/// list instead of a machine.
+fn output_devices_on(host: &cpal::Host) -> DeviceList {
+    let mut list = DeviceList {
+        default: host
+            .default_output_device()
+            .map(|device| device_name(&device)),
+        ..DeviceList::default()
+    };
+    if let Ok(devices) = host.output_devices() {
+        for device in devices {
+            let name = device_name(&device);
+            if !list.names.contains(&name) {
+                list.names.push(name);
+            }
+        }
+    }
+    list
+}
+
+/// A device's own name (issue #44, S1): cpal renders it, and that rendering
+/// is the name the user knows the device by.
+fn device_name(device: &cpal::Device) -> String {
+    device.to_string()
+}
+
+/// Which device a launch or a switch opens, and what it says once when the
+/// requested name is not among the machine's outputs (issue #44, S3): the
+/// requested name itself, else the default with a one-line notice — never a
+/// refusal to start. The decision is pure over the device list, which is
+/// what makes the fallback testable without a machine.
+fn open_target<'a>(
+    requested: Option<&str>,
+    list: &'a DeviceList,
+) -> Result<(&'a str, Option<String>), AudioError> {
+    match requested {
+        // The offered name is returned, not the request's: the answer must
+        // borrow from the list, which outlives the request.
+        Some(name) if list.names.iter().any(|offered| offered.as_str() == name) => {
+            let offered = list
+                .names
+                .iter()
+                .find(|offered| offered.as_str() == name)
+                .expect("the guard above checked the name is offered");
+            Ok((offered.as_str(), None))
+        }
+        Some(name) => {
+            let default = list.default.as_deref().ok_or_else(|| {
+                AudioError::Device(format!(
+                    "no audio output device — \"{name}\" is not among the outputs"
+                ))
+            })?;
+            Ok((
+                default,
+                Some(format!(
+                    "audio device \"{name}\" is not present — using the default output"
+                )),
+            ))
+        }
+        None => list
+            .default
+            .as_deref()
+            .map(|default| (default, None))
+            .ok_or_else(|| AudioError::Device("no audio output device".to_owned())),
+    }
+}
+
+/// Opens the named output device at `track`'s own format when it accepts it,
 /// otherwise at the device default, and the stream config to match. Under
 /// bit-perfect (T17), the device is opened at the track's own sample rate —
 /// and the boolean says whether that worked; when it did not, the caller
-/// falls back to the converted path and announces it.
+/// falls back to the converted path and announces it. The string is the
+/// opened device's own name, what [`Player::device_name`] answers (issue
+/// #44, S1). A configured name that is not among the machine's outputs is
+/// announced once and the default opens instead (issue #44, S3).
 fn open_output(
+    requested: Option<&str>,
     track: TrackSpec,
     bit_perfect: bool,
-) -> Result<(cpal::Device, cpal::StreamConfig, TrackSpec, bool), AudioError> {
+    notices: &Mutex<VecDeque<String>>,
+) -> Result<(cpal::Device, cpal::StreamConfig, TrackSpec, bool, String), AudioError> {
     let host = cpal::default_host();
-    let device = host
-        .default_output_device()
-        .ok_or_else(|| AudioError::Device("no audio output device".to_owned()))?;
+    let list = output_devices_on(&host);
+    let (name, fallback) = open_target(requested, &list)?;
+    if let Some(notice) = fallback {
+        push_notice(notices, notice);
+    }
+    let device = find_device(&host, name)
+        .ok_or_else(|| AudioError::Device(format!("no audio output device named \"{name}\"")))?;
     let (spec, exact) = if bit_perfect {
         match stream_spec_at(&device, track) {
             Ok(spec) => (spec, true),
@@ -2451,7 +2570,16 @@ fn open_output(
         sample_rate: spec.sample_rate,
         buffer_size: cpal::BufferSize::Default,
     };
-    Ok((device, config, spec, exact))
+    let opened = device_name(&device);
+    Ok((device, config, spec, exact, opened))
+}
+
+/// The device whose name is `name`, the first match; the list it was chosen
+/// from carried no duplicates.
+fn find_device(host: &cpal::Host, name: &str) -> Option<cpal::Device> {
+    host.output_devices()
+        .ok()?
+        .find(|device| device_name(device) == name)
 }
 
 /// The spec for a bit-perfect stream: the track's own sample rate, on a
@@ -2580,8 +2708,63 @@ const fn elapsed_samples(
 
 #[cfg(test)]
 mod tests {
-    use super::{Retry, elapsed_samples};
+    use super::{DeviceList, Retry, elapsed_samples, open_target};
     use std::time::Duration;
+
+    fn two_devices() -> DeviceList {
+        DeviceList {
+            names: vec!["Speakers".to_owned(), "Headphones".to_owned()],
+            default: Some("Speakers".to_owned()),
+        }
+    }
+
+    #[test]
+    fn a_requested_device_that_is_still_there_is_opened_itself() {
+        let list = two_devices();
+        let (name, notice) = open_target(Some("Headphones"), &list).expect("the request resolves");
+        assert_eq!(name, "Headphones");
+        assert_eq!(notice, None, "nothing to say about a device that is there");
+    }
+
+    #[test]
+    fn a_device_that_has_vanished_falls_back_to_the_default_and_says_so_once() {
+        let list = two_devices();
+        let (name, notice) = open_target(Some("USB DAC"), &list).expect("the launch never refuses");
+        assert_eq!(name, "Speakers", "the default is used, never a refusal");
+        assert_eq!(
+            notice.as_deref(),
+            Some("audio device \"USB DAC\" is not present — using the default output"),
+            "the fallback says so once"
+        );
+    }
+
+    #[test]
+    fn no_request_opens_the_default_without_a_word() {
+        let list = two_devices();
+        let (name, notice) = open_target(None, &list).expect("the default resolves");
+        assert_eq!(name, "Speakers");
+        assert_eq!(notice, None);
+    }
+
+    #[test]
+    fn a_vanished_device_on_a_machine_without_a_default_is_an_error_that_names_it() {
+        let list = DeviceList {
+            names: vec![],
+            default: None,
+        };
+        let error = open_target(Some("USB DAC"), &list).expect_err("nothing to fall back to");
+        assert!(
+            error.to_string().contains("USB DAC"),
+            "the error names the device, got: {error}"
+        );
+        assert_eq!(
+            open_target(None, &list)
+                .expect_err("no device at all")
+                .to_string(),
+            "audio device: no audio output device",
+            "the error type's own prefix, exactly as the status line prints it"
+        );
+    }
 
     #[test]
     fn the_retry_policies_are_exactly_the_two_the_spec_names() {
