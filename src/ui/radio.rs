@@ -863,6 +863,14 @@ impl RadioView {
         let Some(row) = self.selection() else {
             return RadioOutcome::Handled;
         };
+        // `enter` answers the country question the way `y` does (issue #47):
+        // it is the only place the question is asked, and a row a person can
+        // select is a row `enter` should act on. Declining stays on `n`, and
+        // the row's fact names both letters.
+        if matches!(&row.kind, RowKind::AskCountry { .. }) {
+            self.answer_country(true);
+            return RadioOutcome::Handled;
+        }
         if let Some((url, name)) = station_of_row(&row.kind) {
             // A station the user put into `radio.toml` themselves — a
             // hand-added `[[station]]` or a favourite — may be a channel
@@ -1227,7 +1235,7 @@ impl RadioView {
         {
             rows.push(Row {
                 label: "Use my location".to_owned(),
-                fact: String::new(),
+                fact: String::from("y / n"),
                 kind: RowKind::AskCountry { code },
             });
         }
