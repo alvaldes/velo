@@ -383,6 +383,23 @@ impl<T: Transport + Send + Sync> PathResolver for SubsonicResolver<T> {
             .ensure(&url, || self.client.stream_bytes(&id))
             .map_err(|error| as_audio_error(&error))
     }
+
+    /// Whether the row's original bytes are already in the cache (issue
+    /// #60): the same name [`Cache::ensure`] would look under, answered
+    /// from the disk, never by fetching. A local path, a broken row or a
+    /// row of another server answers yes — nothing this resolver could
+    /// fetch is pending, and the entry's own resolution reports whatever
+    /// is wrong with it.
+    fn cached(&self, path: &Path) -> bool {
+        let Ok(Some((host, id))) = parse_pseudo_path(path) else {
+            return true;
+        };
+        if format!("subsonic:{host}") != self.source {
+            return true;
+        }
+        let url = stream_url(self.client.base_url(), &id);
+        self.cache.path_for(&url).is_file()
+    }
 }
 
 /// The cover-art seam the interface draws through (T12d): one `cover_id` in,
@@ -481,6 +498,23 @@ impl<T: Transport + Send + Sync> PathResolver for RemoteResolver<T> {
             Some(resolver) => resolver.resolve(path),
             None => Ok(path.to_path_buf()),
         }
+    }
+
+    /// Whether the entry is already the file it resolves to (issue #60): a
+    /// remote URL answers from the track cache — the same name [`Cache::
+    /// ensure`] looks under, answered from the disk, never by fetching —
+    /// and anything else follows the wrapped resolver's answer, or the
+    /// default yes when there is none.
+    fn cached(&self, path: &Path) -> bool {
+        if !is_remote_url(path) {
+            return self
+                .fallback
+                .as_ref()
+                .is_none_or(|resolver| resolver.cached(path));
+        }
+        self.cache
+            .path_for(path.to_str().unwrap_or_default())
+            .is_file()
     }
 }
 

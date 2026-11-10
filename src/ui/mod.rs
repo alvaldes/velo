@@ -179,6 +179,9 @@ struct TransportFixture {
     /// The ICY title a live station is announcing (S4), when one is
     /// published.
     title: Option<String>,
+    /// The queue index the transport is fetching, stored the way the real
+    /// player's cell answers it (issue #60): `None` is no fetch going on.
+    fetching: Option<usize>,
 }
 
 /// The floating prompt that asks for the library root when none is set.
@@ -2671,7 +2674,21 @@ impl<'lib> App<'lib> {
             position,
             duration,
             title,
+            fetching: None,
         });
+    }
+
+    /// Says which queue entry the transport is fetching, the way the real
+    /// player's fetching cell answers [`Player::fetching_index`] (issue
+    /// #60): `Some(index)` while the download runs, `None` when it is over.
+    /// No test can build a player — building one opens an audio device —
+    /// so the fixture carries the fact. Production never calls this, which
+    /// is why it is hidden from the docs.
+    #[doc(hidden)]
+    pub fn set_fetching_for_tests(&mut self, fetching: Option<usize>) {
+        if let Some(fixture) = self.transport_fixture.as_mut() {
+            fixture.fetching = fetching;
+        }
     }
 
     /// Moves the transport to a state no key reaches without a player
@@ -2718,6 +2735,9 @@ impl<'lib> App<'lib> {
         // directory request lands without a key press, and an in-flight
         // one says `⟳ loading…` on the status line.
         self.radio_poll();
+        // The fetching fact (issue #60): a remote entry the queue is
+        // downloading says so on the status line until it sounds.
+        self.fetch_status();
         self.poll_cover();
         // The saving copy's worker (issue #45): its progress and its last
         // word land without a key press, the way a finished cover and a
@@ -3974,18 +3994,18 @@ impl<'lib> App<'lib> {
     /// through a channel, the pattern the library index uses.
     fn radio_poll(&mut self) {
         // The playing fact is the shell's to give (S15, issue #32): the view
-        // is told, never guesses. A station marks its rows wherever they are
-        // listed — `▶` while its stream runs, `■` once it stopped (issue
-        // #53); a local file or silence marks none. The standing entry is
-        // the queue's own, known even after the player stopped (issue #53).
-        // radio_poll runs on every tick and after every radio key, so no key
-        // can leave the marker stale.
-        let playing = match self.standing_entry() {
-            Some(Entry::Station { url, .. }) => Some((url.clone(), self.state)),
-            _ => None,
-        };
+        // is told, never guesses. Whatever the transport stands on reaches
+        // the view: a station by its URL, a song by the path the queue
+        // carries — which for a channel's song is the song's URL (issue
+        // #59) — so each marks its own row. A local file's path matches no
+        // radio row and marks none. radio_poll runs on every tick and after
+        // every radio key, so no key can leave the marker stale.
+        let playing = self.standing_entry().map(|entry| match entry {
+            Entry::Station { url, .. } => url.clone(),
+            Entry::File(path) => path.to_string_lossy().into_owned(),
+        });
         if let Some(view) = self.radio.as_mut() {
-            view.set_playing(playing);
+            view.set_playing(playing.map(|identity| (identity, self.state)));
         }
         if let Some((wire, view)) = self.radio_wire.as_mut().zip(self.radio.as_mut()) {
             wire.poll(view);
@@ -4003,6 +4023,105 @@ impl<'lib> App<'lib> {
         // so no tick rewrites the line and no other writer's message is
         // disturbed.
         self.radio_refusal_status();
+    }
+
+    /// The fetching fact on the status line (issue #60): while the queue is
+    /// fetching a remote entry it has not cached yet, the line names it —
+    /// `⟳ fetching <name>…` — and clears when the entry starts producing
+    /// sound. A cache hit is instant and says nothing; a failed fetch keeps
+    /// its own report, because the clearing only ever removes the fetching
+    /// line itself, never another writer's message.
+    fn fetch_status(&mut self) {
+        let fetching = self.fetching_entry().map(|entry| {
+            let path = entry.as_path().unwrap_or(Path::new(""));
+            format!("⟳ fetching {}…", self.fetching_name(path))
+        });
+        if let Some(line) = fetching {
+            if self.status != line {
+                self.status = line;
+            }
+            return;
+        }
+        if !self.status.starts_with("⟳ fetching ") {
+            return;
+        }
+        // The fetch is over; what may be left is the wait for sound: a
+        // track still in its preroll keeps the line until the first samples
+        // are heard. Stopped, there is nothing to wait for.
+        let sounding = match (&self.player, self.transport_fixture.as_ref()) {
+            (Some(player), _) => player.position() > Duration::ZERO,
+            (None, Some(fixture)) => fixture.position > Duration::ZERO,
+            (None, None) => true,
+        };
+        if self.state == PlayState::Stopped || sounding {
+            self.status.clear();
+        }
+    }
+
+    /// The entry the queue is fetching right now, when one is: the
+    /// transport's fetching cell names the entry it is resolving — the real
+    /// player's cell ([`Player::fetching_index`]), the fixture's under test —
+    /// and the resolver's own [`PathResolver::cached`], the seam and never a
+    /// re-derivation of its rules, says whether the queue actually waits for
+    /// it. Only a remote entry can be uncached: a local file is already on
+    /// disk.
+    fn fetching_entry(&self) -> Option<&Entry> {
+        if self.state == PlayState::Stopped {
+            return None;
+        }
+        let index = match &self.player {
+            Some(player) => player.fetching_index()?,
+            None => self.transport_fixture.as_ref()?.fetching?,
+        };
+        let entry = self.queue.get(index)?;
+        let path = entry.as_path()?;
+        if !is_pseudo_path(path) && !is_remote_url(path) {
+            return None;
+        }
+        let cached = self
+            .resolver
+            .as_ref()
+            .is_none_or(|resolver| resolver.cached(path));
+        if cached { None } else { Some(entry) }
+    }
+
+    /// The name a fetching line carries: the title the wrapper gave the song
+    /// this session (`song_titles`, issue #34) when one is known, otherwise
+    /// the file's own name — exactly what a failure report names.
+    fn fetching_name(&self, path: &Path) -> String {
+        if let Some(title) = self.song_titles.get(path.to_string_lossy().as_ref()) {
+            return title.clone();
+        }
+        path.file_name().map_or_else(
+            || path.display().to_string(),
+            |name| name.to_string_lossy().into_owned(),
+        )
+    }
+
+    /// Says the fetching fact for the entry a stream is about to resolve at
+    /// selection time (issue #60): the first entry of a fresh stream, a skip
+    /// or a seek is resolved on this thread before the player exists, and an
+    /// uncached remote one there is a download the user waits for — so the
+    /// status line carries `⟳ fetching <name>…` before the wait begins, the
+    /// way the opening note does. A cache hit is instant and says nothing.
+    /// The line clears when the track starts sounding ([`Self::fetch_status`]),
+    /// and a failure's own report replaces it.
+    fn note_fetching(&mut self, entry: Option<&Entry>) {
+        let Some(Entry::File(path)) = entry else {
+            return;
+        };
+        if !is_pseudo_path(path) && !is_remote_url(path) {
+            return;
+        }
+        if self
+            .resolver
+            .as_ref()
+            .is_none_or(|resolver| resolver.cached(path))
+        {
+            return;
+        }
+        let name = self.fetching_name(path);
+        self.status = format!("⟳ fetching {name}…");
     }
 
     /// Carries an [`Action`] into the audio or library half. Errors land in
@@ -7714,6 +7833,10 @@ impl<'lib> App<'lib> {
         // The player reads the queue it is given, so the interface keeps the
         // handle and edits it in place (T18).
         let queue = Arc::new(Mutex::new(paths.clone()));
+        // The first entry is resolved at selection time, on this thread
+        // (T12c): an uncached remote one is a download the user waits for,
+        // so the status line says so before the wait begins (issue #60).
+        self.note_fetching(paths.first());
         match Player::play_gapless_at_full(
             Arc::clone(&queue),
             0,
@@ -7734,7 +7857,12 @@ impl<'lib> App<'lib> {
                 self.player = Some(player);
                 self.playing = Some(playback);
                 self.state = PlayState::Playing;
-                self.status.clear();
+                // A fetching line outlives the start (issue #60): the wait it
+                // names is only beginning, and `fetch_status` clears it when
+                // the track sounds. Every other message has had its moment.
+                if !self.status.starts_with("⟳ fetching ") {
+                    self.status.clear();
+                }
             }
             Err(error) => {
                 self.queue.clear();
@@ -7892,6 +8020,11 @@ impl<'lib> App<'lib> {
         }
         let queue = Arc::new(Mutex::new(self.queue.clone()));
         self.shared = Some(Arc::clone(&queue));
+        // A skip or a seek reaches its entry at selection time too (T12c):
+        // an uncached remote one is a download, so the line says so before
+        // the wait begins (issue #60).
+        let fetching = self.queue.get(track).cloned();
+        self.note_fetching(fetching.as_ref());
         match Player::play_gapless_at_full(
             queue,
             track,
@@ -7912,7 +8045,11 @@ impl<'lib> App<'lib> {
                 player.set_volume(self.volume);
                 self.player = Some(player);
                 self.state = PlayState::Playing;
-                self.status.clear();
+                // A fetching line outlives the rebuild (issue #60), the same
+                // rule a fresh start follows.
+                if !self.status.starts_with("⟳ fetching ") {
+                    self.status.clear();
+                }
             }
             Err(error) => {
                 self.player = None;

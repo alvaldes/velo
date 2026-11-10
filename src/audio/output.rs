@@ -9,7 +9,7 @@
 use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -310,6 +310,11 @@ pub struct Player {
     /// The queue index the producer is currently decoding; the UI reads it to
     /// mark the playing row.
     current: Arc<AtomicUsize>,
+    /// The queue index the producer is fetching right now, stored index plus
+    /// one, zero when none (issue #60): the interface reads it on its tick to
+    /// say `⟳ fetching …` on the status line for as long as the download
+    /// runs. The same cell the headless drains take from their caller.
+    fetching: Arc<AtomicU64>,
     /// Which track the producer is on and how many ring samples had been
     /// delivered when it started it, in one record. Publishing these as two
     /// pieces let the UI read an index whose start had not been written yet and
@@ -450,6 +455,17 @@ pub trait PathResolver: Send + Sync {
     /// Fails when the entry cannot be turned into a playable file: the
     /// producer announces the failure and continues with the queue.
     fn resolve(&self, path: &Path) -> Result<PathBuf, AudioError>;
+
+    /// Whether `path` is already the file it resolves to, so reaching it
+    /// costs no network and no wait. The default answers yes: a resolver
+    /// that never downloads has nothing that waits, and a local file is
+    /// already on disk. Implementations that download answer from their
+    /// cache — never by fetching — which is what lets the interface ask
+    /// "will reaching this stall" without re-deriving their rules (issue
+    /// #60).
+    fn cached(&self, _path: &Path) -> bool {
+        true
+    }
 }
 
 /// One opened live station, as the producer reads it: the same surface a
@@ -738,6 +754,9 @@ impl Player {
         // The requested track is the one being produced until the producer says
         // otherwise; it sets the index before it opens each track.
         let current = Arc::new(AtomicUsize::new(track_index));
+        // The fetching cell (issue #60): the producer stores the entry it is
+        // resolving into, the interface reads it on its tick.
+        let fetching = Arc::new(AtomicU64::new(0));
         let progress = Arc::new(Mutex::new(Progress {
             start: 0,
             duration: None,
@@ -774,6 +793,7 @@ impl Player {
             let delivered = Arc::clone(&delivered);
             let stop = Arc::clone(&stop);
             let current = Arc::clone(&current);
+            let fetching = Arc::clone(&fetching);
             let progress = Arc::clone(&progress);
             let failures = Arc::clone(&failures);
             let repeat = Arc::clone(&repeat);
@@ -803,6 +823,7 @@ impl Player {
                         progress: &progress,
                         repeat: &repeat,
                         mono: &mono,
+                        fetching: &fetching,
                     };
                     let mut out = StreamOut {
                         device: device_handle,
@@ -831,6 +852,7 @@ impl Player {
             stop,
             delivered,
             current,
+            fetching,
             progress,
             failures,
             start_offset_samples: usize::try_from(clock_offset_samples).unwrap_or(usize::MAX),
@@ -1010,6 +1032,19 @@ impl Player {
     #[must_use]
     pub fn current_index(&self) -> usize {
         self.current.load(Ordering::Acquire)
+    }
+
+    /// The index, within the list passed to [`Player::play_gapless`], of the
+    /// track the producer is fetching right now, when one is: the entry it is
+    /// resolving into a file — for a remote miss, the download — between the
+    /// moment the queue reaches it and the moment it opens or fails (issue
+    /// #60). `None` while no fetch is going on.
+    #[must_use]
+    pub fn fetching_index(&self) -> Option<usize> {
+        let index = self.fetching.load(Ordering::Acquire);
+        usize::try_from(index)
+            .ok()
+            .and_then(|index| index.checked_sub(1))
     }
 
     /// Silences the device without stopping the stream.
@@ -1292,6 +1327,13 @@ struct Shared<'a> {
     progress: &'a Mutex<Progress>,
     repeat: &'a RepeatCell,
     mono: &'a MonoCell,
+    /// Which queue entry the sequence is fetching right now, stored as the
+    /// index plus one — zero means none (issue #60). The sequence sets it
+    /// around a file entry's resolution, the step a remote miss spends
+    /// downloading, and clears it when the entry opens or fails. The
+    /// interface reads it on its tick, the way it reads the volume and the
+    /// mono cell; the audio callback never touches it.
+    fetching: &'a AtomicU64,
 }
 
 /// Fills the stream from the file system: the producer's device-side sink.
@@ -1542,13 +1584,28 @@ fn run_sequence(
         // caller reports at selection time.
         let label = entry.label().into_owned();
         let outcome = match &entry {
-            Entry::File(path) => match resolve_entry(resolver.as_ref(), path) {
-                Ok(resolved) => play_turn(&label, &resolved, &turn, &mut expected, shared, sink)?,
-                Err(error) => {
-                    sink.failure(track_failure(&label, error.to_string()));
-                    Turn::Failed
+            Entry::File(path) => {
+                // The resolution is the wait (issue #60): the cell says
+                // which entry is being fetched, from the moment the queue
+                // reaches it until it opens or fails. A pass-through and a
+                // cache hit clear it again within the same step; a miss
+                // keeps it up for the download's whole length.
+                shared.fetching.store(
+                    u64::try_from(turn.index).unwrap_or(u64::MAX) + 1,
+                    Ordering::Release,
+                );
+                let resolved = resolve_entry(resolver.as_ref(), path);
+                shared.fetching.store(0, Ordering::Release);
+                match resolved {
+                    Ok(resolved) => {
+                        play_turn(&label, &resolved, &turn, &mut expected, shared, sink)?
+                    }
+                    Err(error) => {
+                        sink.failure(track_failure(&label, error.to_string()));
+                        Turn::Failed
+                    }
                 }
-            },
+            }
             Entry::Station { url, .. } => {
                 match station_source(&mut preopen, opener.as_ref(), url, retry) {
                     Ok(source) => {
@@ -2083,6 +2140,7 @@ pub fn drain_headless_with_gain(
         retry: Retry::NONE,
         preopen: None,
     };
+    let fetching_cell = AtomicU64::new(0);
     let mut refuse = |_: TrackSpec| -> Result<TrackSpec, AudioError> {
         unreachable!("only bit-perfect sequences reopen the stream")
     };
@@ -2091,6 +2149,7 @@ pub fn drain_headless_with_gain(
         expected,
         &RepeatCell::default(),
         stop,
+        &fetching_cell,
         &mut FnSink {
             block: on_block,
             failure: on_failure,
@@ -2106,7 +2165,9 @@ pub fn drain_headless_with_gain(
 /// `on_failure` and skipped, exactly the way the producer thread does it.
 /// This is the headless proof that remote playback never touches the audio
 /// path: the drained samples are the cached files', decoded as any local
-/// track would be.
+/// track would be. `fetching` is the cell the loop stores the entry it is
+/// fetching into, index plus one, zero when none — the same cell the real
+/// player's producer writes and the interface reads (issue #60).
 ///
 /// # Errors
 ///
@@ -2122,6 +2183,7 @@ pub fn drain_headless_resolving(
     expected: TrackSpec,
     gain_mode: ReplayGainMode,
     resolver: Option<Arc<dyn PathResolver>>,
+    fetching: &AtomicU64,
     stop: &AtomicBool,
     on_block: &mut dyn FnMut(&[f32]),
     on_failure: &mut dyn FnMut(TrackFailure),
@@ -2145,6 +2207,7 @@ pub fn drain_headless_resolving(
         expected,
         &RepeatCell::default(),
         stop,
+        fetching,
         &mut FnSink {
             block: on_block,
             failure: on_failure,
@@ -2197,6 +2260,7 @@ pub fn drain_headless_with_opener(
         retry,
         preopen: None,
     };
+    let fetching_cell = AtomicU64::new(0);
     let mut refuse = |_: TrackSpec| -> Result<TrackSpec, AudioError> {
         unreachable!("only bit-perfect sequences reopen the stream")
     };
@@ -2205,6 +2269,7 @@ pub fn drain_headless_with_opener(
         expected,
         &RepeatCell::default(),
         stop,
+        &fetching_cell,
         &mut FnSink {
             block: on_block,
             failure: on_failure,
@@ -2248,6 +2313,7 @@ pub fn drain_headless_with_mono(
         retry: Retry::NONE,
         preopen: None,
     };
+    let fetching_cell = AtomicU64::new(0);
     let mut refuse = |_: TrackSpec| -> Result<TrackSpec, AudioError> {
         unreachable!("only bit-perfect sequences reopen the stream")
     };
@@ -2257,6 +2323,7 @@ pub fn drain_headless_with_mono(
         &RepeatCell::default(),
         mono,
         stop,
+        &fetching_cell,
         &mut FnSink {
             block: on_block,
             failure: on_failure,
@@ -2299,6 +2366,7 @@ pub fn drain_headless_repeating(
         retry: Retry::NONE,
         preopen: None,
     };
+    let fetching_cell = AtomicU64::new(0);
     let mut refuse = |_: TrackSpec| -> Result<TrackSpec, AudioError> {
         unreachable!("only bit-perfect sequences reopen the stream")
     };
@@ -2307,6 +2375,7 @@ pub fn drain_headless_repeating(
         expected,
         repeat,
         stop,
+        &fetching_cell,
         &mut FnSink {
             block: on_block,
             failure: on_failure,
@@ -2351,6 +2420,7 @@ pub fn drain_headless_bit_perfect(
         preopen: None,
     };
     let channels = expected.channels;
+    let fetching_cell = AtomicU64::new(0);
     let mut follow = move |track: TrackSpec| -> Result<TrackSpec, AudioError> {
         // Headless, the reopen only retunes the stream's rate: a layout
         // still maps, exactly as on the device.
@@ -2364,6 +2434,7 @@ pub fn drain_headless_bit_perfect(
         expected,
         &RepeatCell::default(),
         stop,
+        &fetching_cell,
         &mut FnSink {
             block: on_block,
             failure: on_failure,
@@ -2381,6 +2452,7 @@ fn drain(
     expected: TrackSpec,
     repeat: &RepeatCell,
     stop: &AtomicBool,
+    fetching: &AtomicU64,
     sink: &mut dyn SequenceSink,
 ) -> Result<(), AudioError> {
     let delivered = AtomicUsize::new(0);
@@ -2399,6 +2471,7 @@ fn drain(
         progress: &progress,
         repeat,
         mono: &mono,
+        fetching,
     };
     run_sequence(job, expected, &shared, sink)
 }
@@ -2413,6 +2486,7 @@ fn drain_with_mono(
     repeat: &RepeatCell,
     mono: &MonoCell,
     stop: &AtomicBool,
+    fetching: &AtomicU64,
     sink: &mut dyn SequenceSink,
 ) -> Result<(), AudioError> {
     let delivered = AtomicUsize::new(0);
@@ -2430,6 +2504,7 @@ fn drain_with_mono(
         progress: &progress,
         repeat,
         mono,
+        fetching,
     };
     run_sequence(job, expected, &shared, sink)
 }

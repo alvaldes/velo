@@ -10,7 +10,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -578,6 +578,29 @@ impl PathResolver for FakeResolver {
     }
 }
 
+/// A resolver that records what the fetching cell holds at the moment each
+/// entry is resolved (issue #60), and serves the remote URL from a file.
+struct Watching {
+    remote_file: PathBuf,
+    fetching: Arc<AtomicU64>,
+    seen: Arc<Mutex<Vec<(String, u64)>>>,
+}
+
+impl PathResolver for Watching {
+    fn resolve(&self, path: &Path) -> Result<PathBuf, AudioError> {
+        let text = path.to_str().unwrap_or_default();
+        let value = self.fetching.load(Ordering::SeqCst);
+        self.seen
+            .lock()
+            .expect("seen")
+            .push((text.to_owned(), value));
+        if text.starts_with("https://") {
+            return Ok(self.remote_file.clone());
+        }
+        Ok(path.to_path_buf())
+    }
+}
+
 /// Two remote entries drain exactly the two fixtures, in order, with nothing
 /// between them: the producer resolves each entry when it reaches it and the
 /// audio path plays the cached file as if the user had queued it.
@@ -604,6 +627,7 @@ fn a_remote_queue_drains_exactly_the_fixtures_the_resolver_serves() {
 
     let mut heard: Vec<f32> = Vec::new();
     let mut failures: Vec<velo::audio::output::TrackFailure> = Vec::new();
+    let fetching = std::sync::atomic::AtomicU64::new(0);
     drain_headless_resolving(
         queue,
         0,
@@ -611,6 +635,7 @@ fn a_remote_queue_drains_exactly_the_fixtures_the_resolver_serves() {
         SPEC,
         velo::config::ReplayGainMode::default(),
         Some(Arc::new(resolver)),
+        &fetching,
         &std::sync::atomic::AtomicBool::new(false),
         &mut |block| heard.extend_from_slice(block),
         &mut |failure| failures.push(failure),
@@ -643,6 +668,7 @@ fn a_failed_download_is_announced_once_and_the_next_local_track_still_plays() {
 
     let mut heard: Vec<f32> = Vec::new();
     let mut failures: Vec<velo::audio::output::TrackFailure> = Vec::new();
+    let fetching = std::sync::atomic::AtomicU64::new(0);
     drain_headless_resolving(
         queue,
         0,
@@ -652,6 +678,7 @@ fn a_failed_download_is_announced_once_and_the_next_local_track_still_plays() {
         Some(Arc::new(Unconfigured::new(
             "the server could not be reached: connection refused".to_owned(),
         ))),
+        &fetching,
         &std::sync::atomic::AtomicBool::new(false),
         &mut |block| heard.extend_from_slice(block),
         &mut |failure| failures.push(failure),
@@ -691,6 +718,7 @@ fn a_file_entry_round_trips_through_the_queue_and_resolves_once_per_start() {
     let calls = Arc::clone(&resolver.calls);
     let mut heard: Vec<f32> = Vec::new();
     let mut failures: Vec<velo::audio::output::TrackFailure> = Vec::new();
+    let fetching = std::sync::atomic::AtomicU64::new(0);
     drain_headless_resolving(
         queue,
         0,
@@ -698,6 +726,7 @@ fn a_file_entry_round_trips_through_the_queue_and_resolves_once_per_start() {
         SPEC,
         velo::config::ReplayGainMode::default(),
         Some(Arc::new(resolver)),
+        &fetching,
         &std::sync::atomic::AtomicBool::new(false),
         &mut |block| heard.extend_from_slice(block),
         &mut |failure| failures.push(failure),
@@ -865,6 +894,7 @@ fn a_remote_song_entry_drains_through_the_cache_as_an_ordinary_file() {
     ]));
     let mut heard: Vec<f32> = Vec::new();
     let mut failures: Vec<velo::audio::output::TrackFailure> = Vec::new();
+    let fetching = std::sync::atomic::AtomicU64::new(0);
     drain_headless_resolving(
         queue,
         0,
@@ -872,6 +902,7 @@ fn a_remote_song_entry_drains_through_the_cache_as_an_ordinary_file() {
         SPEC,
         velo::config::ReplayGainMode::default(),
         Some(Arc::new(resolver)),
+        &fetching,
         &std::sync::atomic::AtomicBool::new(false),
         &mut |block| heard.extend_from_slice(block),
         &mut |failure| failures.push(failure),
@@ -888,4 +919,127 @@ fn a_remote_song_entry_drains_through_the_cache_as_an_ordinary_file() {
         "nothing had to be skipped: {failures:?}"
     );
     assert_eq!(serving.calls(), 1, "the cache fetched the song once");
+}
+
+// ------------------------------------------------- the cached seam (issue #60)
+
+/// Whether an entry is already the file it resolves to is the resolver's own
+/// answer, from its cache, never by fetching: the interface asks it to decide
+/// whether the status line should say `⟳ fetching …` (issue #60).
+#[test]
+fn the_remote_song_resolver_answers_whether_a_url_is_cached() {
+    let dir = temp_dir("cached-remote");
+    let serving = Arc::new(Serving::with(&[(
+        "https://radio.example/lofi/tracks/a",
+        b"song-audio".as_slice(),
+    )]));
+    let resolver = RemoteResolver::new(
+        Arc::clone(&serving) as Arc<dyn Transport + Send + Sync>,
+        Cache::new(dir),
+        None,
+    );
+    let url = Path::new("https://radio.example/lofi/tracks/a");
+    let local = Path::new("/music/Library/01 - Dawn.wav");
+
+    assert!(resolver.cached(local), "a local file is already on disk");
+    assert!(
+        !resolver.cached(url),
+        "the miss is not cached: reaching it is a download"
+    );
+    resolver.resolve(url).expect("the resolve downloads");
+    assert!(resolver.cached(url), "after the fetch the answer turns");
+    assert_eq!(serving.calls(), 1, "asking never fetched");
+}
+
+#[test]
+fn the_subsonic_resolver_answers_whether_a_row_is_cached() {
+    let dir = temp_dir("cached-subsonic");
+    let transport = Counting::with(&[b"canned-audio"]);
+    let client = Client::new(
+        &transport,
+        "https://music.example.com",
+        "demo",
+        Auth::Token {
+            password: "demo".to_owned(),
+        },
+    );
+    let resolver = SubsonicResolver::new(
+        client,
+        "subsonic:music.example.com".to_owned(),
+        Cache::new(dir),
+    );
+    let row = Path::new("subsonic://music.example.com/s-1");
+    let foreign = Path::new("subsonic://elsewhere.example.com/s-1");
+
+    assert!(!resolver.cached(row), "the miss is not cached");
+    assert!(
+        resolver.cached(foreign),
+        "another server's row is not this resolver's to fetch"
+    );
+    assert!(
+        resolver.cached(Path::new("/music/01 - Dawn.wav")),
+        "a local file is already on disk"
+    );
+    resolver.resolve(row).expect("the resolve downloads");
+    assert!(resolver.cached(row), "after the fetch the answer turns");
+    assert_eq!(transport.calls(), 1, "asking never fetched");
+}
+
+/// The fetching cell (issue #60): while the queue reaches the remote entry
+/// and downloads it, the cell holds that entry's index plus one; once the
+/// entry opens — or the drain ends, however it ends — the cell is back to
+/// none. This is the same cell the real player's producer writes and the
+/// interface reads on its tick.
+#[test]
+fn the_producer_says_which_entry_it_is_fetching() {
+    let dir = temp_dir("fetching-cell");
+    let local = dir.join("first.wav");
+    let pcm: Vec<i16> = (0..1_000)
+        .map(|frame| i16::try_from(frame % 400 + 30).expect("in range"))
+        .collect();
+    write_wav(&local, SPEC, &pcm);
+    let cached = dir.join("cached.wav");
+    write_wav(&cached, SPEC, &pcm);
+
+    let fetching = Arc::new(AtomicU64::new(0));
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let watching = Watching {
+        remote_file: cached,
+        fetching: Arc::clone(&fetching),
+        seen: Arc::clone(&seen),
+    };
+
+    let queue = Arc::new(Mutex::new(vec![
+        Entry::File(local.clone()),
+        Entry::File(PathBuf::from("https://radio.example/lofi/tracks/a")),
+    ]));
+    let mut heard: Vec<f32> = Vec::new();
+    drain_headless_resolving(
+        queue,
+        0,
+        0,
+        SPEC,
+        velo::config::ReplayGainMode::default(),
+        Some(Arc::new(watching)),
+        &fetching,
+        &std::sync::atomic::AtomicBool::new(false),
+        &mut |block| heard.extend_from_slice(block),
+        &mut |_failure| {},
+    )
+    .expect("the sequence drains");
+
+    assert!(!heard.is_empty(), "both tracks played");
+    assert_eq!(
+        seen.lock().expect("seen").clone(),
+        vec![
+            (local.display().to_string(), 1),
+            (String::from("https://radio.example/lofi/tracks/a"), 2),
+        ],
+        "the cell holds the resolving entry's index plus one, per entry"
+    );
+    assert_eq!(
+        fetching.load(Ordering::SeqCst),
+        0,
+        "once the entry opens, the cell is back to none"
+    );
 }
