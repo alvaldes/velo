@@ -616,7 +616,7 @@ fn the_settings_spectrum_row_steps_the_visualizer_and_writes_it() {
 
     press_ctrl(&mut app, KeyCode::Char('p'));
 
-    for _ in 0..5 {
+    for _ in 0..6 {
         press(&mut app, KeyCode::Char('j'));
     }
     assert_eq!(
@@ -650,7 +650,7 @@ fn enter_on_the_settings_spectrum_row_opens_the_picker() {
     let mut app = app();
     press_ctrl(&mut app, KeyCode::Char('p'));
 
-    for _ in 0..5 {
+    for _ in 0..6 {
         press(&mut app, KeyCode::Char('j'));
     }
     press(&mut app, KeyCode::Enter);
