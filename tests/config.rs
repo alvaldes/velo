@@ -15,8 +15,8 @@ use clap::Parser as _;
 use velo::audio::output::Repeat;
 use velo::config::{
     Cli, Config, DEFAULT_VOLUME, OpenNode, ReplayGainMode, ThemeColor, ThemeColors, UiParts,
-    config_path, default_config_text, expand_path, library_to_save, radio_host_from, remove_value,
-    set_library, set_value, write_default_config,
+    config_path, default_config_text, expand_path, library_to_save, radio_cliamp_from,
+    radio_host_from, remove_value, set_library, set_value, write_default_config,
 };
 use velo::ui::visualizer::Visualizer;
 use velo::ui::{BrowseBy, View};
@@ -1281,6 +1281,44 @@ fn the_default_file_names_the_radio_table_commented_out() {
     let text = default_config_text();
     assert!(text.contains("# [radio]"), "{text}");
     assert!(text.contains("# host ="), "{text}");
+    assert!(text.contains("# cliamp ="), "{text}");
+}
+
+// ------------------------------------------------------- cliamp (issue #48)
+
+#[test]
+fn the_cliamp_switch_defaults_to_shown() {
+    // No file at all, a file without the table, and the table without the
+    // key: the section shows (issue #48, S1).
+    assert!(radio_cliamp_from(None));
+    let dir = temp_dir("cliamp-default");
+    let path = write_config(&dir, "bit_perfect = false\n");
+    assert!(radio_cliamp_from(Some(&path)));
+    let path = write_config(&dir, "[radio]\nhost = \"h.example\"\n");
+    assert!(radio_cliamp_from(Some(&path)));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_cliamp_switch_turns_the_section_off() {
+    let dir = temp_dir("cliamp-off");
+    let path = write_config(&dir, "[radio]\ncliamp = false\n");
+    assert!(!radio_cliamp_from(Some(&path)), "cliamp = false hides it");
+    // The host key beside it reads as before.
+    let path = write_config(&dir, "[radio]\ncliamp = false\nhost = \"h.example\"\n");
+    assert!(!radio_cliamp_from(Some(&path)));
+    assert_eq!(radio_host_from(Some(&path)), "h.example");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_broken_file_yields_the_default_cliamp_switch() {
+    // Read when the radio view opens, long after the launch rejected the
+    // broken file: the default, never an error (the host's rule, S5).
+    let dir = temp_dir("cliamp-broken");
+    let path = write_config(&dir, "[radio]\ncliamp = 7\n");
+    assert!(radio_cliamp_from(Some(&path)));
+    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]

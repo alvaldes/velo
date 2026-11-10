@@ -34,6 +34,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 
+use crate::radio::cliamp::{self, Channel, Listeners, Song};
 use crate::radio::client::{
     self, Client, Country, HttpTransport, Order, State, Station, StationSearch, Tag, Transport,
 };
@@ -62,6 +63,39 @@ pub trait RadioWire {
     fn loading(&self) -> bool;
 }
 
+/// Hands one transport to both clients: the directory and the cliamp
+/// service (issue #48) fetch through the same seam, so a canned transport
+/// answers for both and one call log records both.
+struct SharedTransport<T>(Arc<T>);
+
+// Manual impls on purpose: the `Arc` carries the sharing, so neither impl
+// needs a bound on `T` — a derive would demand `T: Clone`/`T: Debug` for
+// nothing.
+impl<T> Clone for SharedTransport<T> {
+    fn clone(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+}
+
+impl<T> std::fmt::Debug for SharedTransport<T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SharedTransport")
+    }
+}
+
+impl<T> SharedTransport<T> {
+    /// Wraps one owned transport in the shared arc.
+    fn from_transport(transport: T) -> Self {
+        Self(Arc::new(transport))
+    }
+}
+
+impl<T: Transport> Transport for SharedTransport<T> {
+    fn get(&self, url: &str) -> Result<String, client::Error> {
+        self.0.get(url)
+    }
+}
+
 /// What one finished background request hands back.
 enum Outcome {
     /// The `/countries` index.
@@ -78,6 +112,19 @@ enum Outcome {
         place: Place,
         /// The search's answer.
         result: Result<Vec<Station>, client::Error>,
+    },
+    /// The cliamp channels: `GET /stations` (issue #48, S2).
+    CliampStations(Result<Vec<Channel>, client::Error>),
+    /// The cliamp listeners: `GET /statistics` (issue #48, S2).
+    CliampStatistics(Result<Vec<Listeners>, client::Error>),
+    /// One cliamp channel's songs: `GET /<id>/tracks` (issue #48, S2).
+    /// The answer carries the whole [`Place`] it was asked for, so a stale
+    /// answer is dropped, the way a station search's is.
+    CliampSongs {
+        /// The channel place the songs were asked for.
+        place: Place,
+        /// The answer.
+        result: Result<Vec<Song>, client::Error>,
     },
 }
 
@@ -106,7 +153,15 @@ fn station_search(place: &Place, order: Order) -> StationSearch {
             order,
             ..StationSearch::default()
         },
-        Place::Top | Place::Countries | Place::Tags | Place::NoCountry => {
+        // The cliamp places (issue #48) are not directory searches: the
+        // section lists the service's channels and a channel's songs, and
+        // [`requests_stations`] keeps both out of here.
+        Place::Top
+        | Place::Countries
+        | Place::Tags
+        | Place::NoCountry
+        | Place::Cliamp
+        | Place::CliampChannel { .. } => {
             unreachable!("a place without a directory request never searches")
         }
     }
@@ -134,7 +189,14 @@ fn requests_stations(place: &Place) -> bool {
 pub struct RadioData<T> {
     /// The directory client; `None` when the transport could not be built,
     /// in which case every request is skipped and the view still works.
-    client: Option<Arc<Client<T>>>,
+    client: Option<Arc<Client<SharedTransport<T>>>>,
+    /// The cliamp client (issue #48), over the same transport; `None`
+    /// with it, so a transport that never was leaves the section present
+    /// but silent.
+    cliamp: Option<Arc<cliamp::Client<SharedTransport<T>>>>,
+    /// The shared transport both clients fetch through, kept so
+    /// [`Self::with_host`] can rebuild the directory client.
+    transport: Option<SharedTransport<T>>,
     /// Where `radio.toml` lives; `None` means preferences live in memory
     /// for this session only.
     store_path: Option<PathBuf>,
@@ -167,6 +229,22 @@ pub struct RadioData<T> {
     states_loaded: bool,
     /// Whether `/tags` was already requested this session.
     tags_loaded: bool,
+    /// Whether the cliamp channels were already requested (or answered)
+    /// this session (issue #48, S2): an empty answer is still an answer.
+    cliamp_channels_loaded: bool,
+    /// Whether the cliamp listeners were already requested this session.
+    cliamp_stats_loaded: bool,
+    /// The cliamp channels, as `/stations` answered.
+    cliamp_channels: Vec<Channel>,
+    /// The cliamp listeners, as `/statistics` answered.
+    cliamp_listeners: Vec<Listeners>,
+    /// The last cliamp songs answer and the place it belongs to, set only
+    /// when an answer lands: coming back to its place shows it again
+    /// without a request (S9).
+    cliamp_songs: Option<(Place, Vec<Song>)>,
+    /// Whether the cliamp section shows at all (issue #48, S1): the
+    /// `[radio] cliamp` switch, shown unless the config hides it.
+    cliamp_enabled: bool,
     /// The request in flight, its answer still to be polled.
     pending: Option<Receiver<Outcome>>,
     /// The status-line message waiting to be taken.
@@ -174,14 +252,15 @@ pub struct RadioData<T> {
 }
 
 impl<T: Transport + Send + Sync + 'static> RadioData<T> {
-    /// A wired radio over the given client, store file and the country
+    /// A wired radio over the given transport, store file and the country
     /// the locale yields (S5) — computed by the caller, usually
-    /// [`crate::radio::country::detect`]. Loading the store here reads one
-    /// small file and never touches the network; a corrupt file becomes
-    /// the first status-line message, and the file is left exactly as it
-    /// is.
+    /// [`crate::radio::country::detect`]. Both clients — the directory's
+    /// and the cliamp service's (issue #48) — are built over the one
+    /// transport. Loading the store here reads one small file and never
+    /// touches the network; a corrupt file becomes the first status-line
+    /// message, and the file is left exactly as it is.
     pub fn new(
-        client: Option<Client<T>>,
+        transport: Option<T>,
         store_path: Option<PathBuf>,
         detected: Option<String>,
     ) -> Self {
@@ -196,8 +275,15 @@ impl<T: Transport + Send + Sync + 'static> RadioData<T> {
             },
             None => RadioStore::default(),
         };
+        let shared = transport.map(SharedTransport::from_transport);
         Self {
-            client: client.map(Arc::new),
+            client: shared
+                .clone()
+                .map(|transport| Arc::new(Client::new(transport))),
+            cliamp: shared
+                .clone()
+                .map(|transport| Arc::new(cliamp::Client::new(transport))),
+            transport: shared,
             store_unreadable: message.is_some(),
             store_path,
             store,
@@ -210,9 +296,38 @@ impl<T: Transport + Send + Sync + 'static> RadioData<T> {
             countries_loaded: false,
             states_loaded: false,
             tags_loaded: false,
+            cliamp_channels_loaded: false,
+            cliamp_stats_loaded: false,
+            cliamp_channels: Vec::new(),
+            cliamp_listeners: Vec::new(),
+            cliamp_songs: None,
+            cliamp_enabled: true,
             pending: None,
             message,
         }
+    }
+
+    /// Rebuilds the directory client at `host`, the host the config names
+    /// ([`crate::config::radio_host_from`], issue #14). The cliamp client
+    /// is untouched: its host is the service's constant, not the
+    /// directory's (issue #48, S5).
+    #[must_use]
+    pub fn with_host(mut self, host: &str) -> Self {
+        if let Some(transport) = &self.transport {
+            self.client = Some(Arc::new(Client::with_host(
+                SharedTransport(Arc::clone(&transport.0)),
+                host,
+            )));
+        }
+        self
+    }
+
+    /// Sets whether the cliamp section shows (issue #48, S1): the
+    /// `[radio] cliamp` switch; shown unless the config says `false`.
+    #[must_use]
+    pub fn with_cliamp(mut self, cliamp: bool) -> Self {
+        self.cliamp_enabled = cliamp;
+        self
     }
 
     /// Collects a finished request, if one arrived. A station answer for a
@@ -268,6 +383,33 @@ impl<T: Transport + Send + Sync + 'static> RadioData<T> {
                         view.set_catalog(place.clone(), stations.clone());
                     }
                     self.catalog = Some((place, stations));
+                }
+                Err(error) => self.message = Some(format!("velo: {error}")),
+            },
+            Outcome::CliampStations(result) => match result {
+                Ok(channels) => {
+                    self.cliamp_channels.clone_from(&channels);
+                    view.set_cliamp_channels(channels);
+                }
+                // One status line naming the reason; the section stays
+                // present but empty (issue #48, S4).
+                Err(error) => self.message = Some(format!("velo: {error}")),
+            },
+            Outcome::CliampStatistics(result) => match result {
+                Ok(listeners) => {
+                    self.cliamp_listeners.clone_from(&listeners);
+                    view.set_cliamp_listeners(listeners);
+                }
+                // Only the `●` counts drop: the channels were set already
+                // and stay listed, and the failure is said once (S4).
+                Err(error) => self.message = Some(format!("velo: {error}")),
+            },
+            Outcome::CliampSongs { place, result } => match result {
+                Ok(songs) => {
+                    if view.place() == &place {
+                        view.set_cliamp_songs(place.clone(), songs.clone());
+                    }
+                    self.cliamp_songs = Some((place, songs));
                 }
                 Err(error) => self.message = Some(format!("velo: {error}")),
             },
@@ -340,6 +482,35 @@ impl<T: Transport + Send + Sync + 'static> RadioData<T> {
                 self.pending = Some(receiver);
                 view.set_loading(Some(Place::Tags));
             }
+            // The cliamp section (issue #48, S2, S4): `/stations` first,
+            // `/statistics` right after its answer lands — one request in
+            // flight at a time, two in total per open, and none on a timer
+            // (S4). A failure marks its own loaded flag, so it is never
+            // re-requested behind the user's back; `Ctrl+R` is the retry.
+            Place::Cliamp if !self.cliamp_channels_loaded => {
+                self.cliamp_channels_loaded = true;
+                let client = Arc::clone(self.cliamp.as_ref().expect("just checked"));
+                let (sender, receiver) = mpsc::channel();
+                thread::spawn(move || {
+                    let _ = sender.send(Outcome::CliampStations(client.stations()));
+                });
+                self.pending = Some(receiver);
+                view.set_loading(Some(Place::Cliamp));
+            }
+            Place::Cliamp if !self.cliamp_stats_loaded => {
+                self.cliamp_stats_loaded = true;
+                let client = Arc::clone(self.cliamp.as_ref().expect("just checked"));
+                let (sender, receiver) = mpsc::channel();
+                thread::spawn(move || {
+                    let _ = sender.send(Outcome::CliampStatistics(client.statistics()));
+                });
+                self.pending = Some(receiver);
+                view.set_loading(Some(Place::Cliamp));
+            }
+            Place::CliampChannel { ref id, .. } if self.requested.as_ref() != Some(&place) => {
+                self.spawn_cliamp_songs(place.clone(), id.clone());
+                view.set_loading(Some(place));
+            }
             place => {
                 if requests_stations(&place) && self.requested.as_ref() != Some(&place) {
                     self.spawn_stations(place.clone(), view.order());
@@ -364,20 +535,46 @@ impl<T: Transport + Send + Sync + 'static> RadioData<T> {
         self.pending = Some(receiver);
     }
 
+    /// Starts one cliamp channel's songs request on the worker thread
+    /// (issue #48, S2): one GET of `/<id>/tracks`, the songs in the
+    /// service's order.
+    fn spawn_cliamp_songs(&mut self, place: Place, id: String) {
+        self.requested = Some(place.clone());
+        let client = Arc::clone(self.cliamp.as_ref().expect("a client is present"));
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let result = client.songs(&id);
+            let _ = sender.send(Outcome::CliampSongs { place, result });
+        });
+        self.pending = Some(receiver);
+    }
+
     /// Hands the view the cached answer when it stands in the answer's
     /// place without holding it: coming back to a loaded place shows the
     /// cache again and never re-requests it (S9). The answer's own place
     /// is the only place it may show in — never the top, a sibling country
     /// or a tag.
     fn sync(&mut self, view: &mut RadioView) {
-        if self.pending.is_some() || !requests_stations(view.place()) {
+        if self.pending.is_some() {
             return;
         }
-        if let Some((place, stations)) = &self.catalog
+        if requests_stations(view.place()) {
+            if let Some((place, stations)) = &self.catalog
+                && place == view.place()
+                && view.catalog_place().is_none_or(|held| held != place)
+            {
+                view.set_catalog(place.clone(), stations.clone());
+            }
+            return;
+        }
+        // A cliamp channel's songs behave the same way (issue #48): the
+        // cached answer is handed back only in its own place.
+        if matches!(view.place(), Place::CliampChannel { .. })
+            && let Some((place, songs)) = &self.cliamp_songs
             && place == view.place()
-            && view.catalog_place().is_none_or(|held| held != place)
+            && view.cliamp_songs_place().is_none_or(|held| held != place)
         {
-            view.set_catalog(place.clone(), stations.clone());
+            view.set_cliamp_songs(place.clone(), songs.clone());
         }
     }
 
@@ -395,7 +592,16 @@ impl<T: Transport + Send + Sync + 'static> RadioData<T> {
                 self.states_loaded = false;
             }
             Place::Tags => self.tags_loaded = false,
-            Place::Country { .. } | Place::Tag { .. } | Place::Search { .. } => {
+            // The cliamp section asks both requests again (issue #48, S4);
+            // one channel's songs re-ask like a place's stations do.
+            Place::Cliamp => {
+                self.cliamp_channels_loaded = false;
+                self.cliamp_stats_loaded = false;
+            }
+            Place::CliampChannel { .. }
+            | Place::Country { .. }
+            | Place::Tag { .. }
+            | Place::Search { .. } => {
                 self.requested = None;
             }
         }
@@ -424,6 +630,17 @@ impl<T: Transport + Send + Sync + 'static> RadioWire for RadioData<T> {
         // (T6d): rows beside the places at the top.
         if !self.states.is_empty() {
             view.set_states(self.states.clone());
+        }
+        // The cliamp section's channels and listeners, once fetched (issue
+        // #48, S2): a fresh view stands at the top, and the section's fact
+        // names the channels when there are any. A failed request is an
+        // empty answer like an empty index is: the section stays.
+        view.set_cliamp_enabled(self.cliamp_enabled);
+        if self.cliamp_channels_loaded {
+            view.set_cliamp_channels(self.cliamp_channels.clone());
+        }
+        if self.cliamp_stats_loaded {
+            view.set_cliamp_listeners(self.cliamp_listeners.clone());
         }
         // The station cache is deliberately not injected here (S9): a
         // fresh view stands at the top, and the top is a section list —
@@ -456,23 +673,25 @@ impl<T: Transport + Send + Sync + 'static> RadioWire for RadioData<T> {
 }
 
 impl RadioData<HttpTransport> {
-    /// The shell's radio wiring: the real transport and the country from
+    /// The shell's radio wiring: the real transport, the directory host
+    /// and the cliamp switch from the real config, and the country from
     /// the real environment (`LC_ALL`, then `LC_MESSAGES`, then `LANG`).
-    /// `store_path` is the `radio.toml` beside the config file, and `host`
-    /// is the directory host the config names
-    /// ([`crate::config::radio_host_from`]).
+    /// `store_path` is the `radio.toml` beside the config file, `host` is
+    /// the directory host the config names
+    /// ([`crate::config::radio_host_from`]) and `cliamp` is the `[radio]
+    /// cliamp` switch ([`crate::config::radio_cliamp_from`], issue #48).
     ///
     /// A transport that cannot be built (none is known to fail today)
     /// leaves the view usable without a directory instead of failing the
     /// interface.
     #[must_use]
-    pub fn open(store_path: Option<PathBuf>, host: &str) -> Self {
+    pub fn open(store_path: Option<PathBuf>, host: &str, cliamp: bool) -> Self {
         Self::new(
-            HttpTransport::new()
-                .ok()
-                .map(|transport| Client::with_host(transport, host)),
+            HttpTransport::new().ok(),
             store_path,
             crate::radio::country::detect(|key| std::env::var(key).ok()),
         )
+        .with_host(host)
+        .with_cliamp(cliamp)
     }
 }

@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-use velo::radio::client::{Client, Error, Transport};
+use velo::radio::client::{Error, Transport};
 use velo::ui::App;
 use velo::ui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use velo::ui::radio::RadioView;
@@ -206,7 +206,10 @@ impl Drop for TempDir {
 /// The wired loader over a canned transport, with no store file and no
 /// country detected.
 fn wired(canned: Arc<Canned>) -> RadioData<Shared> {
-    RadioData::new(Some(Client::new(Shared(canned))), None, None)
+    // The directory suite pins the directory's own wiring, so its fixture
+    // hides the cliamp section (issue #48); the section's wiring lives in
+    // `tests/ui_cliamp.rs`.
+    RadioData::new(Some(Shared(canned)), None, None).with_cliamp(false)
 }
 
 fn press(view: &mut RadioView, code: KeyCode) {
@@ -546,11 +549,7 @@ fn stations_load_capped_at_200_and_non_http_urls_are_dropped() {
 fn wired_with_country(canned: Arc<Canned>, dir: &TempDir, code: &str) -> RadioData<Shared> {
     std::fs::write(dir.radio_toml(), format!("country = \"{code}\"\n"))
         .expect("the answered store is written");
-    RadioData::new(
-        Some(Client::new(Shared(canned))),
-        Some(dir.radio_toml()),
-        None,
-    )
+    RadioData::new(Some(Shared(canned)), Some(dir.radio_toml()), None).with_cliamp(false)
 }
 
 /// The bodies the region tests start from: two countries and two regions
@@ -726,10 +725,11 @@ fn f_on_a_region_pins_it_and_the_pin_survives_a_reload() {
     // A restart: a fresh wiring over the same file shows the pinned
     // region as its own row, and the row opens the region's stations.
     let reloaded = RadioData::new(
-        Some(Client::new(Shared(Arc::clone(&canned)))),
+        Some(Shared(Arc::clone(&canned))),
         Some(dir.radio_toml()),
         None,
-    );
+    )
+    .with_cliamp(false);
     let mut view = reloaded.view();
     let labels = view.labels();
     assert!(
@@ -769,10 +769,11 @@ fn with_no_home_country_no_states_are_ever_requested() {
     let dir = TempDir::new("states-none");
     std::fs::write(dir.radio_toml(), "country = \"none\"\n").expect("the decline is written");
     let mut data = RadioData::new(
-        Some(Client::new(Shared(Arc::clone(&canned)))),
+        Some(Shared(Arc::clone(&canned))),
         Some(dir.radio_toml()),
         None,
-    );
+    )
+    .with_cliamp(false);
     let mut view = data.view();
     press(&mut view, KeyCode::Enter); // Browse all countries
     settle(&mut data, &mut view, &canned, |view, _canned| {
@@ -872,10 +873,11 @@ fn the_no_country_section_never_requests_the_directory() {
     .expect("the store is written");
     let canned = Arc::new(Canned::new());
     let mut data = RadioData::new(
-        Some(Client::new(Shared(Arc::clone(&canned)))),
+        Some(Shared(Arc::clone(&canned))),
         Some(dir.radio_toml()),
         None,
-    );
+    )
+    .with_cliamp(false);
     let mut view = data.view();
 
     let section = view
@@ -1007,13 +1009,14 @@ fn entering_a_place_shows_the_waiting_fact_until_its_answer_lands() {
     );
     let gate = Arc::new(Gate::closed());
     let mut data = RadioData::new(
-        Some(Client::new(Gated {
+        Some(Gated {
             canned: Arc::clone(&canned),
             gate: Arc::clone(&gate),
-        })),
+        }),
         None,
         None,
-    );
+    )
+    .with_cliamp(false);
     let mut view = data.view();
 
     press(&mut view, KeyCode::Enter); // Browse all countries
@@ -1064,13 +1067,14 @@ fn ctrl_r_shows_the_waiting_fact_again_and_the_answer_clears_it() {
     );
     let gate = Arc::new(Gate::closed());
     let mut data = RadioData::new(
-        Some(Client::new(Gated {
+        Some(Gated {
             canned: Arc::clone(&canned),
             gate: Arc::clone(&gate),
-        })),
+        }),
         None,
         None,
-    );
+    )
+    .with_cliamp(false);
     let mut view = data.view();
 
     press(&mut view, KeyCode::Enter); // Browse all countries
@@ -1148,14 +1152,17 @@ fn the_footer_stops_saying_loading_once_the_answer_lands() {
     );
     let gate = Arc::new(Gate::closed());
     let mut app = App::new(Vec::new());
-    app.set_radio_wire(Box::new(RadioData::new(
-        Some(Client::new(Gated {
-            canned: Arc::clone(&canned),
-            gate: Arc::clone(&gate),
-        })),
-        None,
-        None,
-    )));
+    app.set_radio_wire(Box::new(
+        RadioData::new(
+            Some(Gated {
+                canned: Arc::clone(&canned),
+                gate: Arc::clone(&gate),
+            }),
+            None,
+            None,
+        )
+        .with_cliamp(false),
+    ));
 
     let _ = app.on_key(KeyEvent::from(KeyCode::Char('R'))); // the radio opens over the wiring
     let _ = app.on_key(KeyEvent::from(KeyCode::Enter)); // Browse all countries: the request starts
@@ -1216,10 +1223,11 @@ fn a_corrupt_store_is_reported_and_never_overwritten() {
         Canned::new().countries(r#"[{"name":"Norway","iso_3166_1":"NO","stationcount":2}]"#),
     );
     let mut data = RadioData::new(
-        Some(Client::new(Shared(Arc::clone(&canned)))),
+        Some(Shared(Arc::clone(&canned))),
         Some(dir.radio_toml()),
         None,
-    );
+    )
+    .with_cliamp(false);
     let mut view = data.view();
     data.poll(&mut view);
 
@@ -1259,10 +1267,11 @@ fn a_successful_favourite_save_creates_the_file() {
             .search(&stations_json(1)),
     );
     let mut data = RadioData::new(
-        Some(Client::new(Shared(Arc::clone(&canned)))),
+        Some(Shared(Arc::clone(&canned))),
         Some(dir.radio_toml()),
         None,
-    );
+    )
+    .with_cliamp(false);
     let mut view = data.view();
 
     press(&mut view, KeyCode::Enter); // Browse all countries
@@ -1294,10 +1303,11 @@ fn enter_answers_the_country_question_too() {
     let dir = TempDir::new("ask-enter");
     let canned = Arc::new(Canned::new());
     let mut data = RadioData::new(
-        Some(Client::new(Shared(Arc::clone(&canned)))),
+        Some(Shared(Arc::clone(&canned))),
         Some(dir.radio_toml()),
         Some(String::from("NO")),
-    );
+    )
+    .with_cliamp(false);
     let mut view = data.view();
     press(&mut view, KeyCode::Char('j')); // onto the question
     press(&mut view, KeyCode::Enter);
@@ -1320,10 +1330,11 @@ fn y_answers_the_country_question_and_n_declines_it() {
     let dir = TempDir::new("ask-yes");
     let canned = Arc::new(Canned::new());
     let mut data = RadioData::new(
-        Some(Client::new(Shared(Arc::clone(&canned)))),
+        Some(Shared(Arc::clone(&canned))),
         Some(dir.radio_toml()),
         Some(String::from("NO")),
-    );
+    )
+    .with_cliamp(false);
     let mut view = data.view();
     assert_eq!(
         view.labels()[1],
@@ -1348,10 +1359,11 @@ fn y_answers_the_country_question_and_n_declines_it() {
     // `n` stores the decline and the row goes away for good.
     let dir = TempDir::new("ask-no");
     let mut data = RadioData::new(
-        Some(Client::new(Shared(Arc::clone(&canned)))),
+        Some(Shared(Arc::clone(&canned))),
         Some(dir.radio_toml()),
         Some(String::from("NO")),
-    );
+    )
+    .with_cliamp(false);
     let mut view = data.view();
     press(&mut view, KeyCode::Char('j'));
     press(&mut view, KeyCode::Char('n'));
@@ -1379,10 +1391,11 @@ fn an_answered_or_undetectable_country_shows_no_question() {
     let dir = TempDir::new("answered");
     std::fs::write(dir.radio_toml(), "country = \"NO\"\n").expect("the store is written");
     let data = RadioData::new(
-        Some(Client::new(Shared(Arc::clone(&canned)))),
+        Some(Shared(Arc::clone(&canned))),
         Some(dir.radio_toml()),
         Some(String::from("NO")),
-    );
+    )
+    .with_cliamp(false);
     let view = data.view();
     assert!(
         view.labels().contains(&"NO (near you)".to_owned()),
@@ -1398,10 +1411,11 @@ fn an_answered_or_undetectable_country_shows_no_question() {
     let dir = TempDir::new("declined");
     std::fs::write(dir.radio_toml(), "country = \"none\"\n").expect("the store is written");
     let data = RadioData::new(
-        Some(Client::new(Shared(Arc::clone(&canned)))),
+        Some(Shared(Arc::clone(&canned))),
         Some(dir.radio_toml()),
         Some(String::from("NO")),
-    );
+    )
+    .with_cliamp(false);
     let view = data.view();
     assert!(
         !view.labels().iter().any(|label| label.contains("near you")),
@@ -1467,15 +1481,18 @@ fn the_index_lists_say_loading_until_their_answer_lands() {
     );
     let gate = Arc::new(Gate::closed());
     let mut app = App::new(Vec::new());
-    app.set_radio_wire(Box::new(RadioData::new(
-        Some(Client::new(GatedOn {
-            canned: Arc::clone(&canned),
-            gate: Arc::clone(&gate),
-            endpoint: "/countries",
-        })),
-        None,
-        None,
-    )));
+    app.set_radio_wire(Box::new(
+        RadioData::new(
+            Some(GatedOn {
+                canned: Arc::clone(&canned),
+                gate: Arc::clone(&gate),
+                endpoint: "/countries",
+            }),
+            None,
+            None,
+        )
+        .with_cliamp(false),
+    ));
 
     let _ = app.on_key(KeyEvent::from(KeyCode::Char('R')));
     let _ = app.on_key(KeyEvent::from(KeyCode::Enter)); // Browse all countries
@@ -1503,15 +1520,18 @@ fn the_index_lists_say_loading_until_their_answer_lands() {
     // The tag index says the same, and stops the same way.
     let gate = Arc::new(Gate::closed());
     let mut app = App::new(Vec::new());
-    app.set_radio_wire(Box::new(RadioData::new(
-        Some(Client::new(GatedOn {
-            canned: Arc::clone(&canned),
-            gate: Arc::clone(&gate),
-            endpoint: "/tags",
-        })),
-        None,
-        None,
-    )));
+    app.set_radio_wire(Box::new(
+        RadioData::new(
+            Some(GatedOn {
+                canned: Arc::clone(&canned),
+                gate: Arc::clone(&gate),
+                endpoint: "/tags",
+            }),
+            None,
+            None,
+        )
+        .with_cliamp(false),
+    ));
     let _ = app.on_key(KeyEvent::from(KeyCode::Char('R')));
     let _ = app.on_key(KeyEvent::from(KeyCode::Char('G'))); // Browse genres & tags
     let _ = app.on_key(KeyEvent::from(KeyCode::Enter));

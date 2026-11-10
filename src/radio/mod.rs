@@ -1,6 +1,7 @@
 //! Internet radio: live streams, now-playing metadata and the station
 //! directory.
 
+pub mod cliamp;
 pub mod client;
 pub mod country;
 pub mod directory;

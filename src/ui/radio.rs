@@ -36,6 +36,7 @@ use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, ListState, Paragraph};
 
+use crate::radio::cliamp::{Channel, Listeners, Song};
 use crate::radio::client::{Country, Order, State, Station, Tag};
 use crate::radio::directory::{is_playable_codec, is_playable_station, refusal, refusal_for};
 use crate::radio::store::{Favorite, Pinned, RadioStore, station_key};
@@ -89,6 +90,26 @@ pub enum RadioOutcome {
         /// and the reason the directory refused it.
         body: String,
     },
+    /// `enter` on a cliamp song (issue #48, S3): the channel's songs, in
+    /// the service's order, handed to the shell to queue as file entries —
+    /// the URL is the path, the cache resolver fetches it — with the player
+    /// starting at the selected one. Never a live station (S3): the
+    /// transport shows a position, not `● live`.
+    PlaySongs {
+        /// The channel's songs, in the service's order.
+        songs: Vec<Song>,
+        /// The selected song's index within `songs`.
+        from: usize,
+    },
+    /// `a` on a cliamp song (issue #48, S3): that one song handed to the
+    /// shell to queue as a file entry, without starting anything and
+    /// without leaving the view.
+    QueueSong {
+        /// The song's URL — its identity, and the path the resolver caches.
+        url: String,
+        /// The song's title, for the queue row's display name.
+        title: String,
+    },
     /// Not a radio key: the rest of the keymap may have it.
     Pass,
 }
@@ -129,6 +150,19 @@ pub enum Place {
     /// was.
     Search {
         /// The name the directory is asked for.
+        name: String,
+    },
+    /// The cliamp section (issue #48, S1): the channels of the cliamp
+    /// radio service, shown first at the top when the config shows the
+    /// section at all. Its channels list from the service, never the
+    /// directory.
+    Cliamp,
+    /// One cliamp channel's songs (issue #48, S2): a finite playlist of
+    /// files, in the service's order — never a live station (S3).
+    CliampChannel {
+        /// The channel's id, as `/stations` names it.
+        id: String,
+        /// The channel's display name.
         name: String,
     },
 }
@@ -207,6 +241,25 @@ pub enum RowKind {
     FavoriteStation {
         /// The stored favourite.
         favorite: Favorite,
+    },
+    /// `cliamp radio`: the section row at the top (issue #48, S1). It
+    /// opens [`Place::Cliamp`].
+    BrowseCliamp,
+    /// One channel of the cliamp section (issue #48, S2): the channel's
+    /// name as the label, and as the row's dim fact the song count and,
+    /// when `/statistics` answered, the listeners on it right now.
+    CliampChannel {
+        /// The channel as `/stations` listed it.
+        channel: Channel,
+        /// The listeners `/statistics` reports for the channel, when it
+        /// answered; `None` when it has not, or failed (S4).
+        listeners: Option<u32>,
+    },
+    /// One song of a cliamp channel (issue #48, S2, S3): a finite remote
+    /// track, played and queued as a file whose identity is its URL.
+    CliampSong {
+        /// The song as `/<id>/tracks` listed it.
+        song: Song,
     },
     /// The dotted rule that closes the list of sections above the
     /// favourites (S5, revised in #22). Display only: no number, and the
@@ -339,6 +392,24 @@ pub struct RadioView {
     /// the view knows nothing about players and only renders what it was
     /// told. `None` — a local file, or nothing at all — marks no row.
     playing: Option<(String, PlayState)>,
+    /// Whether the cliamp section shows at the top (issue #48, S1): the
+    /// `[radio] cliamp` switch, shown unless the config hides it. The
+    /// shell decides once, from the config, and hands it in.
+    cliamp_enabled: bool,
+    /// The channels of the cliamp section, as `/stations` answered (S2).
+    /// Like the two indexes: replaced whole, reused on every visit.
+    cliamp_channels: Vec<Channel>,
+    /// The listeners of those channels, as `/statistics` answered (S2).
+    /// Empty when it has not answered or failed — the channels then list
+    /// without their `●` counts (S4).
+    cliamp_listeners: Vec<Listeners>,
+    /// The songs of the channel place [`Self::cliamp_songs_place`] names —
+    /// the one cliamp song slot, the catalog slot's sibling (S2). Replaced
+    /// whole, dropped by every move to another place, rendered only in
+    /// exactly its place.
+    cliamp_songs: Vec<Song>,
+    /// The place [`Self::cliamp_songs`] is the answer to, when one is held.
+    cliamp_songs_place: Option<Place>,
 }
 
 impl RadioView {
@@ -375,6 +446,11 @@ impl RadioView {
             refresh_wanted: false,
             page: std::cell::Cell::new(10),
             playing: None,
+            cliamp_enabled: true,
+            cliamp_channels: Vec::new(),
+            cliamp_listeners: Vec::new(),
+            cliamp_songs: Vec::new(),
+            cliamp_songs_place: None,
         }
     }
 
@@ -423,6 +499,47 @@ impl RadioView {
     /// appears, `▶` while it plays and `■` once it stopped.
     pub fn set_playing(&mut self, playing: Option<(String, PlayState)>) {
         self.playing = playing;
+    }
+
+    /// Sets whether the cliamp section shows at the top (issue #48, S1):
+    /// the `[radio] cliamp` switch decides; shown unless it says `false`.
+    /// No clamp: the section is the top's first row, so hiding it shifts
+    /// every row up one and the cursor keeps the same kind of row under
+    /// it — the fixture that starts on the favourites' rule keeps it.
+    pub fn set_cliamp_enabled(&mut self, cliamp: bool) {
+        self.cliamp_enabled = cliamp;
+    }
+
+    /// Replaces the cliamp channels, as `/stations` answered (S2). An
+    /// empty answer is still an answer: the section stays and lists
+    /// nothing (S4).
+    pub fn set_cliamp_channels(&mut self, channels: Vec<Channel>) {
+        self.cliamp_channels = channels;
+        self.clamp();
+    }
+
+    /// Replaces the cliamp listeners, as `/statistics` answered (S2). An
+    /// empty answer still answers: the channels list without their `●`
+    /// counts (S4).
+    pub fn set_cliamp_listeners(&mut self, listeners: Vec<Listeners>) {
+        self.cliamp_listeners = listeners;
+        self.clamp();
+    }
+
+    /// Sets the cliamp songs of `place`, in the service's order (S2). The
+    /// answer belongs to the place that asked: its rows render only while
+    /// the view stands in exactly that place, never in a sibling channel.
+    pub fn set_cliamp_songs(&mut self, place: Place, songs: Vec<Song>) {
+        self.cliamp_songs = songs;
+        self.cliamp_songs_place = Some(place);
+        self.clamp();
+    }
+
+    /// The place the cliamp songs slot's answer belongs to, when one is
+    /// held.
+    #[must_use]
+    pub fn cliamp_songs_place(&self) -> Option<&Place> {
+        self.cliamp_songs_place.as_ref()
     }
 
     /// Replaces the country index, as `/countries` answered (T6b). An
@@ -873,6 +990,21 @@ impl RadioView {
             self.answer_country(true);
             return RadioOutcome::Handled;
         }
+        if let RowKind::CliampSong { song } = &row.kind {
+            // A cliamp song is a finite remote track, never a station
+            // (issue #48, S3): the channel's songs — which the place
+            // holds in the service's order — are handed to the shell as
+            // file entries, and the player starts at the selected one.
+            let from = self
+                .cliamp_songs
+                .iter()
+                .position(|candidate| candidate.url == song.url)
+                .unwrap_or(0);
+            return RadioOutcome::PlaySongs {
+                songs: self.cliamp_songs.clone(),
+                from,
+            };
+        }
         if let Some((url, name)) = station_of_row(&row.kind) {
             // A station the user put into `radio.toml` themselves — a
             // hand-added `[[station]]` or a favourite — may be a channel
@@ -890,6 +1022,11 @@ impl RadioView {
             };
         }
         let next = match row.kind {
+            RowKind::BrowseCliamp => Some(Place::Cliamp),
+            RowKind::CliampChannel { channel, .. } => Some(Place::CliampChannel {
+                id: channel.id,
+                name: channel.name,
+            }),
             RowKind::BrowseCountries => Some(Place::Countries),
             RowKind::BrowseTags => Some(Place::Tags),
             RowKind::BrowseNoCountry => Some(Place::NoCountry),
@@ -906,6 +1043,7 @@ impl RadioView {
             RowKind::CatalogStation { .. }
             | RowKind::AddedStation { .. }
             | RowKind::FavoriteStation { .. }
+            | RowKind::CliampSong { .. }
             | RowKind::AskCountry { .. }
             | RowKind::Rule
             | RowKind::Header { .. } => None,
@@ -924,6 +1062,14 @@ impl RadioView {
         let Some(row) = self.selection() else {
             return RadioOutcome::Handled;
         };
+        // A cliamp song queues as one file entry, never a station (issue
+        // #48, S3); every other station the row names queues as itself.
+        if let RowKind::CliampSong { song } = row.kind {
+            return RadioOutcome::QueueSong {
+                url: song.url,
+                title: song.title,
+            };
+        }
         station_of_row(&row.kind).map_or(RadioOutcome::Handled, |(url, name)| RadioOutcome::Queue {
             url,
             name,
@@ -1005,6 +1151,8 @@ impl RadioView {
         self.naming = false;
         self.catalog = Vec::new();
         self.catalog_place = None;
+        self.cliamp_songs = Vec::new();
+        self.cliamp_songs_place = None;
     }
 
     /// Goes back one level, restoring where `enter` came from. At the top
@@ -1107,9 +1255,12 @@ impl RadioView {
                 let toggled = self.store.toggle_pin(Pinned { code, name, state });
                 self.dirty |= toggled.needs_save();
             }
-            RowKind::BrowseCountries
+            RowKind::BrowseCliamp
+            | RowKind::BrowseCountries
             | RowKind::BrowseTags
             | RowKind::BrowseNoCountry
+            | RowKind::CliampChannel { .. }
+            | RowKind::CliampSong { .. }
             | RowKind::Tag { .. }
             | RowKind::AskCountry { .. }
             | RowKind::Rule
@@ -1170,8 +1321,66 @@ impl RadioView {
                     Vec::new()
                 }
             }
+            Place::Cliamp => self.cliamp_channel_rows(),
+            Place::CliampChannel { .. } => {
+                // The songs render only in the channel that asked for
+                // them, the way a place's stations do (S9, issue #48).
+                if self.cliamp_songs_place.as_ref() == Some(&self.place) {
+                    self.cliamp_song_rows()
+                } else {
+                    Vec::new()
+                }
+            }
             Place::NoCountry => self.no_country_rows(),
         }
+    }
+
+    /// The channels of the cliamp section (issue #48, S2): the channel's
+    /// name as the label and, as the row's dim fact, the song count and —
+    /// when `/statistics` answered — the listeners on it right now. A
+    /// failed or unloaded statistics drops only the `●` count (S4).
+    fn cliamp_channel_rows(&self) -> Vec<Row> {
+        self.cliamp_channels
+            .iter()
+            .map(|channel| {
+                let listeners = self
+                    .cliamp_listeners
+                    .iter()
+                    .find(|row| row.id == channel.id)
+                    .map(|row| row.active);
+                let mut fact = plural(
+                    usize::try_from(channel.tracks).unwrap_or(usize::MAX),
+                    "track",
+                    "tracks",
+                );
+                if let Some(listeners) = listeners {
+                    use std::fmt::Write as _;
+                    let _ = write!(fact, " · ● {listeners} listening now");
+                }
+                Row {
+                    label: channel.name.clone(),
+                    fact,
+                    kind: RowKind::CliampChannel {
+                        channel: channel.clone(),
+                        listeners,
+                    },
+                }
+            })
+            .collect()
+    }
+
+    /// The songs of one cliamp channel (issue #48, S2): the title as the
+    /// label, `artist · album` as the dim note, each part only when the
+    /// service knows it.
+    fn cliamp_song_rows(&self) -> Vec<Row> {
+        self.cliamp_songs
+            .iter()
+            .map(|song| Row {
+                label: song.title.clone(),
+                fact: song_note(song),
+                kind: RowKind::CliampSong { song: song.clone() },
+            })
+            .collect()
     }
 
     /// The stations that belong to no country (S4): every hand-added
@@ -1215,6 +1424,13 @@ impl RadioView {
     /// directly, in the order the layout fixed.
     fn top_rows(&self) -> Vec<Row> {
         let mut rows = Vec::new();
+        // The cliamp section (issue #48, S1): `1. cliamp radio`, first,
+        // above the directory's sections, shown unless the config hides
+        // it. Like the browse rows, it shows before its content loads —
+        // the section exists to be entered and loaded (T6b).
+        if self.cliamp_enabled {
+            rows.push(self.cliamp_section_row());
+        }
         // The browse rows belong to the sections, not to their content:
         // the wired view shows them before the indexes load, so entering
         // one can start the load (T6b).
@@ -1325,6 +1541,21 @@ impl RadioView {
         rows
     }
 
+    /// The section row the top leads with (issue #48, S1): the label and,
+    /// once the channels are loaded, their count as the fact.
+    fn cliamp_section_row(&self) -> Row {
+        let fact = if self.cliamp_channels.is_empty() {
+            String::new()
+        } else {
+            plural(self.cliamp_channels.len(), "channel", "channels")
+        };
+        Row {
+            label: "cliamp radio".to_owned(),
+            fact,
+            kind: RowKind::BrowseCliamp,
+        }
+    }
+
     /// The favourites' closing block (S5, revised in #22): the dotted rule,
     /// their header, and the favourite rows. Empty when there is no
     /// favourite, so an empty section is never drawn.
@@ -1405,6 +1636,8 @@ impl RadioView {
             }
             Place::Tag { name } => (format!("Radio › {name}"), "station", "stations"),
             Place::Search { name } => (format!("Radio › search “{name}”"), "station", "stations"),
+            Place::Cliamp => ("Radio › cliamp".to_owned(), "channel", "channels"),
+            Place::CliampChannel { name, .. } => (format!("Radio › {name}"), "song", "songs"),
             Place::NoCountry => (
                 "Radio › stations without a country".to_owned(),
                 "station",
@@ -1645,6 +1878,18 @@ fn marked(label: String, refusal: Option<&String>) -> String {
     match label.strip_prefix("★ ") {
         Some(rest) => format!("★ ✗ {rest}"),
         None => format!("✗ {label}"),
+    }
+}
+
+/// `Artist · Album` for a cliamp song row's dim note (issue #48, S2),
+/// each part only when the service knows it; both unknown, the note is
+/// empty and the row is the title alone.
+fn song_note(song: &Song) -> String {
+    match (song.artist.as_str(), song.album.as_str()) {
+        ("", "") => String::new(),
+        (artist, "") => artist.to_owned(),
+        ("", album) => album.to_owned(),
+        (artist, album) => format!("{artist} · {album}"),
     }
 }
 
