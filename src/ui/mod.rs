@@ -4079,7 +4079,18 @@ impl<'lib> App<'lib> {
             .find(|theme| theme.name == name)
             .map(|theme| theme.colors)
         {
-            Some(colors) => self.theme_overrides.resolved_over(colors),
+            // The launch's rule, so the preview cannot lie (issue #41): under
+            // a named theme, a `[theme]` key that merely restates the built-in
+            // default is documentation, not a choice — and the generated
+            // config carries all seven of them. Without this, every preview is
+            // masked by the config's own defaults and nothing seems to change.
+            Some(colors) if name == crate::config::DEFAULT_THEME_NAME => {
+                self.theme_overrides.resolved_over(colors)
+            }
+            Some(colors) => self
+                .theme_overrides
+                .non_default_choices()
+                .resolved_over(colors),
             None => self.theme_overrides.resolved(),
         }
     }

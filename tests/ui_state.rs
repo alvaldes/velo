@@ -2703,6 +2703,43 @@ fn open_on_theme_row(app: &mut App<'_>) {
     assert_eq!(app.settings_focused(), "theme", "the theme row is focused");
 }
 
+#[test]
+fn the_preview_is_not_masked_by_the_configs_own_default_colours() {
+    // The config velo generates carries all seven `[theme]` keys at the
+    // built-in defaults (issue #41). Under a named theme those are
+    // documentation, so the preview has to show the theme, not the defaults.
+    let dir = config_dir("preview-not-masked");
+    let config = dir.join("config.toml");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(&config, velo::config::default_config_text()).unwrap();
+    let themes = dir.join("themes");
+    fs::create_dir_all(&themes).unwrap();
+
+    // The launch reads the file's `[theme]` keys and hands them over as the
+    // overrides; a generated file has all seven, at their defaults.
+    let cli = velo::config::Cli::try_parse_from(["velo"]).unwrap();
+    let settings = velo::config::Config::load_from(&config)
+        .unwrap()
+        .merged(&cli);
+    let selection = velo::config::select_theme(Some(&themes), &settings.theme);
+    let mut app = app_with_three_tracks();
+    app.set_config_file(Some(config));
+    app.set_theme_library(selection, settings.theme);
+    let before = app.theme_colors();
+
+    open_theme_picker(&mut app);
+    press(&mut app, KeyCode::Char('j'));
+    let focused = app.theme_colors();
+    assert_ne!(
+        focused.background, before.background,
+        "moving to the next theme repaints the interface: {focused:?}"
+    );
+    assert_ne!(
+        focused, before,
+        "and it is the theme's palette, not the config's defaults"
+    );
+}
+
 fn open_theme_picker(app: &mut App<'_>) {
     open_on_theme_row(app);
     press(app, KeyCode::Enter);
