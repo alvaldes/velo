@@ -1,6 +1,10 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.36.2] - 2026-11-10
+
+### Fixes
+- **subsonic:** A track downloads however long it takes to arrive
 ## [0.36.1] - 2026-11-10
 
 ### Fixes
