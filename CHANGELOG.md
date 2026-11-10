@@ -1,6 +1,10 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.41.1] - 2026-11-10
+
+### Fixes
+- **ui:** A playing song marks its row, and a long fetch says so
 ## [0.41.0] - 2026-11-10
 
 ### Features
