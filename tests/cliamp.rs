@@ -110,6 +110,37 @@ fn the_channels_parse_with_their_track_counts() {
 }
 
 #[test]
+fn the_channels_parse_their_live_streams() {
+    // The `stream` field is the channel's own live MP3 (issue #68): kept,
+    // so a channel can lead with a live row played through the station
+    // path, beside its finite songs.
+    let client = Client::new(Canned::new().stations(STATIONS));
+    let channels = client.stations().expect("the channels parse");
+    assert_eq!(
+        channels[0].stream, "https://radio.cliamp.stream/lofi/stream",
+        "got: {:?}",
+        channels[0]
+    );
+    assert_eq!(
+        channels[1].stream, "https://radio.cliamp.stream/jazz/stream",
+        "got: {:?}",
+        channels[1]
+    );
+}
+
+#[test]
+fn a_channel_without_a_stream_parses_with_an_empty_one() {
+    // The service can name a channel without a stream: an absent field is
+    // an empty one, never a malformed answer — the same rule the songs'
+    // optional fields follow (issue #55).
+    let canned =
+        Canned::new().stations(r#"{"stations":[{"id":"lofi","name":"LoFi Beats","tracks":120}]}"#);
+    let client = Client::new(canned);
+    let channels = client.stations().expect("the answer parses");
+    assert_eq!(channels[0].stream, "", "got: {:?}", channels[0]);
+}
+
+#[test]
 fn the_stations_url_is_the_constant_host() {
     let client = Client::new(Canned::new().stations(STATIONS));
     let _ = client.stations();

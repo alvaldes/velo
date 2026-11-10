@@ -372,3 +372,47 @@ brief, each pinned:
 
 #60 closes with this: the line appears at once, the wait runs off the event
 loop, and nothing behind the start moved.
+
+## Issue #68 — the live row
+
+The service publishes each channel's live stream (`stream` in `/stations`)
+and velo threw it away, so a channel could only ever open as its songs: no
+`● live`, no ICY title, nothing that behaved like radio. Now a channel keeps
+its songs and leads with one unnumbered row above them — `LoFi Beats — live`,
+carrying the `● N listening now` count as its fact — and `enter` on it hands
+the stream to the shell through the exact path a directory station takes
+(`RadioOutcome::Play`, `configured: false`, no expansion probe): `● live`,
+the ICY title, one retry, the HLS refusal. No second station opener was
+written. The listener count moved off the channel row to the live row, where
+the channel is actually played; the songs stay cached finite files with
+seek, untouched; the live row marks `▶`/`■` on the stream's key like any
+station row, the songs never mark. A channel the service gives no `stream`
+for has no live row; a failing `/statistics` leaves the row standing with
+no count.
+
+- `src/radio/cliamp.rs` — `Channel` carries `stream` (optional on the wire,
+  empty when absent); `description`/`genre` stay ignored.
+- `src/ui/rowtext.rs` — `live(name)` and `listening(count)`: one owner each
+  for the `— live` label and the `●` fact, per issue #71's rule.
+- `src/ui/radio.rs` — `RowKind::CliampLive` (+ the channel-place row builder
+  that leads with it), `enter` answering `Play` with the stream,
+  `station_row_key` marking it; the live row is selectable but not numbered
+  (`RowKind::numbered`), so the header and the digits count songs alone.
+- `src/ui/mod.rs` — `ListRow.number` is `Option<usize>` for the unnumbered
+  row; every existing list passes `Some` and renders byte for byte as
+  before.
+
+Verification: `cargo fmt`; `cargo test --test ui_cliamp --test ui_radio
+--test cliamp --test ui_render` (189 tests, all passing, including the new
+`the_shell_plays_the_channel_stream_as_a_station_from_the_live_row`,
+`enter_on_the_live_row_asks_to_play_the_stream_not_the_first_song`,
+`the_live_row_carries_the_listener_count`,
+`without_statistics_the_live_row_stands_without_a_count`,
+`a_channel_without_a_stream_has_no_live_row`,
+`the_playing_stream_marks_the_live_row`, and the client's
+`the_channels_parse_their_live_streams` /
+`a_channel_without_a_stream_parses_with_an_empty_one`);
+`cargo clippy --all-targets` clean except the pre-existing
+`config.rs` too-many-lines note. README.md line 220 still describes the old
+channel-row fact (`N tracks · ● M listening now`) — README was not an
+allowed edit surface here, so the parent should update that line.

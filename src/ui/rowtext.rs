@@ -63,6 +63,23 @@ pub fn station_label(favourite: bool, refused: bool, name: &str, tail: &str) -> 
     label
 }
 
+/// `● N listening now` — the listener count of a channel, as the live
+/// row's dim fact (issue #68): it belongs to the row that plays the
+/// channel live, not to the song list. One owner, so the `●` is never
+/// spelled twice.
+#[must_use]
+pub fn listening(count: u32) -> String {
+    format!("● {count} listening now")
+}
+
+/// `Name — live` — the one way a row says it plays the channel itself,
+/// not one of its songs (issue #68): the channel's live stream, through
+/// the same path a directory station takes.
+#[must_use]
+pub fn live(name: &str) -> String {
+    format!("{name} — live")
+}
+
 /// The dim note after a row's name: the parts that are known, joined by
 /// ` · `. A part that is empty is left out, so a row with an unknown artist
 /// reads `Harbor`, never ` · Harbor`.
@@ -78,7 +95,7 @@ pub fn note(parts: &[&str]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{note, starred, station_label, tail};
+    use super::{listening, live, note, starred, station_label, tail};
 
     #[test]
     fn the_star_carries_one_space_in_every_shape() {
@@ -108,6 +125,12 @@ mod tests {
             " · DE",
             "an empty bracket is no bracket"
         );
+    }
+
+    #[test]
+    fn the_live_row_names_the_channel_and_its_listeners() {
+        assert_eq!(live("Lofi"), "Lofi — live");
+        assert_eq!(listening(47), "● 47 listening now");
     }
 
     #[test]
