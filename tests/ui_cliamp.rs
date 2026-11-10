@@ -10,8 +10,8 @@
 //! would open an audio device.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use velo::audio::AudioError;
 use velo::audio::output::{Entry, PathResolver, TrackFailure};
@@ -891,6 +891,308 @@ fn a_failed_fetch_keeps_its_report_and_clears_the_line() {
         app.status(),
         "velo: skipped t1: the server could not be reached",
         "the fetching line is gone and the failure's report stands"
+    );
+}
+
+// ---- issue #60's second half: the event loop never waits -------------------
+
+/// The lock a test holds over the worker's download (issue #60's second
+/// half): the resolver waits for it, so the interface's own turn ends long
+/// before the "fetch" does.
+type Gate = Arc<(Mutex<bool>, Condvar)>;
+
+fn gate() -> Gate {
+    Arc::new((Mutex::new(false), Condvar::new()))
+}
+
+fn open_gate(gate: &Gate) {
+    let (lock, signal) = &**gate;
+    *lock.lock().expect("the gate opens") = true;
+    signal.notify_all();
+}
+
+/// Turns the loop until the worker's answer has been taken (issue #60): the
+/// tick polls the slot and never waits on it, so the start lands on the
+/// first tick that finds the answer there — bounded, so a broken handoff
+/// fails its test instead of hanging it.
+fn ticks_until_started(app: &mut App<'_>) {
+    for _ in 0..100 {
+        app.tick();
+        if !app.status().starts_with("⟳ fetching") {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("the worker's answer never reached the loop's ticks");
+}
+
+/// A resolver the worker waits on: every remote entry's "download" holds
+/// until the test opens the gate, then answers — with the path of a file
+/// that does not exist when the fetch succeeded (the start attempt that
+/// follows is what the test observes, and that attempt fails before any
+/// audio device is touched), or with its failure reason.
+struct Gated {
+    gate: Gate,
+    /// The path a released fetch answers with.
+    resolved: PathBuf,
+    /// Some(reason) makes the released fetch fail with it instead.
+    fail: Option<String>,
+}
+
+impl Gated {
+    /// A gate held shut, resolving (once released) to `resolved`.
+    fn at(gate: Gate, resolved: impl Into<PathBuf>) -> Self {
+        Self {
+            gate,
+            resolved: resolved.into(),
+            fail: None,
+        }
+    }
+
+    /// A gate held shut, failing (once released) with `reason`.
+    fn failing(gate: Gate, reason: &str) -> Self {
+        Self {
+            gate,
+            resolved: PathBuf::new(),
+            fail: Some(reason.to_owned()),
+        }
+    }
+}
+
+impl PathResolver for Gated {
+    fn resolve(&self, _path: &Path) -> Result<PathBuf, AudioError> {
+        let (lock, signal) = &*self.gate;
+        let mut open = lock.lock().expect("the gate's lock");
+        // The wait has a patience, so a turn that resolved on this thread —
+        // the old blocking shape — answers instead of hanging its test.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !*open {
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(AudioError::Unsupported(String::from(
+                    "the fetch was still running",
+                )));
+            }
+            let (turned, _) = signal
+                .wait_timeout(open, deadline - now)
+                .expect("the gate answers");
+            open = turned;
+        }
+        if let Some(reason) = &self.fail {
+            return Err(AudioError::Unsupported(reason.clone()));
+        }
+        Ok(self.resolved.clone())
+    }
+
+    fn cached(&self, _path: &Path) -> bool {
+        false
+    }
+}
+
+/// A queue standing on two remote songs, with the resolver the test chose:
+/// the shape `enter` on a channel's song makes.
+fn two_remote_songs(resolver: Arc<dyn PathResolver>) -> App<'static> {
+    let mut app = App::new(Vec::new());
+    app.queue_song_for_tests("https://radio.cliamp.stream/lofi/tracks/t1");
+    app.queue_song_for_tests("https://radio.cliamp.stream/lofi/tracks/t2");
+    app.set_resolver(Some(resolver));
+    app
+}
+
+#[test]
+fn pressing_enter_on_an_uncached_remote_entry_says_so_in_the_same_turn() {
+    let gate = gate();
+    let mut app = two_remote_songs(
+        Arc::new(Gated::at(Arc::clone(&gate), "/nowhere/velo-gate.wav")) as Arc<dyn PathResolver>,
+    );
+
+    // The event loop's own turn: the play is applied here, and the turn
+    // must end while the "download" still holds — the line says so without
+    // a tick, and the queue stands where it was.
+    app.apply(Action::PlayQueue { from: 0 });
+    assert_eq!(
+        app.status(),
+        "⟳ fetching t1…",
+        "the fetch is on the line in the very turn that asked for it"
+    );
+    assert_eq!(app.queue().len(), 2, "the queue stands where it was");
+
+    app.tick();
+    assert_eq!(
+        app.status(),
+        "⟳ fetching t1…",
+        "the line holds for every tick the download runs"
+    );
+    open_gate(&gate);
+}
+
+#[test]
+fn a_finished_fetch_starts_the_stream_on_the_next_tick() {
+    let gate = gate();
+    let mut app = two_remote_songs(Arc::new(Gated::at(
+        Arc::clone(&gate),
+        "/nowhere/velo-replay.wav",
+    )) as Arc<dyn PathResolver>);
+
+    app.apply(Action::PlayQueue { from: 0 });
+    assert_eq!(app.status(), "⟳ fetching t1…", "the wait is under way");
+
+    // The file is on disk now: the tick the event loop turns next runs the
+    // same start the request asked for. The resolved path fails to open —
+    // before any audio device is touched — and the start attempt's own
+    // report replaces the fetching line.
+    open_gate(&gate);
+    ticks_until_started(&mut app);
+    assert!(
+        app.status().starts_with("velo: "),
+        "the start attempt ran on the tick and answered for itself, got: {:?}",
+        app.status()
+    );
+    let settled = app.status().to_owned();
+    app.tick();
+    assert_eq!(
+        app.status(),
+        settled,
+        "the start happened once; no second start races in behind it"
+    );
+}
+
+#[test]
+fn a_failed_resolve_says_why_once_and_the_queue_stands() {
+    let gate = gate();
+    let mut app = two_remote_songs(Arc::new(Gated::failing(
+        Arc::clone(&gate),
+        "the server could not be reached",
+    )) as Arc<dyn PathResolver>);
+
+    app.apply(Action::PlayQueue { from: 0 });
+    assert_eq!(app.status(), "⟳ fetching t1…", "the wait is under way");
+
+    open_gate(&gate);
+    ticks_until_started(&mut app);
+    assert_eq!(
+        app.status(),
+        "velo: unsupported format: the server could not be reached",
+        "one line naming the reason, no stream"
+    );
+    assert_eq!(
+        app.queue().len(),
+        2,
+        "the queue was not advanced behind the user's back"
+    );
+
+    app.tick();
+    assert_eq!(
+        app.status(),
+        "velo: unsupported format: the server could not be reached",
+        "said once: no retry, no second line"
+    );
+}
+
+#[test]
+fn a_cached_entry_starts_in_the_same_turn_with_no_fetching_line() {
+    // The path `AlwaysCached` resolves to is not a file, so the synchronous
+    // start answers with its own report — which is the point: the start ran
+    // on this turn, and no fetching line ever stood.
+    let mut app = App::new(Vec::new());
+    app.queue_song_for_tests("https://radio.cliamp.stream/lofi/tracks/t1");
+    app.set_resolver(Some(Arc::new(AlwaysCached) as Arc<dyn PathResolver>));
+
+    app.apply(Action::PlayQueue { from: 0 });
+    assert!(
+        app.status().starts_with("velo: "),
+        "the start ran in this turn, got: {:?}",
+        app.status()
+    );
+    assert!(
+        !app.status().starts_with("⟳ fetching"),
+        "a cache hit is instant: no fetching line"
+    );
+    app.tick();
+    assert!(
+        !app.status().starts_with("⟳ fetching"),
+        "no worker's answer arrives later either"
+    );
+}
+
+#[test]
+fn a_local_file_starts_synchronously_no_matter_what_the_resolver_says() {
+    // `NeverCached` answers false for everything, and a local path is not
+    // a fetch: the start still runs on this thread, in this turn.
+    let mut app = App::new(Vec::new());
+    app.queue_song_for_tests("/music/dawn.wav");
+    app.set_resolver(Some(Arc::new(NeverCached) as Arc<dyn PathResolver>));
+
+    app.apply(Action::PlayQueue { from: 0 });
+    assert!(
+        app.status().starts_with("velo: "),
+        "the start ran in this turn, got: {:?}",
+        app.status()
+    );
+    assert!(
+        !app.status().starts_with("⟳ fetching"),
+        "a local file is already on disk: no fetching line"
+    );
+}
+
+#[test]
+fn a_second_play_supersedes_the_wait_of_the_first() {
+    let gate = gate();
+    let mut app = two_remote_songs(Arc::new(Gated::at(
+        Arc::clone(&gate),
+        "/nowhere/velo-supersede.wav",
+    )) as Arc<dyn PathResolver>);
+
+    app.apply(Action::PlayQueue { from: 0 });
+    assert_eq!(app.status(), "⟳ fetching t1…", "the first ask waits");
+
+    // A second play while the first runs: the slot holds the newer ask.
+    app.apply(Action::PlayQueue { from: 1 });
+    assert_eq!(
+        app.status(),
+        "⟳ fetching t2…",
+        "the newer ask holds the slot"
+    );
+
+    open_gate(&gate);
+    ticks_until_started(&mut app);
+    assert!(
+        app.status().starts_with("velo: "),
+        "exactly one start ran — the second ask's — got: {:?}",
+        app.status()
+    );
+    let settled = app.status().to_owned();
+    app.tick();
+    assert_eq!(
+        app.status(),
+        settled,
+        "the first ask's start never comes in behind it"
+    );
+}
+
+#[test]
+fn a_skip_of_an_uncached_remote_entry_waits_the_same_way() {
+    let gate = gate();
+    let mut app = two_remote_songs(
+        Arc::new(Gated::at(Arc::clone(&gate), "/nowhere/velo-skip.wav")) as Arc<dyn PathResolver>,
+    );
+
+    // A skip is the same rebuild a seek is; no test can hold a `Player`, so
+    // the rebuild is driven through its hook, the way a skip would land.
+    app.start_track_at_for_tests(1);
+    assert_eq!(
+        app.status(),
+        "⟳ fetching t2…",
+        "the skip's rebuild is a wait too"
+    );
+    assert_eq!(app.queue().len(), 2, "the queue stands where it was");
+
+    open_gate(&gate);
+    ticks_until_started(&mut app);
+    assert!(
+        app.status().starts_with("velo: "),
+        "the rebuild ran on the tick and answered for itself, got: {:?}",
+        app.status()
     );
 }
 

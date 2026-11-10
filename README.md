@@ -640,10 +640,15 @@ working, because the audio path opens a file either way. A cache hit needs
 no network at all; a download that fails skips that track with the reason in
 the status line and the queue keeps going — a network dying mid-album does
 not end the session. While the queue is fetching a track it has not cached
-yet, the status line carries `⟳ fetching <name>…` until the track starts
-sounding — a wait that is real for a channel's six-megabyte song — and
-clears then; a cache hit, being instant, shows nothing, and a failed fetch
-keeps its own skip report.
+yet, the status line carries `⟳ fetching <name>…` — from the moment `enter`
+is pressed, not a minute later: the event loop never waits for the
+download, the first fetch runs on a worker while the interface keeps
+drawing, and the stream starts by itself once the file is on disk — until
+the track starts sounding, a wait that is real for a channel's six-megabyte
+song. A second play, skip or seek while one fetch runs supersedes it, so
+only ever one wait is in flight; a fetch that fails says why in one line
+and leaves the queue standing; a cache hit, being instant, shows nothing,
+and a failed *producer* fetch keeps its own skip report.
 
 The cache lives at `$XDG_CACHE_HOME/velo/subsonic`, else
 `~/.cache/velo/subsonic`; each file is named after a hash of the track's
