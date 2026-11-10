@@ -1361,7 +1361,8 @@ fn mono_is_a_session_flag_and_never_a_config_key() {
 // ------------------------------------------------ theme files (issue #10)
 
 use velo::config::{
-    DEFAULT_THEME_NAME, ThemeKeys, ThemeSelection, select_theme, themes_dir, write_default_theme,
+    DEFAULT_THEME_NAME, TERMINAL_THEME_NAME, ThemeKeys, ThemeSelection, select_theme, themes_dir,
+    write_default_theme,
 };
 
 /// Writes a theme file into `<dir>/themes/` and returns the folder's path.
@@ -1985,6 +1986,227 @@ fn selecting_default_or_no_name_keeps_todays_layering() {
         assert_eq!(selection.palette, ThemeColors::default());
     }
     let _ = fs::remove_dir_all(&dir);
+}
+
+// --------------------------------- the factory palette carries its own colours (issue #57)
+
+/// The factory palette (S15, issue #57), spelled out so a drift in any one
+/// slot fails this test by name.
+const VELO_PALETTE: ThemeColors = ThemeColors {
+    background: ThemeColor::Rgb {
+        red: 0x14,
+        green: 0x1c,
+        blue: 0x28,
+    },
+    text: ThemeColor::Rgb {
+        red: 0xF4,
+        green: 0xF0,
+        blue: 0xE2,
+    },
+    dim: ThemeColor::Rgb {
+        red: 0x76,
+        green: 0x76,
+        blue: 0x76,
+    },
+    accent: ThemeColor::Rgb {
+        red: 0xF4,
+        green: 0xBA,
+        blue: 0xA3,
+    },
+    secondary: ThemeColor::Rgb {
+        red: 0xA6,
+        green: 0xC8,
+        blue: 0xE2,
+    },
+    border: ThemeColor::Rgb {
+        red: 0x76,
+        green: 0x76,
+        blue: 0x76,
+    },
+    ink: ThemeColor::Rgb {
+        red: 0x00,
+        green: 0x00,
+        blue: 0x00,
+    },
+};
+
+#[test]
+fn the_velo_palette_carries_its_own_background_and_text() {
+    // S15 (issue #57), the author: "por defecto va a tener ese color oscuro
+    // de background". The factory palette is a real dark surface now, not
+    // the terminal's own background and text.
+    let selection = select_theme(None, &ThemeKeys::default());
+    assert_eq!(selection.palette, VELO_PALETTE);
+    assert_eq!(selection.themes[0].colors, VELO_PALETTE);
+    assert_eq!(selection.themes[0].name, DEFAULT_THEME_NAME);
+}
+
+#[test]
+fn transparent_background_forces_the_terminal_s_background_over_every_layer() {
+    // S16 (issue #57), the author: "si está activado … va a utilizar el color
+    // de la terminal … transparente". The switch is applied after the whole
+    // layering — built-in, theme file, `[theme]` keys — so it wins over the
+    // theme's own background, and touches no other slot.
+    let dir = temp_dir("themes-transparent");
+    let themes = write_theme(
+        &dir,
+        "nord",
+        "background = \"#2e3440\"\ntext = \"#eceff4\"\naccent = \"#88c0d0\"\n",
+    );
+    let opaque = ThemeKeys {
+        name: Some("nord".to_owned()),
+        ..ThemeKeys::default()
+    };
+    let transparent = ThemeKeys {
+        transparent_background: Some(true),
+        ..opaque.clone()
+    };
+
+    let selection = select_theme(Some(&themes), &transparent);
+
+    let without = select_theme(Some(&themes), &opaque).palette;
+    assert_eq!(selection.palette.background, ThemeColor::Terminal);
+    assert_eq!(
+        selection.palette.text, without.text,
+        "text is the theme's, untouched"
+    );
+    assert_eq!(selection.palette.dim, without.dim, "dim is untouched");
+    assert_eq!(
+        selection.palette.accent, without.accent,
+        "accent is untouched"
+    );
+    assert_eq!(
+        selection.palette.secondary, without.secondary,
+        "secondary is untouched"
+    );
+    assert_eq!(
+        selection.palette.border, without.border,
+        "border is untouched"
+    );
+    assert_eq!(selection.palette.ink, without.ink, "ink is untouched");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn transparent_background_false_and_absent_change_nothing() {
+    // S16 (issue #57): `false` is exactly the same as the key not being
+    // there — the theme paints its own background, as always.
+    let dir = temp_dir("themes-transparent-false");
+    let themes = write_theme(&dir, "nord", "background = \"#2e3440\"\n");
+    let absent = select_theme(
+        Some(&themes),
+        &ThemeKeys {
+            name: Some("nord".to_owned()),
+            ..ThemeKeys::default()
+        },
+    );
+    let off = select_theme(
+        Some(&themes),
+        &ThemeKeys {
+            name: Some("nord".to_owned()),
+            transparent_background: Some(false),
+            ..ThemeKeys::default()
+        },
+    );
+    assert_eq!(absent, off);
+    assert_eq!(
+        off.palette.background,
+        ThemeColor::Rgb {
+            red: 0x2e,
+            green: 0x34,
+            blue: 0x40,
+        }
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn transparent_background_reads_from_the_config_file() {
+    // S16 (issue #57): the key joins the `[theme]` table, so a config file
+    // carrying it parses — the table denies unknown keys — and the launch
+    // honours it through the selected theme.
+    let dir = temp_dir("themes-transparent-file");
+    let themes = write_theme(
+        &dir,
+        "nord",
+        "background = \"#2e3440\"\naccent = \"#88c0d0\"\n",
+    );
+    let path = write_config(
+        &dir,
+        "[theme]\nname = \"nord\"\ntransparent_background = true\n",
+    );
+    let settings = Config::load_from(&path)
+        .unwrap_or_else(|error| panic!("load failed: {error}"))
+        .merged(&cli_with_no_flags());
+    assert_eq!(settings.theme.transparent_background, Some(true));
+
+    let selection = select_theme(Some(&themes), &settings.theme);
+
+    assert_eq!(selection.palette.background, ThemeColor::Terminal);
+    assert_eq!(selection.palette.accent, NORD_ACCENT);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_generated_config_carries_transparent_background_commented_under_name() {
+    // S18 (issue #57): the key is documented in the generated file, right
+    // under the theme's `name`, and the commented line parses when it is
+    // uncommented.
+    let text = default_config_text();
+    let name_line = text
+        .lines()
+        .position(|line| line == "name = \"velo\"")
+        .expect("the generated file names the factory theme");
+    let commented = text
+        .lines()
+        .position(|line| line == "# transparent_background = true")
+        .expect("the commented key is in the generated file");
+    // The table's own convention: the key's comment sits above it, so the
+    // sentence comes first and the key lands right under the name with it.
+    assert_eq!(
+        commented,
+        name_line + 2,
+        "the key sits right under the name"
+    );
+    let sentence = text.lines().nth(commented - 1).unwrap();
+    assert!(
+        sentence.contains("background shows through") && sentence.contains("theme"),
+        "one sentence says what the switch does: {sentence}"
+    );
+
+    // Uncommenting the line parses: the table denies unknown keys, so the
+    // key has to be part of `[theme]`.
+    let dir = temp_dir("themes-transparent-generated");
+    let uncommented = text
+        .lines()
+        .map(|line| {
+            if line == "# transparent_background = true" {
+                "transparent_background = true"
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let path = write_config(&dir, &uncommented);
+    let settings = Config::load_from(&path)
+        .unwrap_or_else(|error| panic!("load failed: {error}"))
+        .merged(&cli_with_no_flags());
+    assert_eq!(settings.theme.transparent_background, Some(true));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn default_terminal_is_still_all_reset() {
+    // S19 (issue #57): the palette change does not touch the terminal's own
+    // theme — it stays the way to get the look velo used to have.
+    let keys = ThemeKeys {
+        name: Some(TERMINAL_THEME_NAME.to_owned()),
+        ..ThemeKeys::default()
+    };
+    let selection = select_theme(None, &keys);
+    assert_eq!(selection.palette, ALL_TERMINAL);
+    assert_eq!(selection.applied, TERMINAL_THEME_NAME);
 }
 
 // --------------------------------------- the theme a fresh install finds

@@ -476,18 +476,20 @@ is still read there and moves under `[state]` the first time velo saves one.
 
 ### `[theme]` — the colours
 
-Every value is `"#rrggbb"`. `"reset"` means the terminal's own colour and is
-allowed for `background` and `text` only.
+Every value is `"#rrggbb"`. `"reset"` means the terminal's own colour and
+is allowed for `background` and `text` only — every other slot needs a
+hex colour.
 
 | Key | Meaning | Default |
 |:--|:--|:--|
-| `background` | The screen behind everything | `reset` |
-| `text` | Body text and the values in a list | `reset` |
+| `background` | The screen behind everything | `#141c28` |
+| `text` | Body text and the values in a list | `#f4f0e2` |
 | `dim` | Hints and everything that should recede | `#767676` |
-| `accent` | Borders, titles, the focused row and the selection | `#af00af` |
-| `secondary` | The keys and labels next to the values | `#5f87d7` |
+| `accent` | Borders, titles, the focused row and the selection | `#f4baa3` |
+| `secondary` | The keys and labels next to the values | `#a6c8e2` |
 | `border` | The panes that are not in focus | `#767676` |
 | `ink` | The text drawn on top of `accent` | `#000000` |
+| `transparent_background` | `true` puts the terminal's own background back behind everything — it shows through wherever the terminal is transparent, whatever the theme says. `false` and absent change nothing | `false` |
 
 The brighter shade behind the accent is derived from `accent`, not written.
 
@@ -510,10 +512,12 @@ that does not parse, or carries a colour that does not, is reported naming
 the file and the key, and the built-in is used. velo always starts.
 
 Two themes ship with velo and are recreated when missing, never over a file
-you edited: `velo` — velo's own palette, the built-in one, there to show the
-format — and `default terminal`, whose seven colours are all `reset`, the
-terminal's own, so velo draws with exactly the palette your terminal already
-has. A theme file accepts `reset` in every slot. `default` is an invisible
+you edited: `velo` — velo's own palette, the built-in one, carries its own
+colours: a dark background, warm text and pinkish accents, no longer the
+terminal's own — and `default terminal`, whose seven colours are all
+`reset`, the terminal's own, so velo draws with exactly the palette your
+terminal already has — the way to get the look velo had before issue #57.
+A theme file accepts `reset` in every slot. `default` is an invisible
 alias: `[theme] name = "default"` — what older configs carry — still selects
 velo's palette, but the alias gets no row in the picker; a
 `themes/default.toml` you write wins over the alias, like any file named
@@ -529,8 +533,9 @@ the focused theme at once — the preview is the interface, every card and
 list repaints with it. `enter` keeps the theme and writes `[theme] name`
 (the file only when the theme actually changed); `esc` closes the picker
 and restores exactly the palette that was in force when it opened,
-`[theme]` overrides included. Every other key waits while the picker is
-open.
+`[theme]` overrides included — `transparent_background` included, so with
+it on no move ever repaints the background. Every other key waits while the
+picker is open.
 
 Twelve themes are built in, embedded in the binary: `catppuccin-latte`,
 `catppuccin-mocha`, `default terminal`, `dracula`, `gruvbox-dark`, `monokai`,

@@ -18,7 +18,8 @@
 //!
 //! Since S1 of the config-and-settings feature this one file also carries what
 //! the interface needs: the `[state]` table (what the next launch comes back
-//! to), the `[theme]` table (every colour, as `"#rrggbb"`, plus `name`) and
+//! to), the `[theme]` table (every colour, as `"#rrggbb"`, plus `name` and
+//! `transparent_background`) and
 //! the `[ui]` table (which parts of the screen are drawn). It also reads the
 //! named theme files of the `themes/` folder beside the config file (issue
 //! #10, `select_theme`). Nothing else is stored
@@ -155,7 +156,8 @@ Audio must share one channel layout: sample rates are converted to the
 Configuration: $XDG_CONFIG_HOME/velo/config.toml, or
     ~/.config/velo/config.toml — keys: library, bit_perfect, replay_gain, and
     the tables [state] (volume, shuffle, repeat and the open node),
-    [theme] (every colour, as \"#rrggbb\"), [ui] (cover_art, spectrum,
+    [theme] (every colour, as \"#rrggbb\", plus name and
+    transparent_background), [ui] (cover_art, spectrum,
     visualizer, low_power, hints, top_bar, advisories, view_numbers) and the optional
     [subsonic] table (url, user, api_key, insecure) for a Subsonic-compatible
     server; `velo --subsonic-test` answers \"can I use this server?\" and works
@@ -620,16 +622,17 @@ pub struct ThemeColors {
 }
 
 impl Default for ThemeColors {
-    /// The palette velo drew with before colours were configurable: the
-    /// terminal's own background and text, the ANSI magenta accent and the
-    /// ANSI blue secondary.
+    /// The factory palette (S15, issue #57): velo's own dark surface with
+    /// written-in colours for every slot. Before issue #57 the background
+    /// and the text were the terminal's own; `default terminal` is what
+    /// selects that look now.
     fn default() -> Self {
         Self {
-            background: ThemeColor::Terminal,
-            text: ThemeColor::Terminal,
+            background: rgb(0x14, 0x1c, 0x28),
+            text: rgb(0xF4, 0xF0, 0xE2),
             dim: rgb(0x76, 0x76, 0x76),
-            accent: rgb(0xaf, 0x00, 0xaf),
-            secondary: rgb(0x5f, 0x87, 0xd7),
+            accent: rgb(0xF4, 0xBA, 0xA3),
+            secondary: rgb(0xA6, 0xC8, 0xE2),
             border: rgb(0x76, 0x76, 0x76),
             ink: rgb(0x00, 0x00, 0x00),
         }
@@ -666,6 +669,13 @@ pub struct ThemeKeys {
     /// `ink` — the text drawn on top of `accent`.
     #[serde(default, deserialize_with = "deserialize_hex_colour")]
     pub ink: Option<ThemeColor>,
+    /// `transparent_background` — when `true`, velo paints nothing behind
+    /// its colours: the terminal's own background shows through, wherever
+    /// the terminal is transparent. It wins over every theme's own
+    /// `background`, and every other slot stays exactly as the theme says
+    /// (S16, issue #57).
+    #[serde(default)]
+    pub transparent_background: Option<bool>,
 }
 
 impl ThemeKeys {
@@ -688,6 +698,7 @@ impl ThemeKeys {
         };
         Self {
             name: self.name.clone(),
+            transparent_background: self.transparent_background,
             background: is_choice(self.background, default.background)
                 .then_some(self.background)
                 .flatten(),
@@ -714,10 +725,15 @@ impl ThemeKeys {
 
     /// The table resolved over `base` (S2): a key the table carries replaces
     /// `base`'s, a key it leaves out keeps `base`'s. `name` is not a colour
-    /// and takes no part.
+    /// and takes no part. `transparent_background` is applied last, after the
+    /// layering: `true` forces the resolved `background` to the terminal's
+    /// own, winning over the theme's and leaving every other slot as resolved
+    /// (S16, issue #57). Every path that resolves a palette — the launch in
+    /// [`select_theme`], the theme picker's preview — ends here, so the
+    /// switch is applied the same way in both.
     #[must_use]
     pub fn resolved_over(&self, base: ThemeColors) -> ThemeColors {
-        ThemeColors {
+        let mut colors = ThemeColors {
             background: self.background.unwrap_or(base.background),
             text: self.text.unwrap_or(base.text),
             dim: self.dim.unwrap_or(base.dim),
@@ -725,7 +741,11 @@ impl ThemeKeys {
             secondary: self.secondary.unwrap_or(base.secondary),
             border: self.border.unwrap_or(base.border),
             ink: self.ink.unwrap_or(base.ink),
+        };
+        if self.transparent_background == Some(true) {
+            colors.background = ThemeColor::Terminal;
         }
+        colors
     }
 }
 
@@ -878,11 +898,11 @@ pub const DEFAULT_THEME_TEMPLATE: &str = r##"# velo's own palette, which is also
 # Every colour is "#rrggbb", or "reset" for the terminal's own colour. A
 # line you delete keeps the built-in value, and a colour in config.toml's
 # [theme] table that differs from the built-in still wins over this file.
-background = "reset"
-text = "reset"
+background = "#141c28"
+text = "#f4f0e2"
 dim = "#767676"
-accent = "#af00af"
-secondary = "#5f87d7"
+accent = "#f4baa3"
+secondary = "#a6c8e2"
 border = "#767676"
 ink = "#000000"
 "##;
@@ -1026,17 +1046,17 @@ browse_by = \"artists\"
 # The theme to use, by name: a TOML file with these same colour keys in the
 # themes/ folder beside this one (themes/<name>.toml), which you can hand to
 # another person. \"velo\" is the factory theme, built in and always there;
-# the folder ships it as themes/velo.toml, which documents the format velo
-# already draws with, and \"default terminal\" — every colour \"reset\", the
-# terminal's own — as \"themes/default terminal.toml\". \"default\" is an old
-# spelling of \"velo\" that still selects the same palette but gets no row in
-# the picker.
+# the folder ships it as themes/velo.toml, and \"default terminal\" — every
+# colour \"reset\", the terminal's own — as \"themes/default terminal.toml\".
+# \"default\" is an old spelling of \"velo\" that still selects the same
+# palette but gets no row in the picker.
 #
-# Every colour, as \"#rrggbb\". \"reset\" is the terminal's own colour and is
-# the default for background and text only. A colour here that differs from
-# the built-in default wins over the theme named above.
+# Every colour, as \"#rrggbb\". A colour that differs from the built-in
+# default wins over the theme named above.
 [theme]
 name = \"velo\"
+# With transparent_background = true, your terminal's own background shows through, whatever the theme says.
+# transparent_background = true
 background = \"{}\"
 text = \"{}\"
 dim = \"{}\"
@@ -1735,6 +1755,7 @@ fn load_theme_file(path: &Path) -> Result<ThemeColors, String> {
         border: theme_file_colour(&table, "border")?,
         ink: theme_file_colour(&table, "ink")?,
         name: None,
+        transparent_background: None,
     };
     Ok(keys.resolved())
 }

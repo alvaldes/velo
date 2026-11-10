@@ -1,12 +1,12 @@
 //! The interface's colors, as roles over the palette the user configured.
 //!
 //! Nothing here hard-codes a value: every role comes from the `[theme]`
-//! table of the config file, resolved by [`ThemeColors`], and the defaults
-//! reproduce the ANSI look velo has always drawn with — the background and
-//! the text are the terminal's (`Reset`), so a translucent terminal stays
-//! translucent, and every other role is the fixed color its ANSI entry
-//! stood for. The same build looks like Gentleman in a Gentleman terminal
-//! and like Everforest in an Everforest one (ui-redesign T8, S5).
+//! table of the config file, resolved by [`ThemeColors`]. The factory
+//! palette (`velo`, issue #57) carries its own dark background and its own
+//! text; the terminal's own colours are still a theme — `default terminal`
+//! is every slot `reset` — and so is `transparent_background = true` in the
+//! `[theme]` table, which puts the terminal's background back behind
+//! everything.
 //!
 //! No ANSI color can stand for a raised surface — many themes set color 0 to
 //! the background itself — so the interface marks the selection and the
@@ -63,7 +63,7 @@ impl From<ThemeColors> for Theme {
 }
 
 impl Default for Theme {
-    /// The palette velo drew with before colours were configurable.
+    /// The factory palette (issue #57): velo's own colours.
     fn default() -> Self {
         ThemeColors::default().into()
     }
