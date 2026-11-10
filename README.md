@@ -442,7 +442,10 @@ key, so everything below can be changed from it; `radio.toml` and
 comments are a starting point. Everything below can also be changed while velo runs: `ctrl+p` opens the
 settings card (a smaller card shaped like the help), where the
 ReplayGain mode, the repeat and the shuffle, the theme (chosen in its own
-picker), the visualizer (its own picker too) and the `[ui]` switches and the
+picker), the transparent-background switch — the row directly below the
+theme, shown `on`/`off`, and flipping it repaints with the terminal's own
+background at once, no restart needed — the visualizer (its own picker
+too) and the `[ui]` switches and the
 library folder can be stepped
 through live — each change applies on the next frame and is written to
 this file key by key, just as if the matching key had been pressed. An existing file is

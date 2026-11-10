@@ -140,6 +140,39 @@ background shows through when it is `true`, whatever the theme says.
 look), the invisible `default` alias, the precedence, the picker's
 contract and every other setting.
 
+**S20 — The settings card gains a row for the switch, immediately below
+the `theme` row** (issue #61):
+> "la opcion de transparent bg debe estar en la tarjeta de settings justo
+> debajo del selector de tema. al cambiarlo debe verse el cambio al momento
+> igual que al cambiar de tema"
+
+Its value is shown the way the card shows every other switch (`on`/`off`,
+not a colour), it is stepped by `enter` and the arrows like `repeat` or
+`spectrum`, and it never opens a picker.
+
+**S21 — Switching applies on the spot** (issue #61): with the switch on,
+the background the interface draws with becomes the terminal's own —
+transparent where the terminal is — with every other colour exactly as
+the theme says; off, the theme's background comes back. No restart, and
+the same immediate repaint holds across the theme picker: the card sits
+over the interface, so the change is visible as it happens.
+
+**S22 — The value is written to `[theme] transparent_background` only
+when it changed**, through the surgical `set_value` the other keys use;
+repeated presses that end where they started write nothing. The decision
+pinned in the tests: a return to off writes `false` explicitly, the way
+the `[ui]` switches write both of their values.
+
+**S23 — The rule stays single** (issue #61): the session's switch is the
+same `ThemeKeys` field the launch and the picker's preview resolve
+through (`resolved_over`, applying it last), so with it on a move across
+the theme picker keeps the background the terminal's own while the
+accents preview. No second code path forces the background from the card.
+
+**S24 — Nothing else changes** (issue #61): the other card rows and their
+order, the theme picker, the palette of any theme, the eleven built-ins,
+`default terminal`, and the generated config's commented line.
+
 ## Tasks
 
 | ID | Spec | Route | Task | Commit |
@@ -151,6 +184,7 @@ contract and every other setting.
 | T5 | S6–S10 | worker | issue #37: `src/ui/theme/builtins.rs` (the eleven embedded themes), `src/config.rs` (`select_theme` seeds the catalogue; a file matching a built-in takes its row), `src/ui/mod.rs` (the card keeps one `theme` row, the colour rows and their cycling machinery leave, `enter` on the row opens the picker overlay with live preview on move, restore on `esc`, write-on-change on `enter`), tests, README | |
 | T6 | S11–S14 | worker | issue #54: `src/config.rs` (`DEFAULT_THEME_NAME` is `velo`, the `default` alias in `select_theme`, `DEFAULT_TERMINAL_TEMPLATE`, `write_default_theme` writes both factory themes, a theme file accepts `reset` in every slot, the generated config names `velo`), `src/ui/theme/builtins.rs` (`default terminal` joins the catalogue), `src/ui/mod.rs` (the alias keeps the full layering in previews), tests, README | |
 | T7 | S15–S19 | worker | issue #57: `src/config.rs` (`ThemeColors::default` is velo's own palette, `ThemeKeys.transparent_background` applied last inside `resolved_over`, `DEFAULT_THEME_TEMPLATE` carries the same palette, the generated file documents the key commented), `src/ui/mod.rs` (the preview resolves through the same `resolved_over`), `src/ui/theme.rs` (doc), tests in `tests/config.rs` and `tests/ui_state.rs`, README, this logbook | |
+| T8 | S20–S24 | worker | issue #61: `src/ui/mod.rs` (the `transparent background` row directly below `theme`, flipping the same `ThemeKeys.transparent_background` and re-resolving through `theme_colors_of` — the single rule — with the surgical write), tests in `tests/ui_state.rs`, `tests/ui_render.rs` and `tests/visualizers.rs` (walk positions shifted by the new row), README, this logbook | |
 
 ## Log
 
@@ -246,3 +280,20 @@ wants its seven colour lines deleted, and nothing is ever rewritten
 automatically. One wording consequence: the generated config's colour
 paragraph no longer claims `reset` is the default for background and text
 — it is only what those two slots are allowed to carry.
+
+**L8** (writer, T8/S20–S24, issue #61). The author: "la opcion de
+transparent bg debe estar en la tarjeta de settings justo debajo del
+selector de tema. al cambiarlo debe verse el cambio al momento igual que
+al cambiar de tema". So the card grew a `transparent background` row
+immediately below `theme` — a switch like `shuffle`, `on`/`off`, stepped
+by `enter` and the arrows, never a picker. A press flips the same
+`ThemeKeys.transparent_background` field the launch resolves through and
+re-resolves the palette through `theme_colors_of` — the one function —
+so the change is on screen at once and a preview across the theme picker
+keeps the background the terminal's own while the accents change. The
+surgical `set_value` writes `[theme] transparent_background` per change;
+the decision pinned in the tests: a return to off writes `false`
+explicitly rather than removing the key, the way the `[ui]` switches
+write both of their values. Every other row, the picker and the palettes
+are untouched; the tests that walked the card by a counted number of
+`j` presses moved down one step.

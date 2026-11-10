@@ -2512,8 +2512,14 @@ fn the_settings_cursor_moves_between_settings_only_and_stops_at_the_ends() {
     press(&mut app, KeyCode::Char('j'));
     assert_eq!(
         app.settings_focused(),
+        "transparent background",
+        "the switch sits directly below the theme row (issue #61)"
+    );
+    press(&mut app, KeyCode::Char('j'));
+    assert_eq!(
+        app.settings_focused(),
         "cover art",
-        "the theme row is a setting and the last of its section: the card has no colour rows (issue #37)"
+        "the theme section ends with the switch: the card has no colour rows (issue #37)"
     );
 
     press(&mut app, KeyCode::Char('G'));
@@ -2573,7 +2579,7 @@ fn enter_on_a_visibility_row_flips_it_and_writes_cover_art_to_the_file() {
     let default = velo::config::default_config_text();
 
     open_settings(&mut app);
-    for _ in 0..4 {
+    for _ in 0..5 {
         press(&mut app, KeyCode::Char('j'));
     }
     assert_eq!(app.settings_focused(), "cover art");
@@ -2614,7 +2620,7 @@ fn enter_on_the_advisories_row_writes_it_to_the_file() {
     let default = velo::config::default_config_text();
 
     open_settings(&mut app);
-    for _ in 0..8 {
+    for _ in 0..9 {
         press(&mut app, KeyCode::Char('j'));
     }
     assert_eq!(app.settings_focused(), "advisories");
@@ -2636,7 +2642,7 @@ fn enter_on_the_view_numbers_row_writes_it_to_the_file() {
     let default = velo::config::default_config_text();
 
     open_settings(&mut app);
-    for _ in 0..9 {
+    for _ in 0..10 {
         press(&mut app, KeyCode::Char('j'));
     }
     assert_eq!(app.settings_focused(), "view numbers");
@@ -2790,6 +2796,186 @@ fn transparent_background_keeps_the_terminal_s_background_in_the_preview() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+// ---- the transparent-background switch on the card (issue #61) -------------
+
+/// An app launched over a config file selecting `nord`, whose theme file
+/// carries a background of its own — the colour the switch has to beat and
+/// then give back — wired in the way the launch paths do it.
+fn nord_app(name: &str, theme_table: &str) -> (PathBuf, App<'static>) {
+    let dir = config_dir(name);
+    let config = dir.join("config.toml");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(&config, format!("[theme]\n{theme_table}")).unwrap();
+    let themes = dir.join("themes");
+    fs::create_dir_all(&themes).unwrap();
+    fs::write(
+        themes.join("nord.toml"),
+        "background = \"#2e3440\"\naccent = \"#88c0d0\"\n",
+    )
+    .unwrap();
+    let cli = velo::config::Cli::try_parse_from(["velo"]).unwrap();
+    let settings = velo::config::Config::load_from(&config)
+        .unwrap()
+        .merged(&cli);
+    let selection = velo::config::select_theme(Some(&themes), &settings.theme);
+    let mut app = app_with_three_tracks();
+    app.set_config_file(Some(config.clone()));
+    app.set_theme_library(selection, settings.theme);
+    (config, app)
+}
+
+/// Opens the card and steps to the transparent-background row.
+fn open_on_transparent_row(app: &mut App<'_>) {
+    open_settings(app);
+    for _ in 0..4 {
+        press(app, KeyCode::Char('j'));
+    }
+    assert_eq!(
+        app.settings_focused(),
+        "transparent background",
+        "the switch row sits directly under the theme row"
+    );
+}
+
+#[test]
+fn the_transparent_background_row_sits_directly_below_the_theme_row() {
+    // S1 (issue #61): the row is immediately below `theme`, a switch like
+    // `shuffle` — on/off, stepped by `enter` and the arrows, never a picker.
+    let mut app = app_with_three_tracks();
+    open_settings(&mut app);
+    for _ in 0..3 {
+        press(&mut app, KeyCode::Char('j'));
+    }
+    assert_eq!(app.settings_focused(), "theme");
+    press(&mut app, KeyCode::Char('j'));
+    assert_eq!(
+        app.settings_focused(),
+        "transparent background",
+        "the switch row sits directly below the theme row"
+    );
+    press(&mut app, KeyCode::Char('j'));
+    assert_eq!(
+        app.settings_focused(),
+        "cover art",
+        "the rows after it keep their order"
+    );
+}
+
+#[test]
+fn enter_on_the_transparent_background_row_flips_the_background_on_the_spot() {
+    // S2 (issue #61): switching applies at once — on, the terminal's own
+    // background; off, the theme's background back — with every other
+    // colour exactly as the theme says. No restart, no second path.
+    let (config, mut app) = nord_app("settings-transparent-flip", "name = \"nord\"\n");
+    let _ = &config;
+
+    open_on_transparent_row(&mut app);
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(
+        app.theme_colors().background,
+        ThemeColor::Terminal,
+        "on: the background the interface draws with is the terminal's own"
+    );
+    assert_eq!(
+        app.theme_colors().accent,
+        ThemeColor::Rgb {
+            red: 0x88,
+            green: 0xc0,
+            blue: 0xd0,
+        },
+        "every other colour stays exactly as the theme says"
+    );
+
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(
+        app.theme_colors().background,
+        ThemeColor::Rgb {
+            red: 0x2e,
+            green: 0x34,
+            blue: 0x40,
+        },
+        "off: the theme's background comes back"
+    );
+    let _ = fs::remove_dir_all(config_dir("settings-transparent-flip"));
+}
+
+#[test]
+fn the_transparent_switch_writes_the_key_in_place_once_per_change() {
+    // S3 (issue #61): the value lands in `[theme] transparent_background`
+    // through the surgical `set_value`, once per change; the decision
+    // pinned here is that a return to off writes `false` explicitly, the
+    // way the `[ui]` switches write both of their values.
+    let dir = config_dir("settings-transparent-write");
+    let config = dir.join("config.toml");
+    let mut app = app_with_default_config(&config);
+
+    open_on_transparent_row(&mut app);
+    press(&mut app, KeyCode::Enter);
+    let text = fs::read_to_string(&config).unwrap();
+    let active = |value: &str| {
+        text.lines()
+            .filter(|line| line.starts_with(&format!("transparent_background = {value}")))
+            .count()
+    };
+    assert_eq!(
+        active("true"),
+        1,
+        "the first press writes the key once, in the [theme] table\n{text}"
+    );
+
+    press(&mut app, KeyCode::Enter);
+    let text = fs::read_to_string(&config).unwrap();
+    let active = |value: &str| {
+        text.lines()
+            .filter(|line| line.starts_with(&format!("transparent_background = {value}")))
+            .count()
+    };
+    assert_eq!(
+        active("true"),
+        0,
+        "the second press replaced the line\n{text}"
+    );
+    assert_eq!(
+        active("false"),
+        1,
+        "the return to off writes false, held once\n{text}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn with_the_switch_on_the_picker_preview_keeps_the_background_transparent() {
+    // S4 (issue #61): the session's switch is the same `ThemeKeys` field
+    // the launch and the picker's preview resolve through, so with it on
+    // a move across the picker leaves the background the terminal's own
+    // while the accents preview.
+    let (config, mut app) = nord_app("settings-transparent-picker", "name = \"nord\"\n");
+    let _ = &config;
+
+    open_on_transparent_row(&mut app);
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.theme_colors().background, ThemeColor::Terminal);
+    let before_accent = app.theme_colors().accent;
+
+    // Up to the theme row, then the picker; moving previews on the spot.
+    press(&mut app, KeyCode::Char('k'));
+    assert_eq!(app.settings_focused(), "theme");
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Char('j'));
+
+    assert_eq!(
+        app.theme_colors().background,
+        ThemeColor::Terminal,
+        "moving in the picker does not repaint the background"
+    );
+    assert_ne!(
+        app.theme_colors().accent,
+        before_accent,
+        "every other colour previews exactly as it does"
+    );
+    let _ = fs::remove_dir_all(config_dir("settings-transparent-picker"));
+}
+
 fn open_theme_picker(app: &mut App<'_>) {
     open_on_theme_row(app);
     press(app, KeyCode::Enter);
@@ -2843,6 +3029,7 @@ fn the_settings_card_has_one_theme_row_and_no_colour_rows() {
             "repeat",
             "shuffle",
             "theme",
+            "transparent background",
             "cover art",
             "spectrum",
             "hints",

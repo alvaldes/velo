@@ -1335,6 +1335,14 @@ impl<'lib> App<'lib> {
         }
     }
 
+    /// Whether the session's transparent-background switch is on (issue
+    /// #61): the same `ThemeKeys` field the launch and the picker's
+    /// preview resolve through, never a second rule of its own.
+    #[must_use]
+    pub fn background_transparent(&self) -> bool {
+        self.theme_overrides.transparent_background == Some(true)
+    }
+
     /// The picker's rows, in order (issue #37, S2; issue #54): the factory
     /// theme `velo` first, then the built-ins sorted, then the folder files
     /// that override nothing.
@@ -4820,6 +4828,27 @@ impl<'lib> App<'lib> {
             // The theme row is never stepped through `change_setting`
             // (issue #37): its `enter` opens the picker.
             SettingsKey::Theme => {}
+            // The transparent-background switch (issue #61): a press flips
+            // it, and the palette is re-resolved through the one function
+            // the launch and the picker's preview resolve through
+            // (`theme_colors_of`, ending in `resolved_over`), so the change
+            // is on screen at once — the card is over the interface. A
+            // press that changed nothing would write nothing; a two-state
+            // switch always changes.
+            SettingsKey::TransparentBackground => {
+                let next = !self.background_transparent();
+                self.theme_overrides.transparent_background = Some(next);
+                let name = self.theme_name.clone();
+                self.set_theme(self.theme_colors_of(&name));
+                // A return to off writes `false` explicitly, the way the
+                // `[ui]` switches write both of their values; the surgical
+                // `set_value` keeps the key held once, in place.
+                self.remember(
+                    Some("theme"),
+                    "transparent_background",
+                    if next { "true" } else { "false" },
+                );
+            }
             // The visualizer row (issue #40): the arrows step it through the
             // nine shapes, each step written like any other `[ui]` switch.
             SettingsKey::Spectrum => {
@@ -5266,6 +5295,12 @@ impl<'lib> App<'lib> {
             SettingsKey::Shuffle => if self.shuffle { "on" } else { "off" }.to_owned(),
             // The spectrum row shows the visualizer in force (issue #40).
             SettingsKey::Theme => self.theme_name.clone(),
+            SettingsKey::TransparentBackground => if self.background_transparent() {
+                "on"
+            } else {
+                "off"
+            }
+            .to_owned(),
             SettingsKey::Spectrum => self.ui.visualizer.name().to_owned(),
             SettingsKey::CoverArt
             | SettingsKey::Hints
@@ -8745,6 +8780,7 @@ enum SettingsKey {
     Repeat,
     Shuffle,
     Theme,
+    TransparentBackground,
     CoverArt,
     Spectrum,
     Hints,
@@ -8762,6 +8798,7 @@ impl SettingsKey {
             Self::Repeat => "repeat",
             Self::Shuffle => "shuffle",
             Self::Theme => "theme",
+            Self::TransparentBackground => "transparent background",
             Self::CoverArt => "cover art",
             Self::Spectrum => "spectrum",
             Self::Hints => "hints",
@@ -8786,13 +8823,16 @@ enum SettingsRow {
 /// colour editable in the file. The volume is not a row (S7.3): it lives
 /// in `[state]` and on `+`/`-`, where it has always been changed from the
 /// keyboard.
-const SETTINGS_ROWS: [SettingsRow; 15] = [
+const SETTINGS_ROWS: [SettingsRow; 16] = [
     SettingsRow::Header("sound"),
     SettingsRow::Setting(SettingsKey::ReplayGain),
     SettingsRow::Setting(SettingsKey::Repeat),
     SettingsRow::Setting(SettingsKey::Shuffle),
     SettingsRow::Header("theme"),
     SettingsRow::Setting(SettingsKey::Theme),
+    // The transparent-background switch (issue #61): directly below the
+    // theme row, a switch like `shuffle` — never a picker of its own.
+    SettingsRow::Setting(SettingsKey::TransparentBackground),
     SettingsRow::Header("screen"),
     SettingsRow::Setting(SettingsKey::CoverArt),
     SettingsRow::Setting(SettingsKey::Spectrum),

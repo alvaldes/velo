@@ -1923,6 +1923,7 @@ fn the_settings_card_draws_its_title_sections_and_focused_row_in_the_accent() {
         ("repeat", "off"),
         ("shuffle", "off"),
         ("theme", "velo"),
+        ("transparent background", "off"),
         ("cover art", "shown"),
         ("hints", "shown"),
         ("advisories", "shown"),
@@ -2032,7 +2033,7 @@ fn hiding_the_cover_from_the_card_removes_its_columns_on_the_next_frame() {
     app.show_artwork(Some(velo::ui::artwork::Picker::new((8, 12))));
 
     ctrl(&mut app, velo::ui::crossterm::event::KeyCode::Char('p'));
-    for _ in 0..4 {
+    for _ in 0..5 {
         press(&mut app, KeyCode::Char('j'));
     }
     assert_eq!(app.settings_focused(), "cover art");
