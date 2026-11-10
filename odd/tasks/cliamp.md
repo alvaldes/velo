@@ -302,3 +302,31 @@ out, the two refusals and the never-overwritten destination; the choice the
 issue left open (say the file is there, or append a suffix) was taken as the
 card's refusal with the name kept, because it is the one answer that never
 writes anything the user did not ask for.
+
+**L7** — the issue (#59), in the author's words: "ahora si caga pero demora
+mucho y ademas no se ve el indicador de cuando esta reproduciendoce en la
+lista. Y un indicador de que se esta cargando o progreso no estaria mal". The
+list half is this issue: `radio_poll` handed the view only the station that
+plays, so a song — queued as a file whose path is its URL — reached the view
+as nothing playing and its row never marked. The playing fact now covers any
+entry: the view is told the identity of whatever plays and its
+[`PlayState`], and marks the matching row — a station by its station key, a
+song by its URL — with `▶` while it plays, while a stopped station keeps its
+`■` and nothing marks when nothing plays. The queue's `● live` fact is
+untouched.
+
+**L8** — the issue (#60), in the same author's words: "ahora si caga pero
+demora mucho y ademas no se ve el indicador de cuando esta reproduciendoce
+en la lista. Y un indicador de que se esta cargando o progreso no estaria
+mal". The loading half is this issue: between `enter` and the first samples
+of an uncached channel's song the screen said nothing. The status line now
+carries `⟳ fetching <name>…` from the moment the queue reaches a remote
+entry that is not cached — the producer stores which entry it is resolving
+in a cell the interface reads on its tick, the way the volume and mono cells
+already work — until the track starts sounding, and a failed fetch keeps its
+skip report. Whether an entry waits is the resolver's own answer: a
+`cached(path)` method with a default on the [`PathResolver`] trait,
+implemented where the cache actually knows. The byte count the author
+might have wanted is left for later: the download is one whole-body `get`
+inside the transport, so there is no copy loop to hang a counter on without
+rewriting it — and the line never invents a percentage.

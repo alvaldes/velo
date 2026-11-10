@@ -49,7 +49,10 @@ rows beside it never move. The marker is the transport's state: a track
 that paused carries `⏸` and the transport says `paused`. A station is a
 live stream and cannot pause: while it plays, the transport says `● live`
 and its row carries `▶`; when its stream has stopped, the queue's entry it
-stood on carries `■` and the transport says `■ stopped`.
+stood on carries `■` and the transport says `■ stopped`. A song marks its
+row too: a channel's song — queued as a file whose path is its URL —
+carries `▶` in the channel's list while it plays, matched by the same
+station key a station is.
 
 ## Keys
 
@@ -633,7 +636,11 @@ that file. Seek, gapless, bit-perfect and ReplayGain-from-tags all keep
 working, because the audio path opens a file either way. A cache hit needs
 no network at all; a download that fails skips that track with the reason in
 the status line and the queue keeps going — a network dying mid-album does
-not end the session.
+not end the session. While the queue is fetching a track it has not cached
+yet, the status line carries `⟳ fetching <name>…` until the track starts
+sounding — a wait that is real for a channel's six-megabyte song — and
+clears then; a cache hit, being instant, shows nothing, and a failed fetch
+keeps its own skip report.
 
 The cache lives at `$XDG_CACHE_HOME/velo/subsonic`, else
 `~/.cache/velo/subsonic`; each file is named after a hash of the track's

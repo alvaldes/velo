@@ -384,13 +384,15 @@ pub struct RadioView {
     /// render sets it — a view never drawn keeps a default page, so the
     /// keys never jump into the dark either way.
     page: std::cell::Cell<usize>,
-    /// The station the shell says the transport stands on, and the state
-    /// its rows draw (issue #53): `▶` while the station plays, `■` once its
-    /// stream stopped — a live stream cannot pause. The shell owns the fact
-    /// — the queue and the player are its — and hands it in through
-    /// [`RadioView::set_playing`] on every tick and after every radio key;
-    /// the view knows nothing about players and only renders what it was
-    /// told. `None` — a local file, or nothing at all — marks no row.
+    /// The station the shell says the transport stands on — or, since issue
+    /// #59, the song — and the state its rows draw (issue #53): `▶` while it
+    /// plays, `■` once a station's stream stopped — a live stream cannot
+    /// pause. The shell owns the fact — the queue and the player are its —
+    /// and hands it in through [`RadioView::set_playing`] on every tick and
+    /// after every radio key; the view knows nothing about players and only
+    /// renders what it was told. The identity is the URL as the queue
+    /// carries it: a station's stream URL, a song's URL (its file path).
+    /// `None` — a local file, or nothing at all — marks no row.
     playing: Option<(String, PlayState)>,
     /// Whether the cliamp section shows at the top (issue #48, S1): the
     /// `[radio] cliamp` switch, shown unless the config hides it. The
@@ -491,12 +493,12 @@ impl RadioView {
         self.pending.as_ref()
     }
 
-    /// Says which station the transport stands on, and in which state
-    /// (S15, issue #32, issue #53): the shell owns that fact and refreshes
-    /// it on every tick and after every radio key. `None` — a local file
-    /// standing there, or nothing at all — marks no row. The view never
-    /// guesses: it marks exactly the station it was told, wherever its row
-    /// appears, `▶` while it plays and `■` once it stopped.
+    /// Says which entry the transport stands on, and in which state (S15,
+    /// issue #32, issue #53, issue #59): the shell owns that fact and
+    /// refreshes it on every tick and after every radio key. `None` — a
+    /// local file standing there, or nothing at all — marks no row. The
+    /// view never guesses: it marks exactly the entry it was told, wherever
+    /// its row appears — `▶` while it plays, `■` once a station stopped.
     pub fn set_playing(&mut self, playing: Option<(String, PlayState)>) {
         self.playing = playing;
     }
@@ -1711,8 +1713,11 @@ impl RadioView {
             // same station reached through a favourite, the store or the
             // catalogue can be spelled differently — host case, a default
             // port, a trailing slash — and the key, never the string as
-            // written, decides. The mark is the state the shell handed in
-            // (issue #53): `▶` while the station plays, `■` once it stopped.
+            // written, decides. A channel's song is matched by the same key
+            // of its URL (issue #59). The mark is the state the shell
+            // handed in (issue #53): `▶` while it plays, `■` once a station
+            // stopped — a song that is not playing marks nothing, a finite
+            // track not being a stream that was left standing.
             let playing = self
                 .playing
                 .as_ref()
@@ -1738,6 +1743,9 @@ impl RadioView {
                             {
                                 match state {
                                     PlayState::Playing => RowMark::Playing,
+                                    _ if matches!(row.kind, RowKind::CliampSong { .. }) => {
+                                        RowMark::None
+                                    }
                                     _ => RowMark::Stopped,
                                 }
                             }
@@ -1833,15 +1841,17 @@ fn station_of_row(kind: &RowKind) -> Option<(String, String)> {
     }
 }
 
-/// The station key of the URL a station row names, when the row is a
-/// station at all: a catalog station, a hand-added one or a favourite. The
-/// playing marker matches on this key (S15, issue #32), never on the URL
-/// as written — the same identity rule the store's toggles go through.
+/// The station key of the URL a row names, when the row is something that
+/// plays: a catalog station, a hand-added one, a favourite — or, since
+/// issue #59, a cliamp song, whose identity is its URL. The playing marker
+/// matches on this key (S15, issue #32), never on the string as written —
+/// the same identity rule the store's toggles go through.
 fn station_row_key(kind: &RowKind) -> Option<String> {
     match kind {
         RowKind::CatalogStation { station, .. } => Some(station_key(&station.url_resolved)),
         RowKind::AddedStation { url, .. } => Some(station_key(url)),
         RowKind::FavoriteStation { favorite } => Some(station_key(&favorite.url)),
+        RowKind::CliampSong { song } => Some(station_key(&song.url)),
         _ => None,
     }
 }

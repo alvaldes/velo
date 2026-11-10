@@ -9,18 +9,19 @@
 //! drives — the play action returned, never applied, because applying it
 //! would open an audio device.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use velo::audio::output::Entry;
+use velo::audio::AudioError;
+use velo::audio::output::{Entry, PathResolver, TrackFailure};
 use velo::radio::cliamp::{Channel, Listeners, Song};
 use velo::radio::client::{Error, Transport};
 use velo::ui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use velo::ui::radio::{Place, RadioOutcome, RadioView};
 use velo::ui::radio_data::{RadioData, RadioWire};
 use velo::ui::theme::Theme;
-use velo::ui::{Action, App};
+use velo::ui::{Action, App, PlayState};
 
 // ---- the canned, counting transport -----------------------------------------
 
@@ -273,6 +274,27 @@ fn shell(app: &mut App<'_>, code: KeyCode) -> Action {
         app.apply(action);
     }
     action
+}
+
+/// The whole interface as one screen, the way the user sees it (the
+/// `ui_radio.rs` helper, copied).
+fn app_screen(app: &App) -> String {
+    use velo::ui::ratatui::Terminal;
+    use velo::ui::ratatui::backend::TestBackend;
+    use velo::ui::ratatui::buffer::{Buffer, Cell};
+
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("a test terminal");
+    terminal
+        .draw(|frame| app.draw(frame))
+        .expect("the frame draws");
+    let buffer: &Buffer = terminal.backend().buffer();
+    let screen: String = buffer.content().iter().map(Cell::symbol).collect();
+    let characters: Vec<char> = screen.chars().collect();
+    characters
+        .chunks(80)
+        .map(|line| line.iter().collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 // ---- S1: the section at the top ---------------------------------------------
@@ -701,6 +723,174 @@ fn entering_a_channel_loads_its_songs_through_the_wiring() {
     assert!(
         !calls.iter().any(|url| url.contains("/stations/search")),
         "no directory request was made for a cliamp place (S6), got: {calls:?}"
+    );
+}
+
+// ---- issue #59: a song's row marks while it plays ---------------------------
+
+#[test]
+fn a_playing_song_marks_its_row() {
+    // A song queued from a channel plays as a file whose path is its URL
+    // (cliamp S3); the shell hands that identity to the view the way it
+    // hands a station's URL, and the song's row marks with the same rule.
+    let mut view = bare();
+    view.open_place(channel_place());
+    view.set_cliamp_songs(channel_place(), songs());
+    view.set_playing(Some((
+        String::from("https://radio.cliamp.stream/lofi/tracks/t1"),
+        PlayState::Playing,
+    )));
+    assert!(
+        screen(&view).contains("▶ 1. Dawn"),
+        "the song that plays marks its row, got:\n{}",
+        screen(&view)
+    );
+}
+
+#[test]
+fn a_song_that_is_not_playing_marks_nothing() {
+    // The stopped marker is a live stream's (issue #53): a live stream
+    // cannot pause, so stopped is the state it is left in. A song is a
+    // finite track — one that is not sounding marks nothing.
+    let mut view = bare();
+    view.open_place(channel_place());
+    view.set_cliamp_songs(channel_place(), songs());
+    view.set_playing(Some((
+        String::from("https://radio.cliamp.stream/lofi/tracks/t1"),
+        PlayState::Stopped,
+    )));
+    let quiet = screen(&view);
+    assert!(
+        !quiet.contains("▶ 1. Dawn") && !quiet.contains("■ 1. Dawn"),
+        "a song that is not playing marks nothing, got:\n{quiet}"
+    );
+}
+
+#[test]
+fn the_shell_hands_the_playing_song_to_the_radio_view() {
+    // The shell-level rule (issue #59): radio_poll tells the view what
+    // plays, whatever kind of entry it is — a song reaches the view too,
+    // where before only a station did, and the tick marks the row.
+    let mut app = App::new(Vec::new());
+    shell(&mut app, KeyCode::Char('R')); // the radio opens over its wiring
+    app.show_radio_cliamp_songs(channel_place(), songs());
+    app.show_playing_for_tests(
+        Entry::File(PathBuf::from("https://radio.cliamp.stream/lofi/tracks/t1")),
+        Duration::ZERO,
+        None,
+        None,
+    );
+
+    app.tick();
+    assert!(
+        app_screen(&app).contains("▶ 1. Dawn"),
+        "the playing song's row marks through the shell, got:\n{}",
+        app_screen(&app)
+    );
+}
+
+// ---- issue #60: a long fetch says so ----------------------------------------
+
+/// A resolver whose every entry is still a download (issue #60's fixture):
+/// resolution passes through, and the cache question always says no.
+struct NeverCached;
+
+impl PathResolver for NeverCached {
+    fn resolve(&self, path: &Path) -> Result<PathBuf, AudioError> {
+        Ok(path.to_path_buf())
+    }
+
+    fn cached(&self, _path: &Path) -> bool {
+        false
+    }
+}
+
+/// A resolver whose every entry is already on disk: a cache hit, instant.
+struct AlwaysCached;
+
+impl PathResolver for AlwaysCached {
+    fn resolve(&self, path: &Path) -> Result<PathBuf, AudioError> {
+        Ok(path.to_path_buf())
+    }
+}
+
+/// A queue standing on one remote song, sounding (position past zero), with
+/// the transport fixture's fetching cell set by the caller.
+fn fetching_app(fetching: Option<usize>, position: Duration) -> App<'static> {
+    let mut app = App::new(Vec::new());
+    app.show_playing_for_tests(
+        Entry::File(PathBuf::from("https://radio.cliamp.stream/lofi/tracks/t1")),
+        position,
+        None,
+        None,
+    );
+    app.set_fetching_for_tests(fetching);
+    app
+}
+
+#[test]
+fn an_uncached_remote_entry_says_it_is_fetching() {
+    let mut app = fetching_app(Some(0), Duration::ZERO);
+    app.set_resolver(Some(Arc::new(NeverCached) as Arc<dyn PathResolver>));
+
+    app.tick();
+    assert_eq!(
+        app.status(),
+        "⟳ fetching t1…",
+        "the queue is downloading the song, and the status line says so"
+    );
+}
+
+#[test]
+fn the_fetching_line_clears_when_the_song_starts() {
+    let mut app = fetching_app(Some(0), Duration::from_secs(1));
+    app.set_resolver(Some(Arc::new(NeverCached) as Arc<dyn PathResolver>));
+    app.tick();
+    assert_eq!(app.status(), "⟳ fetching t1…", "the fetch is under way");
+
+    // The fetch is over (the transport's cell is back to none) and the
+    // samples are being heard.
+    app.set_fetching_for_tests(None);
+    app.tick();
+    assert_eq!(
+        app.status(),
+        "",
+        "the song sounds: the fetching line has said its piece"
+    );
+}
+
+#[test]
+fn a_cached_entry_says_nothing() {
+    let mut app = fetching_app(Some(0), Duration::ZERO);
+    app.set_resolver(Some(Arc::new(AlwaysCached) as Arc<dyn PathResolver>));
+
+    app.tick();
+    assert_eq!(
+        app.status(),
+        "",
+        "a cache hit is instant: no fetching line, no made-up wait"
+    );
+}
+
+#[test]
+fn a_failed_fetch_keeps_its_report_and_clears_the_line() {
+    let mut app = fetching_app(Some(0), Duration::from_secs(1));
+    app.set_resolver(Some(Arc::new(NeverCached) as Arc<dyn PathResolver>));
+    app.tick();
+    assert_eq!(app.status(), "⟳ fetching t1…", "the fetch is under way");
+
+    // The download failed: the producer cleared its cell and announced the
+    // skip (the announcement's own one-line report).
+    app.set_fetching_for_tests(None);
+    app.announce_failure(&TrackFailure {
+        label: String::from("t1"),
+        message: String::from("the server could not be reached"),
+    });
+    app.tick();
+    assert_eq!(
+        app.status(),
+        "velo: skipped t1: the server could not be reached",
+        "the fetching line is gone and the failure's report stands"
     );
 }
 
