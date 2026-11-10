@@ -111,14 +111,16 @@ already on disk is left exactly as it is, and the alias is what keeps
 
 **S15 — The factory palette carries a real background and text** (issue
 #57): `background = #141c28`, `text = #F4F0E2`, `dim = #767676`,
-`accent = #F4BAA3`, `secondary = #A6C8E2`, `border = #767676`,
+`accent = #F4BAA3`, `secondary = #A6C8E2`, `border = #252939`,
 `ink = #000000`. It is the built-in `velo` AND what `themes/velo.toml`
 ships, and the two must agree — the test that pins the shipped file to
-the built-in palette is the guard, so they move together.
+the built-in palette is the guard, so they move together. The `border`
+slot was `#767676` until L9, which took it off `dim` and gave the frame a
+shade of its own; `dim` keeps `#767676`.
 
 **S16 — `[theme] transparent_background` joins the table as an optional
-boolean**; the table denies unknown keys, so the commented line the
-generated file documents must parse when it is uncommented. `true` forces
+boolean**; the table denies unknown keys, so the value the generated file
+writes must parse as part of `[theme]`. `true` forces
 the FINAL palette's `background` to the terminal's own — transparent where
 the terminal is — for whichever theme is selected, and leaves every other
 slot exactly as the theme says; `false` or absent changes nothing. It is
@@ -131,9 +133,13 @@ background (it stays the terminal's), while the other colours preview as
 they do. The launch rule and the preview rule stay the same function,
 never two.
 
-**S18 — The generated `config.toml` writes the key commented out inside
-`[theme]`, right under `name`, with one sentence**: the terminal's own
-background shows through when it is `true`, whatever the theme says.
+**S18 — The generated `config.toml` writes the key at its default, `false`,
+uncommented inside `[theme]`, right under `name`** (written as a commented
+example until L11): the switch is reachable from the interface, so the file
+says what is in force the way every `[ui]` key does instead of leaving a
+reader to uncomment a line to find out. The sentence above it says what the
+switch does: the terminal's own background shows through when it is `true`,
+whatever the theme says.
 
 **S19 — Nothing else changes**: the eleven well-known themes,
 `default terminal` (still all `reset`, and now the way to get the old
@@ -297,3 +303,37 @@ explicitly rather than removing the key, the way the `[ui]` switches
 write both of their values. Every other row, the picker and the palettes
 are untouched; the tests that walked the card by a counted number of
 `j` presses moved down one step.
+
+**L9** (2026-11-10, inline, S15, issue #62). The author: "otro cambio en el
+tema velo es el color del borde que a partir de ahora va a ser este: border
+= \"#252939\"". The frame stops sharing `dim`'s gray: `ThemeColors::default()`
+and the shipped `themes/velo.toml` template carry `#252939`, `dim` stays
+`#767676`, and README's palette table says the new value. The same session
+closed issue #62 — `ThemeColors::previous_factory()` makes the values velo
+itself wrote before issue #57 (`reset` background and text, `#af00af`
+accent, `#5f87d7` secondary) documentation too, so a generated config from
+that era no longer masks a named theme; the `default` alias keeps its full
+layering. An installation whose `themes/velo.toml` already exists keeps its
+own border until that file is deleted.
+
+**L10** (2026-11-10, inline, S12, issue #62). The author, asked whether
+`name = "velo"` should keep the full layering like the alias `default`:
+"no conservar alias default". The alias keeps resolving to velo's palette
+and still gets no picker row, but it is no longer the one name that layers
+every key: `non_default_choices` now runs on every named path, the picker
+preview included, so the values velo itself wrote before issue #57 are
+documentation under `default` too. The one path that layers everything is a
+config with no `[theme] name`, unchanged. Tests: `the_default_alias_drops_
+the_old_generated_values_too` and `without_a_name_every_key_layers_exactly_
+as_before` replace the alias-keeps-the-old-look test.
+
+**L11** (2026-11-10, inline, S16/S18). The author: "esta linea asta comentada
+/Users/alvaldes/.config/velo/config.toml#L49 … si es cierto que el default de
+transparent_background es false pero no importa que sea el defualt debe estar
+sin comentar porque desde la tui se puede cambiar a true". So the generated
+`config.toml` writes `transparent_background = false` uncommented under
+`name`, the way every `[ui]` key is written, with the same sentence above it
+plus where the card flips it (`ctrl+p`). Verified: the written line loads as
+`Some(false)` and leaves the theme's own background alone — the switch is
+off, and only `true` forces the terminal's. Tests renamed to
+`the_generated_config_writes_transparent_background_at_its_default`.

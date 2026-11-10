@@ -633,6 +633,26 @@ impl Default for ThemeColors {
             dim: rgb(0x76, 0x76, 0x76),
             accent: rgb(0xF4, 0xBA, 0xA3),
             secondary: rgb(0xA6, 0xC8, 0xE2),
+            border: rgb(0x25, 0x29, 0x39),
+            ink: rgb(0x00, 0x00, 0x00),
+        }
+    }
+}
+
+impl ThemeColors {
+    /// The factory palette before it had colours of its own (issue #57): the
+    /// `[theme]` table velo itself wrote then, and the values a generated config
+    /// may still carry. Those values are documentation too, never a choice
+    /// (issue #62), so they are dropped under a named theme exactly as the
+    /// current defaults are.
+    #[must_use]
+    pub const fn previous_factory() -> Self {
+        Self {
+            background: ThemeColor::Terminal,
+            text: ThemeColor::Terminal,
+            dim: rgb(0x76, 0x76, 0x76),
+            accent: rgb(0xAF, 0x00, 0xAF),
+            secondary: rgb(0x5F, 0x87, 0xD7),
             border: rgb(0x76, 0x76, 0x76),
             ink: rgb(0x00, 0x00, 0x00),
         }
@@ -688,38 +708,26 @@ impl ThemeKeys {
     /// The table with only the keys that are not a written-out built-in
     /// default (S2, issue #10): the generated config names all seven colour
     /// keys at their defaults, and under a named theme those defaults are
-    /// documentation, not choices. A key whose value differs from the
-    /// built-in default is a genuine choice and survives.
+    /// documentation, not choices. A key whose value differs from both the
+    /// built-in default and the one before it ([`Self::previous_factory`],
+    /// issue #62) is a genuine choice and survives.
     #[must_use]
     pub fn non_default_choices(&self) -> Self {
         let default = ThemeColors::default();
-        let is_choice = |value: Option<ThemeColor>, base: ThemeColor| {
-            value.is_some_and(|colour| colour != base)
+        let previous = ThemeColors::previous_factory();
+        let is_choice = |value: Option<ThemeColor>, now: ThemeColor, before: ThemeColor| {
+            value.filter(|colour| *colour != now && *colour != before)
         };
         Self {
             name: self.name.clone(),
             transparent_background: self.transparent_background,
-            background: is_choice(self.background, default.background)
-                .then_some(self.background)
-                .flatten(),
-            text: is_choice(self.text, default.text)
-                .then_some(self.text)
-                .flatten(),
-            dim: is_choice(self.dim, default.dim)
-                .then_some(self.dim)
-                .flatten(),
-            accent: is_choice(self.accent, default.accent)
-                .then_some(self.accent)
-                .flatten(),
-            secondary: is_choice(self.secondary, default.secondary)
-                .then_some(self.secondary)
-                .flatten(),
-            border: is_choice(self.border, default.border)
-                .then_some(self.border)
-                .flatten(),
-            ink: is_choice(self.ink, default.ink)
-                .then_some(self.ink)
-                .flatten(),
+            background: is_choice(self.background, default.background, previous.background),
+            text: is_choice(self.text, default.text, previous.text),
+            dim: is_choice(self.dim, default.dim, previous.dim),
+            accent: is_choice(self.accent, default.accent, previous.accent),
+            secondary: is_choice(self.secondary, default.secondary, previous.secondary),
+            border: is_choice(self.border, default.border, previous.border),
+            ink: is_choice(self.ink, default.ink, previous.ink),
         }
     }
 
@@ -897,7 +905,8 @@ pub const DEFAULT_THEME_TEMPLATE: &str = r##"# velo's own palette, which is also
 #
 # Every colour is "#rrggbb", or "reset" for the terminal's own colour. A
 # line you delete keeps the built-in value, and a colour in config.toml's
-# [theme] table that differs from the built-in still wins over this file.
+# [theme] table that is a real choice — not one of the built-in defaults, and
+# not a value velo itself wrote there — still wins over this file.
 # The screen behind everything. `transparent_background = true` in config.toml
 # shows the terminal's own instead.
 background = "#141c28"
@@ -910,7 +919,7 @@ accent = "#f4baa3"
 # The transport's buttons and small controls, and the paused icon.
 secondary = "#a6c8e2"
 # The window's frame and the dotted rules.
-border = "#767676"
+border = "#252939"
 # The colour drawn ON the accent, so the selected row's own text stays readable.
 ink = "#000000"
 "##;
@@ -926,7 +935,8 @@ pub const DEFAULT_TERMINAL_TEMPLATE: &str = r##"# The terminal's own colours: ev
 #
 # Every colour is "#rrggbb", or "reset" for the terminal's own colour. A
 # line you delete keeps the built-in value, and a colour in config.toml's
-# [theme] table that differs from the built-in still wins over this file.
+# [theme] table that is a real choice — not one of the built-in defaults, and
+# not a value velo itself wrote there — still wins over this file.
 # The screen behind everything.
 background = "reset"
 # The body text: row names and values, the now-playing title.
@@ -1066,12 +1076,16 @@ browse_by = \"artists\"
 # \"default\" is an old spelling of \"velo\" that still selects the same
 # palette but gets no row in the picker.
 #
-# Every colour, as \"#rrggbb\". A colour that differs from the built-in
-# default wins over the theme named above.
+# Every colour, as \"#rrggbb\". The seven below are the built-in values, so
+# they are documentation, not choices: a colour that differs from them wins
+# over the theme named above, and a value velo itself wrote here in an
+# older version does not.
 [theme]
 name = \"velo\"
-# With transparent_background = true, your terminal's own background shows through, whatever the theme says.
-# transparent_background = true
+# Your terminal's own background shows through wherever the terminal is
+# transparent, whatever the theme says; every other colour stays as the
+# theme writes it. `ctrl+p` flips it in the settings card and writes this key.
+transparent_background = false
 background = \"{}\"
 text = \"{}\"
 dim = \"{}\"
@@ -1080,7 +1094,9 @@ secondary = \"{}\"
 border = \"{}\"
 ink = \"{}\"
 
-# The parts of the interface to draw.
+# The parts of the interface to draw: the cover art panel, the spectrum
+# beside the now-playing block, the key hints in the footer, and the bar at
+# the top of the screen.
 [ui]
 cover_art = true
 spectrum = true
@@ -1711,25 +1727,22 @@ pub fn select_theme(themes_dir: Option<&Path>, keys: &ThemeKeys) -> ThemeSelecti
         .filter(|name| !name.is_empty());
     if let Some(name) = selected {
         if let Some(theme) = selection.themes.iter().find(|theme| theme.name == name) {
-            // The alias `default` keeps the old layering, defaults and all
-            // (issue #54, S2/S5): it is how existing installations select
-            // the factory palette, and nothing on disk is ever rewritten.
-            // Every other name — the factory `velo` included — is a named
-            // theme: a `[theme]` key equal to the built-in default is
-            // documentation, not a choice (L3), and does not mask it.
-            let choices = if name == ALIAS_THEME_NAME {
-                keys.clone()
-            } else {
-                keys.non_default_choices()
-            };
-            selection.palette = choices.resolved_over(theme.colors);
+            // Every name is a named theme, the factory `velo` and the
+            // invisible alias `default` included: a `[theme]` key equal to
+            // the built-in default, or to the factory value before the palette
+            // had its own colours, is documentation, not a choice (L3, issue
+            // #62, L10), and does not mask it.
+            selection.palette = keys.non_default_choices().resolved_over(theme.colors);
             selection.applied = theme.name.clone();
         } else if name == ALIAS_THEME_NAME {
             // The invisible alias (issue #54, S2): with no
             // `themes/default.toml` on disk, `default` is the factory
             // palette, under the name `velo` — never a picker row of its
-            // own, never a rewrite of the config file.
-            selection.palette = keys.resolved_over(selection.themes[0].colors);
+            // own, never a rewrite of the config file. It layers the
+            // config's keys the way every other name does (L10).
+            selection.palette = keys
+                .non_default_choices()
+                .resolved_over(selection.themes[0].colors);
             selection.applied = selection.themes[0].name.clone();
         } else {
             let place = themes_dir.map_or_else(

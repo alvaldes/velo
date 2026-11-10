@@ -2164,8 +2164,8 @@ fn the_library_view_and_the_open_node_are_written_as_you_move() {
                 &format!("browse_by = \"{browse_by}\""),
             )
             .replace(
-                "# default wins over the theme named above.\n[theme]",
-                &format!("# default wins over the theme named above.\n{keys}[theme]"),
+                "\n[theme]\nname = \"velo\"\n",
+                &format!("\n{keys}[theme]\nname = \"velo\"\n"),
             )
     };
     let file = || fs::read_to_string(&config).unwrap();

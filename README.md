@@ -493,7 +493,7 @@ hex colour.
 | `dim` | Hints and everything that should recede | `#767676` |
 | `accent` | Borders, titles, the focused row and the selection | `#f4baa3` |
 | `secondary` | The keys and labels next to the values | `#a6c8e2` |
-| `border` | The panes that are not in focus | `#767676` |
+| `border` | The panes that are not in focus | `#252939` |
 | `ink` | The text drawn on top of `accent` | `#000000` |
 | `transparent_background` | `true` puts the terminal's own background back behind everything — it shows through wherever the terminal is transparent, whatever the theme says. `false` and absent change nothing | `false` |
 
@@ -512,7 +512,12 @@ one order: the factory theme (`velo`, which always exists), then the
 selected theme file, then the `[theme]` colour keys of this file that differ
 from the built-in defaults — a one-off change still wins, without copying a
 whole theme, and the defaults the generated file writes are documentation,
-not choices: they never mask a selected theme. A name that
+not choices: they never mask a selected theme. That covers the values velo
+itself wrote before its palette had colours of its own — `reset` for
+`background` and `text`, `#af00af` for `accent`, `#5f87d7` for `secondary`
+(issue #62). No name at all is the one path that layers every key, so an
+older config with no `[theme] name` keeps exactly the look it describes;
+the `default` alias is a name like any other and drops those values too. A name that
 is not on disk falls back to the built-in and says so once; a theme file
 that does not parse, or carries a colour that does not, is reported naming
 the file and the key, and the built-in is used. velo always starts.

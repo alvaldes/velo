@@ -1934,6 +1934,107 @@ fn the_generated_file_does_not_mask_a_named_theme_with_its_default_keys() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// The `[theme]` table velo itself generated before the factory palette had
+/// colours of its own (issue #57): the seven keys at what were the built-in
+/// defaults then — `reset` for `background` and `text`, and the written-in
+/// values that differ from today's `accent` and `secondary` (issue #62).
+const OLD_GENERATED_THEME_KEYS: &str = r##"[theme]
+background = "reset"
+text = "reset"
+dim = "#767676"
+accent = "#af00af"
+secondary = "#5f87d7"
+border = "#767676"
+ink = "#000000"
+"##;
+
+#[test]
+fn an_old_generated_file_does_not_mask_a_named_theme_with_its_old_defaults() {
+    // Issue #62: a config velo wrote before the factory palette got its own
+    // colours carries those older defaults. Against today's palette they
+    // differ from the current default, so they used to count as genuine
+    // choices and masked every named theme. They are documentation too.
+    let dir = temp_dir("themes-old-generated");
+    let config = write_config(&dir, OLD_GENERATED_THEME_KEYS);
+    let themes = write_theme(&dir, "nord", "accent = \"#88c0d0\"\n");
+    set_value(&config, Some("theme"), "name", "\"nord\"").unwrap();
+
+    let settings = Config::load_from(&config)
+        .unwrap_or_else(|error| panic!("load failed: {error}"))
+        .merged(&cli_with_no_flags());
+    let selection = select_theme(Some(&themes), &settings.theme);
+    let factory = ThemeColors::default();
+
+    assert_eq!(selection.applied, "nord");
+    assert_eq!(
+        selection.palette.accent, NORD_ACCENT,
+        "nord's accent is in force, not the old generated `accent = #af00af`"
+    );
+    assert_eq!(
+        selection.palette.background, factory.background,
+        "the old generated `background = reset` is documentation, not a choice"
+    );
+    assert_eq!(
+        selection.palette.secondary, factory.secondary,
+        "the old generated `secondary = #5f87d7` is documentation too"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_default_alias_drops_the_old_generated_values_too() {
+    // The author's call (2026-11-10): the alias no longer keeps the full
+    // layering. `default` still resolves to the factory palette and still gets
+    // no picker row, but the values velo itself wrote are documentation here
+    // exactly as under any other name.
+    let dir = temp_dir("themes-old-generated-alias");
+    let config = write_config(&dir, OLD_GENERATED_THEME_KEYS);
+    set_value(&config, Some("theme"), "name", "\"default\"").unwrap();
+
+    let settings = Config::load_from(&config)
+        .unwrap_or_else(|error| panic!("load failed: {error}"))
+        .merged(&cli_with_no_flags());
+    let selection = select_theme(None, &settings.theme);
+
+    assert_eq!(
+        selection.applied, DEFAULT_THEME_NAME,
+        "no picker row of its own"
+    );
+    assert_eq!(
+        selection.palette,
+        ThemeColors::default(),
+        "the old values are documentation under the alias too"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn without_a_name_every_key_layers_exactly_as_before() {
+    // No `[theme] name` at all: every key of the file layers over the built-in
+    // with nothing dropped, so an older config keeps the look it describes —
+    // today's behaviour, untouched (S5).
+    let dir = temp_dir("themes-unnamed-old");
+    let config = write_config(&dir, OLD_GENERATED_THEME_KEYS);
+
+    let settings = Config::load_from(&config)
+        .unwrap_or_else(|error| panic!("load failed: {error}"))
+        .merged(&cli_with_no_flags());
+    let selection = select_theme(None, &settings.theme);
+
+    assert_eq!(selection.applied, DEFAULT_THEME_NAME);
+    assert_eq!(selection.palette.background, ThemeColor::Terminal);
+    assert_eq!(
+        selection.palette.accent,
+        ThemeColor::Rgb {
+            red: 0xaf,
+            green: 0x00,
+            blue: 0xaf,
+        },
+        "without a name nothing is dropped"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_deliberately_different_key_still_wins_over_a_named_theme() {
     // A key whose value differs from the built-in default IS a choice and
@@ -1967,9 +2068,12 @@ fn a_deliberately_different_key_still_wins_over_a_named_theme() {
 }
 
 #[test]
-fn selecting_default_or_no_name_keeps_todays_layering() {
-    // `name = "default"`, and no name at all, layer every `[theme]` key —
-    // defaults included — exactly as before the theme files existed.
+fn the_default_alias_and_no_name_both_reach_the_factory_palette() {
+    // `name = "default"` resolves to the factory palette with no picker row,
+    // and with a generated config it lands on the same palette the built-in
+    // gives: its keys are documentation like any other name's (L10). With no
+    // name at all every key layers, which over a generated file is the same
+    // picture (S5).
     let dir = temp_dir("themes-default-selected");
     let config = write_config(&dir, &default_config_text());
     let themes = write_theme(&dir, "nord", "accent = \"#88c0d0\"\n");
@@ -2019,9 +2123,9 @@ const VELO_PALETTE: ThemeColors = ThemeColors {
         blue: 0xE2,
     },
     border: ThemeColor::Rgb {
-        red: 0x76,
-        green: 0x76,
-        blue: 0x76,
+        red: 0x25,
+        green: 0x29,
+        blue: 0x39,
     },
     ink: ThemeColor::Rgb {
         red: 0x00,
@@ -2148,51 +2252,60 @@ fn transparent_background_reads_from_the_config_file() {
 }
 
 #[test]
-fn the_generated_config_carries_transparent_background_commented_under_name() {
-    // S18 (issue #57): the key is documented in the generated file, right
-    // under the theme's `name`, and the commented line parses when it is
-    // uncommented.
+fn the_generated_config_writes_transparent_background_at_its_default() {
+    // S18 (issue #57, L11): the switch is reachable from the settings card, so
+    // the generated file says what is in force — `false`, like every `[ui]`
+    // key — instead of leaving a commented example. It sits under the theme's
+    // `name`, with the sentence above it saying what the switch does.
     let text = default_config_text();
-    let name_line = text
-        .lines()
-        .position(|line| line == "name = \"velo\"")
+    let lines: Vec<&str> = text.lines().collect();
+    let name_line = lines
+        .iter()
+        .position(|line| *line == "name = \"velo\"")
         .expect("the generated file names the factory theme");
-    let commented = text
-        .lines()
-        .position(|line| line == "# transparent_background = true")
-        .expect("the commented key is in the generated file");
-    // The table's own convention: the key's comment sits above it, so the
-    // sentence comes first and the key lands right under the name with it.
-    assert_eq!(
-        commented,
-        name_line + 2,
-        "the key sits right under the name"
-    );
-    let sentence = text.lines().nth(commented - 1).unwrap();
+    let written = lines
+        .iter()
+        .position(|line| *line == "transparent_background = false")
+        .expect("the generated file writes the key at its default");
     assert!(
-        sentence.contains("background shows through") && sentence.contains("theme"),
-        "one sentence says what the switch does: {sentence}"
+        written > name_line,
+        "the key sits under the name: {written} after {name_line}"
+    );
+    // The block directly above the key says what the switch does, however
+    // many lines it takes to say it.
+    let mut comment: Vec<&str> = lines[..written]
+        .iter()
+        .rev()
+        .take_while(|line| line.starts_with('#'))
+        .map(|line| line.trim_start_matches('#').trim())
+        .collect();
+    comment.reverse();
+    let sentence = comment.join(" ");
+    assert!(
+        !comment.is_empty()
+            && sentence.contains("background shows through")
+            && sentence.contains("theme"),
+        "the comment above the key says what the switch does: {sentence}"
+    );
+    assert!(
+        !text.contains("# transparent_background"),
+        "the key is written, not documented as an example"
     );
 
-    // Uncommenting the line parses: the table denies unknown keys, so the
-    // key has to be part of `[theme]`.
+    // It loads as the off state (the table denies unknown keys, so the line
+    // has to belong to `[theme]`): `false` changes nothing about the palette.
     let dir = temp_dir("themes-transparent-generated");
-    let uncommented = text
-        .lines()
-        .map(|line| {
-            if line == "# transparent_background = true" {
-                "transparent_background = true"
-            } else {
-                line
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let path = write_config(&dir, &uncommented);
+    let path = write_config(&dir, &text);
     let settings = Config::load_from(&path)
         .unwrap_or_else(|error| panic!("load failed: {error}"))
         .merged(&cli_with_no_flags());
-    assert_eq!(settings.theme.transparent_background, Some(true));
+    assert_eq!(settings.theme.transparent_background, Some(false));
+    let selection = select_theme(None, &settings.theme);
+    assert_eq!(
+        selection.palette.background,
+        ThemeColors::default().background,
+        "false leaves the theme's own background alone"
+    );
     let _ = fs::remove_dir_all(&dir);
 }
 
