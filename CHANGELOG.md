@@ -1,6 +1,13 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.34.3] - 2026-11-10
+
+### Fixes
+- **ui:** An idle row carries no marker
+- **ui:** A station is stopped, a track is paused
+- **ui:** The radio draws from the row the screen header takes
+- **ui:** The country and tag indexes say they are loading
 ## [0.34.2] - 2026-11-10
 
 ### Fixes
