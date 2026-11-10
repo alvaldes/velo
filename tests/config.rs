@@ -1328,7 +1328,7 @@ fn the_default_file_names_the_theme_and_its_folder() {
     let text = default_config_text();
     assert!(text.contains("themes/<name>.toml"), "{text}");
     assert!(
-        text.contains("[theme]\nname = \"default\""),
+        text.contains("[theme]\nname = \"velo\""),
         "the theme name sits inside the table it belongs to: {text}"
     );
 }
@@ -1390,12 +1390,14 @@ fn the_themes_folder_lives_beside_the_config_file() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-/// The picker's rows with no `themes/` folder at all (issue #37): `default`
-/// first, then the eleven built-ins sorted by name.
-const BUILT_IN_NAMES: [&str; 12] = [
-    "default",
+/// The picker's rows with no `themes/` folder at all (issue #37, issue #54):
+/// the factory theme `velo` first, then the twelve built-ins sorted by
+/// name. `default` is an invisible alias for `velo` and gets no row.
+const BUILT_IN_NAMES: [&str; 13] = [
+    "velo",
     "catppuccin-latte",
     "catppuccin-mocha",
+    "default terminal",
     "dracula",
     "gruvbox-dark",
     "monokai",
@@ -1407,6 +1409,18 @@ const BUILT_IN_NAMES: [&str; 12] = [
     "tokyo-night",
 ];
 
+/// The palette `default terminal` resolves to (issue #54, S3): every slot
+/// is the terminal's own colour.
+const ALL_TERMINAL: ThemeColors = ThemeColors {
+    background: ThemeColor::Terminal,
+    text: ThemeColor::Terminal,
+    dim: ThemeColor::Terminal,
+    accent: ThemeColor::Terminal,
+    secondary: ThemeColor::Terminal,
+    border: ThemeColor::Terminal,
+    ink: ThemeColor::Terminal,
+};
+
 fn names_of(selection: &ThemeSelection) -> Vec<String> {
     selection
         .themes
@@ -1416,18 +1430,23 @@ fn names_of(selection: &ThemeSelection) -> Vec<String> {
 }
 
 #[test]
-fn the_picker_offers_the_eleven_built_in_themes_sorted_after_default() {
-    // S8 of issue #37: the catalogue is embedded, and the picker's row
-    // order is stable with no folder and no files.
+fn the_picker_offers_velo_and_the_built_in_themes_sorted_after_it() {
+    // S8 of issue #37 and S1/S3 of issue #54: the catalogue is embedded,
+    // the factory theme `velo` leads, `default terminal` is one of the
+    // built-ins, and the alias `default` gets no row.
     let selection = select_theme(None, &ThemeKeys::default());
     assert_eq!(names_of(&selection), BUILT_IN_NAMES.to_vec());
+    assert!(
+        !names_of(&selection).contains(&"default".to_owned()),
+        "the invisible alias is not a picker row"
+    );
     assert_eq!(selection.notices, Vec::<String>::new());
 }
 
 #[test]
-fn default_stays_the_palette_velo_always_drew_with() {
-    // `default` is not one of the eleven: it is velo's own palette, and no
-    // catalogue entry may shadow it.
+fn velo_is_the_palette_velo_always_drew_with() {
+    // The factory theme is not one of the catalogue schemes: it is velo's
+    // own palette, and no catalogue entry may shadow it.
     let selection = select_theme(None, &ThemeKeys::default());
     assert_eq!(selection.themes[0].name, DEFAULT_THEME_NAME);
     assert_eq!(selection.themes[0].colors, ThemeColors::default());
@@ -1472,6 +1491,91 @@ fn with_no_themes_folder_and_no_theme_keys_the_builtin_is_the_whole_story() {
     assert_eq!(selection.applied, DEFAULT_THEME_NAME);
     assert_eq!(selection.themes.len(), BUILT_IN_NAMES.len());
     assert_eq!(selection.notices, Vec::<String>::new());
+}
+
+// ------------------------------------------------- the factory themes (issue #54)
+
+#[test]
+fn the_generated_config_selects_velo() {
+    // S1 of issue #54: a fresh install's config names the factory theme,
+    // and the name parses into the `[theme]` table.
+    let text = default_config_text();
+    assert!(
+        text.contains("name = \"velo\""),
+        "the generated file:\n{text}"
+    );
+    let dir = temp_dir("theme-generated-velo");
+    let path = write_config(&dir, &text);
+    let settings = Config::load_from(&path)
+        .unwrap_or_else(|error| panic!("load failed: {error}"))
+        .merged(&cli_with_no_flags());
+    assert_eq!(settings.theme.name.as_deref(), Some(DEFAULT_THEME_NAME));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn default_is_an_invisible_alias_for_velo_and_gets_no_picker_row() {
+    // S2 of issue #54: `name = "default"` — what existing installations
+    // carry — resolves to velo's palette, says nothing, and never adds a
+    // picker row.
+    let keys = ThemeKeys {
+        name: Some("default".to_owned()),
+        ..ThemeKeys::default()
+    };
+    let selection = select_theme(None, &keys);
+    assert_eq!(selection.palette, ThemeColors::default());
+    assert_eq!(selection.applied, DEFAULT_THEME_NAME);
+    assert_eq!(selection.notices, Vec::<String>::new());
+    assert!(
+        !names_of(&selection).contains(&"default".to_owned()),
+        "the alias is invisible: {:?}",
+        names_of(&selection)
+    );
+}
+
+#[test]
+fn default_terminal_is_the_terminal_s_own_palette() {
+    // S3 of issue #54, the author: "debe haber un tema llamado default
+    // terminal que es el tema de la terminal". Every slot is `reset`.
+    let keys = ThemeKeys {
+        name: Some("default terminal".to_owned()),
+        ..ThemeKeys::default()
+    };
+    let selection = select_theme(None, &keys);
+    assert_eq!(selection.applied, "default terminal");
+    assert_eq!(selection.palette, ALL_TERMINAL);
+    let row = selection
+        .themes
+        .iter()
+        .find(|theme| theme.name == "default terminal")
+        .expect("default terminal is offered like any other factory theme");
+    assert_eq!(row.colors, ALL_TERMINAL);
+    assert_eq!(selection.notices, Vec::<String>::new());
+}
+
+#[test]
+fn a_theme_file_accepts_reset_in_every_slot() {
+    // S3 of issue #54: `default terminal` is all `reset`, so a theme file
+    // accepts it in every slot — the `[theme]` table of config.toml keeps
+    // its stricter rule, untouched.
+    let dir = temp_dir("themes-reset-everywhere");
+    let themes = write_theme(
+        &dir,
+        "all-terminal",
+        "background = \"reset\"\ntext = \"reset\"\ndim = \"reset\"\n\
+         accent = \"reset\"\nsecondary = \"reset\"\nborder = \"reset\"\nink = \"reset\"\n",
+    );
+    let keys = ThemeKeys {
+        name: Some("all-terminal".to_owned()),
+        ..ThemeKeys::default()
+    };
+
+    let selection = select_theme(Some(&themes), &keys);
+
+    assert_eq!(selection.applied, "all-terminal");
+    assert_eq!(selection.palette, ALL_TERMINAL);
+    assert_eq!(selection.notices, Vec::<String>::new());
+    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -1680,19 +1784,24 @@ fn a_theme_colour_that_does_not_parse_is_reported_naming_the_file_and_the_key() 
 }
 
 #[test]
-fn reset_in_a_theme_file_colour_it_would_erase_is_reported() {
-    let dir = temp_dir("themes-reset");
-    let themes = write_theme(&dir, "nord", "accent = \"reset\"\n");
+fn a_theme_file_accepts_reset_where_it_would_not_erase_anything() {
+    // S3 of issue #54: a theme file accepts `reset` in every slot, the way
+    // `default terminal` needs. (The `[theme]` table of config.toml keeps
+    // its stricter rule; that is pinned by
+    // `a_theme_colour_is_hex_or_reset_in_the_two_places_reset_makes_sense`.)
+    let dir = temp_dir("themes-reset-kept");
+    let themes = write_theme(&dir, "nord", "background = \"reset\"\naccent = \"reset\"\n");
+    let keys = ThemeKeys {
+        name: Some("nord".to_owned()),
+        ..ThemeKeys::default()
+    };
 
-    let selection = select_theme(Some(&themes), &ThemeKeys::default());
+    let selection = select_theme(Some(&themes), &keys);
 
-    assert_eq!(names_of(&selection).len(), BUILT_IN_NAMES.len());
-    assert_eq!(selection.notices.len(), 1);
-    assert!(
-        selection.notices[0].contains("accent"),
-        "the notice names the key: {}",
-        selection.notices[0]
-    );
+    assert_eq!(selection.applied, "nord");
+    assert_eq!(selection.palette.background, ThemeColor::Terminal);
+    assert_eq!(selection.palette.accent, ThemeColor::Terminal);
+    assert_eq!(selection.notices, Vec::<String>::new());
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -1719,23 +1828,29 @@ fn an_unknown_key_in_a_theme_file_is_reported_naming_the_file() {
 }
 
 #[test]
-fn a_default_toml_file_replaces_the_builtin_colours_under_the_same_name() {
-    // The built-in always exists under the name `default` (S1); a file of
-    // that name takes its place in the picker instead of shadowing it.
+fn a_default_toml_file_overrides_the_alias_and_yields_one_row() {
+    // S2 of issue #54: an existing `themes/default.toml` wins over the
+    // invisible alias, exactly as any file whose stem matches a factory
+    // theme, and the picker yields one row named `default`.
     let dir = temp_dir("themes-default-file");
     let themes = write_theme(&dir, "default", "accent = \"#88c0d0\"\n");
+    let keys = ThemeKeys {
+        name: Some("default".to_owned()),
+        ..ThemeKeys::default()
+    };
 
-    let selection = select_theme(Some(&themes), &ThemeKeys::default());
+    let selection = select_theme(Some(&themes), &keys);
 
-    assert_eq!(selection.applied, DEFAULT_THEME_NAME);
+    assert_eq!(selection.applied, "default");
     assert_eq!(selection.palette.accent, NORD_ACCENT);
     assert_eq!(
         names_of(&selection)
             .iter()
-            .filter(|name| *name == DEFAULT_THEME_NAME)
+            .filter(|name| *name == "default")
             .count(),
         1,
-        "one default, not two"
+        "one default, not two: {}",
+        names_of(&selection).join(", ")
     );
     assert_eq!(selection.notices, Vec::<String>::new());
     let _ = fs::remove_dir_all(&dir);
@@ -1875,16 +1990,22 @@ fn selecting_default_or_no_name_keeps_todays_layering() {
 // --------------------------------------- the theme a fresh install finds
 
 #[test]
-fn a_fresh_install_finds_its_own_palette_as_a_theme_file() {
+fn a_fresh_install_finds_the_factory_themes_as_files() {
     let dir = temp_dir("theme-template");
     let themes = themes_dir(&dir.join("config.toml"));
 
     assert!(
         write_default_theme(&themes).unwrap(),
-        "the template is written when the folder has nothing"
+        "the templates are written when the folder has nothing"
     );
-    let file = themes.join(format!("{DEFAULT_THEME_NAME}.toml"));
-    assert!(file.is_file(), "it is default.toml");
+    let velo_file = themes.join(format!("{DEFAULT_THEME_NAME}.toml"));
+    assert_eq!(DEFAULT_THEME_NAME, "velo", "the factory theme is velo (S1)");
+    assert!(velo_file.is_file(), "it is velo.toml");
+    let terminal_file = themes.join("default terminal.toml");
+    assert!(
+        terminal_file.is_file(),
+        "the terminal's own theme ships beside it (S3)"
+    );
 
     // It has to be velo's own palette, not a copy that drifted: the file is
     // documentation of the format, and the format's first reader is velo.
@@ -1900,13 +2021,21 @@ fn a_fresh_install_finds_its_own_palette_as_a_theme_file() {
         ThemeColors::default(),
         "and a launch with it looks the same as one without it"
     );
+
+    // The terminal theme parses to the terminal's own palette in every slot.
+    let keys = ThemeKeys {
+        name: Some("default terminal".to_owned()),
+        ..ThemeKeys::default()
+    };
+    let selection = select_theme(Some(&themes), &keys);
+    assert_eq!(selection.palette, ALL_TERMINAL, "every slot is reset");
     assert!(selection.notices.is_empty(), "{:?}", selection.notices);
 
     let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
-fn the_shipped_theme_never_touches_one_you_edited() {
+fn the_shipped_themes_never_touch_ones_you_edited() {
     let dir = temp_dir("theme-template-keep");
     let themes = write_theme(
         &dir,
@@ -1914,18 +2043,30 @@ fn the_shipped_theme_never_touches_one_you_edited() {
         "background = \"#101010\"\ntext = \"#eeeeee\"\ndim = \"#777777\"\n\
          accent = \"#00afff\"\nsecondary = \"#5f87d7\"\nborder = \"#444444\"\nink = \"#000000\"\n",
     );
-    let file = themes.join(format!("{DEFAULT_THEME_NAME}.toml"));
-    let before = fs::read_to_string(&file).unwrap();
+    let velo_file = themes.join(format!("{DEFAULT_THEME_NAME}.toml"));
+    let before_velo = fs::read_to_string(&velo_file).unwrap();
+    let terminal_file = themes.join("default terminal.toml");
+    fs::write(&terminal_file, "accent = \"#00afff\"\n").unwrap();
+    let before_terminal = fs::read_to_string(&terminal_file).unwrap();
 
     assert!(
         !write_default_theme(&themes).unwrap(),
         "nothing is written over an edited theme"
     );
-    assert_eq!(fs::read_to_string(&file).unwrap(), before, "byte for byte");
+    assert_eq!(
+        fs::read_to_string(&velo_file).unwrap(),
+        before_velo,
+        "byte for byte"
+    );
+    assert_eq!(
+        fs::read_to_string(&terminal_file).unwrap(),
+        before_terminal,
+        "byte for byte, both factory themes"
+    );
     assert_ne!(
         select_theme(Some(&themes), &ThemeKeys::default()).themes[0].colors,
         ThemeColors::default(),
-        "an edited default.toml is the user's, and it wins"
+        "an edited velo.toml is the user's, and it wins"
     );
 
     let _ = fs::remove_dir_all(&dir);

@@ -60,7 +60,7 @@ fn main() -> ExitCode {
         if let Err(error) = config::write_default_theme(&themes) {
             eprintln!(
                 "velo: cannot write {}: {error}",
-                themes.join("default.toml").display()
+                themes.join("velo.toml").display()
             );
         }
     }

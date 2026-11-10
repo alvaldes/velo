@@ -591,12 +591,14 @@ pub struct App<'lib> {
     /// The palette as the `[theme]` table wrote it (S4): what the settings
     /// card rebuilds with one role replaced when a colour is cycled.
     colors: ThemeColors,
-    /// The themes the picker offers (S2, issue #37): `default` first, then
-    /// the built-in catalogue sorted by name, then the files of the
-    /// `themes/` folder that do not override a built-in.
+    /// The themes the picker offers (S2, issue #37, issue #54): the
+    /// factory theme `velo` first, then the built-in catalogue sorted by
+    /// name, then the files of the `themes/` folder that do not override a
+    /// factory theme.
     theme_files: Vec<LoadedTheme>,
     /// The theme applied right now (S2): the name the config file carries,
-    /// `default` when none is selected or the selected one is not on disk.
+    /// `velo` — the factory theme — when none is selected or the selected
+    /// one is not on disk.
     theme_name: String,
     /// The theme picker while it is open (issue #37): its cursor and the
     /// palette in force when it opened, which `esc` restores.
@@ -1067,8 +1069,9 @@ impl<'lib> App<'lib> {
         }
     }
 
-    /// The picker's rows, in order (issue #37, S2): `default` first, then
-    /// the built-ins sorted, then the folder files that override nothing.
+    /// The picker's rows, in order (issue #37, S2; issue #54): the factory
+    /// theme `velo` first, then the built-ins sorted, then the folder files
+    /// that override nothing.
     #[must_use]
     pub fn theme_picker_names(&self) -> Vec<String> {
         self.theme_files
@@ -4152,8 +4155,11 @@ impl<'lib> App<'lib> {
     }
 
     /// The palette the theme named `name` gives, with the colour keys that
-    /// win over it on top (S2): what the picker previews and applies. A
-    /// name that is not loaded falls back to the built-in (S3).
+    /// win over it on top (S2): what the picker previews and applies. The
+    /// invisible alias `default` keeps the old layering, defaults and all
+    /// (issue #54, S2/S5) — it is how existing installations select the
+    /// factory palette. A name that is not loaded falls back to the
+    /// built-in (S3).
     fn theme_colors_of(&self, name: &str) -> ThemeColors {
         match self
             .theme_files
@@ -4166,7 +4172,10 @@ impl<'lib> App<'lib> {
             // default is documentation, not a choice — and the generated
             // config carries all seven of them. Without this, every preview is
             // masked by the config's own defaults and nothing seems to change.
-            Some(colors) if name == crate::config::DEFAULT_THEME_NAME => {
+            // The alias `default` is the one name that keeps the full
+            // layering, exactly as it did before the factory theme had its
+            // own name (issue #54, S5).
+            Some(colors) if name == crate::config::ALIAS_THEME_NAME => {
                 self.theme_overrides.resolved_over(colors)
             }
             Some(colors) => self

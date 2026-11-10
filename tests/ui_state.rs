@@ -2749,13 +2749,15 @@ fn open_theme_picker(app: &mut App<'_>) {
     );
 }
 
-/// The picker's rows for `theme_app`: `default`, the eleven built-ins in
-/// name order — the `nord.toml` file taking nord's row — and the folder
-/// file that overrides nothing, last.
-const PICKER_ROWS: [&str; 13] = [
-    "default",
+/// The picker's rows for `theme_app`: the factory theme `velo` first, then
+/// the built-ins in name order (issue #54: `default terminal` among them,
+/// and no `default` alias row) — the `nord.toml` file taking nord's row —
+/// and the folder file that overrides nothing, last.
+const PICKER_ROWS: [&str; 14] = [
+    "velo",
     "catppuccin-latte",
     "catppuccin-mocha",
+    "default terminal",
     "dracula",
     "gruvbox-dark",
     "monokai",
@@ -2817,7 +2819,7 @@ fn enter_on_the_theme_row_opens_the_picker_and_the_card_gives_up_the_keys() {
 }
 
 #[test]
-fn the_picker_lists_default_then_the_built_ins_then_the_folder_files() {
+fn the_picker_lists_velo_then_the_built_ins_then_the_folder_files() {
     let (_config, mut app) = theme_app("picker-rows");
     open_theme_picker(&mut app);
 
@@ -2840,7 +2842,7 @@ fn moving_the_cursor_applies_that_theme_at_once_and_writes_nothing() {
     assert_eq!(app.theme_picker_cursor(), 1);
     assert_eq!(
         app.theme_name(),
-        "default",
+        "velo",
         "the name is not applied by moving"
     );
     assert_eq!(
@@ -2971,7 +2973,7 @@ fn enter_on_the_applied_theme_closes_without_writing() {
     press(&mut app, KeyCode::Enter);
 
     assert!(!app.theme_picker_open());
-    assert_eq!(app.theme_name(), "default");
+    assert_eq!(app.theme_name(), "velo");
     assert_eq!(
         fs::read_to_string(&config).unwrap(),
         before,
