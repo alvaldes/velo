@@ -528,7 +528,7 @@ fn the_transport_keys_keep_working_while_full_screen() {
         Action::Seek { delta_secs: 5 }
     );
     assert_eq!(app.on_key(key(KeyCode::Char('n'))), Action::Next);
-    assert_eq!(app.on_key(key(KeyCode::Char('p'))), Action::Previous);
+    assert_eq!(app.on_key(key(KeyCode::Char(','))), Action::Previous);
     assert_eq!(
         app.on_key(key(KeyCode::Char('-'))),
         Action::SetVolume(95),
@@ -614,7 +614,8 @@ fn the_settings_spectrum_row_steps_the_visualizer_and_writes_it() {
     let mut app = app();
     app.set_config_file(Some(config.clone()));
 
-    press(&mut app, KeyCode::Char('o'));
+    press_ctrl(&mut app, KeyCode::Char('p'));
+
     for _ in 0..5 {
         press(&mut app, KeyCode::Char('j'));
     }
@@ -647,7 +648,8 @@ fn the_settings_spectrum_row_steps_the_visualizer_and_writes_it() {
 #[test]
 fn enter_on_the_settings_spectrum_row_opens_the_picker() {
     let mut app = app();
-    press(&mut app, KeyCode::Char('o'));
+    press_ctrl(&mut app, KeyCode::Char('p'));
+
     for _ in 0..5 {
         press(&mut app, KeyCode::Char('j'));
     }
@@ -742,4 +744,10 @@ fn temp_dir(name: &str) -> PathBuf {
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     dir
+}
+
+/// One ctrl-modified key press, its action applied.
+fn press_ctrl(app: &mut App<'_>, code: KeyCode) {
+    let action = app.on_key(KeyEvent::new(code, KeyModifiers::CONTROL));
+    app.apply(action);
 }

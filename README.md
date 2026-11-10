@@ -48,42 +48,47 @@ Every key below is what the code does today.
 | Key | Action |
 |:--|:--|
 | `j` / `↓`, `k` / `↑` | Move down / up; the lists wrap at their ends — `j` on the last row lands on the first, `k` on the first on the last — except the queue, which stops at its ends |
-| `g` / `G` | First / last row |
+| `g` / `G` (or `home` / `end`) | First / last row |
+| `pgdn` / `pgup` (or `ctrl+d` / `ctrl+u`) | A page of rows at a time, in every list that scrolls; a page never wraps |
 | `enter` (sources) | Open the source under the cursor: `Local library`, `Radio`, `Recently played`, `Favourites` or `Playlists` |
 | `enter` (library) | Open an artist, album or genre; play from the selected track onwards through the list it is in |
 | `esc` / `backspace` | Back one level; from the top of the library, or when the radio closes, back to `Sources`. Closes the help overlay |
 | `1` `2` `3` `4` | Library view: artists (artist → album → track), every album, every track, genres |
 | `/` | Fuzzy search the whole library (`lofi` finds `Lo-Fi Scientists`); in the radio view, ask the directory for stations by name, across every country |
 | `space` | Pause / resume |
-| `←` / `→` (or `,` / `.`) | Seek 5 s back / forward; with `shift` on the arrow (or `<` / `>` on the comma keys) 30 s |
-| `:` | Jump to a position in the playing track: a percentage of it (`70%`), a clock position (`1:20`, `1:20:30`) or a count of seconds (`90`); refused on a live station or an empty answer |
-| `n` / `p` | Next track / previous track — `p` restarts a track already 3 s in; from a live station, `n` goes to the first track of the queue |
-| `s` | Shuffle what is left of the queue; again to put it back in order |
+| `←` / `→` | Seek 5 s back / forward; with `shift` on the arrow, 30 s |
+| `:` (or `ctrl+j`) | Jump to a position in the playing track: a percentage of it (`70%`), a clock position (`1:20`, `1:20:30`) or a count of seconds (`90`); refused on a live station or an empty answer |
+| `>` / `.` / `n` | Next track — from a live station, next goes to the first track of the queue |
+| `<` / `,` | Previous track — it restarts a track already 3 s in |
+| `z` | Shuffle what is left of the queue; again to put it back in order |
 | `r` | Repeat: off → all (the queue again) → one (the track again) |
-| `M` | Mono: both output channels carry the average of the mix — `(left + right) / 2`, never the sum, so the peak does not grow — applied after ReplayGain, before the samples reach the device, and toggled without restarting the stream. Refused while `bit_perfect` is on: the status line says so |
-| `P` | Low power: the screen redraws at a quarter of its ordinary rate and the spectrum stays out entirely — its rows go back to the list. Playback, the clock, the volume, seeking and every other key behave exactly as they do today; only the redraw cadence changes. Press again to step back out, and the last state is remembered under `[ui] low_power` the way `s` remembers shuffle |
-| `L` | Set the library folder: the same prompt as the first run, at any time |
+| `m` | Mono: both output channels carry the average of the mix — `(left + right) / 2`, never the sum, so the peak does not grow — applied after ReplayGain, before the samples reach the device, and toggled without restarting the stream. Refused while `bit_perfect` is on: the status line says so |
+| `P` | Low power: the screen redraws at a quarter of its ordinary rate and the spectrum stays out entirely — its rows go back to the list. Playback, the clock, the volume, seeking and every other key behave exactly as they do today; only the redraw cadence changes. Press again to step back out, and the last state is remembered under `[ui] low_power` the way `z` remembers shuffle |
+| `o` (or `ctrl+l`) | Set the library folder: the same prompt as the first run, at any time, tab completion included |
+| `L` | The saved playlists source, straight from the library |
 | `u` | Refresh the library index in the background; the title bar shows `⟳ indexing…` until it ends and the lists reload |
 | `+` / `-` | Volume up / down, 5% at a time; `[` / `]` move it a single point for the levels in between |
 | `tab` | One round trip: to the queue, and back to the screen you left — `Sources`, the library at its level, or the radio view with the place you were inside |
+| `p` | The queue view — the working list, where `x` removes and `shift+↑`/`shift+↓` move; `tab` is the way back out |
 | `a` | Append the selection to the queue — a track, or every track of an album or genre |
-| `d` | Remove the selected entry from the queue (queue view); delete the playlist under the cursor, said in the status line (`Playlists` names list) |
-| `J` / `K` | Move the selected entry down / up (queue view); move the selected track down / up inside a playlist's track list, saved to `library.toml` at once |
+| `A` | Append the selection to the queue and start playing from the entry it landed on |
+| `x` | Remove the selected entry from the queue (queue view); delete the playlist under the cursor, said in the status line (`Playlists` names list). Where nothing can be removed — a library row, a playlist's own tracks — one status line says so |
+| `J` / `K` (or `shift+↓` / `shift+↑`) | Move the selected entry down / up (queue view); move the selected track down / up inside a playlist's track list, saved to `library.toml` at once |
 | `S` | In the queue view: save the queue as a new playlist — a prompt asks for the name, `enter` saves, `esc` cancels, a taken name is refused in the card. On a track of the library: append that track to a playlist chosen from a small overlay of the saved names (`enter` applies, `esc` cancels) |
 | `e` | On a playlist in the `Playlists` names list: rename it with a prompt, opened with the name as it stands; `esc` cancels |
 | `v` | Cycle the visualizer — the shape the spectrum draws — through `bars`, `bars-outline`, `wave`, `scatter`, `flame`, `matrix`, `scope`, `mirror` and `none`, wrapping back to `bars`; the choice is written to `[ui] visualizer` |
 | `ctrl+v` | Visualizer picker: one row per shape, `none` first. Moving the cursor applies the focused shape on the spot — the preview is the interface — `enter` keeps it and writes the choice, `esc` restores what was in force; every other key waits |
-| `V` | The visualizer over the whole body: no list, no now-playing block, but the header and the footer stay. `V` again — or `esc` — returns to exactly the view it came from, and the transport keys keep working full screen: `space` still pauses, the arrows still seek, `n`/`p` still skip, the volume and `q` are not swallowed |
+| `V` | The visualizer over the whole body: no list, no now-playing block, but the header and the footer stay. `V` again — or `esc` — returns to exactly the view it came from, and the transport keys keep working full screen: `space` still pauses, the arrows still seek, `n`/`.` still skip, the volume and `q` are not swallowed |
 | `enter` (queue view) | Play the queue from the selected entry |
-| `?` | Help card: `j`/`k` (or `↓`/`↑`) scroll it and `g`/`G` jump to its ends; `/` filters it by key or description (`enter` keeps the filter, `esc` clears it, a second `esc` or `?` closes the help). The card keeps its full size however few rows the filter leaves, and every other key waits until it closes — `q` and `space` included |
-| `o` | Settings card: everything in `config.toml` — replay gain, repeat, shuffle, the theme, the `[ui]` switches and the visualizer and the library folder (the volume is not a row: it stays on `+`/`-`; the seven `[theme]` colours are the theme's inside and stay editable in the file, not on the card). `j`/`k` (or `↓`/`↑`) move between the settings (the `sound`/`theme`/`screen`/`library` headers are never focused), `g`/`G` jump to the ends, `enter` or `←`/`→` step the focused row (`enter` on the `theme` row opens the theme picker — one row per theme, the cursor's move previews it on the spot, `enter` applies, `esc` restores —, `enter` on the `spectrum` row opens the visualizer picker the same way, and the `folder` row opens the library prompt), `esc` closes — and every other key waits until it does, `q` and `space` included |
+| `?` (or `ctrl+k`) | Help card: `j`/`k` (or `↓`/`↑`) scroll it and `g`/`G` (or `home`/`end`) jump to its ends; `/` filters it by key or description (`enter` keeps the filter, `esc` clears it, a second `esc` or `?` closes the help). The card keeps its full size however few rows the filter leaves, and every other key waits until it closes — `q` and `space` included |
+| `ctrl+p` | Settings card: everything in `config.toml` — replay gain, repeat, shuffle, the theme, the `[ui]` switches and the visualizer and the library folder (the volume is not a row: it stays on `+`/`-`; the seven `[theme]` colours are the theme's inside and stay editable in the file, not on the card). `j`/`k` (or `↓`/`↑`) move between the settings (the `sound`/`theme`/`screen`/`library` headers are never focused), `g`/`G` jump to the ends, `enter` or `←`/`→` step the focused row (`enter` on the `theme` row opens the theme picker — one row per theme, the cursor's move previews it on the spot, `enter` applies, `esc` restores —, `enter` on the `spectrum` row opens the visualizer picker the same way, and the `folder` row opens the library prompt), `esc` closes — and every other key waits until it does, `q` and `space` included |
 | `R` | Radio view, straight from either screen: the shortcut for `Sources` → `Radio` |
 | `f` | On a track of the library: mark it as a favourite — press again to unmark; the mark is kept in `library.toml` and the track shows `★` in every library list. In the radio view: favourite the selected station, or pin the selected country or region |
 | `F` (radio view) | Filter the list already loaded, without asking the directory — `enter` keeps the filter, `esc` clears it |
 | `N` (radio view) | The country list, with your own country first when it knows it |
 | `ctrl+r` (radio view) | Refetch the directory for the place you are in: the country list, a region's stations or a tag's |
 | `i` (radio view) | On a station marked `✗`: open a prefilled bug report in your browser — the station's name, codec and URL, the reason velo gave, and your velo version and platform. Nothing is posted: read the draft and send it |
-| `q` | Quit |
+| `q` (or `ctrl+c`) | Quit |
 
 While a search is open, every printable key types into the query,
 `backspace` deletes, `enter` plays from the selected result, and `esc`
@@ -101,7 +106,7 @@ so and the station keeps playing.
 
 If the system has a media session to offer — macOS's media controls, a
 Linux desktop's MPRIS — velo registers with it: the OS's play/pause, next
-and previous reach the same actions the interface's `space`, `n` and `p`
+and previous reach the same actions the interface's `space`, `n` and `,`
 perform, and velo publishes what is playing so the OS can show it — a
 track's title and artist (its file name when the index never saw it), a
 live station's announced ICY title or its own name, and nothing when
@@ -119,7 +124,7 @@ its `★`, playable and queueable exactly like any other track list. `Playlists`
 lists your saved playlists by name with their track counts; `enter` on a name
 opens its tracks in order, playable and queueable like any other list, and
 playlists are created from the queue with `S`, appended to with `S` on a track,
-reordered with `J`/`K`, renamed with `e` and deleted with `d` — everything
+reordered with `J`/`K`, renamed with `e` and deleted with `x` — everything
 written to `library.toml` as it happens, so the names outlive the process. `esc` walks
 back one level at a time; the top of the
 library and the radio both land there, and a radio opened with `R` from the
@@ -504,8 +509,8 @@ Precedence: `--library` (expanded the same way) beats the config file. With
 no library set, the interface no longer demands a folder: when a `[subsonic]`
 server is configured, the synced index *is* the library and `/` searches it;
 when neither a library nor a server is configured, one sentence in the
-interface says what to set up. `L` still opens the folder prompt at any time
-— it starts at `~/`, which cannot be deleted, and `tab` completes folder
+interface says what to set up. `o` (or `ctrl+l`) still opens the folder prompt
+at any time — it starts at `~/`, which cannot be deleted, and `tab` completes folder
 names the way a shell does (several matches are listed under the field). A
 path that is not a directory is refused in the prompt; an accepted one is
 saved to the file as `library = "~/<what you typed>"` (every other line
@@ -661,9 +666,9 @@ than misapplied. To fill those tags in from a measurement, see
 
 Mono folds the mix into both channels as their average — `(left + right) / 2`,
 never a sum, so the peak does not grow. `velo --mono` starts a session that way
-and `M` toggles it while playing, without restarting the stream; it is a step
+and `m` toggles it while playing, without restarting the stream; it is a step
 in the sample path after ReplayGain is applied, and it is refused while
-`bit_perfect` is on — one line at startup, or the status line on `M` — instead
+`bit_perfect` is on — one line at startup, or the status line on `m` — instead
 of being quietly applied. Nothing about it is persisted: the setting dies with
 the session.
 
@@ -685,7 +690,7 @@ Honest list; none of these exist behind a flag:
   all exist (see above). Streaming over HTTP ranges (playing before the
   whole track is on disk) is a later optimisation.
 - Playlists: saved, named and reordered in `library.toml` now (see
-  `Playlists` under the keys); a playlist editor beyond `d`/`e`/`J`/`K` is
+  `Playlists` under the keys); a playlist editor beyond `x`/`e`/`J`/`K` is
   not here yet.
 
 MP3, FLAC, M4A/AAC, OGG Vorbis, OGG Opus and WAV are what plays today, decoded

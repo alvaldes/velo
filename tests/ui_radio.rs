@@ -2686,3 +2686,51 @@ fn the_help_card_covers_the_radio_view_it_is_opened_over() {
         "the card starts on the radio's rows, not the library's, got:\n{screen}"
     );
 }
+
+// ---- the cliamp paging keys (issue #38) -------------------------------------
+
+/// `home` and `end` jump to the ends of the radio's list, the way `g` and
+/// `G` do, skipping the rule and the headers.
+#[test]
+fn home_and_end_jump_to_the_ends_of_the_radio_list() {
+    let mut view = view();
+    let last = view.labels().len() - 1;
+
+    press(&mut view, KeyCode::End);
+    assert_eq!(view.cursor(), last, "end jumps to the last row");
+    press(&mut view, KeyCode::Home);
+    assert_eq!(view.cursor(), 0, "home jumps to the first row");
+}
+
+/// `pgdn`/`pgup` (and `ctrl+d`/`ctrl+u`) move the cursor a page of rows —
+/// the rows the last render showed — never landing on the rule or a header.
+#[test]
+fn the_page_keys_move_the_radio_cursor_by_a_page() {
+    use velo::ui::ratatui::Terminal;
+    use velo::ui::ratatui::backend::TestBackend;
+
+    let mut view = view();
+    let labels = view.labels().len();
+    // A short body: the page the render leaves behind is smaller than the
+    // list, so a page lands inside it.
+    let mut terminal = Terminal::new(TestBackend::new(80, 5)).expect("a test terminal");
+    terminal
+        .draw(|frame| view.render(frame, frame.area(), &Theme::default()))
+        .expect("the frame draws");
+
+    press(&mut view, KeyCode::PageDown);
+    assert!(
+        view.cursor() > 1,
+        "pgdn moved the cursor more than one row, got {}",
+        view.cursor()
+    );
+    press(&mut view, KeyCode::PageUp);
+    assert_eq!(view.cursor(), 0, "pgup moved back to the first row");
+
+    // ctrl+d is pgdn's alias, and a page never wraps past the end.
+    press(&mut view, KeyCode::End);
+    let outcome = view.key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
+    assert_eq!(outcome, RadioOutcome::Handled, "ctrl+d is the radio's pgdn");
+
+    assert_eq!(view.cursor(), labels - 1, "pgdn stops at the last row");
+}

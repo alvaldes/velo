@@ -1318,7 +1318,7 @@ impl<'lib> App<'lib> {
     /// library always lands on the library (issue #27) — the saved tab is
     /// the queue's half of the round trip, not the library's address — and
     /// with no library configured, the prompt asks for its path, the same
-    /// card `L` opens.
+    /// card `o` (or `ctrl+l`) opens.
     fn open_source(&mut self) -> Action {
         match self.sources.current() {
             sources::Source::Library => {
@@ -1505,7 +1505,7 @@ impl<'lib> App<'lib> {
         });
     }
 
-    /// `d` on a playlist row of the names list (issue #4, S5): deletes it
+    /// `x` on a playlist row of the names list (issue #4, S5): deletes it
     /// from the store and says so in the status line. The store's write is
     /// best effort: a file that cannot be written loses the change, not the
     /// session — the same courtesy rule every store write follows.
@@ -1968,8 +1968,8 @@ impl<'lib> App<'lib> {
     /// The launch with no `library` configured (T12c): with a Subsonic server
     /// configured, the synced index is the library — nothing is asked, and
     /// `/` reaches its search; with neither, one sentence says what to
-    /// configure instead of asking for a folder. `L` still opens the prompt
-    /// at any time.
+    /// configure instead of asking for a folder. `o` (or `ctrl+l`) still
+    /// opens the prompt at any time.
     pub fn launch_without_library(&mut self, subsonic_configured: bool) {
         if subsonic_configured {
             return;
@@ -2865,12 +2865,66 @@ impl<'lib> App<'lib> {
         // the keys it does not claim keep reaching the transport and the
         // global commands.
         if self.view == View::Sources
-            && let Some(action) = self.sources_key(event.code)
+            && let Some(action) = self.sources_key(event)
         {
             return action;
         }
 
+        // The ctrl-modified keys (issue #38) sit between the views that own
+        // their own lists and the plain keymap: every ctrl pair below would
+        // otherwise collapse into the plain arm of its letter (`ctrl+j`
+        // into `j`, `ctrl+d` into `d`), and an overlay above has already
+        // kept them where it owns them (S2).
+        if event.modifiers.contains(KeyModifiers::CONTROL) {
+            match event.code {
+                KeyCode::Char('c') => return Action::Quit,
+                KeyCode::Char('k') => {
+                    self.help = Some(Help::for_radio(
+                        self.radio_on_screen(),
+                        self.seen_area.get(),
+                    ));
+                    return Action::None;
+                }
+                KeyCode::Char('j') => {
+                    self.seek_prompt = Some(SeekPrompt::default());
+                    return Action::None;
+                }
+                KeyCode::Char('p') => {
+                    self.settings = Some(SettingsCard::default());
+                    return Action::None;
+                }
+                KeyCode::Char('l') if !matches!(self.position, Position::Files) => {
+                    self.ask_for_library(self.config_file.clone());
+                    return Action::None;
+                }
+                KeyCode::Char('u') => {
+                    self.select_page(false);
+                    return Action::None;
+                }
+                KeyCode::Char('d') => {
+                    self.select_page(true);
+                    return Action::None;
+                }
+                // `ctrl+r` stays the radio's refresh and `ctrl+v` the
+                // visualizer picker's; the plain keymap's own guards keep
+                // them apart below.
+                _ => {}
+            }
+        }
+
         match event.code {
+            // `shift+↓`/`shift+↑` (issue #38) beside `J`/`K`: the same move of
+            // the selected entry, in the queue or in a playlist's track list.
+            // They must stand above the plain arrow arms, which a shifted
+            // arrow would otherwise reach.
+            KeyCode::Down if event.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.move_selection(1);
+                Action::None
+            }
+            KeyCode::Up if event.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.move_selection(-1);
+                Action::None
+            }
             KeyCode::Char('j') | KeyCode::Down => {
                 self.select_next();
                 Action::None
@@ -2879,11 +2933,11 @@ impl<'lib> App<'lib> {
                 self.select_previous();
                 Action::None
             }
-            KeyCode::Char('g') => {
+            KeyCode::Char('g') | KeyCode::Home => {
                 self.select_first();
                 Action::None
             }
-            KeyCode::Char('G') => {
+            KeyCode::Char('G') | KeyCode::End => {
                 self.select_last();
                 Action::None
             }
@@ -2909,6 +2963,20 @@ impl<'lib> App<'lib> {
                 self.toggle_favourite();
                 Action::None
             }
+            // `A` (issue #38): add the selection to the queue and start
+            // playing from the entry it landed on — the queue keeps its
+            // order, the stream starts there. Nothing appended, nothing to
+            // play: `append_selection` has already said why in the status
+            // line, and the radio owns its own screen.
+            KeyCode::Char('A') if self.radio.is_none() => {
+                let before = self.queue.len();
+                self.append_selection();
+                if self.queue.len() > before {
+                    Action::PlayQueue { from: before }
+                } else {
+                    Action::None
+                }
+            }
             // `S` in the queue view saves the queue as a new playlist
             // (issue #4, S3), asking for a name with the seek prompt's card.
             KeyCode::Char('S') if self.view == View::Queue => {
@@ -2927,14 +2995,21 @@ impl<'lib> App<'lib> {
                 self.ask_to_append_to_playlist();
                 Action::None
             }
-            KeyCode::Char('d') if self.view == View::Queue => {
+            KeyCode::Char('x') if self.view == View::Queue => {
                 self.remove_from_queue();
                 Action::None
             }
-            // `d` on a playlist row of the names list deletes it (issue #4,
+            // `x` on a playlist row of the names list deletes it (issue #4,
             // S5), and the status line says so.
-            KeyCode::Char('d') if matches!(self.position, Position::Playlists) => {
+            KeyCode::Char('x') if matches!(self.position, Position::Playlists) => {
                 self.delete_playlist();
+                Action::None
+            }
+            // `x` where nothing can be removed — a library track row, a
+            // playlist's own track list — says so instead of doing nothing
+            // (issue #38, S4); the radio's rows are not removable either.
+            KeyCode::Char('x') if self.radio.is_none() => {
+                "velo: nothing to remove here".clone_into(&mut self.status);
                 Action::None
             }
             // `e` on a playlist row of the names list renames it (issue #4,
@@ -2964,6 +3039,20 @@ impl<'lib> App<'lib> {
                 self.move_in_playlist(-1);
                 Action::None
             }
+            // `pgdn`/`pgup` beside `g`/`G` (issue #38): a page of rows in
+            // every list these keys act on. A page never wraps — jumping
+            // from the last page to the first reads as a mistake, the way
+            // it does in the queue's `j`/`k`.
+            KeyCode::PageDown => {
+                self.select_page(true);
+                Action::None
+            }
+            KeyCode::PageUp => {
+                self.select_page(false);
+                Action::None
+            }
+            // `shift+↓`/`shift+↑` beside `J`/`K` (issue #38): the same move,
+            // without leaving the arrow keys.
             KeyCode::Enter if self.view == View::Queue => {
                 if self.queue.is_empty() {
                     Action::None
@@ -2980,17 +3069,13 @@ impl<'lib> App<'lib> {
             KeyCode::Char(' ') => Action::TogglePause,
             // The second seek gear (issue #6): shift on an arrow, which a
             // terminal does report as a modifier, unlike a character key that
-            // arrives already shifted. `,` and `.` carry the same pair as the
-            // characters shift produces, for both the layouts that need no
-            // shift to type them and the terminals that drop the modifier.
+            // arrives already shifted.
             KeyCode::Left if event.modifiers.contains(KeyModifiers::SHIFT) => {
                 Action::Seek { delta_secs: -30 }
             }
             KeyCode::Right if event.modifiers.contains(KeyModifiers::SHIFT) => {
                 Action::Seek { delta_secs: 30 }
             }
-            KeyCode::Char('<') => Action::Seek { delta_secs: -30 },
-            KeyCode::Char('>') => Action::Seek { delta_secs: 30 },
             KeyCode::Char(':') => {
                 self.seek_prompt = Some(SeekPrompt::default());
                 Action::None
@@ -3004,21 +3089,31 @@ impl<'lib> App<'lib> {
             KeyCode::Char('-') => Action::SetVolume(self.change_volume(-5)),
             KeyCode::Char(']') => Action::SetVolume(self.change_volume(1)),
             KeyCode::Char('[') => Action::SetVolume(self.change_volume(-1)),
-            KeyCode::Left | KeyCode::Char(',') => Action::Seek { delta_secs: -5 },
-            KeyCode::Right | KeyCode::Char('.') => Action::Seek { delta_secs: 5 },
-            KeyCode::Char('n') => Action::Next,
-            KeyCode::Char('p') => Action::Previous,
-            KeyCode::Char('s') => Action::ToggleShuffle,
-            // The mono downmix (issue #8, S2): a session setting, `M` on and
-            // off. The refusal under bit-perfect lives in `apply`, with the
-            // rest of the answers.
+            KeyCode::Left => Action::Seek { delta_secs: -5 },
+            KeyCode::Right => Action::Seek { delta_secs: 5 },
+            // The cliamp transport (issue #38): next is `>`, `.` or `n`,
+            // previous is `<` or `,` — the comma keys no longer seek, and
+            // `p` no longer skips: it opens the queue, below.
+            KeyCode::Char('>' | '.' | 'n') => Action::Next,
+            KeyCode::Char('<' | ',') => Action::Previous,
+            // The queue view, the way `tab` opens it — cliamp's `p` (issue
+            // #38); `tab` remains the round trip back out.
+            KeyCode::Char('p') => {
+                self.open_queue();
+                Action::None
+            }
+            // Shuffle (issue #38): cliamp's `z`, where `s` used to sit.
+            KeyCode::Char('z') => Action::ToggleShuffle,
+            // The mono downmix (issue #8, S2): a session setting, `m` on and
+            // off (issue #38 moved it here from `M`). The refusal under
+            // bit-perfect lives in `apply`, with the rest of the answers.
             KeyCode::Char('v') if event.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.open_visualizer_picker();
                 Action::None
             }
             // The visualizer (issue #40, S3): `v` cycles through every
             // shape, `none` included, wrapping back to `bars`, and the
-            // choice is written the way `s` writes shuffle.
+            // choice is written the way `z` writes shuffle.
             KeyCode::Char('v') => {
                 self.set_visualizer(self.ui.visualizer.next());
                 Action::None
@@ -3029,15 +3124,26 @@ impl<'lib> App<'lib> {
                 self.open_visualizer_fullscreen();
                 Action::None
             }
-            KeyCode::Char('M') => Action::ToggleMono,
+            KeyCode::Char('m') => Action::ToggleMono,
             // Low power (issue #11, S1): a session switch on and off, and
-            // the key that remembers it under `[ui]`, the way `s` remembers
+            // the key that remembers it under `[ui]`, the way `z` remembers
             // shuffle under `[state]`.
             KeyCode::Char('P') => Action::ToggleLowPower,
-            // The library can be set again at any time (library-refresh T1);
-            // the files given on the command line have none to set.
-            KeyCode::Char('L') if !matches!(self.position, Position::Files) => {
+            // The library folder prompt (issue #38): cliamp's `o`, with
+            // `ctrl+l` beside it; `L` now opens the saved playlists. The
+            // files given on the command line have no folder to set. It can
+            // be set again at any time (library-refresh T1).
+            KeyCode::Char('o') if !matches!(self.position, Position::Files) => {
                 self.ask_for_library(self.config_file.clone());
+                Action::None
+            }
+            // The saved playlists source (issue #38): cliamp's `L`. The
+            // radio keeps its own screen underneath — opening a source over
+            // it would leave it half asleep.
+            KeyCode::Char('L')
+                if !matches!(self.position, Position::Files) && self.radio.is_none() =>
+            {
+                self.open_playlists();
                 Action::None
             }
             KeyCode::Char('u') if !matches!(self.position, Position::Files) => {
@@ -3055,10 +3161,6 @@ impl<'lib> App<'lib> {
                     self.radio_on_screen(),
                     self.seen_area.get(),
                 ));
-                Action::None
-            }
-            KeyCode::Char('o') => {
-                self.settings = Some(SettingsCard::default());
                 Action::None
             }
             // The radio view (T6a): `R` opens it closed, and its own key
@@ -3083,9 +3185,10 @@ impl<'lib> App<'lib> {
 
     /// The keys the sources screen owns (issue #3); `None` lets the key
     /// fall through to the rest of the keymap, so the transport, `q`, `?`,
-    /// `o`, `s`, `r` and the seek keys stay global (S7).
-    fn sources_key(&mut self, code: ratatui::crossterm::event::KeyCode) -> Option<Action> {
-        use ratatui::crossterm::event::KeyCode;
+    /// `z`, `r` and the seek keys stay global (S7).
+    fn sources_key(&mut self, event: ratatui::crossterm::event::KeyEvent) -> Option<Action> {
+        use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+        let code = event.code;
 
         match code {
             KeyCode::Char('j') | KeyCode::Down => {
@@ -3096,11 +3199,22 @@ impl<'lib> App<'lib> {
                 self.sources.select_previous();
                 Some(Action::None)
             }
-            KeyCode::Char('g') => {
+            // The sources list is short: a page covers it (issue #38), so
+            // the paging keys land on its ends — `ctrl+d`/`ctrl+u` beside
+            // them, or they would page the list underneath.
+            KeyCode::Char('g') | KeyCode::Home | KeyCode::PageUp => {
                 self.sources.select_first();
                 Some(Action::None)
             }
-            KeyCode::Char('G') => {
+            KeyCode::Char('G') | KeyCode::End | KeyCode::PageDown => {
+                self.sources.select_last();
+                Some(Action::None)
+            }
+            KeyCode::Char('u') if event.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.sources.select_first();
+                Some(Action::None)
+            }
+            KeyCode::Char('d') if event.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.sources.select_last();
                 Some(Action::None)
             }
@@ -3112,7 +3226,7 @@ impl<'lib> App<'lib> {
             // to the keymap, which takes it to the queue and back.
             KeyCode::Esc
             | KeyCode::Backspace
-            | KeyCode::Char('1'..='4' | 'a' | 'd' | 'J' | 'K' | '/') => Some(Action::None),
+            | KeyCode::Char('1'..='4' | 'a' | 'A' | 'x' | 'J' | 'K' | '/') => Some(Action::None),
             _ => None,
         }
     }
@@ -3608,8 +3722,12 @@ impl<'lib> App<'lib> {
             // While typing, `j`, `k` and `?` were typed above.
             KeyCode::Char('j') | KeyCode::Down => help.top = (help.top + 1).min(last_top),
             KeyCode::Char('k') | KeyCode::Up => help.top = help.top.saturating_sub(1),
-            KeyCode::Char('g') => help.top = 0,
-            KeyCode::Char('G') => help.top = last_top,
+            // The paging keys (issue #38): `home`/`end` beside `g`/`G`, a
+            // page of the card's own rows at a time.
+            KeyCode::Home | KeyCode::Char('g') => help.top = 0,
+            KeyCode::End | KeyCode::Char('G') => help.top = last_top,
+            KeyCode::PageDown => help.top = (help.top + Help::card_rows(area)).min(last_top),
+            KeyCode::PageUp => help.top = help.top.saturating_sub(Help::card_rows(area)),
             KeyCode::Char('/') => help.typing = true,
             KeyCode::Char('?') | KeyCode::Esc => self.help = None,
             _ => {}
@@ -3643,12 +3761,26 @@ impl<'lib> App<'lib> {
                 card.move_up();
                 card.keep_visible(SettingsCard::card_rows(area));
             }
-            KeyCode::Char('g') => {
+            // The paging keys (issue #38): `home`/`end` beside `g`/`G`, a
+            // page of the card's own rows at a time.
+            KeyCode::Home | KeyCode::Char('g') => {
                 card.cursor = 0;
                 card.top = 0;
             }
-            KeyCode::Char('G') => {
+            KeyCode::End | KeyCode::Char('G') => {
                 card.cursor = SettingsCard::setting_count() - 1;
+                card.keep_visible(SettingsCard::card_rows(area));
+            }
+            KeyCode::PageDown => {
+                for _ in 0..SettingsCard::card_rows(area) {
+                    card.move_down();
+                }
+                card.keep_visible(SettingsCard::card_rows(area));
+            }
+            KeyCode::PageUp => {
+                for _ in 0..SettingsCard::card_rows(area) {
+                    card.move_up();
+                }
                 card.keep_visible(SettingsCard::card_rows(area));
             }
             KeyCode::Enter => {
@@ -4947,7 +5079,7 @@ impl<'lib> App<'lib> {
                 // Dropped before search on a narrow row: the header already
                 // names the views and the help says which key is which.
                 ("1-4", "views"),
-                ("n/p", "next/prev"),
+                ("n", "next"),
                 ("tab", "queue"),
                 ("?", "help"),
                 ("q", "quit"),
@@ -4961,7 +5093,7 @@ impl<'lib> App<'lib> {
                 ("/", "search"),
                 // Dropped first on a narrow row: the transport buttons and
                 // the help already show how to skip and to see the queue.
-                ("n/p", "next/prev"),
+                ("n", "next"),
                 ("tab", "queue"),
                 ("?", "help"),
                 ("q", "quit"),
@@ -5565,6 +5697,24 @@ impl<'lib> App<'lib> {
                 self.move_search_selection(false);
                 Action::None
             }
+            // The paging keys (issue #38): the result list is a list like
+            // any other.
+            KeyCode::Home => {
+                self.search_selected = 0;
+                Action::None
+            }
+            KeyCode::End => {
+                self.search_selected = self.search_results.len().saturating_sub(1);
+                Action::None
+            }
+            KeyCode::PageDown => {
+                self.move_search_page(true);
+                Action::None
+            }
+            KeyCode::PageUp => {
+                self.move_search_page(false);
+                Action::None
+            }
             KeyCode::Enter if self.search_results.is_empty() => Action::None,
             KeyCode::Enter => Action::Play {
                 from: self.search_selected,
@@ -5660,6 +5810,21 @@ impl<'lib> App<'lib> {
             (self.search_selected + 1).min(self.search_results.len().saturating_sub(1))
         } else {
             self.search_selected.saturating_sub(1)
+        };
+    }
+
+    /// Moves the search's selection a page of rows down or up (issue #38),
+    /// stopping at the ends of the result list.
+    fn move_search_page(&mut self, down: bool) {
+        let len = self.search_results.len();
+        if len == 0 {
+            return;
+        }
+        let step = self.page_rows();
+        self.search_selected = if down {
+            (self.search_selected + step).min(len - 1)
+        } else {
+            self.search_selected.saturating_sub(step)
         };
     }
 
@@ -5772,6 +5937,51 @@ impl<'lib> App<'lib> {
         self.set_view_selection(self.view_len().saturating_sub(1));
     }
 
+    /// Moves the selection a page of rows down or up (issue #38), stopping
+    /// at the ends. Before the first draw the page is one row and the keys
+    /// step like `j`/`k` — never a jump into the dark.
+    fn select_page(&mut self, down: bool) {
+        let len = self.view_len();
+        if len == 0 {
+            return;
+        }
+        let step = self.page_rows();
+        let index = self.view_selection();
+        let target = if down {
+            index.saturating_add(step).min(len - 1)
+        } else {
+            index.saturating_sub(step)
+        };
+        self.set_view_selection(target);
+    }
+
+    /// How many rows the body showed the last time it was drawn (issue #38):
+    /// the list's own page, the same arithmetic `draw` runs — the window's
+    /// borders, the bars the switches take and give back, and the header.
+    /// Nothing drawn yet, one row at a time.
+    fn page_rows(&self) -> usize {
+        let area = self.seen_area.get();
+        if area.height == 0 {
+            return 1;
+        }
+        let footer = u16::from(self.ui.hints) + 1;
+        let top = u16::from(self.ui.top_bar);
+        let content = area.height.saturating_sub(2 + footer + top);
+        let now = self.now_playing_rows(content);
+        usize::from(content.saturating_sub(now + 1).max(1))
+    }
+
+    /// Moves the selected entry down or up (issue #38): `J`/`K` and their
+    /// `shift+arrow` aliases. The queue's arms own the queue view; a
+    /// playlist's track list is the library view's rows.
+    fn move_selection(&mut self, delta: i64) {
+        if self.view == View::Queue {
+            self.move_in_queue(delta);
+        } else if matches!(self.position, Position::Playlist { .. }) {
+            self.move_in_playlist(delta);
+        }
+    }
+
     /// The tab round trip (issue #23): from the queue, back to the screen
     /// `tab` was pressed on; from anywhere else — the sources screen, the
     /// library at any level, the radio at any depth — to the queue. The
@@ -5780,21 +5990,28 @@ impl<'lib> App<'lib> {
     fn toggle_view(&mut self) {
         if self.view == View::Queue {
             self.view = self.tab_origin;
-        } else {
-            self.tab_origin = self.view;
-            self.view = View::Queue;
-        }
-        if self.view == View::Queue {
-            self.queue_selected = self.queue_selected.min(self.queue.len().saturating_sub(1));
-            self.status = format!(
-                "velo: queue, {}",
-                plural(self.queue.len(), "track", "tracks")
-            );
-        } else {
             self.status.clear();
+        } else {
+            self.open_queue();
         }
         // The tab is a transient round trip, not a setting (S14): moving it
         // writes nothing.
+    }
+
+    /// Opens the queue view (issue #38): `p`, the way `tab`'s first half
+    /// does — the screen it leaves is remembered for the way back, and the
+    /// status line names the queue. Already there, it stays.
+    fn open_queue(&mut self) {
+        if self.view == View::Queue {
+            return;
+        }
+        self.tab_origin = self.view;
+        self.view = View::Queue;
+        self.queue_selected = self.queue_selected.min(self.queue.len().saturating_sub(1));
+        self.status = format!(
+            "velo: queue, {}",
+            plural(self.queue.len(), "track", "tracks")
+        );
     }
 
     /// The queue index that is playing, when anything is: the player counts
@@ -5990,15 +6207,15 @@ impl<'lib> App<'lib> {
             }
             // The recent and favourites lists are answered above: their rows
             // are the store's entries, not `tracks` rows (issue #33, #7). The
-            // playlists' lists are their own too (issue #4): the track list
-            // is answered above, and the names list has no track to add.
-            (
-                Position::Recent
-                | Position::Favourites
-                | Position::Playlists
-                | Position::Playlist { .. },
-                _,
-            ) => return,
+            // playlist's track list is its own too (issue #4). The arms below
+            // stand only for exhaustiveness; none of them can be reached.
+            (Position::Recent | Position::Favourites | Position::Playlist { .. }, _) => return,
+            // The names list has no track to add — it says so instead of
+            // doing nothing (issue #38, S4).
+            (Position::Playlists, _) => {
+                "velo: nothing to queue here".clone_into(&mut self.status);
+                return;
+            }
         };
         if paths.is_empty() {
             return;
@@ -6303,7 +6520,7 @@ impl<'lib> App<'lib> {
     /// Low power (issue #11, S1–S2): the redraw cadence drops to a quarter
     /// of its ordinary rate and the spectrum is left out entirely;
     /// playback, the clock, the volume and every other key are untouched.
-    /// The key writes `[ui] low_power` the way `s` writes `[state] shuffle`
+    /// The key writes `[ui] low_power` the way `z` writes `[state] shuffle`
     /// — once per change against what the file already said.
     fn toggle_low_power(&mut self) {
         self.ui.low_power = !self.ui.low_power;
@@ -6917,11 +7134,12 @@ fn mmss(duration: Duration) -> String {
 }
 
 /// Every row of the help card: the key, then what it does.
-const HELP_ROWS: [(&str, &str); 40] = [
+const HELP_ROWS: [(&str, &str); 44] = [
     ("j / Down", "move down"),
     ("k / Up", "move up"),
-    ("g", "first track"),
-    ("G", "last track"),
+    ("g / home", "first track"),
+    ("G / end", "last track"),
+    ("pgdn / pgup", "a page at a time; ctrl+d / ctrl+u too"),
     ("enter", "open, or play from the selection"),
     ("esc", "back one level / close help"),
     (
@@ -6930,32 +7148,35 @@ const HELP_ROWS: [(&str, &str); 40] = [
     ),
     ("space", "pause / resume"),
     ("← / →", "seek 5 s back / forward; shift: 30 s"),
-    (", / .", "seek 5 s back / forward; < / >: 30 s"),
-    (":", "jump to a position: 70%, 1:20 or 90"),
-    ("n / p", "next / previous track"),
-    ("s", "shuffle what is left of the queue"),
+    (": / ctrl+j", "jump to a position: 70%, 1:20 or 90"),
+    ("> / . / n", "next track"),
+    ("< / ,", "previous track"),
+    ("z", "shuffle what is left of the queue"),
     ("r", "repeat: off, all, one"),
-    ("M", "mono: both channels carry the average of the mix"),
+    ("m", "mono: both channels carry the average of the mix"),
     ("+ / -", "volume up / down; [ / ] a point at a time"),
-    ("?", "toggle this help"),
-    ("o", "settings"),
+    ("? / ctrl+k", "toggle this help"),
+    ("ctrl+p", "settings"),
     ("tab", "library / queue"),
+    ("p", "the queue, like tab going there"),
     ("1 2 3 4", "artists, albums, tracks, genres"),
-    ("L", "set the library folder"),
+    ("o / ctrl+l", "set the library folder"),
+    ("L", "the saved playlists"),
     ("u", "refresh the library index"),
     (
         "",
         "no library set: a prompt asks for its path, tab completes",
     ),
     ("a", "add the selection to the queue"),
+    ("A", "add the selection to the queue and play from it"),
     ("f", "on a track: mark it as a favourite"),
     (
         "S",
         "save the queue as a playlist; on a track: add it to one",
     ),
-    ("d", "in the queue: remove it; on a playlist: delete it"),
+    ("x", "in the queue: remove it; on a playlist: delete it"),
     ("e", "in playlists: rename the one under the cursor"),
-    ("J / K", "move it down / up, in the queue or in a playlist"),
+    ("J / K", "move it down / up; shift+↓ / shift+↑ too"),
     ("R", "radio: the directory, your favourites, your stations"),
     ("v", "next visualizer"),
     ("ctrl+v", "pick a visualizer"),
@@ -6969,7 +7190,7 @@ const HELP_ROWS: [(&str, &str); 40] = [
     // tests read `u` and `q` on a small window, where a row added above
     // them would silently scroll them off.
     ("P", "low power: a quarter of the redraw rate, no spectrum"),
-    ("q", "quit"),
+    ("q / ctrl+c", "quit"),
 ];
 
 /// The open help card (S1): which row is at its top and what it is

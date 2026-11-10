@@ -79,7 +79,7 @@ fn a_media_command_reaches_the_same_action_its_keyboard_key_answers() {
     // The keys themselves, as the keymap answers them today.
     assert_eq!(app.on_key(key(KeyCode::Char(' '))), Action::TogglePause);
     assert_eq!(app.on_key(key(KeyCode::Char('n'))), Action::Next);
-    assert_eq!(app.on_key(key(KeyCode::Char('p'))), Action::Previous);
+    assert_eq!(app.on_key(key(KeyCode::Char(','))), Action::Previous);
     // The media keys take the same route.
     assert_eq!(
         app.media_command(MediaCommand::PlayPause),
