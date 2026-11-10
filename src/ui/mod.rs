@@ -23,6 +23,7 @@ pub mod search;
 pub mod shuffle;
 pub mod sources;
 pub mod theme;
+pub mod visualizer;
 
 pub use ratatui;
 pub use ratatui::crossterm;
@@ -53,6 +54,7 @@ use crate::subsonic::scrobble::{ScrobbleTracker, Scrobbles};
 use self::artwork::{Artwork, Picker, StatefulImage, StatefulProtocol};
 use self::search::Search;
 use self::theme::Theme;
+use self::visualizer::Visualizer;
 
 /// What the interface says at a launch with neither a library nor a Subsonic
 /// server configured (T12c): one sentence naming both ways to configure, in
@@ -606,6 +608,22 @@ pub struct App<'lib> {
     /// theme file that does not parse. Delivered into the status line once,
     /// on the first tick, then gone.
     theme_notice: Option<String>,
+    /// The visualizer picker while it is open (issue #40): its cursor and
+    /// the visualizer in force when it opened, which `esc` restores.
+    visualizer_picker: Option<VisualizerPicker>,
+    /// The visualizer the config file carries (issue #40, S5): what a
+    /// preview moves around and what a write compares against, the way
+    /// `theme_name` is the written theme while the palette previews.
+    saved_visualizer: Visualizer,
+    /// The view the full-screen visualizer (issue #40, S4) came from, while
+    /// it is up: `V` and `esc` land back there.
+    visualizer_fullscreen: Option<View>,
+    /// The newest samples the tap produced (issue #40): the raw window the
+    /// `scope` shape reads, oldest first, kept beside the spectrum's bands.
+    waveform: Vec<f32>,
+    /// When the session began (issue #40, S2): the elapsed time the falling
+    /// peaks and the rain read, so the same input draws the same frame.
+    started: std::time::Instant,
     /// Present while no library root is set (S4): the empty browser then
     /// says how to set one, and while its prompt is open every key edits it.
     library_setup: Option<LibrarySetup>,
@@ -761,6 +779,11 @@ impl<'lib> App<'lib> {
             theme_picker: None,
             theme_overrides: ThemeKeys::default(),
             theme_notice: None,
+            visualizer_picker: None,
+            saved_visualizer: Visualizer::default(),
+            visualizer_fullscreen: None,
+            waveform: Vec::new(),
+            started: std::time::Instant::now(),
             seek_prompt: None,
             library_setup: None,
             config_file: None,
@@ -851,6 +874,11 @@ impl<'lib> App<'lib> {
             theme_picker: None,
             theme_overrides: ThemeKeys::default(),
             theme_notice: None,
+            visualizer_picker: None,
+            saved_visualizer: Visualizer::default(),
+            visualizer_fullscreen: None,
+            waveform: Vec::new(),
+            started: std::time::Instant::now(),
             seek_prompt: None,
             library_setup: None,
             config_file: None,
@@ -1032,6 +1060,44 @@ impl<'lib> App<'lib> {
             .collect()
     }
 
+    /// The visualizer in force (issue #40), as the config resolves it.
+    #[must_use]
+    pub const fn visualizer(&self) -> Visualizer {
+        self.ui.visualizer
+    }
+
+    /// Whether the visualizer picker is open (issue #40): it owns every key
+    /// while it is, the way the theme picker does.
+    #[must_use]
+    pub const fn visualizer_picker_open(&self) -> bool {
+        self.visualizer_picker.is_some()
+    }
+
+    /// The row the visualizer picker's cursor is on (issue #40).
+    #[must_use]
+    pub const fn visualizer_picker_cursor(&self) -> usize {
+        match &self.visualizer_picker {
+            Some(picker) => picker.cursor,
+            None => 0,
+        }
+    }
+
+    /// The picker's rows, in order (issue #40, S3): `none` first, then the
+    /// eight, in their stable order.
+    #[must_use]
+    pub fn visualizer_picker_names(&self) -> Vec<String> {
+        Visualizer::ALL
+            .iter()
+            .map(|visualizer| visualizer.name().to_owned())
+            .collect()
+    }
+
+    /// Whether the visualizer is up over the whole body (issue #40, S4).
+    #[must_use]
+    pub const fn visualizer_fullscreen(&self) -> bool {
+        self.visualizer_fullscreen.is_some()
+    }
+
     /// The palette as the `[theme]` table wrote it (S4): the colours the
     /// settings card rebuilds and the tests observe.
     #[must_use]
@@ -1045,6 +1111,7 @@ impl<'lib> App<'lib> {
     /// press writes only when it moves away from it.
     pub fn set_ui(&mut self, ui: UiParts) {
         self.saved_low_power = ui.low_power;
+        self.saved_visualizer = ui.visualizer;
         self.ui = ui;
     }
 
@@ -1658,18 +1725,26 @@ impl<'lib> App<'lib> {
         }
     }
 
+    /// Whether the band area is in place (issue #40): the visualizer draws
+    /// something and low power has not taken it away — low power still wins
+    /// over the visualizer, and `none` gives the rows back exactly as it
+    /// does (S6).
+    fn shows_bands(&self) -> bool {
+        self.ui.visualizer != Visualizer::None && !self.ui.low_power
+    }
+
     /// How many rows the now-playing block takes out of a content area this
-    /// tall, with the `[ui]` switches applied (S5). The spectrum belongs to
-    /// the tall block: with the switch off the block never reserves its
-    /// rows — the tall tier is capped at the seven-row block, and the bars'
-    /// rows go to the list instead.
+    /// tall, with the `[ui]` switches applied (S5). The band belongs to
+    /// the tall block: with no visualizer drawing it the block never
+    /// reserves its rows — the tall tier is capped at the seven-row block,
+    /// and the bars' rows go to the list instead.
     fn now_playing_rows(&self, height: u16) -> u16 {
         // Content tall enough for the spectrum tier starts at 22 rows; any
         // shorter height keeps the block at its ordinary size. Low power
         // (issue #11, S2) leaves the spectrum out entirely: its rows go
         // back to the list, the rest of the layout unchanged (S3).
         const SPECTRUM_TIER: u16 = 22;
-        now_playing_rows(if self.ui.spectrum && !self.ui.low_power {
+        now_playing_rows(if self.shows_bands() {
             height
         } else {
             height.min(SPECTRUM_TIER - 1)
@@ -2469,6 +2544,16 @@ impl<'lib> App<'lib> {
         if let Some(player) = &self.player {
             player.drain_tap(&mut self.heard);
             self.spectrum.push(&self.heard);
+            // The waveform visualizers (issue #40) read the same tap: keep
+            // the newest window, oldest first, the way the analyzer keeps
+            // its own. Without a player the window stands still, the way
+            // the bars only fall.
+            self.waveform.extend_from_slice(&self.heard);
+            let stale = self
+                .waveform
+                .len()
+                .saturating_sub(visualizer::WAVEFORM_WINDOW);
+            self.waveform.drain(..stale);
             self.heard.clear();
         }
         let rate = self
@@ -2741,6 +2826,21 @@ impl<'lib> App<'lib> {
         if self.theme_picker.is_some() {
             return self.on_theme_picker_key(event.code);
         }
+        // The visualizer picker (issue #40) owns every key while it is
+        // open, the same way.
+        if self.visualizer_picker.is_some() {
+            return self.on_visualizer_picker_key(event.code);
+        }
+        // The full-screen visualizer (issue #40, S4) gives up every key but
+        // its own two: `V` and `esc` leave it — to exactly the view it came
+        // from — and everything else, the transport and the volume and `q`
+        // included, reaches the interface underneath.
+        if self.visualizer_fullscreen.is_some()
+            && matches!(event.code, KeyCode::Char('V') | KeyCode::Esc)
+        {
+            self.close_visualizer_fullscreen();
+            return Action::None;
+        }
         // An open settings card owns every key too (S6): nothing reaches the
         // lists or the transport while it is up, `q` and `space` included.
         if self.settings.is_some() {
@@ -2912,6 +3012,23 @@ impl<'lib> App<'lib> {
             // The mono downmix (issue #8, S2): a session setting, `M` on and
             // off. The refusal under bit-perfect lives in `apply`, with the
             // rest of the answers.
+            KeyCode::Char('v') if event.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.open_visualizer_picker();
+                Action::None
+            }
+            // The visualizer (issue #40, S3): `v` cycles through every
+            // shape, `none` included, wrapping back to `bars`, and the
+            // choice is written the way `s` writes shuffle.
+            KeyCode::Char('v') => {
+                self.set_visualizer(self.ui.visualizer.next());
+                Action::None
+            }
+            // `V` takes the visualizer to the whole body (issue #40, S4);
+            // it leaves again with `V` or `esc`, handled above.
+            KeyCode::Char('V') => {
+                self.open_visualizer_fullscreen();
+                Action::None
+            }
             KeyCode::Char('M') => Action::ToggleMono,
             // Low power (issue #11, S1): a session switch on and off, and
             // the key that remembers it under `[ui]`, the way `s` remembers
@@ -3540,6 +3657,10 @@ impl<'lib> App<'lib> {
                     // The theme is chosen in the picker (issue #37), never
                     // stepped here.
                     self.open_theme_picker();
+                } else if key == SettingsKey::Spectrum {
+                    // The visualizer is chosen in its own picker too (issue
+                    // #40): the row's `enter` opens it, the arrows step it.
+                    self.open_visualizer_picker();
                 } else {
                     self.change_setting(key, true);
                 }
@@ -3586,6 +3707,16 @@ impl<'lib> App<'lib> {
             // The theme row is never stepped through `change_setting`
             // (issue #37): its `enter` opens the picker.
             SettingsKey::Theme => {}
+            // The visualizer row (issue #40): the arrows step it through the
+            // nine shapes, each step written like any other `[ui]` switch.
+            SettingsKey::Spectrum => {
+                let next = if forward {
+                    self.ui.visualizer.next()
+                } else {
+                    self.ui.visualizer.previous()
+                };
+                self.set_visualizer(next);
+            }
             SettingsKey::Repeat => {
                 let next = match (self.repeat, forward) {
                     (Repeat::Off, true) | (Repeat::One, false) => Repeat::All,
@@ -3597,7 +3728,6 @@ impl<'lib> App<'lib> {
             }
             SettingsKey::Shuffle => self.apply(Action::ToggleShuffle),
             SettingsKey::CoverArt => self.toggle_ui("cover_art", |ui| &mut ui.cover_art),
-            SettingsKey::Spectrum => self.toggle_ui("spectrum", |ui| &mut ui.spectrum),
             SettingsKey::Hints => self.toggle_ui("hints", |ui| &mut ui.hints),
             SettingsKey::TopBar => self.toggle_ui("top_bar", |ui| &mut ui.top_bar),
             SettingsKey::Advisories => self.toggle_ui("advisories", |ui| &mut ui.advisories),
@@ -3702,6 +3832,111 @@ impl<'lib> App<'lib> {
         }
     }
 
+    /// Opens the visualizer picker (issue #40, S3): the cursor starts on
+    /// the visualizer in force, and the choice in force is remembered for
+    /// `esc`. The card that opens it hands the keys over, the way it does
+    /// for the theme picker.
+    fn open_visualizer_picker(&mut self) {
+        let cursor = Visualizer::ALL
+            .iter()
+            .position(|visualizer| *visualizer == self.ui.visualizer)
+            .unwrap_or(0);
+        self.visualizer_picker = Some(VisualizerPicker {
+            cursor,
+            snapshot: self.ui.visualizer,
+        });
+        self.settings = None;
+    }
+
+    /// The keys while the visualizer picker is open (issue #40, S3):
+    /// `j`/`k` and the arrows move and wrap at the ends, and every move
+    /// APPLIES the focused visualizer — the preview is the interface.
+    /// `enter` keeps it and writes `[ui] visualizer` only when it changed;
+    /// `esc` closes and restores the visualizer the picker opened with.
+    /// Every other key waits.
+    fn on_visualizer_picker_key(&mut self, code: ratatui::crossterm::event::KeyCode) -> Action {
+        use ratatui::crossterm::event::KeyCode;
+
+        let count = Visualizer::ALL.len();
+        match code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                let next = self
+                    .visualizer_picker
+                    .as_ref()
+                    .map(|picker| (picker.cursor + 1) % count);
+                if let Some(cursor) = next {
+                    if let Some(picker) = self.visualizer_picker.as_mut() {
+                        picker.cursor = cursor;
+                    }
+                    self.preview_visualizer(Visualizer::ALL[cursor]);
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                let next = self
+                    .visualizer_picker
+                    .as_ref()
+                    .map(|picker| (picker.cursor + count - 1) % count);
+                if let Some(cursor) = next {
+                    if let Some(picker) = self.visualizer_picker.as_mut() {
+                        picker.cursor = cursor;
+                    }
+                    self.preview_visualizer(Visualizer::ALL[cursor]);
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(picker) = self.visualizer_picker.take() {
+                    self.set_visualizer(Visualizer::ALL[picker.cursor]);
+                }
+            }
+            KeyCode::Esc => {
+                if let Some(picker) = self.visualizer_picker.take() {
+                    // Exactly the visualizer in force when the picker opened
+                    // (S3): nothing of the preview left.
+                    self.preview_visualizer(picker.snapshot);
+                }
+            }
+            _ => {}
+        }
+        Action::None
+    }
+
+    /// Puts the focused visualizer on screen (issue #40, S3): the move
+    /// preview IS the interface, and a preview never writes.
+    fn preview_visualizer(&mut self, visualizer: Visualizer) {
+        self.ui.visualizer = visualizer;
+    }
+
+    /// Adopts a visualizer for good (issue #40, S5): the shapes on screen
+    /// change at once and the file gets `[ui] visualizer` — only when the
+    /// choice changed, the way every remembered value is written.
+    fn set_visualizer(&mut self, visualizer: Visualizer) {
+        if visualizer != self.saved_visualizer {
+            self.saved_visualizer = visualizer;
+            self.ui.visualizer = visualizer;
+            self.remember(
+                Some("ui"),
+                "visualizer",
+                &Self::toml_string(visualizer.name()),
+            );
+        }
+    }
+
+    /// Takes the visualizer to the whole body (issue #40, S4), remembering
+    /// the screen it came from: `V` and `esc` land back there exactly.
+    fn open_visualizer_fullscreen(&mut self) {
+        if self.visualizer_fullscreen.is_none() {
+            self.visualizer_fullscreen = Some(self.view);
+        }
+    }
+
+    /// Leaves the full screen (issue #40, S4): the view it came from comes
+    /// back, whatever the keys pressed while it was up did underneath.
+    fn close_visualizer_fullscreen(&mut self) {
+        if let Some(from) = self.visualizer_fullscreen.take() {
+            self.view = from;
+        }
+    }
+
     /// The palette the theme named `name` gives, with the colour keys that
     /// win over it on top (S2): what the picker previews and applies. A
     /// name that is not loaded falls back to the built-in (S3).
@@ -3746,17 +3981,16 @@ impl<'lib> App<'lib> {
             SettingsKey::ReplayGain => replay_gain_label(self.replay_gain).to_owned(),
             SettingsKey::Repeat => self.repeat.label().to_owned(),
             SettingsKey::Shuffle => if self.shuffle { "on" } else { "off" }.to_owned(),
-            // The theme row shows the theme applied right now (issue #37).
+            // The spectrum row shows the visualizer in force (issue #40).
             SettingsKey::Theme => self.theme_name.clone(),
+            SettingsKey::Spectrum => self.ui.visualizer.name().to_owned(),
             SettingsKey::CoverArt
-            | SettingsKey::Spectrum
             | SettingsKey::Hints
             | SettingsKey::TopBar
             | SettingsKey::Advisories
             | SettingsKey::ViewNumbers => {
                 let drawn = match key {
                     SettingsKey::CoverArt => self.ui.cover_art,
-                    SettingsKey::Spectrum => self.ui.spectrum,
                     SettingsKey::Hints => self.ui.hints,
                     SettingsKey::Advisories => self.ui.advisories,
                     SettingsKey::ViewNumbers => self.ui.view_numbers,
@@ -3816,7 +4050,7 @@ impl<'lib> App<'lib> {
     pub fn draw(&self, frame: &mut Frame) {
         let area = frame.area();
         self.seen_area.set(area);
-        // Set again by `draw_spectrum` only when this frame has room for it.
+        // Set again by `draw_visualizer` only when this frame has room for it.
         self.spectrum_bands.set(0);
         frame.render_widget(
             Block::new().style(Style::new().bg(self.theme.background)),
@@ -3854,8 +4088,15 @@ impl<'lib> App<'lib> {
         // and the terminal meets the threshold, it takes the rightmost quarter
         // of the content and the rest makes way. Otherwise the window is
         // exactly what it is without art — nothing to fake, nothing to move.
+        // The full-screen visualizer (issue #40, S4) takes the whole body:
+        // no now-playing block, but the header and the footer stay.
+        let now_rows = if self.visualizer_fullscreen.is_some() {
+            0
+        } else {
+            self.now_playing_rows(content.height)
+        };
         let [now, header, body] = Layout::vertical([
-            Constraint::Length(self.now_playing_rows(content.height)),
+            Constraint::Length(now_rows),
             Constraint::Length(1),
             Constraint::Min(0),
         ])
@@ -3874,14 +4115,21 @@ impl<'lib> App<'lib> {
         let (pane, now) = slot.map_or((None, now), |(art, rest)| (Some(art), rest));
         self.draw_now_playing(frame, now);
         self.draw_header(frame, header);
-        self.draw_body(frame, body);
-        // The radio view (T6a) replaces the list, not the block above it. It
-        // never paints over the queue (issue #23): when the round trip put
-        // the queue on screen, the queue is what the body draws.
-        if self.view != View::Queue
-            && let Some(view) = &self.radio
-        {
-            view.render(frame, body, &self.theme);
+        // The full-screen visualizer (issue #40, S4) owns the body; the
+        // radio and the lists keep out of its way while it is up, and come
+        // back exactly where they were when it leaves.
+        if self.visualizer_fullscreen.is_some() {
+            self.draw_visualizer(frame, body);
+        } else {
+            self.draw_body(frame, body);
+            // The radio view (T6a) replaces the list, not the block above it. It
+            // never paints over the queue (issue #23): when the round trip put
+            // the queue on screen, the queue is what the body draws.
+            if self.view != View::Queue
+                && let Some(view) = &self.radio
+            {
+                view.render(frame, body, &self.theme);
+            }
         }
         self.draw_footer(frame, footer);
         self.draw_artwork(frame, pane);
@@ -3893,6 +4141,9 @@ impl<'lib> App<'lib> {
         }
         if let Some(picker) = &self.theme_picker {
             self.draw_theme_picker(frame, area, picker);
+        }
+        if let Some(picker) = &self.visualizer_picker {
+            Self::draw_visualizer_picker(frame, area, picker, &self.theme);
         }
         if let Some(prompt) = self.library_prompt() {
             Self::draw_library_prompt(frame, area, prompt, &self.theme);
@@ -4041,7 +4292,7 @@ impl<'lib> App<'lib> {
                     Constraint::Length(1),
                 ])
                 .areas(area);
-                self.draw_spectrum(frame, spectrum_area);
+                self.draw_visualizer(frame, spectrum_area);
                 frame.render_widget(Paragraph::new(title), title_row);
                 frame.render_widget(
                     Paragraph::new(Line::styled(subtitle, Style::new().fg(self.theme.dim))),
@@ -4186,10 +4437,17 @@ impl<'lib> App<'lib> {
         Some((position.as_secs_f64() / total.as_secs_f64()).clamp(0.0, 1.0))
     }
 
-    /// The spectrum bars, as many as the row holds at two columns each, and
-    /// the band count remembered so the next tick analyzes exactly that many.
-    fn draw_spectrum(&self, frame: &mut Frame, area: Rect) {
+    /// The visualizer (issue #40): the chosen shape over the analyzer's
+    /// bands, as many as the row holds at two columns each, with the band
+    /// count remembered so the next tick analyzes exactly that many. `none`
+    /// draws nothing — the low-power rule keeps its rows out either way
+    /// (S6).
+    fn draw_visualizer(&self, frame: &mut Frame, area: Rect) {
         if area.height == 0 {
+            return;
+        }
+        let visualizer = self.ui.visualizer;
+        if visualizer == Visualizer::None {
             return;
         }
         let bands = usize::from(area.width).div_ceil(2);
@@ -4197,7 +4455,13 @@ impl<'lib> App<'lib> {
         let mut levels = self.spectrum.levels().to_vec();
         levels.resize(bands, 0.0);
         frame.render_widget(
-            Paragraph::new(spectrum_lines(&levels, area.height, &self.theme)),
+            Paragraph::new(visualizer.draw(
+                &levels,
+                &self.waveform,
+                self.started.elapsed(),
+                area,
+                &self.theme,
+            )),
             area,
         );
     }
@@ -4960,6 +5224,58 @@ impl<'lib> App<'lib> {
                     ))
                     .padding(ratatui::widgets::Padding::horizontal(1))
                     .style(Style::new().bg(self.theme.background)),
+            ),
+            box_area,
+        );
+    }
+
+    /// The visualizer picker (issue #40): the theme picker's card, one row
+    /// per shape, the focused row in the accent, titled ` visualizer `.
+    fn draw_visualizer_picker(
+        frame: &mut Frame,
+        area: Rect,
+        picker: &VisualizerPicker,
+        theme: &Theme,
+    ) {
+        let names: Vec<&str> = Visualizer::ALL
+            .iter()
+            .map(|visualizer| visualizer.name())
+            .collect();
+        let width = u16::try_from(
+            names
+                .iter()
+                .map(|name| name.chars().count())
+                .max()
+                .unwrap_or(0)
+                + 4,
+        )
+        .unwrap_or(area.width);
+        let height = u16::try_from(names.len() + 2).unwrap_or(area.height);
+        let box_area = centered(area, width, height);
+        let lines = names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| {
+                let style = if index == picker.cursor {
+                    Style::new().fg(theme.accent)
+                } else {
+                    Style::new().fg(theme.text)
+                };
+                Line::styled((*name).to_owned(), style)
+            })
+            .collect::<Vec<_>>();
+        frame.render_widget(Clear, box_area);
+        frame.render_widget(
+            Paragraph::new(lines).block(
+                Block::bordered()
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::new().fg(theme.accent))
+                    .title(Span::styled(
+                        " visualizer ",
+                        Style::new().fg(theme.accent).bold(),
+                    ))
+                    .padding(ratatui::widgets::Padding::horizontal(1))
+                    .style(Style::new().bg(theme.background)),
             ),
             box_area,
         );
@@ -6344,15 +6660,22 @@ const fn cadence(visible: bool, playing: bool, falling: bool, low_power: bool) -
 }
 
 /// Partial blocks by eighths, empty to full.
-const EIGHTHS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+pub(crate) const EIGHTHS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
 /// The spectrum as `rows` lines, top first: one column per band and one of
 /// air after it, each bar filling from the bottom in eighths of a row and
 /// colored by height. A silent band keeps a baseline in the frame's color,
 /// so the analyzer reads as there and quiet rather than missing.
-fn spectrum_lines(levels: &[f32], rows: u16, theme: &Theme) -> Vec<Line<'static>> {
+/// The spectrum as `rows` lines, top first: one column per band and one of
+/// air after it, each bar filling from the bottom in eighths of a row and
+/// colored by height. A silent band keeps a baseline in the frame's color,
+/// so the analyzer reads as there and quiet rather than missing — but full
+/// silence draws nothing at all (issue #40): every visualizer renders
+/// nothing when every band is quiet.
+pub(crate) fn spectrum_lines(levels: &[f32], rows: u16, theme: &Theme) -> Vec<Line<'static>> {
     let rows = usize::from(rows);
     let steps = rows * 8;
+    let quiet = levels.iter().all(|&level| level <= 0.0);
     (0..rows)
         .map(|row| {
             let from_bottom = rows - 1 - row;
@@ -6368,7 +6691,7 @@ fn spectrum_lines(levels: &[f32], rows: u16, theme: &Theme) -> Vec<Line<'static>
                     )]
                     let filled = (level.clamp(0.0, 1.0) * steps as f32).round() as usize;
                     let here = filled.saturating_sub(from_bottom * 8).min(8);
-                    let cell = if here == 0 && from_bottom == 0 {
+                    let cell = if here == 0 && from_bottom == 0 && !quiet {
                         Span::styled("▁", Style::new().fg(theme.border))
                     } else {
                         Span::styled(EIGHTHS[here].to_string(), Style::new().fg(color))
@@ -6384,7 +6707,7 @@ fn spectrum_lines(levels: &[f32], rows: u16, theme: &Theme) -> Vec<Line<'static>
 /// The bar color `from_bottom` rows up out of `rows`: the accent in the
 /// lower half, its bright twin above — the two-step gradient the terminal's
 /// own palette can give.
-fn bar_color(from_bottom: usize, rows: usize, theme: &Theme) -> ratatui::style::Color {
+pub(crate) fn bar_color(from_bottom: usize, rows: usize, theme: &Theme) -> ratatui::style::Color {
     if from_bottom * 2 >= rows {
         theme.accent_bright
     } else {
@@ -6594,7 +6917,7 @@ fn mmss(duration: Duration) -> String {
 }
 
 /// Every row of the help card: the key, then what it does.
-const HELP_ROWS: [(&str, &str); 37] = [
+const HELP_ROWS: [(&str, &str); 40] = [
     ("j / Down", "move down"),
     ("k / Up", "move up"),
     ("g", "first track"),
@@ -6634,6 +6957,9 @@ const HELP_ROWS: [(&str, &str); 37] = [
     ("e", "in playlists: rename the one under the cursor"),
     ("J / K", "move it down / up, in the queue or in a playlist"),
     ("R", "radio: the directory, your favourites, your stations"),
+    ("v", "next visualizer"),
+    ("ctrl+v", "pick a visualizer"),
+    ("V", "the visualizer over the whole window"),
     ("f", "in radio: favourite a station, pin a place"),
     ("F", "in radio: filter what is already loaded"),
     ("N", "in radio: the country list"),
@@ -6793,6 +7119,17 @@ const SETTINGS_ROWS: [SettingsRow; 15] = [
     SettingsRow::Header("library"),
     SettingsRow::Setting(SettingsKey::Folder),
 ];
+
+/// The open visualizer picker (issue #40): the row the cursor is on, and
+/// the visualizer in force when it opened, which `esc` restores exactly.
+#[derive(Debug, Clone, Copy)]
+struct VisualizerPicker {
+    /// The focused visualizer, as its index in [`Visualizer::ALL`].
+    cursor: usize,
+    /// The visualizer the session drew with when the picker opened: what
+    /// `esc` puts back.
+    snapshot: Visualizer,
+}
 
 /// The open theme picker (issue #37): the row the cursor is on, and the
 /// palette in force when it opened, which `esc` restores exactly.
