@@ -1,6 +1,10 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.35.0] - 2026-11-10
+
+### Features
+- **radio:** The cliamp channels as a section of the radio
 ## [0.34.3] - 2026-11-10
 
 ### Fixes
