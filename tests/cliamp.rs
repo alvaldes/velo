@@ -188,3 +188,26 @@ fn a_malformed_body_is_a_malformed_error() {
     let error = client.stations().expect_err("the body is not JSON");
     assert!(matches!(error, Error::Malformed { .. }), "got: {error:?}");
 }
+
+#[test]
+fn a_song_without_an_artist_or_an_album_parses() {
+    // The service omits `artist`, `album` and `filename` for songs it has no
+    // metadata for — dozens per channel (issue #55). A missing field is an
+    // empty one, never a malformed answer.
+    let canned = Canned::new().tracks(
+        r#"{"station":"lofi","name":"Lofi","count":2,"tracks":[
+            {"id":"a","title":"City Lofi","filename":"a.mp3","url":"https://x/a.mp3"},
+            {"id":"b","title":"Summer","artist":"AvapXia","album":"summer lofi","url":"https://x/b.mp3"}]}"#,
+    );
+    let client = Client::new(canned);
+
+    let songs = client.songs("lofi").expect("the answer parses");
+
+    assert_eq!(songs.len(), 2, "both songs arrive");
+    assert_eq!(songs[0].title, "City Lofi");
+    assert_eq!(songs[0].artist, "", "an absent artist is empty");
+    assert_eq!(songs[0].album, "");
+    assert_eq!(songs[0].url, "https://x/a.mp3", "the URL is the identity");
+    assert_eq!(songs[1].artist, "AvapXia");
+    assert_eq!(songs[1].album, "summer lofi");
+}

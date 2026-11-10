@@ -114,14 +114,17 @@ struct TracksWire {
     tracks: Vec<SongWire>,
 }
 
-/// One song as the wire lists it.
+/// One song as the wire lists it. The service omits `artist`, `album` and
+/// `filename` for songs it has no metadata for — dozens per channel — so
+/// those are optional here and an absent field is an empty one, never a
+/// malformed answer (issue #55).
 #[derive(Debug, Deserialize)]
 struct SongWire {
     id: String,
     title: String,
-    artist: String,
-    album: String,
-    filename: String,
+    artist: Option<String>,
+    album: Option<String>,
+    filename: Option<String>,
     url: String,
 }
 
@@ -197,9 +200,9 @@ impl<T: Transport> Client<T> {
             .map(|song| Song {
                 id: song.id,
                 title: song.title,
-                artist: song.artist,
-                album: song.album,
-                filename: song.filename,
+                artist: song.artist.unwrap_or_default(),
+                album: song.album.unwrap_or_default(),
+                filename: song.filename.unwrap_or_default(),
                 url: song.url,
             })
             .collect())
