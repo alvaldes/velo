@@ -30,6 +30,8 @@ pub use ratatui::crossterm;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::fs;
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::TryRecvError;
 use std::sync::{Arc, Mutex};
@@ -49,7 +51,7 @@ use crate::config::{
     LoadedTheme, OpenNode, ReplayGainMode, Session, ThemeColors, ThemeKeys, UiParts,
 };
 use crate::library::{AlbumEntry, ArtistEntry, GenreEntry, IndexReport, Library, TrackEntry};
-use crate::subsonic::cache::CoverArt;
+use crate::subsonic::cache::{CoverArt, is_pseudo_path, is_remote_url};
 use crate::subsonic::scrobble::{ScrobbleTracker, Scrobbles};
 
 use lofty::file::{AudioFile, FileType, TaggedFileExt};
@@ -224,6 +226,45 @@ struct UrlPrompt {
     input: String,
     /// Why the last answer was refused, shown in the card.
     error: Option<String>,
+}
+
+/// The save prompt (issue #45): where a remote track's copy lands. The same
+/// card the seek prompt draws, prefilled with `~/Downloads/<the file's own
+/// name>`; `esc` cancels, and an answer naming a file that is already on
+/// disk is refused there — the name is kept, velo never overwrites.
+#[derive(Debug)]
+struct SavePrompt {
+    /// The destination as typed.
+    input: String,
+    /// Why the last answer was refused, shown in the card.
+    error: Option<String>,
+    /// The entry the copy reads out: the `subsonic://…` row or the
+    /// `http(s)://` URL, exactly as the queue carries it.
+    source: String,
+    /// The file's own name — the prefill's tail, and the name the status
+    /// line reports the copy under.
+    name: String,
+}
+
+/// One saving copy's events: the progress the worker can honestly report,
+/// then its one last word — where the file landed, or why it could not.
+enum SaveEvent {
+    /// `done` bytes written, of `total` when the copy knows the whole size.
+    Progress { done: u64, total: Option<u64> },
+    /// The copy is finished, the file is whole at the destination.
+    Saved { destination: PathBuf },
+    /// Nothing was left behind: the reason is the worker's sentence.
+    Failed(String),
+}
+
+/// The saving copy, on the thread it runs on: [`App::pending_save`] holds
+/// the channel it answers on, and the tick drains it — the pattern the
+/// cover fetch and the radio wiring already use.
+struct SaveRun {
+    /// The file's own name, what the status line reports the copy under.
+    name: String,
+    /// The worker's events, drained once per tick.
+    receiver: std::sync::mpsc::Receiver<SaveEvent>,
 }
 
 /// The small overlay `S` opens on a library track row (issue #4, S3): the
@@ -471,6 +512,166 @@ pub fn plural(count: usize, one: &str, many: &str) -> String {
     }
 }
 
+/// Characters a destination file name cannot carry are replaced, not
+/// dropped: a title keeps its shape (`AC/DC` becomes `AC-DC`) and stays a
+/// single path component. Empty after trimming, [`saved_file_name`] says
+/// `track` — the one honest name when nothing names the file.
+#[must_use]
+fn saved_file_name(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|character| {
+            if matches!(character, '/' | '\\') {
+                '-'
+            } else {
+                character
+            }
+        })
+        .collect();
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        String::from("track")
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+/// The copy's progress, as it can honestly be said (issue #45, S2): a
+/// percentage when the copy knows the whole size, the saving note alone
+/// when it does not. Never a made-up number.
+#[doc(hidden)]
+#[must_use]
+pub fn save_progress_line(name: &str, done: u64, total: Option<u64>) -> String {
+    let percent = total.filter(|total| *total > 0).map(|total| {
+        let percent = u128::from(done) * 100 / u128::from(total);
+        u64::try_from(percent).unwrap_or(u64::MAX)
+    });
+    percent.map_or_else(
+        || format!("⟳ saving {name}…"),
+        |percent| format!("⟳ saving {name}… {percent}%"),
+    )
+}
+
+/// Spawns the saving copy's worker (issue #45, S2): it resolves the entry
+/// through the resolver — the exact call the producer makes, so a cache hit
+/// calls no network and a miss is the cache's ordinary fetch, never a
+/// duplicated download — then copies the cached file out to the
+/// destination, reporting its progress through the channel. The UI never
+/// waits on it: the tick drains the channel.
+fn spawn_save_worker(
+    resolver: Arc<dyn PathResolver>,
+    source: String,
+    destination: PathBuf,
+) -> std::sync::mpsc::Receiver<SaveEvent> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(SaveEvent::Progress {
+            done: 0,
+            total: None,
+        });
+        let cached_file = match resolver.resolve(Path::new(&source)) {
+            Ok(file) => file,
+            Err(error) => {
+                let _ = sender.send(SaveEvent::Failed(error.to_string()));
+                return;
+            }
+        };
+        let total = fs::metadata(&cached_file)
+            .ok()
+            .map(|metadata| metadata.len())
+            .filter(|len| *len > 0);
+        let outcome = match copy_out(&cached_file, &destination, &sender, total) {
+            Ok(()) => sender.send(SaveEvent::Saved { destination }),
+            Err(reason) => sender.send(SaveEvent::Failed(reason)),
+        };
+        let _ = outcome;
+    });
+    receiver
+}
+
+/// Copies the cached file to the destination (issue #45, S4): the bytes go
+/// through a temporary sibling in the destination's own directory, renamed
+/// into place at the end — so a failure anywhere leaves no half file, only
+/// a removed temporary — and a file that appeared at the destination while
+/// the copy ran is not overwritten. Progress rides the channel as it
+/// honestly is: percentages only when the whole size is known, and no more
+/// often than the number moves.
+fn copy_out(
+    from: &Path,
+    destination: &Path,
+    sender: &std::sync::mpsc::Sender<SaveEvent>,
+    total: Option<u64>,
+) -> Result<(), String> {
+    /// The copy reads in chunks of this size — small enough that the
+    /// progress it reports moves in visible steps, large enough that a
+    /// multi-megabyte track is a handful of reads.
+    const CHUNK: usize = 64 * 1024;
+    /// Between honest reports of an unmeasured copy: 8 MiB of news at a
+    /// time, so a stream of unknown length does not flood the channel.
+    const UNMETERED_STEP: u64 = 8 * 1024 * 1024;
+
+    let mut input = fs::File::open(from).map_err(|error| error.to_string())?;
+    let folder = destination.parent().unwrap_or(Path::new("/"));
+    let file_name = destination.file_name().map_or_else(
+        || "velo".to_owned(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    let temp = folder.join(format!(".{file_name}.velo-part-{}", std::process::id()));
+    let mut copy = || -> Result<(), String> {
+        let mut output = fs::File::create(&temp).map_err(|error| error.to_string())?;
+        let mut buffer = vec![0_u8; CHUNK];
+        let mut done: u64 = 0;
+        let mut next_step: u64 = 0;
+        let mut reported_percent: i64 = -1;
+        loop {
+            let read = input.read(&mut buffer).map_err(|error| error.to_string())?;
+            if read == 0 {
+                break;
+            }
+            output
+                .write_all(&buffer[..read])
+                .map_err(|error| error.to_string())?;
+            done = done.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
+            let report = match total {
+                Some(total) => {
+                    let percent = i64::try_from(u128::from(done) * 100 / u128::from(total))
+                        .unwrap_or(i64::MAX);
+                    if percent > reported_percent {
+                        reported_percent = percent;
+                        true
+                    } else {
+                        false
+                    }
+                }
+                None => {
+                    if done >= next_step {
+                        next_step += UNMETERED_STEP;
+                        true
+                    } else {
+                        false
+                    }
+                }
+            };
+            if report {
+                let _ = sender.send(SaveEvent::Progress { done, total });
+            }
+        }
+        output.flush().map_err(|error| error.to_string())?;
+        drop(output);
+        if destination.exists() {
+            return Err(String::from(
+                "the destination appeared while the copy ran — it was not overwritten",
+            ));
+        }
+        fs::rename(&temp, destination).map_err(|error| error.to_string())
+    };
+    let outcome = copy();
+    if outcome.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    outcome
+}
+
 /// The whole interface state, minus the terminal.
 #[expect(
     clippy::struct_excessive_bools,
@@ -680,6 +881,13 @@ pub struct App<'lib> {
     /// The URL prompt (issue #42), while it is open: a one-off `http`/`https`
     /// URL to resolve and play, persisted nowhere.
     url_prompt: Option<UrlPrompt>,
+    /// The save prompt (issue #45), while it is open: where the remote
+    /// track's copy lands, prefilled `~/Downloads/<the file's own name>`.
+    save_prompt: Option<SavePrompt>,
+    /// The save currently running (issue #45), with the channel its worker
+    /// answers on. One copy at a time: a second `ctrl+s` while one runs is
+    /// refused, never a second thread over the same cache.
+    pending_save: Option<SaveRun>,
     /// The append-to-playlist overlay (issue #4), while it is open.
     playlist_picker: Option<PlaylistPicker>,
     /// Turns queue entries into files just before the producer opens them
@@ -823,6 +1031,8 @@ impl<'lib> App<'lib> {
             resolver: None,
             covers: None,
             pending_cover: None,
+            save_prompt: None,
+            pending_save: None,
             scrobbles: None,
             subsonic_warning: None,
             media: None,
@@ -920,6 +1130,8 @@ impl<'lib> App<'lib> {
             resolver: None,
             covers: None,
             pending_cover: None,
+            save_prompt: None,
+            pending_save: None,
             scrobbles: None,
             subsonic_warning: None,
             media: None,
@@ -2114,6 +2326,34 @@ impl<'lib> App<'lib> {
             .and_then(|prompt| prompt.error.as_deref())
     }
 
+    /// Whether the save prompt (issue #45) is open.
+    #[must_use]
+    pub const fn save_prompt_open(&self) -> bool {
+        self.save_prompt.is_some()
+    }
+
+    /// What is typed into the save prompt, empty when it is closed.
+    #[must_use]
+    pub fn save_prompt_input(&self) -> &str {
+        self.save_prompt
+            .as_ref()
+            .map_or("", |prompt| prompt.input.as_str())
+    }
+
+    /// Why the save prompt refused the last answer, if it did.
+    #[must_use]
+    pub fn save_prompt_error(&self) -> Option<&str> {
+        self.save_prompt
+            .as_ref()
+            .and_then(|prompt| prompt.error.as_deref())
+    }
+
+    /// Whether a saving copy (issue #45) is running right now.
+    #[must_use]
+    pub const fn save_running(&self) -> bool {
+        self.pending_save.is_some()
+    }
+
     /// The library root `I` refreshes: the configured one, or `None` when no
     /// library is set. A root accepted in the prompt replaces it.
     pub fn set_library_root(&mut self, root: Option<PathBuf>) {
@@ -2396,6 +2636,10 @@ impl<'lib> App<'lib> {
         // one says `⟳ loading…` on the status line.
         self.radio_poll();
         self.poll_cover();
+        // The saving copy's worker (issue #45): its progress and its last
+        // word land without a key press, the way a finished cover and a
+        // finished directory request do.
+        self.poll_save();
         self.refresh_artwork();
         self.explain_hidden_art();
         self.listen();
@@ -2921,6 +3165,11 @@ impl<'lib> App<'lib> {
         if self.url_prompt.is_some() {
             return self.on_url_key(event.code);
         }
+        // The save prompt owns what is typed into it (issue #45), the way the
+        // URL prompt does.
+        if self.save_prompt.is_some() {
+            return self.on_save_key(event.code);
+        }
         // The append overlay owns every key too (issue #4): `j`/`k` move
         // between the saved names, `enter` applies, `esc` cancels.
         if self.playlist_picker.is_some() {
@@ -3006,6 +3255,14 @@ impl<'lib> App<'lib> {
                 }
                 KeyCode::Char('p') => {
                     self.settings = Some(SettingsCard::default());
+                    return Action::None;
+                }
+                // `ctrl+s` (issue #45): saving the remote track the cursor
+                // or the transport stands on, out of the cache. The local
+                // file and the live station are refused inside, each with
+                // its own line.
+                KeyCode::Char('s') => {
+                    self.ask_to_save_remote();
                     return Action::None;
                 }
                 KeyCode::Char('l') if !matches!(self.position, Position::Files) => {
@@ -3911,6 +4168,215 @@ impl<'lib> App<'lib> {
         self.play_station(typed.clone(), typed, expansion)
     }
 
+    /// The keys while the save prompt is open (issue #45): printable keys
+    /// type into it, `backspace` deletes, `enter` answers, `esc` closes it.
+    /// The same shape the URL prompt has (issue #42).
+    fn on_save_key(&mut self, code: ratatui::crossterm::event::KeyCode) -> Action {
+        use ratatui::crossterm::event::KeyCode;
+
+        match code {
+            KeyCode::Esc => {
+                self.save_prompt = None;
+                Action::None
+            }
+            KeyCode::Backspace => {
+                if let Some(prompt) = self.save_prompt.as_mut() {
+                    prompt.input.pop();
+                    prompt.error = None;
+                }
+                Action::None
+            }
+            KeyCode::Char(character) => {
+                if let Some(prompt) = self.save_prompt.as_mut() {
+                    prompt.input.push(character);
+                    prompt.error = None;
+                }
+                Action::None
+            }
+            KeyCode::Enter => self.answer_save_prompt(),
+            _ => Action::None,
+        }
+    }
+
+    /// Answers the save prompt (issue #45): the destination is resolved the
+    /// way the library prompt resolves its path — `~` against the home, a
+    /// path that is neither absolute nor `~`ed against `/` — and refused in
+    /// the card when a file is already there: the name is kept and the user
+    /// picks another, velo never overwrites (S3). An accepted answer closes
+    /// the prompt and starts the copy on its own thread (S2).
+    fn answer_save_prompt(&mut self) -> Action {
+        let Some(prompt) = self.save_prompt.as_ref() else {
+            return Action::None;
+        };
+        let typed = prompt.input.trim().to_owned();
+        let source = prompt.source.clone();
+        let name = prompt.name.clone();
+        if typed.is_empty() {
+            if let Some(prompt) = self.save_prompt.as_mut() {
+                prompt.error = Some(String::from("the destination is empty — name the file"));
+            }
+            return Action::None;
+        }
+        let home = std::env::var_os("HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
+        let destination =
+            crate::config::expand_path(Path::new(&typed), home.as_deref(), Path::new("/"));
+        if destination.exists() {
+            if let Some(prompt) = self.save_prompt.as_mut() {
+                prompt.error = Some(format!(
+                    "{} is already there — velo never overwrites: pick another name",
+                    prompt.name
+                ));
+            }
+            return Action::None;
+        }
+        self.save_prompt = None;
+        self.start_save(source, name, destination);
+        Action::None
+    }
+
+    /// Opens the save prompt (issue #45, S1) for the entry the transport or
+    /// the cursor stands on — the same standing rule `ctrl+i` describes
+    /// with. A screen with no entry, a local file (already on disk: copying
+    /// it is `cp`) and a live station (a stream does not end, so there is
+    /// nothing to save) are refused with their own lines, and a save already
+    /// running is never joined by a second one (S2).
+    fn ask_to_save_remote(&mut self) {
+        if let Some(run) = self.pending_save.as_ref() {
+            self.status = format!("velo: already saving {} — wait for it to end", run.name);
+            return;
+        }
+        let Some(entry) = self
+            .playing_entry()
+            .cloned()
+            .or_else(|| self.cursor_entry())
+        else {
+            "velo: nothing to save here".clone_into(&mut self.status);
+            return;
+        };
+        match &entry {
+            Entry::Station { .. } => {
+                self.status = format!(
+                    "velo: {} is a live stream, and a stream does not end — there is nothing \
+                     to save",
+                    entry.label()
+                );
+                return;
+            }
+            Entry::File(path) if !is_pseudo_path(path) && !is_remote_url(path) => {
+                self.status = format!(
+                    "velo: {} is already a file on disk — copying it is cp",
+                    entry.label()
+                );
+                return;
+            }
+            Entry::File(_) => {}
+        }
+        let source = entry
+            .as_path()
+            .map_or_else(String::new, |path| path.to_string_lossy().into_owned());
+        let name = self.save_source_name(&source);
+        self.save_prompt = Some(SavePrompt {
+            input: format!("~/Downloads/{name}"),
+            error: None,
+            source,
+            name,
+        });
+    }
+
+    /// The file's own name, as the prefill sees it (issue #45): the title
+    /// the index or a wrapper carries when one is known, else the entry's
+    /// own last path segment without any query — a channel song's URL names
+    /// its file. `track` when nothing names it.
+    fn save_source_name(&self, source: &str) -> String {
+        let path = Path::new(source);
+        if let Some(entry) = self.known_tracks().find(|entry| entry.path == path)
+            && !entry.title.is_empty()
+        {
+            return saved_file_name(&entry.title);
+        }
+        if let Some(title) = self.song_titles.get(source)
+            && !title.is_empty()
+        {
+            return saved_file_name(title);
+        }
+        let segment = source.rsplit('/').next().unwrap_or(source);
+        let segment = segment.split(['?', '#']).next().unwrap_or(segment);
+        if segment.is_empty() {
+            return String::from("track");
+        }
+        saved_file_name(segment)
+    }
+
+    /// Starts the saving copy (issue #45, S2): the worker resolves the
+    /// entry through the resolver — a cache hit calls no network, a miss
+    /// downloads once, the cache's ordinary job — and copies the bytes out
+    /// to the destination, off the event loop. The resolver answers with the
+    /// cached file itself, so nothing here duplicates the download and the
+    /// cache is never moved nor deleted: a copy out, not a move (S4).
+    fn start_save(&mut self, source: String, name: String, destination: PathBuf) {
+        let Some(resolver) = self.resolver.clone() else {
+            self.status = String::from(
+                "velo: nothing is configured to fetch remote tracks — no server, no channels",
+            );
+            return;
+        };
+        let receiver = spawn_save_worker(resolver, source, destination);
+        self.status = format!("⟳ saving {name}…");
+        self.pending_save = Some(SaveRun { name, receiver });
+    }
+
+    /// Collects what the saving copy's worker has said since the last turn
+    /// (issue #45): the newest progress goes to the status line while the
+    /// copy runs, and the one last word — where the file landed, or why it
+    /// could not — ends it. A worker that ended without a word is reported
+    /// rather than left hanging. Never blocks: the copy runs on its own
+    /// thread, the pattern the cover fetch and the radio wiring use.
+    fn poll_save(&mut self) {
+        let Some(run) = self.pending_save.as_ref() else {
+            return;
+        };
+        let mut finished: Option<String> = None;
+        let mut progress: Option<String> = None;
+        loop {
+            match run.receiver.try_recv() {
+                Ok(SaveEvent::Progress { done, total }) => {
+                    progress = Some(save_progress_line(&run.name, done, total));
+                }
+                Ok(SaveEvent::Saved { destination }) => {
+                    finished = Some(format!(
+                        "velo: {} saved to {}",
+                        run.name,
+                        destination.display()
+                    ));
+                }
+                Ok(SaveEvent::Failed(reason)) => {
+                    finished = Some(format!("velo: {} could not be saved: {reason}", run.name));
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    if finished.is_none() {
+                        finished = Some(format!(
+                            "velo: {} could not be saved: the copy ended without a report",
+                            run.name
+                        ));
+                    }
+                    break;
+                }
+            }
+        }
+        if finished.is_some() {
+            self.pending_save = None;
+        }
+        if let Some(line) = progress {
+            self.status = line;
+        }
+        if let Some(line) = finished {
+            self.status = line;
+        }
+    }
+
     /// The keys while the help is open (S1): `j`/`k`/`↓`/`↑` scroll it,
     /// `g`/`G` jump to its ends, `/` starts a filter that printable keys type
     /// into until `Enter`; `Esc` clears a filter before it closes the help,
@@ -4613,6 +5079,9 @@ impl<'lib> App<'lib> {
         }
         if let Some(prompt) = &self.url_prompt {
             Self::draw_url_prompt(frame, area, prompt, &self.theme);
+        }
+        if let Some(prompt) = &self.save_prompt {
+            Self::draw_save_prompt(frame, area, prompt, &self.theme);
         }
         if let Some(picker) = &self.playlist_picker {
             Self::draw_playlist_picker(frame, area, picker, &self.theme);
@@ -5987,6 +6456,41 @@ impl<'lib> App<'lib> {
                     .border_type(BorderType::Rounded)
                     .border_style(Style::new().fg(theme.accent))
                     .title(Span::styled(" url ", Style::new().fg(theme.accent).bold()))
+                    .padding(ratatui::widgets::Padding::new(1, 1, 1, 0))
+                    .style(Style::new().bg(theme.background)),
+            ),
+            box_area,
+        );
+    }
+
+    /// The save prompt (issue #45), drawn in the seek prompt's style: a
+    /// question, the destination being typed, and `enter save · esc cancel`
+    /// — or the reason the last answer was refused under what was typed.
+    fn draw_save_prompt(frame: &mut Frame, area: Rect, prompt: &SavePrompt, theme: &Theme) {
+        let width = area.width.saturating_sub(8).clamp(24, 56);
+        let box_area = centered(area, width, 7);
+        let text = vec![
+            Line::styled("Save the track where?", Style::new().fg(theme.text)),
+            Line::styled(
+                "a copy out — the library and the cache are untouched",
+                Style::new().fg(theme.dim),
+            ),
+            Line::from(vec![
+                Span::styled(prompt.input.clone(), Style::new().fg(theme.accent)),
+                Span::styled("▏", Style::new().fg(theme.secondary)),
+            ]),
+            prompt.error.as_ref().map_or_else(
+                || Line::styled("enter save · esc cancel", Style::new().fg(theme.dim)),
+                |error| Line::styled(error.clone(), Style::new().fg(theme.secondary)),
+            ),
+        ];
+        frame.render_widget(Clear, box_area);
+        frame.render_widget(
+            Paragraph::new(text).block(
+                Block::bordered()
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::new().fg(theme.accent))
+                    .title(Span::styled(" save ", Style::new().fg(theme.accent).bold()))
                     .padding(ratatui::widgets::Padding::new(1, 1, 1, 0))
                     .style(Style::new().bg(theme.background)),
             ),
@@ -7637,7 +8141,7 @@ fn mmss(duration: Duration) -> String {
 }
 
 /// Every row of the help card: the key, then what it does.
-const HELP_ROWS: [(&str, &str); 45] = [
+const HELP_ROWS: [(&str, &str); 46] = [
     ("j / Down", "move down"),
     ("k / Up", "move up"),
     ("g / home", "first track"),
@@ -7693,6 +8197,10 @@ const HELP_ROWS: [(&str, &str); 45] = [
     ("N", "in radio: the country list"),
     ("ctrl+r", "in radio: refetch the place you are in"),
     ("i", "in radio: report a station that cannot play"),
+    (
+        "ctrl+s",
+        "save a remote track out of the cache, to a folder you name",
+    ),
     // Kept at the end so the rows the first screenful pins stay put: the
     // tests read `I` and `q` on a small window, where a row added above
     // them would silently scroll them off.

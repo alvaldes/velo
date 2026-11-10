@@ -134,6 +134,41 @@ config line, not a release.
 and pins, the queue's live semantics, history, playlists and the keys are
 untouched.
 
+## Issue #45 — a remote track can be kept (save out)
+
+The author's words: "A Subsonic track, or a song from a configured channel, is
+fetched into a cache and played from there — and `--cache-clean` deletes it.
+There is no way to keep one, and a local file has nothing to keep." `ctrl+s`
+keeps one.
+
+**S13 — the save is a copy out, off the event loop.** `ctrl+s` on a remote
+entry — the one playing, the row under the cursor in the queue, or a row in a
+list that holds remote tracks, the same standing rule `ctrl+i` describes with
+— asks for a destination in the seek prompt's card, prefilled
+`~/Downloads/<the file's own name>`: the title the index or a wrapper carries
+when one is known (`/` becomes `-`, a name never leaves one path component),
+else the entry's own last URL segment without its query. `esc` cancels; the
+copy runs on a worker thread, resolves the entry through the session's own
+resolver — the exact call the producer makes, so a cache hit costs no network
+and a miss is the cache's ordinary fetch-once, never a duplicated download —
+and the status line shows the progress it can honestly report (a percentage
+only when the whole size is known) until one last line says where the file
+landed. A second `ctrl+s` while one runs is refused in one line, never a
+second copy.
+
+**S14 — the refusals and the existing destination.** A local file is refused
+with its own line (it is already on disk — copying it is `cp`) and a live
+station with its own (a stream does not end, so there is nothing to save).
+An answer naming a file that is already on disk is refused in the card with
+the name kept — velo never overwrites, so nothing is said silently.
+
+**S15 — a failure says why and leaves no half file.** The bytes go through a
+temporary sibling in the destination's own directory, renamed into place at
+the end: unreachable, disk full, a destination directory that does not exist
+— each is one line with the reason, and whatever was written is removed
+rather than half a file. The destination is the user's choice: the library is
+never touched and the cache is neither moved nor deleted.
+
 ## Slices
 
 One pass, and deliberately small: no new source, no new dependency, no
@@ -258,3 +293,12 @@ config line, not a release. The section is cliamp-shaped, as the quote asks:
 channels with track counts and live listener counts, and a channel's songs
 listed `artist · album` like the app's, each song playing and queueing as a
 cached file, never a live stream (S7–S12 above).
+
+**L6** — the issue (#45), in its own words: "A Subsonic track, or a song from
+a configured channel, is fetched into a cache and played from there — and
+`--cache-clean` deletes it. There is no way to keep one, and a local file has
+nothing to keep." `ctrl+s` keeps one: the specs above (S13–S15) pin the copy
+out, the two refusals and the never-overwritten destination; the choice the
+issue left open (say the file is there, or append a suffix) was taken as the
+card's refusal with the name kept, because it is the one answer that never
+writes anything the user did not ask for.
