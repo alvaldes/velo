@@ -47,3 +47,12 @@ style: one status line, nothing else moved.
 
 **L1** — the author, on the issue: "tratar de mantener los keymaps de cliamp
 para que sea mas facil usar la app para usuarios que vengan de ahi".
+
+**L2** — issue #42 moved one key to make room and took the freed one:
+`I` now refreshes the library index (the work `u` did, `i` staying the
+radio's report key), and `u` opens a URL prompt — a one-off `http`/`https`
+URL resolved the way a configured station is, reusing cliamp's wrapper rule
+and `play_station`'s outcomes: a plain stream plays live, a multi-entry
+wrapper opens as the songs it lists, a refusal is one status line, and
+nothing is persisted. The moved rows (code, `HELP_ROWS`, README keys table,
+reindex tests) went together, so no key is left half-moved.

@@ -1661,25 +1661,25 @@ fn index_in_background(temp: &TempLibrary) -> Result<velo::library::IndexReport,
 }
 
 #[test]
-fn u_asks_the_shell_to_refresh_the_configured_library() {
-    let temp = TempLibrary::new("u-refresh");
+fn i_asks_the_shell_to_refresh_the_configured_library() {
+    let temp = TempLibrary::new("i-refresh");
     let mut app = App::browse(Some(&temp.library));
     app.set_library_root(Some(temp.root.clone()));
 
-    assert_eq!(app.on_key(key(KeyCode::Char('u'))), Action::Reindex);
+    assert_eq!(app.on_key(key(KeyCode::Char('I'))), Action::Reindex);
     app.apply(Action::Reindex);
     assert_eq!(app.take_library_root(), Some(temp.root.clone()));
 }
 
 #[test]
-fn u_while_an_index_runs_starts_no_second_one_and_says_so() {
-    let temp = TempLibrary::new("u-busy");
+fn i_while_an_index_runs_starts_no_second_one_and_says_so() {
+    let temp = TempLibrary::new("i-busy");
     let mut app = App::browse(Some(&temp.library));
     app.set_library_root(Some(temp.root.clone()));
     app.index_started(&temp.root);
     assert_eq!(app.indexing(), Some(temp.root.as_path()));
 
-    assert_eq!(app.on_key(key(KeyCode::Char('u'))), Action::None);
+    assert_eq!(app.on_key(key(KeyCode::Char('I'))), Action::None);
     assert!(
         app.status().contains("already indexing"),
         "{}",
@@ -1689,17 +1689,17 @@ fn u_while_an_index_runs_starts_no_second_one_and_says_so() {
 }
 
 #[test]
-fn u_without_a_library_says_how_to_set_one() {
+fn i_without_a_library_says_how_to_set_one() {
     let mut app = App::browse(None);
-    assert_eq!(app.on_key(key(KeyCode::Char('u'))), Action::None);
+    assert_eq!(app.on_key(key(KeyCode::Char('I'))), Action::None);
     assert!(app.status().contains("no library set"), "{}", app.status());
     assert!(app.status().contains('L'), "{}", app.status());
     assert_eq!(app.take_library_root(), None);
 }
 
 #[test]
-fn a_library_chosen_in_the_prompt_is_the_one_u_refreshes() {
-    let temp = TempLibrary::new("u-after-prompt");
+fn a_library_chosen_in_the_prompt_is_the_one_i_refreshes() {
+    let temp = TempLibrary::new("i-after-prompt");
     let home = temp.root.clone();
     fs::create_dir_all(home.join("Music")).unwrap();
     let mut app = App::browse(Some(&temp.library));
@@ -1710,7 +1710,7 @@ fn a_library_chosen_in_the_prompt_is_the_one_u_refreshes() {
     press(&mut app, KeyCode::Enter);
     assert_eq!(app.take_library_root(), Some(home.join("Music")));
 
-    assert_eq!(app.on_key(key(KeyCode::Char('u'))), Action::Reindex);
+    assert_eq!(app.on_key(key(KeyCode::Char('I'))), Action::Reindex);
     app.apply(Action::Reindex);
     assert_eq!(app.take_library_root(), Some(home.join("Music")));
 }
@@ -1955,11 +1955,11 @@ fn an_open_search_reads_the_new_pool_when_an_index_finishes_and_keeps_its_select
 }
 
 #[test]
-fn u_says_the_index_could_not_be_opened_instead_of_asking_for_a_library() {
+fn i_says_the_index_could_not_be_opened_instead_of_asking_for_a_library() {
     let mut app = App::browse(None);
     app.index_unavailable("unable to open database file");
 
-    assert_eq!(app.on_key(key(KeyCode::Char('u'))), Action::None);
+    assert_eq!(app.on_key(key(KeyCode::Char('I'))), Action::None);
     let status = app.status().to_owned();
     assert!(status.contains("cannot open the library index"), "{status}");
     assert!(status.contains("unable to open database file"), "{status}");
@@ -2441,7 +2441,7 @@ fn a_node_the_index_no_longer_has_falls_back_silently_to_the_level_above() {
 }
 
 #[test]
-fn u_after_choosing_a_library_without_an_open_index_says_why_nothing_happens() {
+fn i_after_choosing_a_library_without_an_open_index_says_why_nothing_happens() {
     let home = std::env::temp_dir().join(format!("velo-ui-no-index-{}", std::process::id()));
     fs::create_dir_all(home.join("Music")).unwrap();
     for error in [Some("unable to open database file"), None] {
@@ -2454,7 +2454,7 @@ fn u_after_choosing_a_library_without_an_open_index_says_why_nothing_happens() {
         press(&mut app, KeyCode::Enter);
         assert!(!app.library_prompt_open());
 
-        assert_eq!(app.on_key(key(KeyCode::Char('u'))), Action::None);
+        assert_eq!(app.on_key(key(KeyCode::Char('I'))), Action::None);
         let status = app.status().to_owned();
         assert!(status.contains("index"), "{status}");
         assert!(!status.contains("no library set"), "{status}");

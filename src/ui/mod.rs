@@ -210,6 +210,17 @@ struct PlaylistPrompt {
     rename: Option<String>,
 }
 
+/// The URL prompt (issue #42): what is being typed and why the last answer
+/// was refused. The same card the seek prompt draws, a question over the
+/// typed URL and the reason a refused one stays.
+#[derive(Debug, Default)]
+struct UrlPrompt {
+    /// The URL as typed.
+    input: String,
+    /// Why the last answer was refused, shown in the card.
+    error: Option<String>,
+}
+
 /// The small overlay `S` opens on a library track row (issue #4, S3): the
 /// saved playlists' names, one row each; `enter` appends the row's track to
 /// the chosen one, `esc` cancels.
@@ -257,7 +268,7 @@ struct Recent {
     seen: Option<String>,
 }
 
-/// Refreshing the index (library-refresh T3): which folder `u` re-indexes
+/// Refreshing the index (library-refresh T3): which folder `I` re-indexes
 /// and which one is being indexed right now.
 #[derive(Debug, Default)]
 struct Refresh {
@@ -658,6 +669,9 @@ pub struct App<'lib> {
     /// The playlist-name prompt (issue #4), while it is open: saving the
     /// queue as a new playlist, or renaming one.
     playlist_prompt: Option<PlaylistPrompt>,
+    /// The URL prompt (issue #42), while it is open: a one-off `http`/`https`
+    /// URL to resolve and play, persisted nowhere.
+    url_prompt: Option<UrlPrompt>,
     /// The append-to-playlist overlay (issue #4), while it is open.
     playlist_picker: Option<PlaylistPicker>,
     /// Turns queue entries into files just before the producer opens them
@@ -681,7 +695,7 @@ pub struct App<'lib> {
     /// so a value the file holds is never written back.
     saved: Session,
     saved_volume: u8,
-    /// An accepted library root, or the one `u` refreshes, waiting for the
+    /// An accepted library root, or the one `I` refreshes, waiting for the
     /// shell to index it.
     library_root: Option<PathBuf>,
     refresh: Refresh,
@@ -795,6 +809,7 @@ impl<'lib> App<'lib> {
             favourite_rows: Vec::new(),
             playlist_rows: Vec::new(),
             playlist_prompt: None,
+            url_prompt: None,
             playlist_picker: None,
             resolver: None,
             covers: None,
@@ -890,6 +905,7 @@ impl<'lib> App<'lib> {
             favourite_rows: Vec::new(),
             playlist_rows: Vec::new(),
             playlist_prompt: None,
+            url_prompt: None,
             playlist_picker: None,
             resolver: None,
             covers: None,
@@ -2066,7 +2082,29 @@ impl<'lib> App<'lib> {
             .map_or("", |prompt| prompt.input.as_str())
     }
 
-    /// The library root `u` refreshes: the configured one, or `None` when no
+    /// Whether the URL prompt (issue #42) is open.
+    #[must_use]
+    pub const fn url_prompt_open(&self) -> bool {
+        self.url_prompt.is_some()
+    }
+
+    /// What is typed into the URL prompt, empty when it is closed.
+    #[must_use]
+    pub fn url_prompt_input(&self) -> &str {
+        self.url_prompt
+            .as_ref()
+            .map_or("", |prompt| prompt.input.as_str())
+    }
+
+    /// Why the URL prompt refused the last answer, if it did.
+    #[must_use]
+    pub fn url_prompt_error(&self) -> Option<&str> {
+        self.url_prompt
+            .as_ref()
+            .and_then(|prompt| prompt.error.as_deref())
+    }
+
+    /// The library root `I` refreshes: the configured one, or `None` when no
     /// library is set. A root accepted in the prompt replaces it.
     pub fn set_library_root(&mut self, root: Option<PathBuf>) {
         self.refresh.root = root;
@@ -2113,7 +2151,7 @@ impl<'lib> App<'lib> {
         self.refresh.open_error = Some(error);
     }
 
-    /// What `u` answers: the refresh to run, or why there is none.
+    /// What `I` answers: the refresh to run, or why there is none.
     fn ask_to_reindex(&mut self) -> Action {
         if let Some(running) = &self.refresh.running {
             self.status = format!("already indexing {}", running.display());
@@ -2868,6 +2906,11 @@ impl<'lib> App<'lib> {
         if self.playlist_prompt.is_some() {
             return self.on_playlist_prompt_key(event.code);
         }
+        // The URL prompt owns what is typed into it (issue #42), the way the
+        // seek prompt does.
+        if self.url_prompt.is_some() {
+            return self.on_url_key(event.code);
+        }
         // The append overlay owns every key too (issue #4): `j`/`k` move
         // between the saved names, `enter` applies, `esc` cancels.
         if self.playlist_picker.is_some() {
@@ -3198,7 +3241,18 @@ impl<'lib> App<'lib> {
                 self.open_playlists();
                 Action::None
             }
-            KeyCode::Char('u') if !matches!(self.position, Position::Files) => {
+            // The URL prompt (issue #42): a one-off `http`/`https` URL — a
+            // plain stream, or a wrapper with a single entry, plays live;
+            // a wrapper listing several songs opens as those songs. Nothing
+            // is persisted: no station in `radio.toml`.
+            KeyCode::Char('u') => {
+                self.url_prompt = Some(UrlPrompt::default());
+                Action::None
+            }
+            // Refreshing the index moved here from `u` (issue #42), which
+            // now opens the URL prompt: `I` beside `i`, which in the radio
+            // reports a station. The command-line list has no index.
+            KeyCode::Char('I') if !matches!(self.position, Position::Files) => {
                 self.ask_to_reindex()
             }
             // `ctrl+r` is the radio's refresh (issue #25): the keymap must
@@ -3775,6 +3829,66 @@ impl<'lib> App<'lib> {
                 Action::None
             }
         }
+    }
+
+    /// The keys while the URL prompt is open (issue #42): printable keys type
+    /// into it, `backspace` deletes, `enter` answers, `esc` closes it. The
+    /// same shape the seek prompt has (issue #6).
+    fn on_url_key(&mut self, code: ratatui::crossterm::event::KeyCode) -> Action {
+        use ratatui::crossterm::event::KeyCode;
+
+        match code {
+            KeyCode::Esc => {
+                self.url_prompt = None;
+                Action::None
+            }
+            KeyCode::Backspace => {
+                if let Some(prompt) = self.url_prompt.as_mut() {
+                    prompt.input.pop();
+                    prompt.error = None;
+                }
+                Action::None
+            }
+            KeyCode::Char(character) => {
+                if let Some(prompt) = self.url_prompt.as_mut() {
+                    prompt.input.push(character);
+                    prompt.error = None;
+                }
+                Action::None
+            }
+            KeyCode::Enter => self.answer_url_prompt(),
+            _ => Action::None,
+        }
+    }
+
+    /// Answers the URL prompt (issue #42): the URL is resolved exactly the
+    /// way a configured station is — [`App::play_station`], cliamp S1 — so
+    /// a plain stream, or a wrapper with a single entry, plays live as an
+    /// `Entry::Station`, and a wrapper with several entries opens as the
+    /// finite list of its songs, one `Entry::File` per song whose path is
+    /// the URL the cache resolver fetches. Nothing is persisted. An answer
+    /// that is not an `http`/`https` URL stays in the card with its reason;
+    /// a URL the resolution refuses — HLS, an undecodable body, an
+    /// unreachable server — comes back as [`App::play_station`]'s one
+    /// refusal line and the prompt closes, `Action::None`, nothing queued.
+    fn answer_url_prompt(&mut self) -> Action {
+        let Some(typed) = self
+            .url_prompt
+            .as_ref()
+            .map(|prompt| prompt.input.trim().to_owned())
+        else {
+            return Action::None;
+        };
+        if !typed.starts_with("http://") && !typed.starts_with("https://") {
+            if let Some(prompt) = self.url_prompt.as_mut() {
+                prompt.error = Some(String::from("the URL must start with http:// or https://"));
+            }
+            return Action::None;
+        }
+        let expansion =
+            crate::radio::stream::expand(&typed, crate::radio::stream::Timeouts::default());
+        self.url_prompt = None;
+        self.play_station(typed.clone(), typed, expansion)
     }
 
     /// The keys while the help is open (S1): `j`/`k`/`↓`/`↑` scroll it,
@@ -4391,6 +4505,9 @@ impl<'lib> App<'lib> {
         }
         if let Some(prompt) = &self.playlist_prompt {
             Self::draw_playlist_prompt(frame, area, prompt, &self.theme);
+        }
+        if let Some(prompt) = &self.url_prompt {
+            Self::draw_url_prompt(frame, area, prompt, &self.theme);
         }
         if let Some(picker) = &self.playlist_picker {
             Self::draw_playlist_picker(frame, area, picker, &self.theme);
@@ -5676,6 +5793,41 @@ impl<'lib> App<'lib> {
                         " playlist ",
                         Style::new().fg(theme.accent).bold(),
                     ))
+                    .padding(ratatui::widgets::Padding::new(1, 1, 1, 0))
+                    .style(Style::new().bg(theme.background)),
+            ),
+            box_area,
+        );
+    }
+
+    /// The URL prompt (issue #42), drawn in the seek prompt's style: a
+    /// question, the typed URL, and `enter play · esc cancel` — or the
+    /// reason the last answer was refused under what was typed.
+    fn draw_url_prompt(frame: &mut Frame, area: Rect, prompt: &UrlPrompt, theme: &Theme) {
+        let width = area.width.saturating_sub(8).clamp(20, 48);
+        let box_area = centered(area, width, 7);
+        let text = vec![
+            Line::styled("Play what URL?", Style::new().fg(theme.text)),
+            Line::styled(
+                "a live stream — or the songs a playlist lists",
+                Style::new().fg(theme.dim),
+            ),
+            Line::from(vec![
+                Span::styled(prompt.input.clone(), Style::new().fg(theme.accent)),
+                Span::styled("▏", Style::new().fg(theme.secondary)),
+            ]),
+            prompt.error.as_ref().map_or_else(
+                || Line::styled("enter play · esc cancel", Style::new().fg(theme.dim)),
+                |error| Line::styled(error.clone(), Style::new().fg(theme.secondary)),
+            ),
+        ];
+        frame.render_widget(Clear, box_area);
+        frame.render_widget(
+            Paragraph::new(text).block(
+                Block::bordered()
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::new().fg(theme.accent))
+                    .title(Span::styled(" url ", Style::new().fg(theme.accent).bold()))
                     .padding(ratatui::widgets::Padding::new(1, 1, 1, 0))
                     .style(Style::new().bg(theme.background)),
             ),
@@ -7326,7 +7478,7 @@ fn mmss(duration: Duration) -> String {
 }
 
 /// Every row of the help card: the key, then what it does.
-const HELP_ROWS: [(&str, &str); 44] = [
+const HELP_ROWS: [(&str, &str); 45] = [
     ("j / Down", "move down"),
     ("k / Up", "move up"),
     ("g / home", "first track"),
@@ -7354,7 +7506,11 @@ const HELP_ROWS: [(&str, &str); 44] = [
     ("1 2 3 4", "artists, albums, tracks, genres"),
     ("o / ctrl+l", "set the library folder"),
     ("L", "the saved playlists"),
-    ("u", "refresh the library index"),
+    ("I", "refresh the library index"),
+    (
+        "u",
+        "open a URL: a live stream, or the songs its wrapper lists",
+    ),
     (
         "",
         "no library set: a prompt asks for its path, tab completes",
@@ -7379,7 +7535,7 @@ const HELP_ROWS: [(&str, &str); 44] = [
     ("ctrl+r", "in radio: refetch the place you are in"),
     ("i", "in radio: report a station that cannot play"),
     // Kept at the end so the rows the first screenful pins stay put: the
-    // tests read `u` and `q` on a small window, where a row added above
+    // tests read `I` and `q` on a small window, where a row added above
     // them would silently scroll them off.
     ("P", "low power: a quarter of the redraw rate, no spectrum"),
     ("q / ctrl+c", "quit"),
