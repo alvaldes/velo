@@ -557,3 +557,27 @@ fn the_list_reads_the_store_anew_every_time_it_opens() {
 
     let _ = fs::remove_dir_all(&temp.root);
 }
+
+#[test]
+fn the_favourites_list_shows_no_library_tabs_and_ignores_the_library_keys() {
+    // Issue #49: the source borrows the library's view but is not the index.
+    let temp = TempLibrary::new("tabs");
+    let mut app = app(&temp);
+    app.open_sources();
+    press(&mut app, KeyCode::Char('G')); // the last row: Playlists
+    press(&mut app, KeyCode::Char('k')); // up onto Favourites
+    press(&mut app, KeyCode::Enter);
+
+    let before = screen(&app);
+    assert!(
+        !before.contains("artists") && !before.contains("genres"),
+        "no library tabs above the list, got:\n{before}"
+    );
+
+    press(&mut app, KeyCode::Char('2'));
+    let after = screen(&app);
+    assert!(
+        !after.contains("genres"),
+        "the library keys do nothing here, got:\n{after}"
+    );
+}

@@ -943,6 +943,23 @@ impl<'lib> App<'lib> {
         self.radio.is_some()
     }
 
+    /// Whether the screen is the library itself, rather than one of the
+    /// lists that borrow its view: `Recent`, `Favourites`, `Playlists` and a
+    /// flat command-line list are not the index, so the library's tabs and
+    /// its `1`–`4` keys are none of their business (issue #49).
+    fn in_library(&self) -> bool {
+        matches!(
+            self.position,
+            Position::Artists
+                | Position::Albums { .. }
+                | Position::Tracks { .. }
+                | Position::AllAlbums
+                | Position::AllTracks
+                | Position::Genres
+                | Position::Genre { .. }
+        )
+    }
+
     /// The rows of the sources screen, in the order it shows them.
     #[must_use]
     pub fn sources_labels(&self) -> Vec<String> {
@@ -3063,7 +3080,7 @@ impl<'lib> App<'lib> {
                 }
             }
             KeyCode::Enter => self.enter(),
-            KeyCode::Char(key @ '1'..='4') if !matches!(self.position, Position::Files) => {
+            KeyCode::Char(key @ '1'..='4') if self.in_library() => {
                 BrowseBy::from_key(key).map_or(Action::None, Action::Browse)
             }
             KeyCode::Char(' ') => Action::TogglePause,
@@ -4635,10 +4652,7 @@ impl<'lib> App<'lib> {
         if self.radio_on_screen() {
             return;
         }
-        if self.search.is_none()
-            && self.view == View::Library
-            && !matches!(self.position, Position::Files)
-        {
+        if self.search.is_none() && self.view == View::Library && self.in_library() {
             frame.render_widget(Paragraph::new(self.views_header(area.width)), area);
             return;
         }
