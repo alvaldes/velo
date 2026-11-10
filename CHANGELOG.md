@@ -1,6 +1,10 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.34.1] - 2026-11-10
+
+### Fixes
+- **theme:** The preview is not masked by the config's own defaults
 ## [0.34.0] - 2026-11-10
 
 ### Features
