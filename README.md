@@ -45,7 +45,11 @@ Every list marks the row that plays, and no other row: `▶` stands in the
 first column of the row the transport stands on, while every idle row
 carries two spaces there — the selection already has its own background, so
 a bare `▸` would only repeat it, and the numbers, names and facts of the
-rows beside it never move.
+rows beside it never move. The marker is the transport's state: a track
+that paused carries `⏸` and the transport says `paused`. A station is a
+live stream and cannot pause: while it plays, the transport says `● live`
+and its row carries `▶`; when its stream has stopped, the queue's entry it
+stood on carries `■` and the transport says `■ stopped`.
 
 ## Keys
 
@@ -220,8 +224,9 @@ ordered by votes, listeners, trend, name or nothing at all, and a place brings a
 most 200 stations — the directory's catalogue is not something you scroll.
 
 A station is a **live stream**, so it differs from a file in ways the interface
-says out loud: there is no position and no total, the clock row reads `● live`,
-`←` and `→` refuse instead of pretending, and the title comes from the station's
+says out loud: there is no position and no total, the clock row reads `● live`
+while it plays and `■ stopped` once its stream has stopped (a live stream
+cannot pause), `←` and `→` refuse instead of pretending, and the title comes from the station's
 own ICY metadata (`StreamTitle`) rather than from tags. A stream that fails — a
 cut, a timeout, a station that answers with a playlist instead of audio — gets
 exactly one retry before the queue moves on, and a station never joins the next

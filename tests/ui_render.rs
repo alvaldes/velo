@@ -962,6 +962,86 @@ fn a_station_row_in_the_queue_reads_as_live() {
     );
 }
 
+// ---- the states a row can carry (issue #53) --------------------------------
+// A live stream cannot pause: the state next to the clock and the row marker
+// tell a stopped station from a paused track. The shell computes the mark per
+// list from the transport's state plus whether the row is the entry it stands
+// on.
+
+/// `space` on a track pauses it: the row carries `⏸` and the transport says
+/// `paused`.
+#[test]
+fn a_paused_track_row_carries_the_pause_marker_and_the_transport_says_paused() {
+    let mut app = App::new(tracks(&["one.flac"]));
+    // The fixture stands in for the player, paused (issue #53): no test can
+    // build a real one.
+    app.show_playing_for_tests(
+        Entry::File(PathBuf::from("/music/one.flac")),
+        std::time::Duration::ZERO,
+        Some(std::time::Duration::from_secs(180)),
+        None,
+    );
+    app.set_play_state_for_tests(velo::ui::PlayState::Paused);
+    press(&mut app, KeyCode::Tab); // into the queue
+
+    let screen = screen_at(&app, 80, 24);
+    let row = screen
+        .lines()
+        .find(|line| line.contains("1. one.flac"))
+        .expect("the queue shows the paused track");
+    assert!(
+        row.contains("⏸"),
+        "the paused track carries the pause marker, got: {row:?}"
+    );
+    assert!(
+        !row.contains('▶') && !row.contains("■"),
+        "a paused track is neither playing nor stopped, got: {row:?}"
+    );
+    assert!(
+        screen.contains("paused"),
+        "the transport says paused, got:\n{screen}"
+    );
+}
+
+/// A station that stopped is still the entry the queue stands on, and its
+/// being stopped is worth saying: the row carries `■` and the transport says
+/// `■ stopped` — while a live stream can never read as paused.
+#[test]
+fn a_stopped_station_row_carries_the_stopped_marker_and_the_transport_says_stopped() {
+    let mut app = App::new(tracks(&["one.flac"]));
+    // The station played; its stream has stopped, and the queue still stands
+    // on it (the fixture stands in for both halves).
+    app.show_playing_for_tests(
+        Entry::Station {
+            url: String::from("https://stream.example/nova.mp3"),
+            name: String::from("Radio Nova"),
+        },
+        std::time::Duration::ZERO,
+        None,
+        None,
+    );
+    app.set_play_state_for_tests(velo::ui::PlayState::Stopped);
+    press(&mut app, KeyCode::Tab); // into the queue
+
+    let screen = screen_at(&app, 80, 24);
+    let row = screen
+        .lines()
+        .find(|line| line.contains("1. ") && line.contains("Radio Nova"))
+        .expect("the queue still shows the station it stands on");
+    assert!(
+        row.contains("■"),
+        "the stopped station carries the stopped marker, got: {row:?}"
+    );
+    assert!(
+        !row.contains('▶'),
+        "a stopped station does not read as playing, got: {row:?}"
+    );
+    assert!(
+        screen.contains("■ stopped"),
+        "the transport says stopped, got:\n{screen}"
+    );
+}
+
 // ---- cover art (T8, S10) ---------------------------------------------------
 
 /// The marker is only for the row that plays (issue #52): an idle row

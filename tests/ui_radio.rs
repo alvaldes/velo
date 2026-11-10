@@ -22,7 +22,7 @@ use velo::ui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use velo::ui::radio::{Place, RadioOutcome, RadioView, RowKind};
 use velo::ui::radio_data::RadioData;
 use velo::ui::theme::Theme;
-use velo::ui::{Action, App, View};
+use velo::ui::{Action, App, PlayState, View};
 
 /// One directory station with the fields the view shows.
 fn station(name: &str, url: &str, codec: &str, bitrate: u32, code: &str) -> Station {
@@ -2322,7 +2322,10 @@ fn a_playable_favourite_is_never_marked_and_cannot_be_reported() {
 #[test]
 fn the_playing_station_is_marked_in_its_country_and_the_others_are_not() {
     let mut view = view();
-    view.set_playing(Some(String::from("https://stream.example/nova.mp3")));
+    view.set_playing(Some((
+        String::from("https://stream.example/nova.mp3"),
+        PlayState::Playing,
+    )));
     press(&mut view, KeyCode::Enter); // country index
     press(&mut view, KeyCode::Enter); // Norway
     view.set_catalog(norway(), catalog());
@@ -2341,7 +2344,10 @@ fn the_playing_station_is_marked_in_its_country_and_the_others_are_not() {
 #[test]
 fn the_playing_station_is_marked_inside_a_tag_too() {
     let mut view = view();
-    view.set_playing(Some(String::from("https://stream.example/nova.mp3")));
+    view.set_playing(Some((
+        String::from("https://stream.example/nova.mp3"),
+        PlayState::Playing,
+    )));
     for _ in 0..4 {
         press(&mut view, KeyCode::Char('j')); // Browse genres & tags
     }
@@ -2363,7 +2369,10 @@ fn the_playing_station_is_marked_inside_a_tag_too() {
 #[test]
 fn the_playing_favourite_is_marked_in_the_favourites_section() {
     let mut view = view();
-    view.set_playing(Some(String::from("https://jazz.example/stream")));
+    view.set_playing(Some((
+        String::from("https://jazz.example/stream"),
+        PlayState::Playing,
+    )));
     assert!(
         screen(&view).contains("▶ 6. ★ Jazz One [MP3] · NO"),
         "the favourite that plays is marked where it lives, got:\n{}",
@@ -2374,7 +2383,10 @@ fn the_playing_favourite_is_marked_in_the_favourites_section() {
 #[test]
 fn the_playing_hand_added_station_is_marked_without_a_country() {
     let mut view = view();
-    view.set_playing(Some(String::from("http://night.example/live")));
+    view.set_playing(Some((
+        String::from("http://night.example/live"),
+        PlayState::Playing,
+    )));
     view.open_place(Place::NoCountry);
     assert!(
         screen(&view).contains("▶ 1. Night FM"),
@@ -2391,11 +2403,38 @@ fn the_playing_station_is_recognised_however_its_url_is_spelled() {
     // not the string as written, decides (S6) — the same identity rule
     // favourites and toggles already go through.
     let mut view = view();
-    view.set_playing(Some(String::from("https://JAZZ.example:443/stream/")));
+    view.set_playing(Some((
+        String::from("https://JAZZ.example:443/stream/"),
+        PlayState::Playing,
+    )));
     assert!(
         screen(&view).contains("▶ 6. ★ Jazz One [MP3] · NO"),
         "the station key matches the playing station however it is spelled, got:\n{}",
         screen(&view)
+    );
+}
+
+#[test]
+fn a_stopped_station_is_marked_with_the_stopped_marker_in_the_radio() {
+    // The stream ended — a live stream cannot pause, so the state it draws
+    // is stopped, the transport's own word (issue #53).
+    let mut view = view();
+    view.set_playing(Some((
+        String::from("https://stream.example/nova.mp3"),
+        PlayState::Stopped,
+    )));
+    press(&mut view, KeyCode::Enter); // country index
+    press(&mut view, KeyCode::Enter); // Norway
+    view.set_catalog(norway(), catalog());
+
+    let stopped = screen(&view);
+    assert!(
+        stopped.contains("■ 1. Nova [128k] · NO"),
+        "the station the stopped stream stood on carries the stopped marker, got:\n{stopped}"
+    );
+    assert!(
+        stopped.contains("  2. ✗ Hls One [96k] · NO"),
+        "every other row still carries no marker, got:\n{stopped}"
     );
 }
 
@@ -2415,7 +2454,10 @@ fn the_playing_marker_and_the_refusal_marker_can_share_a_row() {
     // It plays, and the codec filter rejects it: two facts about one
     // station, and neither hides the other.
     let mut view = view();
-    view.set_playing(Some(String::from("https://stream.example/live/index.m3u8")));
+    view.set_playing(Some((
+        String::from("https://stream.example/live/index.m3u8"),
+        PlayState::Playing,
+    )));
     press(&mut view, KeyCode::Enter); // country index
     press(&mut view, KeyCode::Enter); // Norway
     view.set_catalog(norway(), catalog());
@@ -2431,7 +2473,10 @@ fn the_playing_marker_and_the_refusal_marker_can_share_a_row() {
 
     // The same on a refused favourite at the top: star, cross and marker.
     let mut view = view_with_refused_stations();
-    view.set_playing(Some(String::from("https://fav.example/live.m3u8")));
+    view.set_playing(Some((
+        String::from("https://fav.example/live.m3u8"),
+        PlayState::Playing,
+    )));
     assert!(
         screen(&view)
             .lines()
@@ -2444,7 +2489,10 @@ fn the_playing_marker_and_the_refusal_marker_can_share_a_row() {
 #[test]
 fn the_playing_marker_leaves_the_selection_highlight_alone() {
     let mut view = view();
-    view.set_playing(Some(String::from("https://stream.example/nova.mp3")));
+    view.set_playing(Some((
+        String::from("https://stream.example/nova.mp3"),
+        PlayState::Playing,
+    )));
     press(&mut view, KeyCode::Enter); // country index
     press(&mut view, KeyCode::Enter); // Norway
     view.set_catalog(norway(), catalog());

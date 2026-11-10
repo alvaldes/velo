@@ -2279,6 +2279,17 @@ impl<'lib> App<'lib> {
         });
     }
 
+    /// Moves the transport to a state no key reaches without a player
+    /// (issue #53): the queue and the playing fact stay exactly where they
+    /// were, only the state changes — the tests' stand-in for the moment a
+    /// stream stops or stands paused while the queue still stands on its
+    /// entry. Production never calls this, which is why it is hidden from
+    /// the docs.
+    #[doc(hidden)]
+    pub fn set_play_state_for_tests(&mut self, state: PlayState) {
+        self.state = state;
+    }
+
     /// Queues one remote song entry (cliamp S4), the queue edit an expanded
     /// channel makes: the entry is the song's URL as a file row, its identity
     /// (S3). Production queues through [`App::play_station`]; a test cannot
@@ -3482,12 +3493,14 @@ impl<'lib> App<'lib> {
     /// through a channel, the pattern the library index uses.
     fn radio_poll(&mut self) {
         // The playing fact is the shell's to give (S15, issue #32): the view
-        // is told, never guesses. A station playing marks its rows wherever
-        // they are listed; a local file or silence marks none. radio_poll
-        // runs on every tick and after every radio key, so no key can leave
-        // the marker stale.
-        let playing = match self.playing_entry() {
-            Some(Entry::Station { url, .. }) => Some(url.clone()),
+        // is told, never guesses. A station marks its rows wherever they are
+        // listed — `▶` while its stream runs, `■` once it stopped (issue
+        // #53); a local file or silence marks none. The standing entry is
+        // the queue's own, known even after the player stopped (issue #53).
+        // radio_poll runs on every tick and after every radio key, so no key
+        // can leave the marker stale.
+        let playing = match self.standing_entry() {
+            Some(Entry::Station { url, .. }) => Some((url.clone(), self.state)),
             _ => None,
         };
         if let Some(view) = self.radio.as_mut() {
@@ -4626,17 +4639,23 @@ impl<'lib> App<'lib> {
         );
     }
 
-    /// The play state as a pill: `▶ playing` in the accent, the others dim.
+    /// The play state as a pill: `▶ playing` in the accent, `● live` for a
+    /// station — a live stream is not "playing" in a track's sense, and it
+    /// cannot pause (issue #53) — the others dim.
     fn state_pill(&self) -> Span<'static> {
+        let live = self.state == PlayState::Playing
+            && matches!(self.standing_entry(), Some(Entry::Station { .. }));
         let (glyph, color) = match self.state {
             PlayState::Playing => ("▶", self.theme.accent),
             PlayState::Paused => ("❚❚", self.theme.secondary),
             PlayState::Stopped => ("■", self.theme.dim),
         };
-        Span::styled(
-            format!(" {glyph} {} ", self.state.label()),
-            Style::new().fg(color),
-        )
+        let (glyph, label) = if live {
+            ("●", "live")
+        } else {
+            (glyph, self.state.label())
+        };
+        Span::styled(format!(" {glyph} {label} "), Style::new().fg(color))
     }
 
     /// The line over the list: what it lists and how many of them, as in
@@ -4810,7 +4829,7 @@ impl<'lib> App<'lib> {
             .map(|(index, source)| {
                 ListItem::new(list_row(
                     ListRow {
-                        playing: false,
+                        mark: RowMark::None,
                         number: index + 1,
                         digits,
                         name: source.label().to_owned(),
@@ -4827,13 +4846,20 @@ impl<'lib> App<'lib> {
     /// The rows of the current level, as they are on screen.
     fn rows(&self, width: u16) -> Vec<ListItem<'static>> {
         let digits = digits(self.row_count());
-        let playing = self.playing_row();
+        let standing = self.playing_row();
         (0..self.row_count())
             .map(|index| {
                 let (name, note, fact) = self.row_text(index);
+                // The recent list's station rows (issue #33) follow the
+                // station rule (issue #53): a stopped stream still marks
+                // its station, a track it does not.
+                let station = matches!(&self.position, Position::Recent)
+                    && self.recent_rows.get(index).is_some_and(|row| {
+                        row.kind == crate::history::Kind::Station
+                    });
                 ListItem::new(list_row(
                     ListRow {
-                        playing: playing == Some(index),
+                        mark: self.row_mark(standing == Some(index), station),
                         number: index + 1,
                         digits,
                         name,
@@ -4991,10 +5017,11 @@ impl<'lib> App<'lib> {
     }
 
     /// The queue, in play order, named the way the now-playing block names
-    /// a file and marked the way every other list marks the row that plays.
+    /// a file and marked the way every other list marks the row the
+    /// transport stands on (issue #53).
     fn queue_rows(&self, width: u16) -> Vec<ListItem<'static>> {
         let digits = digits(self.queue.len());
-        let playing = self.playing_queue_index();
+        let standing = self.playing_queue_index();
         self.queue
             .iter()
             .enumerate()
@@ -5006,7 +5033,10 @@ impl<'lib> App<'lib> {
                     Entry::Station { name, .. } => (name.clone(), String::new()),
                 };
                 let row = ListRow {
-                    playing: playing == Some(index),
+                    mark: self.row_mark(
+                        standing == Some(index),
+                        matches!(entry, Entry::Station { .. }),
+                    ),
                     number: index + 1,
                     digits,
                     name,
@@ -5028,7 +5058,7 @@ impl<'lib> App<'lib> {
     /// it and its length at the right edge.
     fn search_rows(&self, width: u16) -> Vec<ListItem<'static>> {
         let digits = digits(self.search_results.len());
-        let playing = self.playing_path();
+        let standing = self.playing_path();
         self.search_results
             .iter()
             .filter_map(|&index| self.search_pool.get(index))
@@ -5036,7 +5066,10 @@ impl<'lib> App<'lib> {
             .map(|(row, entry)| {
                 ListItem::new(list_row(
                     ListRow {
-                        playing: playing == Some(entry.path.as_path()),
+                        mark: self.row_mark(
+                            standing == Some(entry.path.as_path()),
+                            false,
+                        ),
                         number: row + 1,
                         digits,
                         name: entry.title.clone(),
@@ -5163,6 +5196,32 @@ impl<'lib> App<'lib> {
         }
         let index = self.player.as_ref().map_or(0, Player::current_index);
         self.queue.get(index)
+    }
+
+    /// The queue entry the transport stands on, whether or not it still
+    /// plays (issue #53): a stopped stream keeps its queue, so the stopped
+    /// station can still be marked. `None` before the first stream starts —
+    /// the queue the user lined up without playing is nobody's current
+    /// entry.
+    fn standing_entry(&self) -> Option<&Entry> {
+        self.queue.get(self.playing_queue_index()?)
+    }
+
+    /// The mark a row carries (issue #53), given that it is the row the
+    /// transport stands on and whether it names a station: the transport's
+    /// state — except that a stopped stream marks only a station, a stopped
+    /// track being nothing a list needs to point at, and a live stream never
+    /// pauses.
+    fn row_mark(&self, standing: bool, station: bool) -> RowMark {
+        if !standing {
+            return RowMark::None;
+        }
+        match self.state {
+            PlayState::Playing => RowMark::Playing,
+            PlayState::Paused if !station => RowMark::Paused,
+            PlayState::Stopped if station => RowMark::Stopped,
+            _ => RowMark::None,
+        }
     }
 
     /// The title the playing station shows (S4): the ICY title the stream is
@@ -5645,8 +5704,9 @@ impl<'lib> App<'lib> {
         }
     }
 
-    /// The list position of the row whose samples are being produced: the row
-    /// holding the file that plays. Found by path, not by where the stream
+    /// The list position of the row the transport stands on — whether or
+    /// not it still plays (issue #53) — so the marker finds the row wherever
+    /// a list shows whole tracks. Found by path, not by where the stream
     /// started plus the producer's index, because a shuffled queue no longer
     /// follows the list's order.
     fn playing_row(&self) -> Option<usize> {
@@ -5656,14 +5716,15 @@ impl<'lib> App<'lib> {
                 self.argv.iter().position(|row| row == path)
             }
             // The recent list holds the file's entries (issue #33): a
-            // station row is marked when its station key is the playing
-            // station's; a file row compares paths as everywhere else. No
-            // new state: the playing entry is read fresh every frame.
+            // station row is marked when its station key is the transport's
+            // station's; a file row compares paths as everywhere else. The
+            // standing entry is read fresh every frame (issue #53), so a
+            // stopped stream still finds its station here.
             Position::Recent => {
-                let playing = self.playing_entry()?;
+                let standing = self.standing_entry()?;
                 self.recent_rows
                     .iter()
-                    .position(|row| match (&row.kind, playing) {
+                    .position(|row| match (&row.kind, standing) {
                         (crate::history::Kind::Station, Entry::Station { url, .. }) => {
                             crate::radio::store::station_key(&row.path)
                                 == crate::radio::store::station_key(url)
@@ -6752,9 +6813,24 @@ fn hint_line(hints: &[(&str, &str)], width: u16, theme: &Theme) -> Line<'static>
     Line::from(spans)
 }
 
+/// What the marker column of a row draws (issue #53): the transport's state
+/// for the row it stands on, and nothing for the rows beside it.
+enum RowMark {
+    /// Two spaces: the transport stands on no row here.
+    None,
+    /// `▶` in the accent: the stream runs on this row.
+    Playing,
+    /// `■` dimmed: the stream stood on this station and stopped — a live
+    /// stream cannot pause, so stopped is the only state it can be left in.
+    Stopped,
+    /// `⏸` in the accent: the track on this row is paused.
+    Paused,
+}
+
 /// What one list row says, before it is laid out.
 struct ListRow {
-    playing: bool,
+    /// The transport's state drawn in the marker column ([`RowMark`]).
+    mark: RowMark,
     number: usize,
     digits: usize,
     name: String,
@@ -6764,12 +6840,16 @@ struct ListRow {
     fact: String,
 }
 
-/// `▶ 3. Dawn  Tide · Harbor ……… 4:12`: the marker — `▶` in the accent, on
-/// the row that plays and on no other row (issue #52): an idle row carries
-/// two spaces where the glyph was, so the numbers, names and facts of the
-/// rows beside it never move — the selection already has its own background.
+/// `▶ 3. Dawn  Tide · Harbor ……… 4:12`: the marker — the transport's state
+/// in the row's own column (issue #53): `▶` for the row a track plays on,
+/// `⏸` for the row paused, `■` for the station a stopped stream stood on,
+/// and two spaces for every row beside it (issue #52) — then the number,
+/// the name, the note, and the fact against the right edge when it fits
+/// beside the rest; a fact that does not fit is the part left out, never
+/// the name.
 fn list_row(row: ListRow, width: u16, theme: &Theme) -> Line<'static> {
-    let (marker, number, name) = if row.playing {
+    let lit = matches!(row.mark, RowMark::Playing | RowMark::Paused);
+    let (marker, number, name) = if lit {
         (
             Style::new().fg(theme.accent),
             Style::new().fg(theme.accent),
@@ -6784,7 +6864,15 @@ fn list_row(row: ListRow, width: u16, theme: &Theme) -> Line<'static> {
     };
     let digits = row.digits;
     let mut spans = vec![
-        Span::styled(if row.playing { "▶ " } else { "  " }, marker),
+        Span::styled(
+            match row.mark {
+                RowMark::Playing => "▶ ",
+                RowMark::Paused => "⏸ ",
+                RowMark::Stopped => "■ ",
+                RowMark::None => "  ",
+            },
+            marker,
+        ),
         Span::styled(format!("{:>digits$}. ", row.number), number),
         Span::styled(row.name, name),
     ];
