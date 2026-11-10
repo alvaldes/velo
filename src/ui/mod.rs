@@ -184,6 +184,45 @@ struct TransportFixture {
     fetching: Option<usize>,
 }
 
+/// What a finished fetch starts, exactly as the request named it — kept,
+/// never re-derived, so the start the wait ends is the start that was asked
+/// for (issue #60's second half).
+enum PendingStart {
+    /// A fresh stream: the entries as the caller built them and the
+    /// playback kind.
+    Stream {
+        /// The entries the stream was asked to open.
+        paths: Vec<Entry>,
+        /// Which list the playback follows.
+        playback: Playback,
+    },
+    /// A rebuilt player: the standing queue at `track`, `offset` into it —
+    /// a skip's or a seek's rebuild.
+    TrackAt {
+        /// The queue index the rebuild starts at.
+        track: usize,
+        /// How far into the track it starts.
+        offset: Duration,
+    },
+}
+
+/// The first entry's resolve, running on its worker while the event loop
+/// paints (issue #60's second half). The slot is the whole state: a newer
+/// play, skip or seek replaces it, and the displaced worker's answer is
+/// dropped unread — its download, if one started, lands in the cache and is
+/// simply reused later.
+struct PendingResolve {
+    /// The entry being resolved, for the status line: the file's path.
+    path: PathBuf,
+    /// The worker's answer, polled on the tick and never waited on: the
+    /// resolved file for a finished fetch, the reason for a failed one.
+    /// The error is carried as its own sentence — the status line's shape —
+    /// so the answer needs nothing else.
+    answer: std::sync::mpsc::Receiver<Result<PathBuf, String>>,
+    /// What the finished fetch starts.
+    start: PendingStart,
+}
+
 /// The floating prompt that asks for the library root when none is set.
 #[derive(Debug)]
 struct LibraryPrompt {
@@ -771,6 +810,14 @@ pub struct App<'lib> {
     /// sets it, and every reader takes the real player first, so the player
     /// stays the transport's only source of truth.
     transport_fixture: Option<TransportFixture>,
+    /// The first entry's resolve, running on its worker (issue #60):
+    /// when the entry that would be opened first is remote and not cached,
+    /// `apply` hands the resolve here, says `⟳ fetching …` and returns —
+    /// the event loop paints at once, the download runs off it — and the
+    /// tick polls the answer, starting the stream the way it always starts
+    /// once the file is on disk. One slot: a newer play, skip or seek
+    /// supersedes the one waiting, so two workers never race for the device.
+    pending_resolve: Option<PendingResolve>,
     /// The radio's data wiring (T6b): the preference store and the
     /// directory requests, which run on a worker thread the tick polls.
     /// `None` until the first `R` opens the radio; built once, kept for
@@ -1024,6 +1071,7 @@ impl<'lib> App<'lib> {
             info: None,
             radio: None,
             transport_fixture: None,
+            pending_resolve: None,
             radio_wire: None,
             radio_refusal: None,
             colors: ThemeColors::default(),
@@ -1127,6 +1175,7 @@ impl<'lib> App<'lib> {
             info: None,
             radio: None,
             transport_fixture: None,
+            pending_resolve: None,
             radio_wire: None,
             radio_refusal: None,
             colors: ThemeColors::default(),
@@ -2720,6 +2769,16 @@ impl<'lib> App<'lib> {
         self.edit_queue(|queue| queue.push(Entry::File(PathBuf::from(url))));
     }
 
+    /// Drives [`Self::start_track_at`] — the one rebuild behind a skip and
+    /// a seek — the way a skip lands, zero offset, for the tests: no test
+    /// can hold a `Player` — building one opens an audio device — so the
+    /// rebuild's own shape is reached through this hook; production reaches
+    /// it through `skip` and `seek_by`. Hidden from the docs.
+    #[doc(hidden)]
+    pub fn start_track_at_for_tests(&mut self, track: usize) {
+        self.start_track_at(track, Duration::ZERO);
+    }
+
     /// Runs once per turn of the event loop — the same cadence as key
     /// polling — so the producer's announcements surface without a key
     /// press, the cover art follows the track it plays (T8), and the server
@@ -2744,7 +2803,10 @@ impl<'lib> App<'lib> {
         // one says `⟳ loading…` on the status line.
         self.radio_poll();
         // The fetching fact (issue #60): a remote entry the queue is
-        // downloading says so on the status line until it sounds.
+        // downloading says so on the status line until it sounds. The start's
+        // own worker is polled first, so a finished fetch begins its stream
+        // before the line is decided for this turn.
+        self.poll_pending_resolve();
         self.fetch_status();
         self.poll_cover();
         // The saving copy's worker (issue #45): its progress and its last
@@ -4040,6 +4102,18 @@ impl<'lib> App<'lib> {
     /// its own report, because the clearing only ever removes the fetching
     /// line itself, never another writer's message.
     fn fetch_status(&mut self) {
+        // The wait a start handed to its worker (issue #60's second half):
+        // the line names the entry for as long as the resolve runs, the way
+        // the producer's fetching cell names one later in the queue. The
+        // start itself, when the worker answers, decides what stands
+        // afterwards; a tick never clears the line from under the wait.
+        if let Some(pending) = self.pending_resolve.as_ref() {
+            let line = format!("⟳ fetching {}…", self.fetching_name(&pending.path));
+            if self.status != line {
+                self.status = line;
+            }
+            return;
+        }
         let fetching = self.fetching_entry().map(|entry| {
             let path = entry.as_path().unwrap_or(Path::new(""));
             format!("⟳ fetching {}…", self.fetching_name(path))
@@ -4083,14 +4157,27 @@ impl<'lib> App<'lib> {
         };
         let entry = self.queue.get(index)?;
         let path = entry.as_path()?;
-        if !is_pseudo_path(path) && !is_remote_url(path) {
+        if !self.is_uncached_remote(path) {
             return None;
         }
-        let cached = self
-            .resolver
+        Some(entry)
+    }
+
+    /// Whether reaching `path` would block this thread on a download (issue
+    /// #60): a remote entry — a `subsonic://` row or a channel song's URL —
+    /// that the resolver has not cached yet, its own
+    /// [`PathResolver::cached`] seam answering and never a re-derivation of
+    /// its rules. A local file is already on disk, and without a resolver
+    /// nothing waits (today's behaviour). The one question that decides
+    /// where a first entry is resolved: on this thread, or on a worker the
+    /// tick polls.
+    fn is_uncached_remote(&self, path: &Path) -> bool {
+        if !is_pseudo_path(path) && !is_remote_url(path) {
+            return false;
+        }
+        self.resolver
             .as_ref()
-            .is_none_or(|resolver| resolver.cached(path));
-        if cached { None } else { Some(entry) }
+            .is_some_and(|resolver| !resolver.cached(path))
     }
 
     /// The name a fetching line carries: the title the wrapper gave the song
@@ -4118,18 +4205,77 @@ impl<'lib> App<'lib> {
         let Some(Entry::File(path)) = entry else {
             return;
         };
-        if !is_pseudo_path(path) && !is_remote_url(path) {
-            return;
-        }
-        if self
-            .resolver
-            .as_ref()
-            .is_none_or(|resolver| resolver.cached(path))
-        {
+        if !self.is_uncached_remote(path) {
             return;
         }
         let name = self.fetching_name(path);
         self.status = format!("⟳ fetching {name}…");
+    }
+
+    /// Hands the first entry's resolve to a worker (issue #60's second
+    /// half): the resolve is a download the event loop must never wait for,
+    /// so it runs here, the status line says `⟳ fetching <name>…` — the
+    /// caller's gate (`is_uncached_remote`) has just said so — and `apply`
+    /// goes on, the loop painting while the worker fetches. One slot: the
+    /// caller ahead of this one replaces whatever waited, and its answer is
+    /// dropped unread — a download it started lands in the cache and is
+    /// simply reused. Polled by [`Self::poll_pending_resolve`].
+    fn start_as_pending(&mut self, path: PathBuf, start: PendingStart) {
+        let name = self.fetching_name(&path);
+        self.status = format!("⟳ fetching {name}…");
+        let seam = self.resolver.clone();
+        let queued = path.clone();
+        let (send, answer) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let resolved = match seam {
+                Some(seam) => seam.resolve(&queued),
+                None => Ok(queued),
+            };
+            // A dropped receiver — a superseded resolve — answers into
+            // nothing and is gone; the download, if it ran, already landed
+            // in the cache.
+            let _ = send.send(resolved.map_err(|error| error.to_string()));
+        });
+        self.pending_resolve = Some(PendingResolve {
+            path,
+            answer,
+            start,
+        });
+    }
+
+    /// Polls the pending resolve (issue #60's second half), once per tick:
+    /// still running keeps the line; a file on disk runs the same start the
+    /// request named, the resolver now finding a cache hit, exactly as the
+    /// synchronous start always opened it; a failure is one line naming the
+    /// reason and no stream — the queue stands where it was, never advanced
+    /// behind the user's back, and the state goes stopped the way a start
+    /// failing on this thread always has. A worker that died before it
+    /// answered — a panic inside a resolver — is a failed fetch with its own
+    /// sentence, never an eternal wait.
+    fn poll_pending_resolve(&mut self) {
+        let Some(pending) = self.pending_resolve.as_ref() else {
+            return;
+        };
+        let answer = match pending.answer.try_recv() {
+            // The download runs on; the line stays.
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => Err(String::from("the fetch was interrupted")),
+            Ok(answer) => answer,
+        };
+        let pending = self.pending_resolve.take().expect("checked above");
+        match answer {
+            Ok(_) => match pending.start {
+                PendingStart::Stream { paths, playback } => self.open_stream(paths, playback),
+                PendingStart::TrackAt { track, offset } => self.open_track_at(track, offset),
+            },
+            Err(reason) => {
+                self.pending_resolve = None;
+                self.status = format!("velo: {reason}");
+                self.player = None;
+                self.playing = None;
+                self.state = PlayState::Stopped;
+            }
+        }
     }
 
     /// Carries an [`Action`] into the audio or library half. Errors land in
@@ -7852,7 +7998,12 @@ impl<'lib> App<'lib> {
         self.start_stream(paths, Playback::Queue);
     }
 
-    /// Opens a device for these entries and makes them the queue.
+    /// Opens a device for these entries and makes them the queue. The first
+    /// entry decides where the turn waits: an uncached remote one is a
+    /// download the event loop must never sit in (issue #60), so its resolve
+    /// is handed to a worker and the same start runs again when the file is
+    /// on disk; everything else opens here, on this thread, as it always
+    /// has.
     fn start_stream(&mut self, paths: Vec<Entry>, playback: Playback) {
         // Dropping through `stop` also releases the producer thread.
         if let Some(old) = self.player.take() {
@@ -7865,6 +8016,30 @@ impl<'lib> App<'lib> {
         if self.shuffle {
             shuffle::shuffle_after(&mut paths, 1, shuffle::seed());
         }
+        let first = paths.first().cloned();
+        let waits = first
+            .as_ref()
+            .and_then(Entry::as_path)
+            .is_some_and(|path| self.is_uncached_remote(path));
+        if waits && let Some(Entry::File(path)) = first {
+            self.start_as_pending(path, PendingStart::Stream { paths, playback });
+            return;
+        }
+        self.open_stream(paths, playback);
+    }
+
+    /// The synchronous half of a fresh start: local files and already-cached
+    /// entries open the player on this thread, exactly as they always have
+    /// (issue #60) — no new state, no extra tick — and the start clears
+    /// whatever a superseded fetch left waiting in the slot, since this start
+    /// is the one the user asked for. Production reaches this through
+    /// [`Self::start_stream`] and, once a fetch has landed, through
+    /// [`Self::poll_pending_resolve`].
+    fn open_stream(&mut self, paths: Vec<Entry>, playback: Playback) {
+        // A finished fetch replays here with no player running — the wait
+        // outlived the last one — but a start of any kind retires the slot
+        // all the same, so a stale wait can never start behind it.
+        self.pending_resolve = None;
         // The player reads the queue it is given, so the interface keeps the
         // handle and edits it in place (T18).
         let queue = Arc::new(Mutex::new(paths.clone()));
@@ -8043,16 +8218,47 @@ impl<'lib> App<'lib> {
     /// it: the one rebuild behind a seek and a skip, so both keep the volume
     /// and the `ReplayGain` mode.
     fn start_track_at(&mut self, track: usize, offset: Duration) {
-        let Some(player) = self.player.take() else {
-            return;
-        };
-        player.stop();
+        // Whatever ran before is closed first, whatever this rebuild goes on
+        // to do. Both callers — skip and seek — hold a player, so this sees
+        // `None` only under the tests' hook.
+        if let Some(player) = self.player.take() {
+            player.stop();
+        }
 
         if self.queue.is_empty() || track >= self.queue.len() {
             self.playing = None;
             self.state = PlayState::Stopped;
             return;
         }
+        // Same rule as a fresh start (issue #60): the entry the rebuild
+        // would open first, being remote and uncached, is a download the
+        // event loop never waits for — its resolve goes to a worker, the
+        // line says so, and the same rebuild runs when the file is on disk.
+        // The queue stands where it was; the rebuild neither advances nor
+        // clears it.
+        let first = self.queue.get(track).cloned();
+        let waits = first
+            .as_ref()
+            .and_then(Entry::as_path)
+            .is_some_and(|path| self.is_uncached_remote(path));
+        if waits && let Some(Entry::File(path)) = first {
+            self.start_as_pending(path, PendingStart::TrackAt { track, offset });
+            return;
+        }
+        self.open_track_at(track, offset);
+    }
+
+    /// The synchronous half of a rebuild: local files and already-cached
+    /// entries open the player on this thread, exactly as they always have
+    /// (issue #60), and the rebuild clears whatever a superseded fetch left
+    /// waiting in the slot. Production reaches this through
+    /// [`Self::start_track_at`] and, once a fetch has landed, through
+    /// [`Self::poll_pending_resolve`].
+    fn open_track_at(&mut self, track: usize, offset: Duration) {
+        // A finished fetch replays here with no player running — the wait
+        // outlived the last one — but a rebuild of any kind retires the slot
+        // all the same, so a stale wait can never start behind it.
+        self.pending_resolve = None;
         let queue = Arc::new(Mutex::new(self.queue.clone()));
         self.shared = Some(Arc::clone(&queue));
         // A skip or a seek reaches its entry at selection time too (T12c):
@@ -8129,6 +8335,11 @@ impl<'lib> App<'lib> {
         if let Some(player) = self.player.take() {
             player.stop();
         }
+        // A fetch still running answers into a slot nobody polls (issue
+        // #60); its worker — a download it may still hold — dies with the
+        // session, and its bytes land in the cache whenever the thread gets
+        // there.
+        self.pending_resolve = None;
         self.state = PlayState::Stopped;
     }
 }

@@ -330,3 +330,45 @@ implemented where the cache actually knows. The byte count the author
 might have wanted is left for later: the download is one whole-body `get`
 inside the transport, so there is no copy loop to hang a counter on without
 rewriting it — and the line never invents a percentage.
+
+**L9** — the issue (#60)'s other half, same words: the line was set but the
+screen stayed frozen behind it, because the first entry's resolve ran
+inside `apply()` — the frame only got painted when the wait ended, forty
+seconds later for a channel's song. The event loop never waits for a start
+any more. When the entry that would be opened first is remote and not
+cached — the resolver's own `cached` seam answers, the one question both
+halves of this issue already ask — `apply` hands the resolve to a worker,
+says the fetching line and **returns**, so the loop paints at once; the
+tick polls the worker's answer (one `mpsc` slot, `try_recv`, never a wait),
+and when the file is on disk the very same start runs again — the queue and
+the rebuild exactly as the request named them, the resolver now finding a
+cache hit, so the stream starts as it always has. The decisions beyond the
+brief, each pinned:
+
+- **One resolve at a time, and the rule is supersede.** A newer play, skip
+  or seek replaces the waiting one in the single slot; the displaced
+  worker's answer is dropped unread — a download it already started lands
+  in the cache and is simply reused later, never wasted. Skip and seek
+  while a wait runs find no player (their own fetch closed it) and keep the
+  queue standing; they cannot start a second resolve.
+- **A failed resolve is one line, no stream, no advance.** The line is
+  `velo: <reason>` — the selection-time error shape — and the state goes
+  stopped the way a start failing on this thread always has. The standing
+  queue is *not* cleared the way the device-error arm of a fresh start
+  clears it: the user's queue is not moved by a network failure (the brief
+  says so). A worker that died before answering — a panicked resolver — is
+  the same failure with its own sentence, never an eternal wait.
+- **The synchronous starts are untouched.** A local file, an already-cached
+  entry and every station open on this thread in the same turn, byte for
+  byte as before; the blocking build path survives only behind the
+  uncached-remote gate, so the two shapes are never live for the same case.
+- **The skip/seek shape is pinned through a test hook.** No test can hold a
+  `Player` — building one opens an audio device — so the rebuild a skip or
+  a seek performs reaches its tests through `start_track_at_for_tests`, the
+  same doc-hidden hook family the transport fixture lives in.
+- **What a successful fetch shows while the preroll runs** is what the
+  blocking start always showed — the fetching line staying up until the
+  first samples — and the headless drains and the producer are untouched.
+
+#60 closes with this: the line appears at once, the wait runs off the event
+loop, and nothing behind the start moved.
