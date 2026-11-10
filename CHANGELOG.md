@@ -1,6 +1,10 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.42.0] - 2026-11-10
+
+### Features
+- **ui:** The transparent background is a switch on the card
 ## [0.41.1] - 2026-11-10
 
 ### Fixes
