@@ -11,8 +11,10 @@ use std::path::PathBuf;
 
 use velo::audio::output::Entry;
 use velo::library::Library;
+use velo::radio::client::HttpTransport;
 use velo::ui::App;
 use velo::ui::crossterm::event::{KeyCode, KeyEvent};
+use velo::ui::radio_data::RadioData;
 use velo::ui::ratatui::Terminal;
 use velo::ui::ratatui::backend::TestBackend;
 use velo::ui::ratatui::buffer::{Buffer, Cell};
@@ -1039,6 +1041,40 @@ fn a_stopped_station_row_carries_the_stopped_marker_and_the_transport_says_stopp
     assert!(
         screen.contains("■ stopped"),
         "the transport says stopped, got:\n{screen}"
+    );
+}
+
+// ---- the radio's place on screen (issue #50) -------------------------------
+
+/// With the radio on screen the screen header and the list stand down, but
+/// the radio drew only into the body area: an empty row stayed where the
+/// header was and the whole list sat a row too low. The radio draws from
+/// the row the content starts on, header row included (issue #50).
+#[test]
+fn the_radio_draws_from_the_row_the_screen_header_takes() {
+    // The wired view with no directory: the top level renders, no request.
+    let mut app = App::new(tracks(&["one.flac", "two.flac"]));
+    app.set_radio_wire(Box::new(RadioData::<HttpTransport>::new(None, None, None)));
+    press(&mut app, KeyCode::Char('R')); // the radio opens over its wiring
+    let with_radio = screen_at(&app, 80, 24);
+    let plain = screen_at(&App::new(tracks(&["one.flac", "two.flac"])), 80, 24);
+
+    let radio_header = with_radio
+        .lines()
+        .position(|line| line.contains("▸─ Radio"))
+        .expect("the radio names itself in its header line");
+    let list_header = plain
+        .lines()
+        .position(|line| line.contains("▸─ Files"))
+        .expect("the list names itself in the screen header");
+    assert_eq!(
+        radio_header, list_header,
+        "the radio's header line sits on the row the screen header takes, \
+         with no empty row above it:\n{with_radio}"
+    );
+    assert!(
+        with_radio.contains("Browse all countries"),
+        "the top level's sections are on screen:\n{with_radio}"
     );
 }
 

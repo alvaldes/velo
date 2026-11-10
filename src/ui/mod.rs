@@ -4297,11 +4297,15 @@ impl<'lib> App<'lib> {
             self.draw_body(frame, body);
             // The radio view (T6a) replaces the list, not the block above it. It
             // never paints over the queue (issue #23): when the round trip put
-            // the queue on screen, the queue is what the body draws.
+            // the queue on screen, the queue is what the body draws. And it
+            // draws from the row the content starts on, the header row
+            // included (issue #50): the screen header stands down while the
+            // radio is on screen, so its row is the radio's to draw its own
+            // header line on — no empty row is left above it.
             if self.view != View::Queue
                 && let Some(view) = &self.radio
             {
-                view.render(frame, body, &self.theme);
+                view.render(frame, union(header, body), &self.theme);
             }
         }
         self.draw_footer(frame, footer);
@@ -7176,6 +7180,22 @@ fn pad(area: Rect) -> Rect {
         x: area.x.saturating_add(1),
         width: area.width.saturating_sub(2),
         ..area
+    }
+}
+
+/// The smallest rectangle that covers two areas side by side or one above
+/// the other: the header row and the body, for the radio view that draws
+/// across both (issue #50).
+fn union(a: Rect, b: Rect) -> Rect {
+    let right = (a.x + a.width).max(b.x + b.width);
+    let bottom = (a.y + a.height).max(b.y + b.height);
+    let x = a.x.min(b.x);
+    let y = a.y.min(b.y);
+    Rect {
+        x,
+        y,
+        width: right - x,
+        height: bottom - y,
     }
 }
 
