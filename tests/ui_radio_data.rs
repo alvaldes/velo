@@ -1418,3 +1418,119 @@ fn an_answered_or_undetectable_country_shows_no_question() {
         view.labels()
     );
 }
+
+// ---- the two indexes say they are loading (issue #51) ----------------------
+
+/// Holds one endpoint's requests behind the gate while the test looks at a
+/// request genuinely in flight; every other endpoint answers freely.
+struct GatedOn {
+    canned: Arc<Canned>,
+    gate: Arc<Gate>,
+    endpoint: &'static str,
+}
+
+impl Transport for GatedOn {
+    fn get(&self, url: &str) -> Result<String, Error> {
+        if url.contains(self.endpoint) {
+            self.gate.wait();
+        }
+        self.canned.get(url)
+    }
+}
+
+/// The whole interface as one screen, the way the user sees it.
+fn app_screen(app: &App) -> String {
+    use velo::ui::ratatui::Terminal;
+    use velo::ui::ratatui::backend::TestBackend;
+    use velo::ui::ratatui::buffer::{Buffer, Cell};
+
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("a test terminal");
+    terminal
+        .draw(|frame| app.draw(frame))
+        .expect("the frame draws");
+    let buffer: &Buffer = terminal.backend().buffer();
+    let screen: String = buffer.content().iter().map(Cell::symbol).collect();
+    let characters: Vec<char> = screen.chars().collect();
+    characters
+        .chunks(80)
+        .map(|line| line.iter().collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn the_index_lists_say_loading_until_their_answer_lands() {
+    let canned = Arc::new(
+        Canned::new()
+            .countries(r#"[{"name":"Norway","iso_3166_1":"NO","stationcount":1}]"#)
+            .tags(r#"[{"name":"jazz","stationcount":3}]"#),
+    );
+    let gate = Arc::new(Gate::closed());
+    let mut app = App::new(Vec::new());
+    app.set_radio_wire(Box::new(RadioData::new(
+        Some(Client::new(GatedOn {
+            canned: Arc::clone(&canned),
+            gate: Arc::clone(&gate),
+            endpoint: "/countries",
+        })),
+        None,
+        None,
+    )));
+
+    let _ = app.on_key(KeyEvent::from(KeyCode::Char('R')));
+    let _ = app.on_key(KeyEvent::from(KeyCode::Enter)); // Browse all countries
+    let waiting = app_screen(&app);
+    assert!(
+        waiting.contains("⟳ loading…") && !waiting.contains("no stations here"),
+        "the country index's list says loading while the request is out:\n{waiting}"
+    );
+
+    // The answer lands through the tick, the way the event loop collects it.
+    gate.open();
+    for _ in 0..400 {
+        app.tick();
+        if !app.status().contains("⟳") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let answered = app_screen(&app);
+    assert!(
+        answered.contains("Norway") && !answered.contains("⟳ loading…"),
+        "the answer landed: the countries are listed, the wait is gone:\n{answered}"
+    );
+
+    // The tag index says the same, and stops the same way.
+    let gate = Arc::new(Gate::closed());
+    let mut app = App::new(Vec::new());
+    app.set_radio_wire(Box::new(RadioData::new(
+        Some(Client::new(GatedOn {
+            canned: Arc::clone(&canned),
+            gate: Arc::clone(&gate),
+            endpoint: "/tags",
+        })),
+        None,
+        None,
+    )));
+    let _ = app.on_key(KeyEvent::from(KeyCode::Char('R')));
+    let _ = app.on_key(KeyEvent::from(KeyCode::Char('G'))); // Browse genres & tags
+    let _ = app.on_key(KeyEvent::from(KeyCode::Enter));
+    let waiting = app_screen(&app);
+    assert!(
+        waiting.contains("⟳ loading…"),
+        "the tag index's list says loading while the request is out:\n{waiting}"
+    );
+    gate.open();
+    for _ in 0..400 {
+        app.tick();
+        if !app.status().contains("⟳") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let answered = app_screen(&app);
+    assert!(
+        answered.contains("jazz") && !answered.contains("⟳ loading…"),
+        "the answer landed: the tags are listed, the wait is gone:\n{answered}"
+    );
+}

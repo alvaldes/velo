@@ -22,7 +22,7 @@ use velo::ui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use velo::ui::radio::{Place, RadioOutcome, RadioView, RowKind};
 use velo::ui::radio_data::RadioData;
 use velo::ui::theme::Theme;
-use velo::ui::{Action, App, View};
+use velo::ui::{Action, App, PlayState, View};
 
 /// One directory station with the fields the view shows.
 fn station(name: &str, url: &str, codec: &str, bitrate: u32, code: &str) -> Station {
@@ -652,7 +652,7 @@ fn a_place_with_rows_keeps_them_while_its_request_is_in_flight() {
 }
 
 #[test]
-fn the_top_the_indexes_and_no_country_never_say_loading() {
+fn the_top_and_the_no_country_place_never_say_loading_the_indexes_do() {
     // The top is a section list; it never requests and never waits.
     let mut view = view();
     view.set_loading(Some(Place::Top));
@@ -662,22 +662,38 @@ fn the_top_the_indexes_and_no_country_never_say_loading() {
         "the top never says loading, got:\n{top}"
     );
 
-    // The two indexes do request, but their empty lists never say loading
-    // (S10): the footer carries the wait, the list keeps its own wording.
+    // The two indexes do request, and while the request is out their empty
+    // lists say loading, the way a place's stations do (issue #51) — not
+    // only the footer.
     let mut bare = RadioView::new(store(), Vec::new(), Vec::new(), None);
     bare.open_place(Place::Countries);
     bare.set_loading(Some(Place::Countries));
     let countries = screen(&bare);
     assert!(
-        countries.contains("no stations here") && !countries.contains("⟳ loading…"),
-        "the country index never says loading, got:\n{countries}"
+        countries.contains("⟳ loading…") && !countries.contains("no stations here"),
+        "the country index says loading while the request is out, got:\n{countries}"
     );
+
+    // The answer lands: the wait is gone with the request (S10).
+    bare.set_loading(None);
+    let answered = screen(&bare);
+    assert!(
+        answered.contains("no stations here") && !answered.contains("⟳ loading…"),
+        "the answer landed, the country index's wait is gone, got:\n{answered}"
+    );
+
     bare.open_place(Place::Tags);
     bare.set_loading(Some(Place::Tags));
     let tags = screen(&bare);
     assert!(
-        tags.contains("no stations here") && !tags.contains("⟳ loading…"),
-        "the tag index never says loading, got:\n{tags}"
+        tags.contains("⟳ loading…") && !tags.contains("no stations here"),
+        "the tag index says loading while the request is out, got:\n{tags}"
+    );
+    bare.set_loading(None);
+    let answered = screen(&bare);
+    assert!(
+        answered.contains("no stations here") && !answered.contains("⟳ loading…"),
+        "the answer landed, the tag index's wait is gone, got:\n{answered}"
     );
 
     // The no-country place is the user's own data: never a request, never
@@ -2322,7 +2338,10 @@ fn a_playable_favourite_is_never_marked_and_cannot_be_reported() {
 #[test]
 fn the_playing_station_is_marked_in_its_country_and_the_others_are_not() {
     let mut view = view();
-    view.set_playing(Some(String::from("https://stream.example/nova.mp3")));
+    view.set_playing(Some((
+        String::from("https://stream.example/nova.mp3"),
+        PlayState::Playing,
+    )));
     press(&mut view, KeyCode::Enter); // country index
     press(&mut view, KeyCode::Enter); // Norway
     view.set_catalog(norway(), catalog());
@@ -2333,15 +2352,18 @@ fn the_playing_station_is_marked_in_its_country_and_the_others_are_not() {
         "the playing station carries the marker the library uses, got:\n{played}"
     );
     assert!(
-        played.contains("▸ 2. ✗ Hls One [96k] · NO"),
-        "a different station in the same list keeps the idle marker, got:\n{played}"
+        played.contains("  2. ✗ Hls One [96k] · NO"),
+        "a different station in the same list carries no marker, got:\n{played}"
     );
 }
 
 #[test]
 fn the_playing_station_is_marked_inside_a_tag_too() {
     let mut view = view();
-    view.set_playing(Some(String::from("https://stream.example/nova.mp3")));
+    view.set_playing(Some((
+        String::from("https://stream.example/nova.mp3"),
+        PlayState::Playing,
+    )));
     for _ in 0..4 {
         press(&mut view, KeyCode::Char('j')); // Browse genres & tags
     }
@@ -2363,7 +2385,10 @@ fn the_playing_station_is_marked_inside_a_tag_too() {
 #[test]
 fn the_playing_favourite_is_marked_in_the_favourites_section() {
     let mut view = view();
-    view.set_playing(Some(String::from("https://jazz.example/stream")));
+    view.set_playing(Some((
+        String::from("https://jazz.example/stream"),
+        PlayState::Playing,
+    )));
     assert!(
         screen(&view).contains("▶ 6. ★ Jazz One [MP3] · NO"),
         "the favourite that plays is marked where it lives, got:\n{}",
@@ -2374,7 +2399,10 @@ fn the_playing_favourite_is_marked_in_the_favourites_section() {
 #[test]
 fn the_playing_hand_added_station_is_marked_without_a_country() {
     let mut view = view();
-    view.set_playing(Some(String::from("http://night.example/live")));
+    view.set_playing(Some((
+        String::from("http://night.example/live"),
+        PlayState::Playing,
+    )));
     view.open_place(Place::NoCountry);
     assert!(
         screen(&view).contains("▶ 1. Night FM"),
@@ -2391,11 +2419,38 @@ fn the_playing_station_is_recognised_however_its_url_is_spelled() {
     // not the string as written, decides (S6) — the same identity rule
     // favourites and toggles already go through.
     let mut view = view();
-    view.set_playing(Some(String::from("https://JAZZ.example:443/stream/")));
+    view.set_playing(Some((
+        String::from("https://JAZZ.example:443/stream/"),
+        PlayState::Playing,
+    )));
     assert!(
         screen(&view).contains("▶ 6. ★ Jazz One [MP3] · NO"),
         "the station key matches the playing station however it is spelled, got:\n{}",
         screen(&view)
+    );
+}
+
+#[test]
+fn a_stopped_station_is_marked_with_the_stopped_marker_in_the_radio() {
+    // The stream ended — a live stream cannot pause, so the state it draws
+    // is stopped, the transport's own word (issue #53).
+    let mut view = view();
+    view.set_playing(Some((
+        String::from("https://stream.example/nova.mp3"),
+        PlayState::Stopped,
+    )));
+    press(&mut view, KeyCode::Enter); // country index
+    press(&mut view, KeyCode::Enter); // Norway
+    view.set_catalog(norway(), catalog());
+
+    let stopped = screen(&view);
+    assert!(
+        stopped.contains("■ 1. Nova [128k] · NO"),
+        "the station the stopped stream stood on carries the stopped marker, got:\n{stopped}"
+    );
+    assert!(
+        stopped.contains("  2. ✗ Hls One [96k] · NO"),
+        "every other row still carries no marker, got:\n{stopped}"
     );
 }
 
@@ -2415,14 +2470,17 @@ fn the_playing_marker_and_the_refusal_marker_can_share_a_row() {
     // It plays, and the codec filter rejects it: two facts about one
     // station, and neither hides the other.
     let mut view = view();
-    view.set_playing(Some(String::from("https://stream.example/live/index.m3u8")));
+    view.set_playing(Some((
+        String::from("https://stream.example/live/index.m3u8"),
+        PlayState::Playing,
+    )));
     press(&mut view, KeyCode::Enter); // country index
     press(&mut view, KeyCode::Enter); // Norway
     view.set_catalog(norway(), catalog());
     let played = screen(&view);
     assert!(
-        played.contains("▸ 1. Nova [128k] · NO"),
-        "the other station keeps the idle marker, got:\n{played}"
+        played.contains("  1. Nova [128k] · NO"),
+        "the other station carries no marker, got:\n{played}"
     );
     assert!(
         played.contains("▶ 2. ✗ Hls One [96k] · NO"),
@@ -2431,7 +2489,10 @@ fn the_playing_marker_and_the_refusal_marker_can_share_a_row() {
 
     // The same on a refused favourite at the top: star, cross and marker.
     let mut view = view_with_refused_stations();
-    view.set_playing(Some(String::from("https://fav.example/live.m3u8")));
+    view.set_playing(Some((
+        String::from("https://fav.example/live.m3u8"),
+        PlayState::Playing,
+    )));
     assert!(
         screen(&view)
             .lines()
@@ -2444,7 +2505,10 @@ fn the_playing_marker_and_the_refusal_marker_can_share_a_row() {
 #[test]
 fn the_playing_marker_leaves_the_selection_highlight_alone() {
     let mut view = view();
-    view.set_playing(Some(String::from("https://stream.example/nova.mp3")));
+    view.set_playing(Some((
+        String::from("https://stream.example/nova.mp3"),
+        PlayState::Playing,
+    )));
     press(&mut view, KeyCode::Enter); // country index
     press(&mut view, KeyCode::Enter); // Norway
     view.set_catalog(norway(), catalog());

@@ -42,7 +42,7 @@ use crate::radio::store::{Favorite, Pinned, RadioStore, station_key};
 
 use super::plural;
 use super::theme::Theme;
-use super::{ListRow, centered, digits, draw_empty, list_row};
+use super::{ListRow, PlayState, RowMark, centered, digits, draw_empty, list_row};
 
 /// What one key press asked the shell to do with the radio view.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -331,13 +331,14 @@ pub struct RadioView {
     /// render sets it — a view never drawn keeps a default page, so the
     /// keys never jump into the dark either way.
     page: std::cell::Cell<usize>,
-    /// The URL of the station the shell says is playing, when it plays a
-    /// station (S15, issue #32). The shell owns the fact — the queue and
-    /// the player are its — and hands it in through
+    /// The station the shell says the transport stands on, and the state
+    /// its rows draw (issue #53): `▶` while the station plays, `■` once its
+    /// stream stopped — a live stream cannot pause. The shell owns the fact
+    /// — the queue and the player are its — and hands it in through
     /// [`RadioView::set_playing`] on every tick and after every radio key;
     /// the view knows nothing about players and only renders what it was
     /// told. `None` — a local file, or nothing at all — marks no row.
-    playing: Option<String>,
+    playing: Option<(String, PlayState)>,
 }
 
 impl RadioView {
@@ -414,13 +415,14 @@ impl RadioView {
         self.pending.as_ref()
     }
 
-    /// Says which station the shell is playing, if it plays a station: the
-    /// shell owns that fact and refreshes it on every tick and after every
-    /// radio key (S15, issue #32). `None` — a local file playing, or
-    /// nothing at all — marks no row. The view never guesses: it marks
-    /// exactly the station it was told, wherever its row appears.
-    pub fn set_playing(&mut self, url: Option<String>) {
-        self.playing = url;
+    /// Says which station the transport stands on, and in which state
+    /// (S15, issue #32, issue #53): the shell owns that fact and refreshes
+    /// it on every tick and after every radio key. `None` — a local file
+    /// standing there, or nothing at all — marks no row. The view never
+    /// guesses: it marks exactly the station it was told, wherever its row
+    /// appears, `▶` while it plays and `■` once it stopped.
+    pub fn set_playing(&mut self, playing: Option<(String, PlayState)>) {
+        self.playing = playing;
     }
 
     /// Replaces the country index, as `/countries` answered (T6b). An
@@ -1417,18 +1419,14 @@ impl RadioView {
         (label, plural(counted, one, many))
     }
 
-    /// Whether the place on screen is the one a directory request is in
-    /// flight for: an empty place then says it is loading, not that there
-    /// is nothing here (S10). The top, the two indexes and the no-country
-    /// place never say it: only a place that itself asked the directory
-    /// for stations waits in its list — the indexes' wait is the footer's
-    /// to say.
+    /// Whether the place on screen is the one a request is in flight for:
+    /// an empty place then says it is loading, not that there is nothing
+    /// here (S10). Every place that itself asked — the two indexes
+    /// (issue #51) and the places that ask for stations — waits in its own
+    /// list; the top and the no-country place never ask, so they never say
+    /// it, and the wiring never marks them as waiting.
     fn waiting_here(&self) -> bool {
         self.pending.as_ref() == Some(&self.place)
-            && matches!(
-                self.place,
-                Place::Country { .. } | Place::Tag { .. } | Place::Search { .. }
-            )
     }
 
     /// Draws the view into `area`: the header line, the list with the
@@ -1480,8 +1478,12 @@ impl RadioView {
             // same station reached through a favourite, the store or the
             // catalogue can be spelled differently — host case, a default
             // port, a trailing slash — and the key, never the string as
-            // written, decides.
-            let playing_key = self.playing.as_deref().map(station_key);
+            // written, decides. The mark is the state the shell handed in
+            // (issue #53): `▶` while the station plays, `■` once it stopped.
+            let playing = self
+                .playing
+                .as_ref()
+                .map(|(url, state)| (station_key(url), *state));
             let mut number = 0usize;
             let rows: Vec<ListItem<'static>> = visible
                 .iter()
@@ -1496,12 +1498,21 @@ impl RadioView {
                     )),
                     _ => {
                         number += 1;
-                        let playing = playing_key.is_some()
-                            && station_row_key(&row.kind)
-                                .is_some_and(|key| playing_key.as_deref() == Some(key.as_str()));
+                        let mark = match &playing {
+                            Some((key, state))
+                                if station_row_key(&row.kind)
+                                    .is_some_and(|known| known == key.as_str()) =>
+                            {
+                                match state {
+                                    PlayState::Playing => RowMark::Playing,
+                                    _ => RowMark::Stopped,
+                                }
+                            }
+                            _ => RowMark::None,
+                        };
                         ListItem::new(list_row(
                             ListRow {
-                                playing,
+                                mark,
                                 number,
                                 digits: digits(numbered),
                                 name: row.label.clone(),

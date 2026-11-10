@@ -11,8 +11,10 @@ use std::path::PathBuf;
 
 use velo::audio::output::Entry;
 use velo::library::Library;
+use velo::radio::client::HttpTransport;
 use velo::ui::App;
 use velo::ui::crossterm::event::{KeyCode, KeyEvent};
+use velo::ui::radio_data::RadioData;
 use velo::ui::ratatui::Terminal;
 use velo::ui::ratatui::backend::TestBackend;
 use velo::ui::ratatui::buffer::{Buffer, Cell};
@@ -962,7 +964,161 @@ fn a_station_row_in_the_queue_reads_as_live() {
     );
 }
 
+// ---- the states a row can carry (issue #53) --------------------------------
+// A live stream cannot pause: the state next to the clock and the row marker
+// tell a stopped station from a paused track. The shell computes the mark per
+// list from the transport's state plus whether the row is the entry it stands
+// on.
+
+/// `space` on a track pauses it: the row carries `⏸` and the transport says
+/// `paused`.
+#[test]
+fn a_paused_track_row_carries_the_pause_marker_and_the_transport_says_paused() {
+    let mut app = App::new(tracks(&["one.flac"]));
+    // The fixture stands in for the player, paused (issue #53): no test can
+    // build a real one.
+    app.show_playing_for_tests(
+        Entry::File(PathBuf::from("/music/one.flac")),
+        std::time::Duration::ZERO,
+        Some(std::time::Duration::from_secs(180)),
+        None,
+    );
+    app.set_play_state_for_tests(velo::ui::PlayState::Paused);
+    press(&mut app, KeyCode::Tab); // into the queue
+
+    let screen = screen_at(&app, 80, 24);
+    let row = screen
+        .lines()
+        .find(|line| line.contains("1. one.flac"))
+        .expect("the queue shows the paused track");
+    assert!(
+        row.contains("⏸"),
+        "the paused track carries the pause marker, got: {row:?}"
+    );
+    assert!(
+        !row.contains('▶') && !row.contains("■"),
+        "a paused track is neither playing nor stopped, got: {row:?}"
+    );
+    assert!(
+        screen.contains("paused"),
+        "the transport says paused, got:\n{screen}"
+    );
+}
+
+/// A station that stopped is still the entry the queue stands on, and its
+/// being stopped is worth saying: the row carries `■` and the transport says
+/// `■ stopped` — while a live stream can never read as paused.
+#[test]
+fn a_stopped_station_row_carries_the_stopped_marker_and_the_transport_says_stopped() {
+    let mut app = App::new(tracks(&["one.flac"]));
+    // The station played; its stream has stopped, and the queue still stands
+    // on it (the fixture stands in for both halves).
+    app.show_playing_for_tests(
+        Entry::Station {
+            url: String::from("https://stream.example/nova.mp3"),
+            name: String::from("Radio Nova"),
+        },
+        std::time::Duration::ZERO,
+        None,
+        None,
+    );
+    app.set_play_state_for_tests(velo::ui::PlayState::Stopped);
+    press(&mut app, KeyCode::Tab); // into the queue
+
+    let screen = screen_at(&app, 80, 24);
+    let row = screen
+        .lines()
+        .find(|line| line.contains("1. ") && line.contains("Radio Nova"))
+        .expect("the queue still shows the station it stands on");
+    assert!(
+        row.contains("■"),
+        "the stopped station carries the stopped marker, got: {row:?}"
+    );
+    assert!(
+        !row.contains('▶'),
+        "a stopped station does not read as playing, got: {row:?}"
+    );
+    assert!(
+        screen.contains("■ stopped"),
+        "the transport says stopped, got:\n{screen}"
+    );
+}
+
+// ---- the radio's place on screen (issue #50) -------------------------------
+
+/// With the radio on screen the screen header and the list stand down, but
+/// the radio drew only into the body area: an empty row stayed where the
+/// header was and the whole list sat a row too low. The radio draws from
+/// the row the content starts on, header row included (issue #50).
+#[test]
+fn the_radio_draws_from_the_row_the_screen_header_takes() {
+    // The wired view with no directory: the top level renders, no request.
+    let mut app = App::new(tracks(&["one.flac", "two.flac"]));
+    app.set_radio_wire(Box::new(RadioData::<HttpTransport>::new(None, None, None)));
+    press(&mut app, KeyCode::Char('R')); // the radio opens over its wiring
+    let with_radio = screen_at(&app, 80, 24);
+    let plain = screen_at(&App::new(tracks(&["one.flac", "two.flac"])), 80, 24);
+
+    let radio_header = with_radio
+        .lines()
+        .position(|line| line.contains("▸─ Radio"))
+        .expect("the radio names itself in its header line");
+    let list_header = plain
+        .lines()
+        .position(|line| line.contains("▸─ Files"))
+        .expect("the list names itself in the screen header");
+    assert_eq!(
+        radio_header, list_header,
+        "the radio's header line sits on the row the screen header takes, \
+         with no empty row above it:\n{with_radio}"
+    );
+    assert!(
+        with_radio.contains("Browse all countries"),
+        "the top level's sections are on screen:\n{with_radio}"
+    );
+}
+
 // ---- cover art (T8, S10) ---------------------------------------------------
+
+/// The marker is only for the row that plays (issue #52): an idle row
+/// carries two spaces where the glyph was, so numbers, names and facts stay
+/// in their columns — the selection already has its own background.
+#[test]
+fn an_idle_row_carries_no_marker_and_the_playing_row_keeps_its_glyph() {
+    let mut app = App::new(tracks(&["one.flac", "two.flac"]));
+    // two.flac plays (the fixture stands in for the player) and heads the
+    // queue; one.flac queues after it, idle.
+    app.show_playing_for_tests(
+        Entry::File(PathBuf::from("/music/two.flac")),
+        std::time::Duration::ZERO,
+        None,
+        None,
+    );
+    press(&mut app, KeyCode::Char('a')); // one.flac queues after it
+    press(&mut app, KeyCode::Tab); // into the queue
+
+    let screen = screen_at(&app, 80, 24);
+    let playing_row = screen
+        .lines()
+        .find(|line| line.contains("1. two.flac"))
+        .expect("the queue shows the playing row first");
+    assert!(
+        playing_row.contains("▶"),
+        "the row that plays keeps its marker, got: {playing_row:?}"
+    );
+    let idle_row = screen
+        .lines()
+        .find(|line| line.contains("2. one.flac"))
+        .expect("the queued file keeps its row");
+    assert!(
+        !idle_row.contains('▸'),
+        "an idle row carries no marker, got: {idle_row:?}"
+    );
+    assert!(
+        idle_row.contains("  2. one.flac"),
+        "the two spaces keep the number in its column, got: {idle_row:?}"
+    );
+}
 
 /// The interface's whole 80×24 screen with no image protocol. Cover art may
 /// not move a single cell of it: no protocol is ever attached to a
@@ -981,9 +1137,9 @@ const SCREEN_WITHOUT_COVER_ART: &str = concat!(
     "│  ◂◂   ▶ play   ▸▸    shuffle  repeat off     RG track   VOL ━━━━━━━━━━━● 100 │\n",
     "│                                                                              │\n",
     "│ ▸─ Files  [3 tracks]                                                         │\n",
-    "│ ▸ 1. one.flac  /music                                                        │\n",
-    "│ ▸ 2. two.flac  /music                                                        │\n",
-    "│ ▸ 3. three.flac  /music                                                      │\n",
+    "│   1. one.flac  /music                                                        │\n",
+    "│   2. two.flac  /music                                                        │\n",
+    "│   3. three.flac  /music                                                      │\n",
     "│                                                                              │\n",
     "│                                                                              │\n",
     "│                                                                              │\n",

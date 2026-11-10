@@ -19,9 +19,9 @@ queue make it a player you actually drive, not a playlist viewer.
 │  ◂◂   ▶ play   ▸▸    shuffle  repeat off     RG track   VOL ━━━━━━━━━━━● 100 │
 │                                                                              │
 │ ▸─ 1 artists  2 albums  3 tracks  4 genres   [3 artists]                     │
-│ ▸ 1. Lo-Fi Scientists                                    2 albums · 3 tracks │
-│ ▸ 2. Nujabes                                               1 album · 1 track │
-│ ▸ 3. Poldoore                                             1 album · 2 tracks │
+│   1. Lo-Fi Scientists                                    2 albums · 3 tracks │
+│   2. Nujabes                                               1 album · 1 track │
+│   3. Poldoore                                             1 album · 2 tracks │
 │                                                                              │
 │ j/k move  enter play  space pause  ←/→ seek  / search  ? help  q quit        │
 ╰──────────────────────────────────────────────────────────────────────────────╯
@@ -40,6 +40,16 @@ of its own.
 velo wears your terminal's colors: its background (translucency included)
 and text, and the ANSI palette for everything else — magenta for the
 accent, blue for keys and counts, bright black for what can be dimmed.
+
+Every list marks the row that plays, and no other row: `▶` stands in the
+first column of the row the transport stands on, while every idle row
+carries two spaces there — the selection already has its own background, so
+a bare `▸` would only repeat it, and the numbers, names and facts of the
+rows beside it never move. The marker is the transport's state: a track
+that paused carries `⏸` and the transport says `paused`. A station is a
+live stream and cannot pause: while it plays, the transport says `● live`
+and its row carries `▶`; when its stream has stopped, the queue's entry it
+stood on carries `■` and the transport says `■ stopped`.
 
 ## Keys
 
@@ -203,8 +213,9 @@ to are gathered at the end of the list instead of spread across countries. Those
 sections are screens, not a single mixed list: a category lists categories, a country
 lists its own stations, and neither borrows the other's rows.
 
-A wait says so. While a directory request is in flight the list says `⟳ loading…` and
-the footer says the same, both going away when the answer lands; a live station that
+A wait says so. While a directory request is in flight — a place's stations,
+or one of the two indexes — the list says `⟳ loading…` and the footer says
+the same, both going away when the answer lands; a live station that
 takes a while to open is named in the status line (`velo: opening <name>…`) until the
 player answers.
 
@@ -214,8 +225,9 @@ ordered by votes, listeners, trend, name or nothing at all, and a place brings a
 most 200 stations — the directory's catalogue is not something you scroll.
 
 A station is a **live stream**, so it differs from a file in ways the interface
-says out loud: there is no position and no total, the clock row reads `● live`,
-`←` and `→` refuse instead of pretending, and the title comes from the station's
+says out loud: there is no position and no total, the clock row reads `● live`
+while it plays and `■ stopped` once its stream has stopped (a live stream
+cannot pause), `←` and `→` refuse instead of pretending, and the title comes from the station's
 own ICY metadata (`StreamTitle`) rather than from tags. A stream that fails — a
 cut, a timeout, a station that answers with a playlist instead of audio — gets
 exactly one retry before the queue moves on, and a station never joins the next
