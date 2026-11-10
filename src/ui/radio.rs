@@ -326,6 +326,11 @@ pub struct RadioView {
     /// Whether `ctrl-r` asked the caller for a fresh directory, not yet
     /// taken.
     refresh_wanted: bool,
+    /// How many rows of the list the last render showed (issue #38): the
+    /// page `pgdn`/`pgup` and `ctrl+d`/`ctrl+u` move the cursor over. The
+    /// render sets it — a view never drawn keeps a default page, so the
+    /// keys never jump into the dark either way.
+    page: std::cell::Cell<usize>,
     /// The URL of the station the shell says is playing, when it plays a
     /// station (S15, issue #32). The shell owns the fact — the queue and
     /// the player are its — and hands it in through
@@ -367,6 +372,7 @@ impl RadioView {
             country_ask: None,
             dirty: false,
             refresh_wanted: false,
+            page: std::cell::Cell::new(10),
             playing: None,
         }
     }
@@ -614,16 +620,35 @@ impl RadioView {
                 self.select_prev();
                 RadioOutcome::Handled
             }
-            KeyCode::Char('g') => {
+            KeyCode::Char('g') | KeyCode::Home => {
                 self.select_first();
                 RadioOutcome::Handled
             }
-            KeyCode::Char('G') => {
+            KeyCode::Char('G') | KeyCode::End => {
                 self.select_last();
                 RadioOutcome::Handled
             }
             KeyCode::Enter => self.enter(),
             KeyCode::Char('a') => self.append_station(),
+            // The paging keys (issue #38): `pgdn`/`pgup` and
+            // `ctrl+d`/`ctrl+u` a page of the rendered rows at a time;
+            // `home`/`end` share `g`/`G`'s arms above.
+            KeyCode::PageDown => {
+                self.page_step(true);
+                RadioOutcome::Handled
+            }
+            KeyCode::PageUp => {
+                self.page_step(false);
+                RadioOutcome::Handled
+            }
+            KeyCode::Char('d') if event.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.page_step(true);
+                RadioOutcome::Handled
+            }
+            KeyCode::Char('u') if event.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.page_step(false);
+                RadioOutcome::Handled
+            }
             KeyCode::Char('/') => {
                 self.open_search();
                 RadioOutcome::Handled
@@ -790,6 +815,23 @@ impl RadioView {
             .rev()
             .find(|&index| rows[index].kind.selectable())
             .unwrap_or(rows.len().saturating_sub(1));
+    }
+
+    /// Moves the cursor a page of rows down or up (issue #38) — the rows
+    /// the last render showed — stopping at the ends, and never landing on
+    /// the rule or a header.
+    fn page_step(&mut self, down: bool) {
+        let rows = self.visible_rows();
+        if rows.is_empty() {
+            return;
+        }
+        let last = rows.len() - 1;
+        self.cursor = if down {
+            (self.cursor.min(last) + self.page.get().max(1)).min(last)
+        } else {
+            self.cursor.min(last).saturating_sub(self.page.get().max(1))
+        };
+        self.clamp();
     }
 
     /// Keeps the cursor inside the visible list after its length changed,
@@ -1388,6 +1430,9 @@ impl RadioView {
         frame.render_widget(Block::new().style(Style::new().bg(theme.background)), area);
         let [header_area, list_area] =
             Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+        // The page the paging keys move over (issue #38): the rows this
+        // render shows of the list.
+        self.page.set(usize::from(list_area.height.max(1)));
 
         let (label, count) = self.header();
         let filter_text = if self.naming {

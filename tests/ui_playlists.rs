@@ -559,13 +559,13 @@ fn a_playlist_move_stops_at_the_ends() {
 /// `d` on a playlist in the names list deletes it, and the status line says
 /// so.
 #[test]
-fn d_on_a_name_deletes_the_playlist_and_says_so() {
+fn x_on_a_name_deletes_the_playlist_and_says_so() {
     let temp = TempLibrary::new("delete");
     temp.seed_playlist("Noche", &["a.wav"]);
     let mut app = app(&temp);
     open_playlists_source(&mut app);
 
-    press(&mut app, KeyCode::Char('d'));
+    press(&mut app, KeyCode::Char('x'));
     assert!(
         temp.store().playlist.is_empty(),
         "the playlist is gone from the file"

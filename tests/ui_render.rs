@@ -118,10 +118,9 @@ fn the_volume_slider_shows_the_volume_and_the_help_lists_the_seek_keys() {
         helped.contains("seek 5 s"),
         "the help lists the seek keys, got: {helped}"
     );
-    // The card is taller than a 12-row window; at 80×24 it fits whole.
     let whole = screen_at(&app, 80, 24);
     assert!(
-        whole.contains("n / p") && whole.contains("next / previous track"),
+        whole.contains("> / . / n") && whole.contains("next track"),
         "the help lists the skip keys, got:\n{whole}"
     );
 }
@@ -284,7 +283,7 @@ fn the_transport_row_shows_shuffle_and_repeat_and_lights_them_when_on() {
     assert_eq!(cell_at(&app, column(&row, "shuffle"), y).fg, theme.dim);
 
     press(&mut app, KeyCode::Char('r'));
-    press(&mut app, KeyCode::Char('s'));
+    press(&mut app, KeyCode::Char('z'));
     let row = row_of(&app);
     assert!(row.contains("repeat all"), "{row}");
     assert_eq!(cell_at(&app, column(&row, "shuffle"), y).fg, theme.accent);
@@ -595,6 +594,13 @@ impl Drop for TempLibrary {
 
 fn press(app: &mut App<'_>, code: KeyCode) {
     let action = app.on_key(KeyEvent::from(code));
+    app.apply(action);
+}
+
+/// A ctrl-modified key press, the way a terminal reports it.
+fn ctrl(app: &mut App<'_>, code: KeyCode) {
+    let event = KeyEvent::new(code, velo::ui::crossterm::event::KeyModifiers::CONTROL);
+    let action = app.on_key(event);
     app.apply(action);
 }
 
@@ -1265,7 +1271,8 @@ fn the_title_bar_says_indexing_while_an_index_runs_and_not_after() {
 fn the_help_names_the_key_that_refreshes_the_index() {
     let mut app = App::browse(None);
     press(&mut app, KeyCode::Char('?'));
-    let screen = screen_at(&app, 80, 24);
+    // The card is longer than 80×24 shows; tall enough for every row.
+    let screen = screen_at(&app, 80, 50);
     assert!(screen.contains("refresh the library index"), "{screen}");
 }
 
@@ -1443,7 +1450,7 @@ fn a_help_that_fits_shows_no_position() {
     press(&mut app, KeyCode::Char('?'));
     // Tall enough for the whole card: the property is "no position line when the
     // whole table fits", not "the table has N rows".
-    let screen = screen_at(&app, 80, 45);
+    let screen = screen_at(&app, 80, 50);
     assert!(
         screen.contains("quit") && screen.contains("j / Down"),
         "{screen}"
@@ -1464,11 +1471,12 @@ fn slash_filters_the_help_and_says_when_nothing_matches() {
     }
     let screen = help_at_80x14(&app);
     assert!(screen.contains("/ SEEK"), "the filter shows:\n{screen}");
+    assert!(screen.contains("← / →"), "{screen}");
+    assert_eq!(screen.matches("seek 5 s").count(), 1, "{screen}");
     assert!(
-        screen.contains("← / →") && screen.contains(", / ."),
-        "{screen}"
+        !screen.contains(", / ."),
+        "the comma keys no longer seek (issue #38):\n{screen}"
     );
-    assert_eq!(screen.matches("seek 5 s").count(), 2, "{screen}");
     assert!(!screen.contains("first track"), "{screen}");
     assert!(!screen.contains(" of "), "two rows fit:\n{screen}");
 
@@ -1736,7 +1744,7 @@ fn the_settings_card_draws_its_title_sections_and_focused_row_in_the_accent() {
     use velo::ui::theme::Theme;
 
     let mut app = App::new(tracks(&["one.flac"]));
-    press(&mut app, KeyCode::Char('o'));
+    ctrl(&mut app, velo::ui::crossterm::event::KeyCode::Char('p'));
     let screen = screen_at(&app, 80, 24);
 
     assert!(screen.contains(" settings "), "{screen}");
@@ -1805,7 +1813,7 @@ fn the_settings_card_draws_its_title_sections_and_focused_row_in_the_accent() {
 #[test]
 fn the_settings_card_keeps_its_height_while_the_cursor_walks_it() {
     let mut app = App::new(tracks(&["one.flac"]));
-    press(&mut app, KeyCode::Char('o'));
+    ctrl(&mut app, velo::ui::crossterm::event::KeyCode::Char('p'));
     let height = settings_card_height(&screen_at(&app, 80, 14));
 
     for step in 0..20 {
@@ -1832,7 +1840,7 @@ fn the_settings_card_keeps_its_height_while_the_cursor_walks_it() {
 #[test]
 fn the_theme_picker_draws_one_row_per_theme_over_the_settings_card() {
     let mut app = App::new(tracks(&["one.flac"]));
-    press(&mut app, KeyCode::Char('o'));
+    ctrl(&mut app, velo::ui::crossterm::event::KeyCode::Char('p'));
     for _ in 0..3 {
         press(&mut app, KeyCode::Char('j'));
     }
@@ -1854,7 +1862,7 @@ fn hiding_the_cover_from_the_card_removes_its_columns_on_the_next_frame() {
     let mut app = App::new(tracks(&["one.flac", "two.flac", "three.flac"]));
     app.show_artwork(Some(velo::ui::artwork::Picker::new((8, 12))));
 
-    press(&mut app, KeyCode::Char('o'));
+    ctrl(&mut app, velo::ui::crossterm::event::KeyCode::Char('p'));
     for _ in 0..4 {
         press(&mut app, KeyCode::Char('j'));
     }

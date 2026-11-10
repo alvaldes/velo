@@ -26,6 +26,17 @@ fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::from(code)
 }
 
+/// A ctrl-modified key press, the way a terminal reports it.
+fn ctrl(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::CONTROL)
+}
+
+/// One ctrl-modified key press, its action applied.
+fn press_ctrl(app: &mut App<'_>, code: KeyCode) {
+    let action = app.on_key(ctrl(code));
+    app.apply(action);
+}
+
 /// One key press, its action applied.
 fn press(app: &mut App<'_>, code: KeyCode) {
     let action = app.on_key(key(code));
@@ -337,10 +348,10 @@ fn five_queued() -> (App<'static>, Vec<PathBuf>) {
 }
 
 #[test]
-fn s_shuffles_the_queue_and_s_again_puts_it_back_in_order() {
+fn z_shuffles_the_queue_and_z_again_puts_it_back_in_order() {
     let (mut app, paths) = five_queued();
 
-    let action = app.on_key(key(KeyCode::Char('s')));
+    let action = app.on_key(key(KeyCode::Char('z')));
     assert_eq!(action, Action::ToggleShuffle);
     app.apply(action);
     let mut shuffled = queue_paths(app.queue());
@@ -349,7 +360,7 @@ fn s_shuffles_the_queue_and_s_again_puts_it_back_in_order() {
     sorted.sort();
     assert_eq!(shuffled, sorted, "the same tracks, nothing lost or doubled");
 
-    let action = app.on_key(key(KeyCode::Char('s')));
+    let action = app.on_key(key(KeyCode::Char('z')));
     app.apply(action);
     assert_eq!(
         queue_paths(app.queue()),
@@ -361,39 +372,42 @@ fn s_shuffles_the_queue_and_s_again_puts_it_back_in_order() {
 #[test]
 fn a_track_queued_while_shuffled_follows_the_rest_when_shuffle_ends() {
     let (mut app, mut paths) = five_queued();
-    press(&mut app, KeyCode::Char('s'));
+    press(&mut app, KeyCode::Char('z'));
     // Back to the top of the list and queue the first track once more.
     app.on_key(key(KeyCode::Char('g')));
     let action = app.on_key(key(KeyCode::Char('a')));
     app.apply(action);
-    press(&mut app, KeyCode::Char('s'));
+    press(&mut app, KeyCode::Char('z'));
 
     paths.push(paths[0].clone());
     assert_eq!(queue_paths(app.queue()), paths);
 }
 
-// ---- reopening the library prompt (library-refresh T1) -------------------------
+// ---- reopening the library prompt (library-refresh T1, issue #38) ---------
 
 #[test]
-fn shift_l_opens_the_library_prompt_again_after_esc() {
+fn o_opens_the_library_prompt_again_after_esc() {
     let mut app = App::browse(None);
     app.set_config_file(Some(PathBuf::from("/nowhere/velo/config.toml")));
     assert!(!app.library_prompt_open());
 
-    press(&mut app, KeyCode::Char('L'));
+    press(&mut app, KeyCode::Char('o'));
     assert!(app.library_prompt_open());
     assert_eq!(app.library_prompt_input(), "~/");
 
     press(&mut app, KeyCode::Esc);
     assert!(!app.library_prompt_open());
-    press(&mut app, KeyCode::Char('L'));
-    assert!(app.library_prompt_open(), "it opens again whenever asked");
+    press_ctrl(&mut app, KeyCode::Char('l'));
+    assert!(
+        app.library_prompt_open(),
+        "ctrl+l opens it again whenever asked"
+    );
 }
 
 #[test]
-fn shift_l_types_into_the_search_and_does_nothing_over_files() {
+fn o_types_into_the_search_and_does_nothing_over_files() {
     let mut files = app_with_three_tracks();
-    press(&mut files, KeyCode::Char('L'));
+    press(&mut files, KeyCode::Char('o'));
     assert!(!files.library_prompt_open(), "files have no library to set");
 
     let temp = TempLibrary::new("shift-l-search");
@@ -401,17 +415,22 @@ fn shift_l_types_into_the_search_and_does_nothing_over_files() {
     temp.index();
     let mut app = App::browse(Some(&temp.library));
     press(&mut app, KeyCode::Char('/'));
-    press(&mut app, KeyCode::Char('L'));
-    assert_eq!(app.search_query(), "L");
+    press(&mut app, KeyCode::Char('o'));
+    assert_eq!(app.search_query(), "o");
     assert!(!app.library_prompt_open());
 }
 
 #[test]
-fn n_and_p_ask_for_the_next_and_the_previous_track() {
+fn n_and_the_comma_keys_ask_for_the_next_and_the_previous_track() {
     let mut app = app_with_three_tracks();
 
+    // `n` stays the next key, and cliamp's `>` and `.` join it (issue #38).
     assert_eq!(app.on_key(key(KeyCode::Char('n'))), Action::Next);
-    assert_eq!(app.on_key(key(KeyCode::Char('p'))), Action::Previous);
+    assert_eq!(app.on_key(key(KeyCode::Char('>'))), Action::Next);
+    assert_eq!(app.on_key(key(KeyCode::Char('.'))), Action::Next);
+    // `<` and `,` are the previous keys; `p` is not — it opens the queue.
+    assert_eq!(app.on_key(key(KeyCode::Char('<'))), Action::Previous);
+    assert_eq!(app.on_key(key(KeyCode::Char(','))), Action::Previous);
 }
 
 #[test]
@@ -427,25 +446,18 @@ fn next_and_previous_with_nothing_playing_change_nothing() {
 }
 
 #[test]
-fn left_and_right_and_comma_and_dot_seek_five_seconds() {
+fn left_and_right_seek_five_seconds_and_the_comma_keys_do_not() {
     let mut app = app_with_three_tracks();
 
-    // `Left` and `,` seek back five seconds…
+    // `Left` seeks back five seconds…
     assert_eq!(
         app.on_key(key(KeyCode::Left)),
         Action::Seek { delta_secs: -5 }
     );
-    assert_eq!(
-        app.on_key(key(KeyCode::Char(','))),
-        Action::Seek { delta_secs: -5 }
-    );
-    // …and `Right` and `.` seek forward five seconds.
+    // …and `Right` forward five seconds. The comma keys no longer seek
+    // (issue #38): `,` is previous and `.` is next, on every screen.
     assert_eq!(
         app.on_key(key(KeyCode::Right)),
-        Action::Seek { delta_secs: 5 }
-    );
-    assert_eq!(
-        app.on_key(key(KeyCode::Char('.'))),
         Action::Seek { delta_secs: 5 }
     );
 }
@@ -514,22 +526,22 @@ fn a_on_an_album_appends_all_of_its_tracks_in_order() {
 }
 
 #[test]
-fn d_on_an_empty_queue_refuses_and_says_why() {
+fn x_on_an_empty_queue_refuses_and_says_why() {
     let mut app = app_with_three_tracks();
     app.on_key(key(KeyCode::Tab));
 
-    assert_eq!(app.on_key(key(KeyCode::Char('d'))), Action::None);
+    assert_eq!(app.on_key(key(KeyCode::Char('x'))), Action::None);
     assert_eq!(app.queue(), [] as [Entry; 0], "nothing was removed");
     assert_eq!(app.status(), "velo: nothing selected in the queue");
 }
 
 #[test]
-fn d_removes_a_pending_entry_and_keeps_the_selection_inside_the_queue() {
+fn x_removes_a_pending_entry_and_keeps_the_selection_inside_the_queue() {
     let mut app = app_with_a_queue_of_three();
     app.on_key(key(KeyCode::Tab));
     app.on_key(key(KeyCode::Char('j'))); // onto two.flac, the middle entry
 
-    assert_eq!(app.on_key(key(KeyCode::Char('d'))), Action::None);
+    assert_eq!(app.on_key(key(KeyCode::Char('x'))), Action::None);
     let names: Vec<String> = app
         .queue()
         .iter()
@@ -578,7 +590,7 @@ fn k_then_j_moves_a_pending_entry_and_the_selection_moves_with_it() {
 /// for the transport tests: production sets `playing` and the player
 /// together, so the queue edits read the station as the playing entry.
 #[test]
-fn d_j_and_k_refuse_on_the_playing_station_as_on_a_track() {
+fn x_j_and_k_refuse_on_the_playing_station_as_on_a_track() {
     let labels = |app: &App| -> Vec<String> {
         app.queue()
             .iter()
@@ -598,8 +610,8 @@ fn d_j_and_k_refuse_on_the_playing_station_as_on_a_track() {
     press(&mut app, KeyCode::Char('a')); // one.flac queues after the station
     press(&mut app, KeyCode::Tab); // into the queue, on the station
 
-    // `d` refuses the playing station…
-    assert_eq!(app.on_key(key(KeyCode::Char('d'))), Action::None);
+    // `x` refuses the playing station…
+    assert_eq!(app.on_key(key(KeyCode::Char('x'))), Action::None);
     assert_eq!(
         app.status(),
         "velo: cannot remove the track that is playing"
@@ -634,7 +646,7 @@ fn d_j_and_k_refuse_on_the_playing_station_as_on_a_track() {
     assert_eq!(labels(&app), ["Radio Nova", "one.flac"]);
 
     // …while the entries after it stay editable, station or not.
-    app.on_key(key(KeyCode::Char('d')));
+    app.on_key(key(KeyCode::Char('x')));
     assert_eq!(app.status(), "velo: removed one.flac");
 }
 
@@ -2061,7 +2073,7 @@ fn repeat_and_shuffle_are_written_when_they_change() {
         fs::read_to_string(&config).unwrap(),
         default.replace("repeat = \"off\"", "repeat = \"all\"")
     );
-    press(&mut app, KeyCode::Char('s'));
+    press(&mut app, KeyCode::Char('z'));
     assert_eq!(
         fs::read_to_string(&config).unwrap(),
         default
@@ -2072,14 +2084,14 @@ fn repeat_and_shuffle_are_written_when_they_change() {
     // Off again: `off` and `false` are values too, and they are written.
     press(&mut app, KeyCode::Char('r'));
     press(&mut app, KeyCode::Char('r'));
-    press(&mut app, KeyCode::Char('s'));
+    press(&mut app, KeyCode::Char('z'));
     assert_eq!(fs::read_to_string(&config).unwrap(), default);
 
     let _ = fs::remove_dir_all(&dir);
 }
 
 /// Low power (issue #11, S1): `P` toggles the session switch and writes
-/// `[ui] low_power` the way `s` writes `[state] shuffle` — once per
+/// `[ui] low_power` the way `z` writes `[state] shuffle` — once per
 /// change, and never when the value it would write is already there.
 #[test]
 fn p_toggles_low_power_and_writes_the_key_the_way_s_writes_shuffle() {
@@ -2301,7 +2313,7 @@ fn a_launch_comes_back_to_what_the_file_says_and_writes_nothing() {
 
     // The restored values are the live ones: the next change moves on from
     // them instead of rewriting them.
-    press(&mut app, KeyCode::Char('s'));
+    press(&mut app, KeyCode::Char('z'));
     assert!(
         fs::read_to_string(&config)
             .unwrap()
@@ -2458,12 +2470,12 @@ fn u_after_choosing_a_library_without_an_open_index_says_why_nothing_happens() {
 // ---- the settings card (S6, S7) ---------------------------------------------
 
 #[test]
-fn o_opens_the_settings_card_and_esc_closes_it() {
+fn ctrl_p_opens_the_settings_card_and_esc_closes_it() {
     let mut app = app_with_three_tracks();
     assert!(!app.settings_open());
 
-    assert_eq!(app.on_key(key(KeyCode::Char('o'))), Action::None);
-    assert!(app.settings_open(), "o opens the settings card");
+    assert_eq!(app.on_key(ctrl(KeyCode::Char('p'))), Action::None);
+    assert!(app.settings_open(), "ctrl+p opens the settings card");
 
     press(&mut app, KeyCode::Esc);
     assert!(!app.settings_open(), "esc closes the settings card");
@@ -2473,10 +2485,14 @@ fn o_opens_the_settings_card_and_esc_closes_it() {
     assert_eq!(app.selected(), 1);
 }
 
+fn open_settings(app: &mut App<'_>) {
+    press_ctrl(app, KeyCode::Char('p'));
+}
+
 #[test]
 fn the_settings_cursor_moves_between_settings_only_and_stops_at_the_ends() {
     let mut app = app_with_three_tracks();
-    press(&mut app, KeyCode::Char('o'));
+    open_settings(&mut app);
     assert_eq!(
         app.settings_focused(),
         "replay gain",
@@ -2530,7 +2546,7 @@ fn the_settings_cursor_moves_between_settings_only_and_stops_at_the_ends() {
 #[test]
 fn an_open_settings_card_holds_back_q_and_space_until_it_closes() {
     let mut app = app_with_three_tracks();
-    press(&mut app, KeyCode::Char('o'));
+    open_settings(&mut app);
     assert!(app.settings_open());
 
     for code in [KeyCode::Char('q'), KeyCode::Char(' ')] {
@@ -2556,7 +2572,7 @@ fn enter_on_a_visibility_row_flips_it_and_writes_cover_art_to_the_file() {
     let mut app = app_with_default_config(&config);
     let default = velo::config::default_config_text();
 
-    press(&mut app, KeyCode::Char('o'));
+    open_settings(&mut app);
     for _ in 0..4 {
         press(&mut app, KeyCode::Char('j'));
     }
@@ -2577,7 +2593,7 @@ fn enter_on_the_folder_row_opens_the_library_prompt() {
     let config = dir.join("config.toml");
     let mut app = app_with_default_config(&config);
 
-    press(&mut app, KeyCode::Char('o'));
+    open_settings(&mut app);
     press(&mut app, KeyCode::Char('G'));
     assert_eq!(app.settings_focused(), "folder");
     press(&mut app, KeyCode::Enter);
@@ -2597,7 +2613,7 @@ fn enter_on_the_advisories_row_writes_it_to_the_file() {
     let mut app = app_with_default_config(&config);
     let default = velo::config::default_config_text();
 
-    press(&mut app, KeyCode::Char('o'));
+    open_settings(&mut app);
     for _ in 0..8 {
         press(&mut app, KeyCode::Char('j'));
     }
@@ -2619,7 +2635,7 @@ fn enter_on_the_view_numbers_row_writes_it_to_the_file() {
     let mut app = app_with_default_config(&config);
     let default = velo::config::default_config_text();
 
-    press(&mut app, KeyCode::Char('o'));
+    open_settings(&mut app);
     for _ in 0..9 {
         press(&mut app, KeyCode::Char('j'));
     }
@@ -2637,7 +2653,7 @@ fn enter_on_the_view_numbers_row_writes_it_to_the_file() {
 #[test]
 fn a_question_mark_inside_the_settings_card_does_nothing() {
     let mut app = app_with_three_tracks();
-    press(&mut app, KeyCode::Char('o'));
+    open_settings(&mut app);
 
     assert_eq!(app.on_key(key(KeyCode::Char('?'))), Action::None);
     assert!(app.settings_open(), "the card stays open");
@@ -2679,7 +2695,8 @@ fn theme_app(name: &str) -> (PathBuf, App<'static>) {
 }
 
 fn open_on_theme_row(app: &mut App<'_>) {
-    press(app, KeyCode::Char('o'));
+    press_ctrl(app, KeyCode::Char('p'));
+
     for _ in 0..3 {
         press(app, KeyCode::Char('j'));
     }
@@ -2720,7 +2737,7 @@ fn the_settings_card_has_one_theme_row_and_no_colour_rows() {
     // Walking the card end to end must meet every row that remains and
     // none of the seven colours.
     let mut app = app_with_three_tracks();
-    press(&mut app, KeyCode::Char('o'));
+    open_settings(&mut app);
 
     let mut labels = vec![app.settings_focused().to_owned()];
     for _ in 0..20 {
@@ -3050,32 +3067,14 @@ fn the_second_seek_gear_moves_thirty_seconds_and_the_plain_keys_keep_five() {
         app.on_key(key(KeyCode::Right)),
         Action::Seek { delta_secs: 5 }
     );
-    assert_eq!(
-        app.on_key(key(KeyCode::Char(','))),
-        Action::Seek { delta_secs: -5 }
-    );
-    assert_eq!(
-        app.on_key(key(KeyCode::Char('.'))),
-        Action::Seek { delta_secs: 5 }
-    );
 
     // Shift on an arrow is a modifier a terminal reports, so the coarse gear
-    // rides on the same key.
+    // rides on the same key. The comma keys carry nothing any more (issue
+    // #38): `<` and `,` skip, and a character key arrives already shifted.
     let shift_left = KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT);
     let shift_right = KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT);
     assert_eq!(app.on_key(shift_left), Action::Seek { delta_secs: -30 });
     assert_eq!(app.on_key(shift_right), Action::Seek { delta_secs: 30 });
-
-    // A character key arrives already shifted, so the pair shift produces
-    // carries the coarse gear for the comma keys.
-    assert_eq!(
-        app.on_key(key(KeyCode::Char('<'))),
-        Action::Seek { delta_secs: -30 }
-    );
-    assert_eq!(
-        app.on_key(key(KeyCode::Char('>'))),
-        Action::Seek { delta_secs: 30 }
-    );
 }
 
 // ---- the seek prompt (issue #6) ------------------------------------------
@@ -3257,12 +3256,12 @@ fn m_toggles_mono_for_the_session() {
     let mut app = app_with_three_tracks();
     assert!(!app.mono(), "a session starts in stereo");
 
-    assert_eq!(app.on_key(key(KeyCode::Char('M'))), Action::ToggleMono);
+    assert_eq!(app.on_key(key(KeyCode::Char('m'))), Action::ToggleMono);
     app.apply(Action::ToggleMono);
     assert!(app.mono());
 
     app.apply(Action::ToggleMono);
-    assert!(!app.mono(), "M toggles it back off");
+    assert!(!app.mono(), "m toggles it back off");
 }
 
 #[test]
@@ -3270,11 +3269,249 @@ fn m_with_bit_perfect_is_refused_in_the_status_line() {
     let mut app = app_with_three_tracks();
     app.set_bit_perfect(true);
 
-    assert_eq!(app.on_key(key(KeyCode::Char('M'))), Action::ToggleMono);
+    assert_eq!(app.on_key(key(KeyCode::Char('m'))), Action::ToggleMono);
     app.apply(Action::ToggleMono);
     assert!(!app.mono(), "bit-perfect leaves mono off");
     assert_eq!(
         app.status(),
         "velo: --mono cannot be combined with bit_perfect"
     );
+}
+
+// ------------------------------------------------- the cliamp keymap (issue #38)
+
+#[test]
+fn a_adds_the_selection_and_plays_from_that_entry() {
+    let mut app = app_with_three_tracks();
+    app.on_key(key(KeyCode::Char('j'))); // onto two.flac
+
+    // `A` queues the selection and asks to play the queue from the entry it
+    // landed on; the shell starts the stream, as with `enter` in the queue.
+    let action = app.on_key(key(KeyCode::Char('A')));
+    assert_eq!(
+        action,
+        Action::PlayQueue { from: 0 },
+        "playing starts at the entry just added"
+    );
+    assert_eq!(
+        app.queue(),
+        [Entry::File(PathBuf::from("/library/artist/two.flac"))],
+        "the queue grows by exactly the selection"
+    );
+    assert_eq!(app.status(), "velo: added 1 track");
+}
+
+#[test]
+fn a_on_an_album_adds_its_tracks_and_plays_from_the_first() {
+    let temp = TempLibrary::new("add-and-play");
+    temp.write_wav("Tide/2019 - Harbor/01 - Dawn.wav");
+    temp.write_wav("Tide/2019 - Harbor/02 - Later.wav");
+    temp.index();
+
+    let mut app = App::browse(Some(&temp.library));
+    app.on_key(key(KeyCode::Enter));
+    app.apply(Action::Descend); // the albums of Tide
+
+    let action = app.on_key(key(KeyCode::Char('A')));
+    assert_eq!(
+        action,
+        Action::PlayQueue { from: 0 },
+        "the first track of the album is where playing starts"
+    );
+    let names: Vec<String> = app
+        .queue()
+        .iter()
+        .map(|entry| entry.label().into_owned())
+        .collect();
+    assert_eq!(names, ["01 - Dawn.wav", "02 - Later.wav"]);
+}
+
+#[test]
+fn a_on_an_artist_refuses_with_one_status_line() {
+    let temp = TempLibrary::new("add-and-play-refusal");
+    temp.write_wav("Tide/2019 - Harbor/01 - Dawn.wav");
+    temp.index();
+
+    let mut app = App::browse(Some(&temp.library));
+    assert_eq!(app.on_key(key(KeyCode::Char('A'))), Action::None);
+    assert_eq!(app.status(), "velo: open an album to add its tracks");
+    assert!(app.queue().is_empty(), "nothing was queued");
+}
+
+#[test]
+fn x_where_nothing_can_be_removed_says_so() {
+    let mut app = app_with_three_tracks();
+
+    assert_eq!(app.on_key(key(KeyCode::Char('x'))), Action::None);
+    assert_eq!(app.status(), "velo: nothing to remove here");
+    assert_eq!(app.queue(), [] as [Entry; 0], "nothing was removed");
+}
+
+#[test]
+fn p_lands_on_the_queue_view_and_stays_there() {
+    let mut app = app_with_three_tracks();
+    press(&mut app, KeyCode::Char('a'));
+
+    assert_eq!(app.on_key(key(KeyCode::Char('p'))), Action::None);
+    assert_eq!(app.view(), View::Queue);
+    assert_eq!(app.status(), "velo: queue, 1 track");
+
+    press(&mut app, KeyCode::Char('p'));
+    assert_eq!(
+        app.view(),
+        View::Queue,
+        "p never leaves the queue — tab returns"
+    );
+}
+
+#[test]
+fn l_lands_on_the_playlists_source() {
+    let dir = config_dir("l-playlists");
+    let config = dir.join("config.toml");
+    let store = velo::saved::path_beside(&config);
+    fs::create_dir_all(store.parent().unwrap()).unwrap();
+    fs::write(
+        &store,
+        "[[playlist]]\nname = \"evening\"\ntrack = [\"/music/a.wav\"]\n",
+    )
+    .unwrap();
+    let mut app = App::browse(None);
+    app.set_config_file(Some(config.clone()));
+
+    assert_eq!(app.on_key(key(KeyCode::Char('L'))), Action::None);
+    assert_eq!(app.view(), View::Library);
+    assert_eq!(
+        app.level(),
+        Some(Level::Playlists),
+        "L opens the saved playlists"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn home_and_end_jump_to_the_ends_of_a_list() {
+    let mut app = app_with_three_tracks();
+    app.on_key(key(KeyCode::Char('j')));
+    app.on_key(key(KeyCode::Char('j')));
+
+    assert_eq!(app.on_key(key(KeyCode::Home)), Action::None);
+    assert_eq!(app.selected(), 0, "home jumps to the first row");
+    assert_eq!(app.on_key(key(KeyCode::End)), Action::None);
+    assert_eq!(app.selected(), 2, "end jumps to the last row");
+
+    // The queue view's list gets them too.
+    press(&mut app, KeyCode::Char('a'));
+    press(&mut app, KeyCode::Tab);
+    app.on_key(key(KeyCode::Home));
+    assert_eq!(app.queue_selected(), 0, "home jumps the queue to its head");
+    app.on_key(key(KeyCode::End));
+    assert_eq!(app.queue_selected(), 0, "end jumps to the only entry");
+}
+
+#[test]
+fn the_page_keys_move_by_a_page_in_a_long_list() {
+    let tracks: Vec<PathBuf> = (0..40)
+        .map(|index| PathBuf::from(format!("/t/{index:02}.flac")))
+        .collect();
+    let mut app = App::new(tracks);
+    // A page is what the body showed the last time it was drawn: draw once
+    // so the keymap knows the page.
+    let mut terminal =
+        velo::ui::ratatui::Terminal::new(velo::ui::ratatui::backend::TestBackend::new(80, 24))
+            .unwrap();
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+
+    assert_eq!(app.on_key(key(KeyCode::PageDown)), Action::None);
+    let page = app.selected();
+    assert!(page > 1, "pgdn moves by more than one row, got {page}");
+
+    assert_eq!(app.on_key(key(KeyCode::PageUp)), Action::None);
+    assert_eq!(app.selected(), 0, "pgup moves back the same page");
+
+    // ctrl+d and ctrl+u are the same page keys' aliases.
+    press_ctrl(&mut app, KeyCode::Char('d'));
+    assert_eq!(app.selected(), page, "ctrl+d is pgdn");
+    press_ctrl(&mut app, KeyCode::Char('u'));
+    assert_eq!(app.selected(), 0, "ctrl+u is pgup");
+
+    // A page never wraps: from the last row it stays at the end.
+    app.on_key(key(KeyCode::End));
+    press(&mut app, KeyCode::PageDown);
+    assert_eq!(app.selected(), 39, "pgdn stops at the last row");
+}
+
+#[test]
+fn shift_down_and_up_move_a_queue_entry_the_way_j_and_k_do() {
+    let mut app = app_with_a_queue_of_three();
+    app.on_key(key(KeyCode::Tab));
+    app.on_key(key(KeyCode::Char('j'))); // onto two.flac, the middle entry
+
+    let down = KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT);
+    assert_eq!(app.on_key(down), Action::None);
+    let moved: Vec<String> = app
+        .queue()
+        .iter()
+        .map(|entry| entry.label().into_owned())
+        .collect();
+    assert_eq!(moved, ["one.flac", "three.flac", "two.flac"]);
+    assert_eq!(
+        app.queue_selected(),
+        2,
+        "the selection moves with the entry"
+    );
+
+    let up = KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT);
+    assert_eq!(app.on_key(up), Action::None);
+    let moved: Vec<String> = app
+        .queue()
+        .iter()
+        .map(|entry| entry.label().into_owned())
+        .collect();
+    assert_eq!(moved, ["one.flac", "two.flac", "three.flac"]);
+}
+
+#[test]
+fn ctrl_c_and_ctrl_k_work_beside_q_and_question_mark() {
+    let mut app = app_with_three_tracks();
+
+    assert_eq!(app.on_key(ctrl(KeyCode::Char('c'))), Action::Quit);
+    assert_eq!(app.on_key(ctrl(KeyCode::Char('k'))), Action::None);
+    assert!(app.help_open(), "ctrl+k opens the help");
+    app.on_key(key(KeyCode::Esc));
+    assert!(!app.help_open());
+
+    assert_eq!(app.on_key(ctrl(KeyCode::Char('j'))), Action::None);
+    assert!(app.seek_prompt_open(), "ctrl+j opens the seek prompt");
+}
+
+#[test]
+fn an_open_overlay_keeps_its_grip_on_the_new_global_keys() {
+    let mut app = app_with_three_tracks();
+
+    // The settings card owns every key: ctrl+k must not open the help over
+    // it, ctrl+j must not open the seek prompt, ctrl+c must not quit.
+    press_ctrl(&mut app, KeyCode::Char('p'));
+    assert!(app.settings_open());
+    assert_eq!(app.on_key(ctrl(KeyCode::Char('k'))), Action::None);
+    assert!(
+        !app.help_open(),
+        "ctrl+k never opens the help through the card"
+    );
+    assert_eq!(app.on_key(ctrl(KeyCode::Char('j'))), Action::None);
+    assert!(!app.seek_prompt_open(), "ctrl+j never opens the prompt");
+    assert_eq!(app.on_key(ctrl(KeyCode::Char('c'))), Action::None);
+    assert!(app.settings_open(), "ctrl+c never quits through the card");
+    press(&mut app, KeyCode::Esc);
+    assert!(!app.settings_open());
+
+    // The help card owns them too.
+    press(&mut app, KeyCode::Char('?'));
+    assert_eq!(app.on_key(ctrl(KeyCode::Char('p'))), Action::None);
+    assert!(
+        !app.settings_open(),
+        "ctrl+p never opens settings through the help"
+    );
+    assert_eq!(app.on_key(ctrl(KeyCode::Char('c'))), Action::None);
+    assert!(app.help_open(), "ctrl+c never quits through the help");
 }

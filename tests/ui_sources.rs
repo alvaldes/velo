@@ -289,3 +289,39 @@ fn tab_from_the_sources_screen_reaches_the_queue_and_returns_to_it() {
     assert_eq!(app.view(), View::Sources);
     assert_eq!(app.sources_selected(), 1, "the cursor is where it was left");
 }
+
+/// The paging keys (issue #38) land on the sources' ends — the list is
+/// short, a page covers it — and `ctrl+d`/`ctrl+u` never page the library
+/// underneath the sources screen.
+#[test]
+fn the_page_keys_reach_the_sources_ends_and_no_further() {
+    let mut app = app();
+    app.open_sources();
+    press(&mut app, KeyCode::Char('j'));
+    assert_eq!(app.sources_selected(), 1);
+
+    press(&mut app, KeyCode::PageDown);
+    assert_eq!(app.sources_selected(), 4, "pgdn reaches the last source");
+    press(&mut app, KeyCode::PageUp);
+    assert_eq!(
+        app.sources_selected(),
+        0,
+        "pgup returns to the first source"
+    );
+
+    let ctrl_d = KeyEvent::new(
+        KeyCode::Char('d'),
+        velo::ui::crossterm::event::KeyModifiers::CONTROL,
+    );
+    let action = app.on_key(ctrl_d);
+    app.apply(action);
+    assert_eq!(app.sources_selected(), 4, "ctrl+d is pgdn here");
+
+    let ctrl_u = KeyEvent::new(
+        KeyCode::Char('u'),
+        velo::ui::crossterm::event::KeyModifiers::CONTROL,
+    );
+    let action = app.on_key(ctrl_u);
+    app.apply(action);
+    assert_eq!(app.sources_selected(), 0, "ctrl+u is pgup here");
+}
