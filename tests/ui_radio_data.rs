@@ -1288,6 +1288,33 @@ fn a_successful_favourite_save_creates_the_file() {
 // ---- the country question ---------------------------------------------------
 
 #[test]
+fn enter_answers_the_country_question_too() {
+    // Issue #47: the row is selectable, so `enter` acts on it the way `y`
+    // does — the letters were the only way and nothing said so.
+    let dir = TempDir::new("ask-enter");
+    let canned = Arc::new(Canned::new());
+    let mut data = RadioData::new(
+        Some(Client::new(Shared(Arc::clone(&canned)))),
+        Some(dir.radio_toml()),
+        Some(String::from("NO")),
+    );
+    let mut view = data.view();
+    press(&mut view, KeyCode::Char('j')); // onto the question
+    press(&mut view, KeyCode::Enter);
+    data.poll(&mut view);
+    assert!(
+        view.labels().contains(&"NO (near you)".to_owned()),
+        "enter answers yes, got: {:?}",
+        view.labels()
+    );
+    let saved = std::fs::read_to_string(dir.radio_toml()).expect("the answer is saved");
+    assert!(
+        saved.contains(r#"country = "NO""#),
+        "the answer lands in the file, got: {saved}"
+    );
+}
+
+#[test]
 fn y_answers_the_country_question_and_n_declines_it() {
     // `y` stores the detected country and the row becomes the near-you row.
     let dir = TempDir::new("ask-yes");
