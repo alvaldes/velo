@@ -631,20 +631,24 @@ fn a_list_has_a_header_line_and_numbered_rows_on_an_accent_selection() {
     assert_eq!(selected.fg, theme.ink, "and its text the darkest color");
 }
 
-/// The interface wears the resolved `[theme]` palette. The defaults
-/// reproduce the ANSI look velo has always drawn with — the terminal's own
-/// background and text, the ANSI magenta accent, the ANSI gray dim — and the
-/// help card's border and title show the accent at work.
+/// The interface wears the resolved `[theme]` palette. The factory defaults
+/// are velo's own palette (issue #57) — its dark background, its warm text,
+/// the gray dim — and the help card's border and title show the accent at
+/// work.
 #[test]
 fn the_interface_takes_its_colors_from_the_terminal_palette() {
     use velo::ui::ratatui::style::Color;
 
     let app = App::new(tracks(&["one.flac", "two.flac"]));
     let empty = cell_at(&app, 40, 15);
-    assert_eq!(empty.bg, Color::Reset, "the terminal's own background");
+    assert_eq!(
+        empty.bg,
+        Color::Rgb(0x14, 0x1c, 0x28),
+        "the factory velo background (issue #57)"
+    );
 
-    // The body's ordinary text stays the terminal's own foreground (a row
-    // that is not the selection, whose cells wear the accent).
+    // The body's ordinary text wears the factory text colour (a row that is
+    // not the selection, whose cells wear the accent).
     let screen = screen_at(&app, 80, 24);
     let row = screen
         .lines()
@@ -659,8 +663,12 @@ fn the_interface_takes_its_colors_from_the_terminal_palette() {
     )
     .unwrap();
     let name = cell_at(&app, x, y);
-    assert_eq!(name.fg, Color::Reset, "the terminal's own text");
-    assert_eq!(name.bg, Color::Reset);
+    assert_eq!(
+        name.fg,
+        Color::Rgb(0xF4, 0xF0, 0xE2),
+        "the factory velo text (issue #57)"
+    );
+    assert_eq!(name.bg, Color::Rgb(0x14, 0x1c, 0x28));
 
     // A dim hint recedes in the default dim gray.
     let hints = screen
@@ -681,7 +689,7 @@ fn the_interface_takes_its_colors_from_the_terminal_palette() {
         "the dim hint is the default dim gray"
     );
 
-    // The help card's border and title wear the accent, ANSI magenta as RGB.
+    // The help card's border and title wear the accent.
     let mut app = App::new(tracks(&["one.flac"]));
     press(&mut app, KeyCode::Char('?'));
     let screen = screen_at(&app, 80, 24);
@@ -696,12 +704,12 @@ fn the_interface_takes_its_colors_from_the_terminal_palette() {
     let top = u16::try_from(top).unwrap();
     assert_eq!(
         cell_at(&app, corner_x, top).fg,
-        Color::Rgb(0xaf, 0x00, 0xaf),
+        Color::Rgb(0xf4, 0xba, 0xa3),
         "the card's border is the default accent"
     );
     assert_eq!(
         cell_at(&app, title_x, top).fg,
-        Color::Rgb(0xaf, 0x00, 0xaf),
+        Color::Rgb(0xf4, 0xba, 0xa3),
         "the card's title is the default accent"
     );
 }

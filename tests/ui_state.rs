@@ -2164,8 +2164,8 @@ fn the_library_view_and_the_open_node_are_written_as_you_move() {
                 &format!("browse_by = \"{browse_by}\""),
             )
             .replace(
-                "# the built-in default wins over the theme named above.\n[theme]",
-                &format!("# the built-in default wins over the theme named above.\n{keys}[theme]"),
+                "# default wins over the theme named above.\n[theme]",
+                &format!("# default wins over the theme named above.\n{keys}[theme]"),
             )
     };
     let file = || fs::read_to_string(&config).unwrap();
@@ -2738,6 +2738,56 @@ fn the_preview_is_not_masked_by_the_configs_own_default_colours() {
         focused, before,
         "and it is the theme's palette, not the config's defaults"
     );
+}
+
+#[test]
+fn transparent_background_keeps_the_terminal_s_background_in_the_preview() {
+    // S17 (issue #57): with `transparent_background = true` a move in the
+    // picker must not repaint the background — it stays the terminal's own —
+    // while the other colours preview as they do. The launch rule and the
+    // preview rule are the same rule: whatever the launch resolves, this
+    // move resolves the same way.
+    let dir = config_dir("preview-transparent");
+    let config = dir.join("config.toml");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(&config, "[theme]\ntransparent_background = true\n").unwrap();
+    let themes = dir.join("themes");
+    fs::create_dir_all(&themes).unwrap();
+    fs::write(
+        themes.join("nord.toml"),
+        "background = \"#2e3440\"\naccent = \"#88c0d0\"\n",
+    )
+    .unwrap();
+
+    let cli = velo::config::Cli::try_parse_from(["velo"]).unwrap();
+    let settings = velo::config::Config::load_from(&config)
+        .unwrap()
+        .merged(&cli);
+    let selection = velo::config::select_theme(Some(&themes), &settings.theme);
+    let mut app = app_with_three_tracks();
+    app.set_config_file(Some(config));
+    app.set_theme_library(selection, settings.theme);
+    let before = app.theme_colors();
+
+    assert_eq!(
+        before.background,
+        ThemeColor::Terminal,
+        "the launch honours the switch too"
+    );
+    open_theme_picker(&mut app);
+    press(&mut app, KeyCode::Char('j'));
+
+    let focused = app.theme_colors();
+    assert_eq!(
+        focused.background,
+        ThemeColor::Terminal,
+        "moving does not repaint the background: {focused:?}"
+    );
+    assert_ne!(
+        focused.accent, before.accent,
+        "every other colour previews exactly as it does"
+    );
+    let _ = fs::remove_dir_all(&dir);
 }
 
 fn open_theme_picker(app: &mut App<'_>) {

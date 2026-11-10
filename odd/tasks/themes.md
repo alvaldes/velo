@@ -109,6 +109,37 @@ setting stay as they are; a `themes/default.toml` or a `config.toml`
 already on disk is left exactly as it is, and the alias is what keeps
 `name = "default"` working.
 
+**S15 — The factory palette carries a real background and text** (issue
+#57): `background = #141c28`, `text = #F4F0E2`, `dim = #767676`,
+`accent = #F4BAA3`, `secondary = #A6C8E2`, `border = #767676`,
+`ink = #000000`. It is the built-in `velo` AND what `themes/velo.toml`
+ships, and the two must agree — the test that pins the shipped file to
+the built-in palette is the guard, so they move together.
+
+**S16 — `[theme] transparent_background` joins the table as an optional
+boolean**; the table denies unknown keys, so the commented line the
+generated file documents must parse when it is uncommented. `true` forces
+the FINAL palette's `background` to the terminal's own — transparent where
+the terminal is — for whichever theme is selected, and leaves every other
+slot exactly as the theme says; `false` or absent changes nothing. It is
+applied AFTER the layering (built-in → theme file → `[theme]` keys), so
+it wins over the theme's own background.
+
+**S17 — The picker preview honours the switch too**: with
+`transparent_background = true`, moving across themes must not repaint the
+background (it stays the terminal's), while the other colours preview as
+they do. The launch rule and the preview rule stay the same function,
+never two.
+
+**S18 — The generated `config.toml` writes the key commented out inside
+`[theme]`, right under `name`, with one sentence**: the terminal's own
+background shows through when it is `true`, whatever the theme says.
+
+**S19 — Nothing else changes**: the eleven well-known themes,
+`default terminal` (still all `reset`, and now the way to get the old
+look), the invisible `default` alias, the precedence, the picker's
+contract and every other setting.
+
 ## Tasks
 
 | ID | Spec | Route | Task | Commit |
@@ -119,6 +150,7 @@ already on disk is left exactly as it is, and the alias is what keeps
 | T4 | S1–S4 | parent | wiring in `src/bin/velo.rs`: both launch paths call `select_theme` and `set_theme_library`; README; this logbook | |
 | T5 | S6–S10 | worker | issue #37: `src/ui/theme/builtins.rs` (the eleven embedded themes), `src/config.rs` (`select_theme` seeds the catalogue; a file matching a built-in takes its row), `src/ui/mod.rs` (the card keeps one `theme` row, the colour rows and their cycling machinery leave, `enter` on the row opens the picker overlay with live preview on move, restore on `esc`, write-on-change on `enter`), tests, README | |
 | T6 | S11–S14 | worker | issue #54: `src/config.rs` (`DEFAULT_THEME_NAME` is `velo`, the `default` alias in `select_theme`, `DEFAULT_TERMINAL_TEMPLATE`, `write_default_theme` writes both factory themes, a theme file accepts `reset` in every slot, the generated config names `velo`), `src/ui/theme/builtins.rs` (`default terminal` joins the catalogue), `src/ui/mod.rs` (the alias keeps the full layering in previews), tests, README | |
+| T7 | S15–S19 | worker | issue #57: `src/config.rs` (`ThemeColors::default` is velo's own palette, `ThemeKeys.transparent_background` applied last inside `resolved_over`, `DEFAULT_THEME_TEMPLATE` carries the same palette, the generated file documents the key commented), `src/ui/mod.rs` (the preview resolves through the same `resolved_over`), `src/ui/theme.rs` (doc), tests in `tests/config.rs` and `tests/ui_state.rs`, README, this logbook | |
 
 ## Log
 
@@ -191,3 +223,26 @@ palette, gets no picker row, and keeps the old layering — defaults and all
 and keeps drawing exactly what it drew; a `themes/default.toml` a user
 already has wins over the alias, exactly as any file whose stem matches a
 factory theme.
+
+**L7** (writer, T7/S15–S19, issue #57). The author: "por defecto va a
+tener ese color oscuro de background" and "si está activado … va a
+utilizar el color de la terminal … transparente". So the factory palette
+`velo` carries its own colours now — `#141c28` background, `#F4F0E2` text,
+`#F4BAA3` accent, `#A6C8E2` secondary — and `themes/velo.toml` ships the
+same values. The old look still exists twice over: `default terminal`
+(all `reset`) is the theme for it, and the new
+`[theme] transparent_background = true` forces the resolved `background`
+to the terminal's own through the same function the layering ends in —
+`ThemeKeys::resolved_over`, which both the launch (`select_theme`) and
+the picker's preview (`theme_colors_of`) resolve through — so the switch
+wins over the theme's own background and the preview never lies about it.
+The generated config documents the key commented out under `name`, with
+its one sentence. One consequence of the new defaults worth keeping: a
+generated config from before this change carries the old colour values,
+which now differ from the built-in defaults, so under a named theme those
+old keys are genuine choices that mask the theme — every L3 guarantee
+still holds for files written by THIS release; an older generated file
+wants its seven colour lines deleted, and nothing is ever rewritten
+automatically. One wording consequence: the generated config's colour
+paragraph no longer claims `reset` is the default for background and text
+— it is only what those two slots are allowed to carry.

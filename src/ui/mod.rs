@@ -5087,7 +5087,9 @@ impl<'lib> App<'lib> {
     /// invisible alias `default` keeps the old layering, defaults and all
     /// (issue #54, S2/S5) — it is how existing installations select the
     /// factory palette. A name that is not loaded falls back to the
-    /// built-in (S3).
+    /// built-in (S3). `transparent_background` is applied last, inside the
+    /// same `resolved_over` the launch resolves through, so a preview never
+    /// lies about the switch (issue #57, S17).
     fn theme_colors_of(&self, name: &str) -> ThemeColors {
         match self
             .theme_files
