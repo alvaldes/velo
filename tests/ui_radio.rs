@@ -652,7 +652,7 @@ fn a_place_with_rows_keeps_them_while_its_request_is_in_flight() {
 }
 
 #[test]
-fn the_top_the_indexes_and_no_country_never_say_loading() {
+fn the_top_and_the_no_country_place_never_say_loading_the_indexes_do() {
     // The top is a section list; it never requests and never waits.
     let mut view = view();
     view.set_loading(Some(Place::Top));
@@ -662,22 +662,38 @@ fn the_top_the_indexes_and_no_country_never_say_loading() {
         "the top never says loading, got:\n{top}"
     );
 
-    // The two indexes do request, but their empty lists never say loading
-    // (S10): the footer carries the wait, the list keeps its own wording.
+    // The two indexes do request, and while the request is out their empty
+    // lists say loading, the way a place's stations do (issue #51) — not
+    // only the footer.
     let mut bare = RadioView::new(store(), Vec::new(), Vec::new(), None);
     bare.open_place(Place::Countries);
     bare.set_loading(Some(Place::Countries));
     let countries = screen(&bare);
     assert!(
-        countries.contains("no stations here") && !countries.contains("⟳ loading…"),
-        "the country index never says loading, got:\n{countries}"
+        countries.contains("⟳ loading…") && !countries.contains("no stations here"),
+        "the country index says loading while the request is out, got:\n{countries}"
     );
+
+    // The answer lands: the wait is gone with the request (S10).
+    bare.set_loading(None);
+    let answered = screen(&bare);
+    assert!(
+        answered.contains("no stations here") && !answered.contains("⟳ loading…"),
+        "the answer landed, the country index's wait is gone, got:\n{answered}"
+    );
+
     bare.open_place(Place::Tags);
     bare.set_loading(Some(Place::Tags));
     let tags = screen(&bare);
     assert!(
-        tags.contains("no stations here") && !tags.contains("⟳ loading…"),
-        "the tag index never says loading, got:\n{tags}"
+        tags.contains("⟳ loading…") && !tags.contains("no stations here"),
+        "the tag index says loading while the request is out, got:\n{tags}"
+    );
+    bare.set_loading(None);
+    let answered = screen(&bare);
+    assert!(
+        answered.contains("no stations here") && !answered.contains("⟳ loading…"),
+        "the answer landed, the tag index's wait is gone, got:\n{answered}"
     );
 
     // The no-country place is the user's own data: never a request, never

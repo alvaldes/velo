@@ -1419,18 +1419,14 @@ impl RadioView {
         (label, plural(counted, one, many))
     }
 
-    /// Whether the place on screen is the one a directory request is in
-    /// flight for: an empty place then says it is loading, not that there
-    /// is nothing here (S10). The top, the two indexes and the no-country
-    /// place never say it: only a place that itself asked the directory
-    /// for stations waits in its list — the indexes' wait is the footer's
-    /// to say.
+    /// Whether the place on screen is the one a request is in flight for:
+    /// an empty place then says it is loading, not that there is nothing
+    /// here (S10). Every place that itself asked — the two indexes
+    /// (issue #51) and the places that ask for stations — waits in its own
+    /// list; the top and the no-country place never ask, so they never say
+    /// it, and the wiring never marks them as waiting.
     fn waiting_here(&self) -> bool {
         self.pending.as_ref() == Some(&self.place)
-            && matches!(
-                self.place,
-                Place::Country { .. } | Place::Tag { .. } | Place::Search { .. }
-            )
     }
 
     /// Draws the view into `area`: the header line, the list with the

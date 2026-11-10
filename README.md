@@ -213,8 +213,9 @@ to are gathered at the end of the list instead of spread across countries. Those
 sections are screens, not a single mixed list: a category lists categories, a country
 lists its own stations, and neither borrows the other's rows.
 
-A wait says so. While a directory request is in flight the list says `⟳ loading…` and
-the footer says the same, both going away when the answer lands; a live station that
+A wait says so. While a directory request is in flight — a place's stations,
+or one of the two indexes — the list says `⟳ loading…` and the footer says
+the same, both going away when the answer lands; a live station that
 takes a while to open is named in the status line (`velo: opening <name>…`) until the
 player answers.
 

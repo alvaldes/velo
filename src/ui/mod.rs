@@ -4858,9 +4858,10 @@ impl<'lib> App<'lib> {
                 // station rule (issue #53): a stopped stream still marks
                 // its station, a track it does not.
                 let station = matches!(&self.position, Position::Recent)
-                    && self.recent_rows.get(index).is_some_and(|row| {
-                        row.kind == crate::history::Kind::Station
-                    });
+                    && self
+                        .recent_rows
+                        .get(index)
+                        .is_some_and(|row| row.kind == crate::history::Kind::Station);
                 ListItem::new(list_row(
                     ListRow {
                         mark: self.row_mark(standing == Some(index), station),
@@ -5070,10 +5071,7 @@ impl<'lib> App<'lib> {
             .map(|(row, entry)| {
                 ListItem::new(list_row(
                     ListRow {
-                        mark: self.row_mark(
-                            standing == Some(entry.path.as_path()),
-                            false,
-                        ),
+                        mark: self.row_mark(standing == Some(entry.path.as_path()), false),
                         number: row + 1,
                         digits,
                         name: entry.title.clone(),
