@@ -1,6 +1,10 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.36.1] - 2026-11-10
+
+### Fixes
+- **cliamp:** A channel's songs load, and the service is named right
 ## [0.36.0] - 2026-11-10
 
 ### Features
