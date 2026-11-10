@@ -1,6 +1,13 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.42.2] - 2026-11-10
+
+### Fixes
+- **ui:** The loop paints what the key set before applying it
+
+### Documentation
+- **config:** Every colour in the theme file says what it paints
 ## [0.42.1] - 2026-11-10
 
 ### Fixes
