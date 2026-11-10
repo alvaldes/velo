@@ -66,7 +66,7 @@ impl fmt::Display for Error {
             Self::Malformed { detail } => {
                 write!(
                     formatter,
-                    "the station directory answered malformed JSON: {detail}"
+                    "the radio service answered malformed JSON: {detail}"
                 )
             }
         }
