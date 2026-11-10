@@ -353,6 +353,10 @@ pub struct Config {
     /// table exists. `host` is optional inside it.
     #[serde(default)]
     pub radio: Option<RadioFile>,
+    /// `[audio]` — the output device to open (issue #44, S3), when the
+    /// table exists. `device` is optional inside it.
+    #[serde(default)]
+    pub audio: Option<AudioFile>,
 }
 
 impl Config {
@@ -423,6 +427,13 @@ impl Config {
                 api_key: server.api_key,
                 insecure: server.insecure.unwrap_or(false),
             }),
+            // A blank `device` is no device: the default output, the way a
+            // blank theme name is no theme.
+            audio_device: self
+                .audio
+                .and_then(|audio| audio.device)
+                .map(|device| device.trim().to_owned())
+                .filter(|device| !device.is_empty()),
         }
     }
 }
@@ -459,6 +470,9 @@ pub struct Settings {
     pub ui: UiParts,
     /// The Subsonic server (T12a), when the config has the table.
     pub subsonic: Option<SubsonicConfig>,
+    /// The output device to open (issue #44, S3): the config's `[audio]
+    /// device`. `None` is the system's default output.
+    pub audio_device: Option<String>,
 }
 
 /// Where the next launch picks up (S3): the library view and the node that
@@ -1053,6 +1067,13 @@ view_numbers = true
 # [radio]
 # host = \"all.api.radio-browser.info\"
 
+# The output device to open, by name: `d` in the interface lists every
+# output the machine has, the one in use marked. Unset, velo uses the
+# system's default output; a name that is no longer present falls back to
+# it with one notice, never refusing to start.
+# [audio]
+# device = \"Speakers\"
+
 # The cliamp radio section in the radio view: shown unless you turn it off
 # here. It is another project's service; when it changes or dies, the section
 # alone degrades — this line is what you write then, no release needed.
@@ -1478,6 +1499,16 @@ where
     }
 
     deserializer.deserialize_i64(VolumeVisitor).map(Some)
+}
+
+/// The serde shape of the `[audio]` table (issue #44, S3): the same keys and
+/// nothing else. `device` names the output device to open; an absent table,
+/// or a table without `device`, means the system's default output.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioFile {
+    #[serde(default)]
+    device: Option<String>,
 }
 
 /// The serde shape of the `[radio]` table: the same keys and nothing else.

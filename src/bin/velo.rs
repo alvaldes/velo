@@ -1149,6 +1149,9 @@ fn run_interface(
         }
         app.show_artwork(picker);
         app.set_config_file(config_file);
+        // The output device the config names (issue #44, S3): every player
+        // this session builds opens it, until `d` chooses another one.
+        app.set_audio_device(settings.audio_device.clone());
         // The shuffle and repeat the file saved reach the files interface
         // too; the open node belongs to the browser (S3), and
         // `set_session` remembers the volume above as what the file says.
@@ -1207,6 +1210,9 @@ fn browse_interface(
         }
         app.show_artwork(picker);
         app.set_config_file(config_file);
+        // The output device the config names (issue #44, S3), as the file
+        // interface starts with.
+        app.set_audio_device(settings.audio_device.clone());
         // The session comes back before anything else can move (S3), and
         // remembers the volume above as what the file says.
         app.set_session(settings.session.clone());
@@ -1340,6 +1346,9 @@ fn play(
         velo::audio::output::Repeat::Off,
         settings.mono,
         settings.bit_perfect,
+        // The output device the config names (issue #44, S3); `None` is the
+        // system's default output.
+        settings.audio_device.as_deref(),
         // A `subsonic://<host>/<id>` argument is fetched into the cache and
         // played from there, exactly as the interface does it (T12c). Without
         // a configured server it stays a file, which is what it always was.
