@@ -1320,6 +1320,13 @@ fn event_loop(
             && key.kind == KeyEventKind::Press
         {
             let action = app.on_key(key);
+            // Paint what the key set before applying it: an action can block
+            // on the network — opening a station connects and reads its
+            // headers before anything plays — and a wait that shows nothing
+            // reads as a key that did nothing (issue #63). The draw is cheap:
+            // ratatui writes only the cells that changed, and the next turn
+            // draws the result anyway.
+            terminal.draw(|frame| app.draw(frame))?;
             app.apply(action);
             if action == Action::Quit {
                 break;
