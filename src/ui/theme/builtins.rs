@@ -1,16 +1,34 @@
 //! The built-in theme catalogue (issue #37, S3): eleven classic colour
 //! schemes embedded in the binary, so the picker has something to offer
-//! before the user writes a single theme file. Every scheme maps its own
-//! canonical colours onto velo's seven slots — `background`, `text`, `dim`,
-//! `accent`, `secondary`, `border`, `ink` — with the text kept readable: no
-//! theme pairs an invisible foreground with its background. `default` is
-//! not here; it is velo's own palette, [`ThemeColors::default`].
+//! before the user writes a single theme file — plus the terminal's own
+//! (issue #54, S3), whose seven slots are all `reset`. Every scheme maps its
+//! own canonical colours onto velo's seven slots — `background`, `text`,
+//! `dim`, `accent`, `secondary`, `border`, `ink` — with the text kept
+//! readable: no theme pairs an invisible foreground with its background.
+//! The factory theme `velo` is not here; it is velo's own palette,
+//! [`ThemeColors::default`], which [`catalogue`] puts first.
 
-use crate::config::{DEFAULT_THEME_NAME, LoadedTheme, ThemeColor, ThemeColors};
+use crate::config::{
+    DEFAULT_THEME_NAME, LoadedTheme, TERMINAL_THEME_NAME, ThemeColor, ThemeColors,
+};
 
 const fn rgb(red: u8, green: u8, blue: u8) -> ThemeColor {
     ThemeColor::Rgb { red, green, blue }
 }
+
+/// The terminal's own palette (issue #54, S3): every slot is `reset`, so
+/// velo draws with exactly the colours the terminal's user already chose —
+/// theme and terminal agree by construction. It ships beside the config as
+/// `themes/default terminal.toml`.
+const DEFAULT_TERMINAL: ThemeColors = ThemeColors {
+    background: ThemeColor::Terminal,
+    text: ThemeColor::Terminal,
+    dim: ThemeColor::Terminal,
+    accent: ThemeColor::Terminal,
+    secondary: ThemeColor::Terminal,
+    border: ThemeColor::Terminal,
+    ink: ThemeColor::Terminal,
+};
 
 /// Catppuccin Latte (<https://catppuccin.com>): the flavour's mauve accent,
 /// blue for the labels, overlay grey for what recedes.
@@ -147,11 +165,12 @@ const TOKYO_NIGHT: ThemeColors = ThemeColors {
     ink: rgb(0x1a, 0x1b, 0x26),
 };
 
-/// The catalogue, sorted by name (issue #37, S3): what the picker offers
-/// between `default` and the user's `themes/` folder.
-pub(crate) const BUILT_INS: [(&str, ThemeColors); 11] = [
+/// The catalogue, sorted by name (issue #37, S3; issue #54, S3): what the
+/// picker offers after the factory theme `velo`.
+pub(crate) const BUILT_INS: [(&str, ThemeColors); 12] = [
     ("catppuccin-latte", CATPPUCCIN_LATTE),
     ("catppuccin-mocha", CATPPUCCIN_MOCHA),
+    (TERMINAL_THEME_NAME, DEFAULT_TERMINAL),
     ("dracula", DRACULA),
     ("gruvbox-dark", GRUVBOX_DARK),
     ("monokai", MONOKAI),
@@ -163,11 +182,12 @@ pub(crate) const BUILT_INS: [(&str, ThemeColors); 11] = [
     ("tokyo-night", TOKYO_NIGHT),
 ];
 
-/// The picker's starting library (issue #37, S2): `default` — velo's own
-/// palette, never in the catalogue — first, then the eleven built-ins in
-/// name order. The launch paths pass this through `select_theme`, which
-/// replaces a row whose name a `themes/*.toml` file carries, and appends
-/// the files that name nothing built-in.
+/// The picker's starting library (issue #37, S2; issue #54, S1): the
+/// factory theme `velo` — velo's own palette, never in the catalogue —
+/// first, then the twelve built-ins in name order. The launch paths pass
+/// this through `select_theme`, which replaces a row whose name a
+/// `themes/*.toml` file carries, and appends the files that name nothing
+/// built-in. The alias `default` gets no row (issue #54, S2).
 pub(crate) fn catalogue() -> Vec<LoadedTheme> {
     let mut themes = Vec::with_capacity(1 + BUILT_INS.len());
     themes.push(LoadedTheme {

@@ -418,7 +418,8 @@ config.toml      # everything below, written on the first launch
 radio.toml       # the stations you kept, and the format to add one by hand
 library.toml     # marked tracks and saved playlists, with the format
 history.toml     # what played, newest first — appears with the first track
-themes/*.toml    # one file per theme; default.toml ships with velo's palette
+themes/*.toml    # one file per theme; velo.toml ships with velo's palette,
+                 # "default terminal.toml" with the terminal's own
 ```
 
 The first three are written when velo starts for the first time and never over
@@ -490,7 +491,7 @@ $XDG_CONFIG_HOME/velo/themes/<name>.toml   # else ~/.config/velo/themes/<name>.t
 
 A theme file carries the same seven colour keys as the `[theme]` table, and
 `[theme] name = "<name>"` selects it. The palette velo draws with layers in
-one order: the built-in theme (`default`, which always exists), then the
+one order: the factory theme (`velo`, which always exists), then the
 selected theme file, then the `[theme]` colour keys of this file that differ
 from the built-in defaults — a one-off change still wins, without copying a
 whole theme, and the defaults the generated file writes are documentation,
@@ -499,11 +500,21 @@ is not on disk falls back to the built-in and says so once; a theme file
 that does not parse, or carries a colour that does not, is reported naming
 the file and the key, and the built-in is used. velo always starts.
 
+Two themes ship with velo and are recreated when missing, never over a file
+you edited: `velo` — velo's own palette, the built-in one, there to show the
+format — and `default terminal`, whose seven colours are all `reset`, the
+terminal's own, so velo draws with exactly the palette your terminal already
+has. A theme file accepts `reset` in every slot. `default` is an invisible
+alias: `[theme] name = "default"` — what older configs carry — still selects
+velo's palette, but the alias gets no row in the picker; a
+`themes/default.toml` you write wins over the alias, like any file named
+after a factory theme.
+
 In the settings card (`o`) the `theme` row shows the theme applied right
 now, and `enter` on it opens the theme picker: a small card with one row
-per theme — `default` first, then the built-in catalogue sorted by name,
+per theme — `velo` first, then the built-in catalogue sorted by name,
 then every theme file of the folder that is not one of them. A file named
-like a built-in takes that built-in's row, so no name is listed twice.
+like a factory theme takes that theme's row, so no name is listed twice.
 Moving the cursor (`j`/`k` or the arrows, which wrap at the ends) applies
 the focused theme at once — the preview is the interface, every card and
 list repaints with it. `enter` keeps the theme and writes `[theme] name`
@@ -512,11 +523,11 @@ and restores exactly the palette that was in force when it opened,
 `[theme]` overrides included. Every other key waits while the picker is
 open.
 
-Eleven themes are built in, embedded in the binary: `catppuccin-latte`,
-`catppuccin-mocha`, `dracula`, `gruvbox-dark`, `monokai`, `nord`,
-`one-dark`, `one-light`, `solarized-dark`, `solarized-light` and
-`tokyo-night`. `default` is not one of them — it stays the palette velo
-has always drawn with.
+Twelve themes are built in, embedded in the binary: `catppuccin-latte`,
+`catppuccin-mocha`, `default terminal`, `dracula`, `gruvbox-dark`, `monokai`,
+`nord`, `one-dark`, `one-light`, `solarized-dark`, `solarized-light` and
+`tokyo-night`. `velo` is not one of them — it stays the palette velo has
+always drawn with.
 
 ### `[ui]` — what is drawn
 

@@ -83,6 +83,32 @@ and the arrows move and wrap at the ends like every navigation list,
 waits while it is open — and playback, the queue, the radio, the lists
 and the other settings rows are untouched.
 
+**S11 — The factory theme is named `velo`** (issue #54): it is the
+built-in, it is what a fresh install selects — the generated `config.toml`
+writes `name = "velo"` — and it ships beside the config as
+`themes/velo.toml`, created only when missing like every other template.
+
+**S12 — `default` keeps resolving to `velo`'s palette as an invisible
+alias**: `[theme] name = "default"` — what every installation before the
+factory theme had its name — selects the same palette, and there is no
+`default` row in the picker. An existing `themes/default.toml` still wins
+over the alias, exactly as any file whose stem matches a factory theme.
+
+**S13 — A second factory theme, `default terminal`, whose seven colours
+are all `reset`** (the terminal's own). It ships as `themes/default
+terminal.toml` — the file stem is the name, spaces included — and it
+appears in the picker like any other factory theme. A theme file must
+therefore accept `reset` for every slot, not only for `background` and
+`text`; the `[theme]` table of `config.toml` keeps its stricter rule.
+
+**S14 — Nothing else changes, and an existing installation is never
+rewritten**: the eleven well-known themes, the precedence (built-in →
+file → `[theme]` keys, defaults-are-documentation), the picker's live
+preview and its `esc`/`enter` contract, the settings card and every other
+setting stay as they are; a `themes/default.toml` or a `config.toml`
+already on disk is left exactly as it is, and the alias is what keeps
+`name = "default"` working.
+
 ## Tasks
 
 | ID | Spec | Route | Task | Commit |
@@ -92,6 +118,7 @@ and the other settings rows are untouched.
 | T3 | S4 | worker | `src/ui/mod.rs`: the `theme` row, `←`/`→` preview with wrap, `enter` applies and writes `[theme] name`, `esc` reverts an unapplied preview; the card's colour cycles record their overrides so a later apply keeps them | |
 | T4 | S1–S4 | parent | wiring in `src/bin/velo.rs`: both launch paths call `select_theme` and `set_theme_library`; README; this logbook | |
 | T5 | S6–S10 | worker | issue #37: `src/ui/theme/builtins.rs` (the eleven embedded themes), `src/config.rs` (`select_theme` seeds the catalogue; a file matching a built-in takes its row), `src/ui/mod.rs` (the card keeps one `theme` row, the colour rows and their cycling machinery leave, `enter` on the row opens the picker overlay with live preview on move, restore on `esc`, write-on-change on `enter`), tests, README | |
+| T6 | S11–S14 | worker | issue #54: `src/config.rs` (`DEFAULT_THEME_NAME` is `velo`, the `default` alias in `select_theme`, `DEFAULT_TERMINAL_TEMPLATE`, `write_default_theme` writes both factory themes, a theme file accepts `reset` in every slot, the generated config names `velo`), `src/ui/theme/builtins.rs` (`default terminal` joins the catalogue), `src/ui/mod.rs` (the alias keeps the full layering in previews), tests, README | |
 
 ## Log
 
@@ -148,3 +175,19 @@ cannot drift from the palette it claims to be. Created like every other config-s
 template — only when missing, never over an edited one — and an edited `default.toml`
 still replaces the built-in in the picker, which is the rule above.
 
+**L6** (writer, T6/S11–S14, issue #54). The author: "debe haber un tema
+llamado default terminal que es el tema de la terminal". So the factory
+theme takes its own name — `velo`, the palette velo has always drawn with,
+which the generated config now selects and which ships as
+`themes/velo.toml` — and a second factory theme, `default terminal`, joins
+the catalogue with `reset` in all seven slots: the terminal's own colours,
+shipped as `themes/default terminal.toml` (the stem is the name, spaces
+included). A theme file therefore accepts `reset` in every slot; the
+`[theme]` table of `config.toml` keeps refusing it outside `background`
+and `text`, where it would erase a colour instead of choosing it.
+`default` becomes an invisible alias for `velo`: it resolves to the same
+palette, gets no picker row, and keeps the old layering — defaults and all
+— so an existing `config.toml` with `name = "default"` is never rewritten
+and keeps drawing exactly what it drew; a `themes/default.toml` a user
+already has wins over the alias, exactly as any file whose stem matches a
+factory theme.

@@ -1914,7 +1914,7 @@ fn the_settings_card_draws_its_title_sections_and_focused_row_in_the_accent() {
         ("replay gain", "track"),
         ("repeat", "off"),
         ("shuffle", "off"),
-        ("theme", "default"),
+        ("theme", "velo"),
         ("cover art", "shown"),
         ("hints", "shown"),
         ("advisories", "shown"),
@@ -1991,8 +1991,8 @@ fn the_settings_card_keeps_its_height_while_the_cursor_walks_it() {
 /// (the cover follows the track that plays), so this pins the columns leg of
 /// the gate the same way `hiding_the_cover_art_leaves_no_cover_columns_and_no_explanation`
 /// does — the switch flipped from inside the card, not from the file.
-/// The theme picker (issue #37): one row per theme, `default` first, the
-/// card giving its keys over.
+/// The theme picker (issue #37, issue #54): one row per theme, the factory
+/// theme `velo` first, the card giving its keys over.
 #[test]
 fn the_theme_picker_draws_one_row_per_theme_over_the_settings_card() {
     let mut app = App::new(tracks(&["one.flac"]));
@@ -2004,7 +2004,12 @@ fn the_theme_picker_draws_one_row_per_theme_over_the_settings_card() {
 
     let screen = screen_at(&app, 80, 24);
     assert!(screen.contains(" theme "), "the picker card:\n{screen}");
-    for name in ["default", "catppuccin-latte", "nord", "tokyo-night"] {
+    for name in [
+        "velo",
+        "default terminal",
+        "catppuccin-latte",
+        "tokyo-night",
+    ] {
         assert!(screen.contains(name), "{name} on:\n{screen}");
     }
     assert!(
