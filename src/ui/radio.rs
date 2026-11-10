@@ -42,6 +42,7 @@ use crate::radio::directory::{is_playable_codec, is_playable_station, refusal, r
 use crate::radio::store::{Favorite, Pinned, RadioStore, station_key};
 
 use super::plural;
+use super::rowtext::{note, starred, station_label, tail};
 use super::theme::Theme;
 use super::{ListRow, PlayState, RowMark, centered, digits, draw_empty, list_row};
 
@@ -1379,7 +1380,7 @@ impl RadioView {
             .iter()
             .map(|song| Row {
                 label: song.title.clone(),
-                fact: song_note(song),
+                fact: note(&[&song.artist, &song.album]),
                 kind: RowKind::CliampSong { song: song.clone() },
             })
             .collect()
@@ -1395,7 +1396,7 @@ impl RadioView {
             .station
             .iter()
             .map(|added| Row {
-                label: marked(added.name.clone(), added_refusal(&added.url).as_ref()),
+                label: station_label(false, added_refusal(&added.url).is_some(), &added.name, ""),
                 fact: String::new(),
                 kind: RowKind::AddedStation {
                     name: added.name.clone(),
@@ -1409,10 +1410,7 @@ impl RadioView {
                 .iter()
                 .filter(|favorite| favorite.countrycode.is_empty())
                 .map(|favorite| Row {
-                    label: marked(
-                        favorite_label(favorite),
-                        favorite_refusal(favorite).as_ref(),
-                    ),
+                    label: favorite_label(favorite),
                     fact: String::new(),
                     kind: RowKind::FavoriteStation {
                         favorite: favorite.clone(),
@@ -1490,9 +1488,9 @@ impl RadioView {
         }
         for pinned in &self.store.pinned {
             let label = if pinned.state.is_empty() {
-                format!("★ {}", pinned.name)
+                starred(&pinned.name)
             } else {
-                format!("★ {} · {}", pinned.name, pinned.state)
+                format!("{} · {}", starred(&pinned.name), pinned.state)
             };
             rows.push(Row {
                 label,
@@ -1580,10 +1578,7 @@ impl RadioView {
         });
         for favorite in &self.store.favorite {
             rows.push(Row {
-                label: marked(
-                    favorite_label(favorite),
-                    favorite_refusal(favorite).as_ref(),
-                ),
+                label: favorite_label(favorite),
                 fact: String::new(),
                 kind: RowKind::FavoriteStation {
                     favorite: favorite.clone(),
@@ -1601,17 +1596,17 @@ impl RadioView {
             .map(|station| {
                 let playable = is_playable_station(station);
                 let favorite = self.store.is_favorite(&station.url_resolved);
-                let mut label = String::new();
-                if favorite {
-                    label.push('★');
-                }
-                if !playable {
-                    label.push_str(if favorite { " ✗ " } else { "✗ " });
-                }
-                label.push_str(&station.name);
-                label.push_str(&station_facts(station));
+                // The store keeps no bitrate for a favourite but does for a
+                // catalog station, so the bracket is the one thing the two
+                // lists say differently (issue #71).
+                let bitrate = (station.bitrate > 0).then(|| format!("{}k", station.bitrate));
                 Row {
-                    label,
+                    label: station_label(
+                        favorite,
+                        !playable,
+                        &station.name,
+                        &tail(bitrate.as_deref(), &station.countrycode),
+                    ),
                     fact: String::new(),
                     kind: RowKind::CatalogStation {
                         station: station.clone(),
@@ -1875,59 +1870,16 @@ fn added_refusal(url: &str) -> Option<String> {
     refusal_for("", true, url)
 }
 
-/// `✗ ` in front of a row whose station cannot play. The marker states a fact
-/// about the station, so it shows wherever the station appears — a favourite is
-/// still playable on purpose, and the truth is not hidden for it.
-fn marked(label: String, refusal: Option<&String>) -> String {
-    if refusal.is_none() {
-        return label;
-    }
-    // The star says what the row is, the cross says what it cannot do: read
-    // left to right, identity first, state after. A favourite that cannot play
-    // therefore reads `★ ✗ Name`, in every section it appears in.
-    match label.strip_prefix("★ ") {
-        Some(rest) => format!("★ ✗ {rest}"),
-        None => format!("✗ {label}"),
-    }
-}
-
-/// `Artist · Album` for a cliamp song row's dim note (issue #48, S2),
-/// each part only when the service knows it; both unknown, the note is
-/// empty and the row is the title alone.
-fn song_note(song: &Song) -> String {
-    match (song.artist.as_str(), song.album.as_str()) {
-        ("", "") => String::new(),
-        (artist, "") => artist.to_owned(),
-        ("", album) => album.to_owned(),
-        (artist, album) => format!("{artist} · {album}"),
-    }
-}
-
+/// `★ Name [MP3] · NO`, with the cross when the station cannot play and
+/// leaving out what the store does not know. A favourite keeps its codec where
+/// a catalog station shows its bitrate (issue #71).
 fn favorite_label(favorite: &Favorite) -> String {
-    use std::fmt::Write as _;
-
-    let mut label = format!("★ {}", favorite.name);
-    if !favorite.codec.is_empty() {
-        let _ = write!(label, " [{}]", favorite.codec);
-    }
-    if !favorite.countrycode.is_empty() {
-        let _ = write!(label, " · {}", favorite.countrycode);
-    }
-    label
-}
-
-/// ` [128k] · NO` for a catalog station, each part only when known.
-fn station_facts(station: &Station) -> String {
-    use std::fmt::Write as _;
-
-    let mut facts = String::new();
-    if station.bitrate > 0 {
-        let _ = write!(facts, " [{}k]", station.bitrate);
-    }
-    if !station.countrycode.is_empty() {
-        let _ = write!(facts, " · {}", station.countrycode);
-    }
-    facts
+    station_label(
+        true,
+        favorite_refusal(favorite).is_some(),
+        &favorite.name,
+        &tail(Some(&favorite.codec), &favorite.countrycode),
+    )
 }
 
 /// Fuzzy-ish matching: every character of the needle appears in the

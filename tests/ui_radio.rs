@@ -946,6 +946,40 @@ fn f_on_a_station_toggles_the_favourite_through_the_station_key() {
 }
 
 #[test]
+fn a_favourite_in_the_catalog_is_starred_with_the_space_and_the_catalog_bracket() {
+    // The catalog stars the same favourite the favourites list stars, with
+    // the one space after the marker and the catalog's own bitrate in the
+    // bracket (issue #71): before the two shapes shared one owner, the
+    // catalog spelled the very same star `★Nova`, without the space.
+    let mut store = RadioStore::default();
+    store.favorite.push(Favorite {
+        name: "Nova".to_owned(),
+        url: "https://Stream.example:443/stream/".to_owned(),
+        countrycode: "NO".to_owned(),
+        codec: "MP3".to_owned(),
+    });
+    let mut view = RadioView::new(store, Vec::new(), Vec::new(), None);
+    view.open_place(norway());
+    view.set_catalog(
+        norway(),
+        vec![station(
+            "Nova",
+            "https://stream.example/stream",
+            "MP3",
+            128,
+            "NO",
+        )],
+    );
+
+    assert_eq!(
+        view.labels(),
+        ["★ Nova [128k] · NO"],
+        "the catalog's favourite row reads like a starred station, got: {:?}",
+        view.labels()
+    );
+}
+
+#[test]
 fn f_on_a_place_pins_it_and_f_on_a_pinned_place_unpins_it() {
     let mut view = view();
     press(&mut view, KeyCode::Enter); // country index

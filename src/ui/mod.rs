@@ -19,6 +19,7 @@ pub mod complete;
 pub mod indexing;
 pub mod radio;
 pub mod radio_data;
+pub mod rowtext;
 pub mod search;
 pub mod shuffle;
 pub mod sources;
@@ -5393,15 +5394,14 @@ impl<'lib> App<'lib> {
         {
             // The launch's rule, so the preview cannot lie (issue #41): under
             // a named theme, a `[theme]` key that merely restates the built-in
-            // default is documentation, not a choice — and the generated
-            // config carries all seven of them. Without this, every preview is
-            // masked by the config's own defaults and nothing seems to change.
-            // The alias `default` is the one name that keeps the full
-            // layering, exactly as it did before the factory theme had its
-            // own name (issue #54, S5).
-            Some(colors) if name == crate::config::ALIAS_THEME_NAME => {
-                self.theme_overrides.resolved_over(colors)
-            }
+            // default — or the factory value before the palette had its own
+            // colours (issue #62) — is documentation, not a choice, and the
+            // generated config carries all seven of them. Without this, every
+            // preview is masked by the config's own defaults and nothing
+            // seems to change.
+            // Every name, the invisible alias `default` included, drops the
+            // values velo itself wrote (issue #62, L10): the preview shows
+            // what the launch will show.
             Some(colors) => self
                 .theme_overrides
                 .non_default_choices()
@@ -6187,7 +6187,7 @@ impl<'lib> App<'lib> {
     /// frame, never a copy made when the list was built. Only whole-track
     /// lists carry marks; every row of the favourites list is marked.
     fn starred_name(&self, index: usize, name: String) -> String {
-        let starred = match &self.position {
+        let starred_mark = match &self.position {
             Position::Tracks { .. } | Position::AllTracks | Position::Genre { .. } => self
                 .tracks
                 .get(index)
@@ -6201,8 +6201,8 @@ impl<'lib> App<'lib> {
                 .is_some_and(|path| self.favourites.is_favorite(path)),
             _ => false,
         };
-        if starred {
-            format!("\u{2605} {name}")
+        if starred_mark {
+            rowtext::starred(&name)
         } else {
             name
         }
@@ -6248,7 +6248,7 @@ impl<'lib> App<'lib> {
                 let note = if matches!(self.position, Position::Tracks { .. }) {
                     String::new()
                 } else {
-                    format!("{} · {}", entry.artist, entry.album)
+                    rowtext::note(&[&entry.artist, &entry.album])
                 };
                 (
                     self.starred_name(index, entry.title.clone()),
@@ -6378,7 +6378,7 @@ impl<'lib> App<'lib> {
                         number: row + 1,
                         digits,
                         name: entry.title.clone(),
-                        note: format!("{} · {}", entry.artist, entry.album),
+                        note: rowtext::note(&[&entry.artist, &entry.album]),
                         fact: Self::duration(entry.duration_ms),
                     },
                     width,
@@ -8630,11 +8630,7 @@ fn file_entry_text(
 ) -> (String, String, String) {
     match title {
         Some(title) if !title.is_empty() => {
-            let note = [artist.unwrap_or(""), album.unwrap_or("")]
-                .into_iter()
-                .filter(|part| !part.is_empty())
-                .collect::<Vec<_>>()
-                .join(" \u{b7} ");
+            let note = rowtext::note(&[artist.unwrap_or(""), album.unwrap_or("")]);
             (title.to_owned(), note, String::new())
         }
         _ => {
