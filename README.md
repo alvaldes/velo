@@ -217,10 +217,13 @@ and defaults to the community's round-robin across its mirrors,
 The first section is **cliamp radio** (issue #48): the channels of the
 [cliamp](https://radio.cliamp.stream) radio service, another project's — shown
 numbered `1.`, above the directory's own sections. Entering it asks the service for
-its channels (`N tracks · ● M listening now` on each row) and entering a channel
-lists its songs, `artist · album` beside each title. A song is an ordinary remote
-**file**: `enter` plays from it and `a` queues it, both as a cached track — the
-transport shows a position, never `● live`. The section asks the service for two
+its channels (`N tracks` on each row) and entering a channel opens the channel's own
+screen: a **live row** first — `Lofi — live`, with `● N listening now` when the
+service answered — and below it the channel's songs, `artist · album` beside each
+title. `enter` on the live row plays the channel's stream through the path a station
+already takes: `● live` in the transport, the ICY title, one retry, and the HLS
+refusal. A song is an ordinary remote **file**: `enter` plays from it and `a` queues
+it, both as a cached track, with a position and a seek. The section asks the service for two
 requests when it opens and again on `ctrl+r`, and nothing on a timer; if the
 service is down, a failing channel list leaves the section present but empty with
 one line naming the reason, and a failing listener count only drops the `●`

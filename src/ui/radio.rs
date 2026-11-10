@@ -42,7 +42,7 @@ use crate::radio::directory::{is_playable_codec, is_playable_station, refusal, r
 use crate::radio::store::{Favorite, Pinned, RadioStore, station_key};
 
 use super::plural;
-use super::rowtext::{note, starred, station_label, tail};
+use super::rowtext::{listening, live, note, starred, station_label, tail};
 use super::theme::Theme;
 use super::{ListRow, PlayState, RowMark, centered, digits, draw_empty, list_row};
 
@@ -247,14 +247,22 @@ pub enum RowKind {
     /// opens [`Place::Cliamp`].
     BrowseCliamp,
     /// One channel of the cliamp section (issue #48, S2): the channel's
-    /// name as the label, and as the row's dim fact the song count and,
-    /// when `/statistics` answered, the listeners on it right now.
+    /// name as the label and its song count as the row's dim fact. The
+    /// listeners belong to the live row now (issue #68).
     CliampChannel {
         /// The channel as `/stations` listed it.
         channel: Channel,
-        /// The listeners `/statistics` reports for the channel, when it
-        /// answered; `None` when it has not, or failed (S4).
-        listeners: Option<u32>,
+    },
+    /// The first row of one cliamp channel's place (issue #68): the
+    /// channel's live stream, unnumbered above its songs, labelled
+    /// `Name — live` and carrying the `●` listener count as its fact.
+    /// `enter` plays the stream through the shell's station path —
+    /// `● live`, the ICY title, the HLS refusal — never the first song
+    /// (S3), and the playing marker lands on it like on any station row.
+    CliampLive {
+        /// The channel as `/stations` listed it; its `stream` is what
+        /// `enter` plays.
+        channel: Channel,
     },
     /// One song of a cliamp channel (issue #48, S2, S3): a finite remote
     /// track, played and queued as a file whose identity is its URL.
@@ -278,10 +286,21 @@ impl RowKind {
     /// Whether the cursor may rest on the row and its number counts: the
     /// dotted rule and a section header are display only — there is nothing
     /// to act on, so the navigation never lands on them and they take no
-    /// row number (S5, #22).
+    /// row number (S5, #22). The cliamp live row (issue #68) is the one
+    /// selectable row that still takes no number: it stands above the
+    /// songs the way a section header stands above its rows, so the songs
+    /// keep counting from one.
     #[must_use]
     fn selectable(&self) -> bool {
         !matches!(self, RowKind::Rule | RowKind::Header { .. })
+    }
+
+    /// Whether the row takes a number in the list: every selectable row
+    /// except the cliamp live row (issue #68), whose place above the songs
+    /// is the header's, not the first song's.
+    #[must_use]
+    fn numbered(&self) -> bool {
+        self.selectable() && !matches!(self, RowKind::CliampLive { .. })
     }
 }
 
@@ -1008,6 +1027,18 @@ impl RadioView {
                 from,
             };
         }
+        if let RowKind::CliampLive { channel } = &row.kind {
+            // The live row plays the channel itself (issue #68): its own
+            // stream, handed to the shell through the station path — the
+            // same `● live` open, the ICY title, the HLS refusal — never
+            // expanded, never the first song (S3). `configured` is false:
+            // the stream is the service's own MP3, not a wrapper to probe.
+            return RadioOutcome::Play {
+                url: channel.stream.clone(),
+                name: channel.name.clone(),
+                configured: false,
+            };
+        }
         if let Some((url, name)) = station_of_row(&row.kind) {
             // A station the user put into `radio.toml` themselves — a
             // hand-added `[[station]]` or a favourite — may be a channel
@@ -1047,6 +1078,7 @@ impl RadioView {
             | RowKind::AddedStation { .. }
             | RowKind::FavoriteStation { .. }
             | RowKind::CliampSong { .. }
+            | RowKind::CliampLive { .. }
             | RowKind::AskCountry { .. }
             | RowKind::Rule
             | RowKind::Header { .. } => None,
@@ -1263,6 +1295,7 @@ impl RadioView {
             | RowKind::BrowseTags
             | RowKind::BrowseNoCountry
             | RowKind::CliampChannel { .. }
+            | RowKind::CliampLive { .. }
             | RowKind::CliampSong { .. }
             | RowKind::Tag { .. }
             | RowKind::AskCountry { .. }
@@ -1325,51 +1358,61 @@ impl RadioView {
                 }
             }
             Place::Cliamp => self.cliamp_channel_rows(),
-            Place::CliampChannel { .. } => {
-                // The songs render only in the channel that asked for
-                // them, the way a place's stations do (S9, issue #48).
-                if self.cliamp_songs_place.as_ref() == Some(&self.place) {
-                    self.cliamp_song_rows()
-                } else {
-                    Vec::new()
-                }
-            }
+            Place::CliampChannel { id, .. } => self.cliamp_channel_place_rows(id),
             Place::NoCountry => self.no_country_rows(),
         }
     }
 
     /// The channels of the cliamp section (issue #48, S2): the channel's
-    /// name as the label and, as the row's dim fact, the song count and —
-    /// when `/statistics` answered — the listeners on it right now. A
-    /// failed or unloaded statistics drops only the `●` count (S4).
+    /// name as the label and its song count as the dim fact. The listeners
+    /// moved to the channel's live row (issue #68); a failed or unloaded
+    /// `/statistics` takes nothing else away (S4).
     fn cliamp_channel_rows(&self) -> Vec<Row> {
         self.cliamp_channels
             .iter()
-            .map(|channel| {
-                let listeners = self
-                    .cliamp_listeners
-                    .iter()
-                    .find(|row| row.id == channel.id)
-                    .map(|row| row.active);
-                let mut fact = plural(
+            .map(|channel| Row {
+                label: channel.name.clone(),
+                fact: plural(
                     usize::try_from(channel.tracks).unwrap_or(usize::MAX),
                     "track",
                     "tracks",
-                );
-                if let Some(listeners) = listeners {
-                    use std::fmt::Write as _;
-                    let _ = write!(fact, " · ● {listeners} listening now");
-                }
-                Row {
-                    label: channel.name.clone(),
-                    fact,
-                    kind: RowKind::CliampChannel {
-                        channel: channel.clone(),
-                        listeners,
-                    },
-                }
+                ),
+                kind: RowKind::CliampChannel {
+                    channel: channel.clone(),
+                },
             })
             .collect()
+    }
+
+    /// The rows of one cliamp channel's place (issue #68): the live row
+    /// first — the channel's own stream, labelled `Name — live`, with the
+    /// `●` listener count as its fact when `/statistics` answered (S4:
+    /// a failed answer leaves the count out, never the row) — then the
+    /// songs, which render only in the channel that asked for them, the
+    /// way a place's stations do (S9, issue #48). A channel the service
+    /// gave no stream for has no live row: its songs are all it plays.
+    fn cliamp_channel_place_rows(&self, id: &str) -> Vec<Row> {
+        let mut rows = Vec::new();
+        if let Some(channel) = self.cliamp_channels.iter().find(|channel| channel.id == id)
+            && !channel.stream.is_empty()
+        {
+            let listeners = self
+                .cliamp_listeners
+                .iter()
+                .find(|row| row.id == channel.id)
+                .map(|row| row.active);
+            rows.push(Row {
+                label: live(&channel.name),
+                fact: listeners.map_or_else(String::new, listening),
+                kind: RowKind::CliampLive {
+                    channel: channel.clone(),
+                },
+            });
+        }
+        if self.cliamp_songs_place.as_ref() == Some(&self.place) {
+            rows.extend(self.cliamp_song_rows());
+        }
+        rows
     }
 
     /// The songs of one cliamp channel (issue #48, S2): the title as the
@@ -1644,7 +1687,7 @@ impl RadioView {
         let counted = self
             .visible_rows()
             .iter()
-            .filter(|row| row.kind.selectable())
+            .filter(|row| row.kind.numbered())
             .count();
         (label, plural(counted, one, many))
     }
@@ -1702,8 +1745,10 @@ impl RadioView {
             draw_empty(frame, list_area, message, theme.dim);
         } else {
             // The rule and the headers take no number: the numbering counts
-            // only the rows a person can act on (S5, #22).
-            let numbered = visible.iter().filter(|row| row.kind.selectable()).count();
+            // only the rows a person can act on (S5, #22) — and, since issue
+            // #68, not the cliamp live row, which stands above the songs
+            // unnumbered so the songs keep counting from one.
+            let numbered = visible.iter().filter(|row| row.kind.numbered()).count();
             // The playing marker matches on the station key (S15, #32): the
             // same station reached through a favourite, the store or the
             // catalogue can be spelled differently — host case, a default
@@ -1730,7 +1775,12 @@ impl RadioView {
                         Style::new().fg(theme.text).bold(),
                     )),
                     _ => {
-                        number += 1;
+                        let number = if row.kind.numbered() {
+                            number += 1;
+                            Some(number)
+                        } else {
+                            None
+                        };
                         let mark = match &playing {
                             Some((key, state))
                                 if station_row_key(&row.kind)
@@ -1847,6 +1897,10 @@ fn station_row_key(kind: &RowKind) -> Option<String> {
         RowKind::AddedStation { url, .. } => Some(station_key(url)),
         RowKind::FavoriteStation { favorite } => Some(station_key(&favorite.url)),
         RowKind::CliampSong { song } => Some(station_key(&song.url)),
+        // The live row marks on the stream's key (issue #68): the shell
+        // queues the stream as the station it is, so the playing fact —
+        // the URL the transport stands on — matches it like any station's.
+        RowKind::CliampLive { channel } => Some(station_key(&channel.stream)),
         _ => None,
     }
 }

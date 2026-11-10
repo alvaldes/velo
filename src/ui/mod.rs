@@ -6137,7 +6137,7 @@ impl<'lib> App<'lib> {
                 ListItem::new(list_row(
                     ListRow {
                         mark: RowMark::None,
-                        number: index + 1,
+                        number: Some(index + 1),
                         digits,
                         name: source.label().to_owned(),
                         note: String::new(),
@@ -6168,7 +6168,7 @@ impl<'lib> App<'lib> {
                 ListItem::new(list_row(
                     ListRow {
                         mark: self.row_mark(standing == Some(index), station),
-                        number: index + 1,
+                        number: Some(index + 1),
                         digits,
                         name,
                         note,
@@ -6345,7 +6345,7 @@ impl<'lib> App<'lib> {
                         standing == Some(index),
                         matches!(entry, Entry::Station { .. }),
                     ),
-                    number: index + 1,
+                    number: Some(index + 1),
                     digits,
                     name,
                     note,
@@ -6375,7 +6375,7 @@ impl<'lib> App<'lib> {
                 ListItem::new(list_row(
                     ListRow {
                         mark: self.row_mark(standing == Some(entry.path.as_path()), false),
-                        number: row + 1,
+                        number: Some(row + 1),
                         digits,
                         name: entry.title.clone(),
                         note: rowtext::note(&[&entry.artist, &entry.album]),
@@ -8403,7 +8403,10 @@ enum RowMark {
 struct ListRow {
     /// The transport's state drawn in the marker column ([`RowMark`]).
     mark: RowMark,
-    number: usize,
+    /// The row's number, when it takes one: `None` for a row that stands
+    /// above the list's numbering — the cliamp live row (issue #68) — so
+    /// the rows below it keep counting from one.
+    number: Option<usize>,
     digits: usize,
     name: String,
     /// Dimmed after the name: a folder, or an artist and album.
@@ -8435,19 +8438,19 @@ fn list_row(row: ListRow, width: u16, theme: &Theme) -> Line<'static> {
         )
     };
     let digits = row.digits;
-    let mut spans = vec![
-        Span::styled(
-            match row.mark {
-                RowMark::Playing => "▶ ",
-                RowMark::Paused => "⏸ ",
-                RowMark::Stopped => "■ ",
-                RowMark::None => "  ",
-            },
-            marker,
-        ),
-        Span::styled(format!("{:>digits$}. ", row.number), number),
-        Span::styled(row.name, name),
-    ];
+    let mut spans = vec![Span::styled(
+        match row.mark {
+            RowMark::Playing => "▶ ",
+            RowMark::Paused => "⏸ ",
+            RowMark::Stopped => "■ ",
+            RowMark::None => "  ",
+        },
+        marker,
+    )];
+    if let Some(row_number) = row.number {
+        spans.push(Span::styled(format!("{row_number:>digits$}. "), number));
+    }
+    spans.push(Span::styled(row.name, name));
     if !row.note.is_empty() {
         spans.push(Span::styled(
             format!("  {}", row.note),

@@ -45,9 +45,11 @@ use crate::radio::client::{Error, Transport};
 pub const HOST: &str = "radio.cliamp.stream";
 
 /// One channel of the cliamp section, as `/stations` lists it. The song
-/// count is the row's fact beside the listeners (S2); `description`,
-/// `genre` and `stream` are ignored here — a channel plays through its
-/// songs, never as a live stream (S3).
+/// count is the row's fact beside the listeners (S2); `description` and
+/// `genre` are ignored here. `stream` is the channel's live MP3 (issue
+/// #68): kept so the channel's place can lead with a live row that plays
+/// through the station path — `● live`, the ICY title — exactly as a
+/// directory station does; its songs stay finite files beside it (S3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Channel {
     /// The channel's id, as the URLs name it (`lofi`).
@@ -56,6 +58,10 @@ pub struct Channel {
     pub name: String,
     /// The channel's song count, as `/stations` reports it.
     pub tracks: u32,
+    /// The channel's live stream URL (`https://…/stream`), as `/stations`
+    /// reports it. Empty when the service names none — a channel without
+    /// a stream has no live row, and its songs are all it plays.
+    pub stream: String,
 }
 
 /// One station's row of `/statistics`: how many people the service says
@@ -98,12 +104,15 @@ struct StationsWire {
     stations: Vec<ChannelWire>,
 }
 
-/// One channel as the wire lists it.
+/// One channel as the wire lists it. `stream` is optional: the service
+/// has carried channels without one, and a channel without a stream
+/// parses with an empty one, never a malformed answer.
 #[derive(Debug, Deserialize)]
 struct ChannelWire {
     id: String,
     name: String,
     tracks: u32,
+    stream: Option<String>,
 }
 
 /// Everything the wire answers with for one channel's songs.
@@ -162,6 +171,7 @@ impl<T: Transport> Client<T> {
                 id: channel.id,
                 name: channel.name,
                 tracks: channel.tracks,
+                stream: channel.stream.unwrap_or_default(),
             })
             .collect())
     }

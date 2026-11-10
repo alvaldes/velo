@@ -154,18 +154,20 @@ fn ctrl_r(view: &mut RadioView) -> RadioOutcome {
 
 // ---- fixtures ---------------------------------------------------------------
 
-/// Two channels as `/stations` lists them.
+/// Two channels as `/stations` lists them, each with its live stream.
 fn channels() -> Vec<Channel> {
     vec![
         Channel {
             id: String::from("lofi"),
             name: String::from("LoFi Beats"),
             tracks: 120,
+            stream: String::from("https://radio.cliamp.stream/lofi/stream"),
         },
         Channel {
             id: String::from("jazz"),
             name: String::from("Jazz Cafe"),
             tracks: 12,
+            stream: String::from("https://radio.cliamp.stream/jazz/stream"),
         },
     ]
 }
@@ -370,7 +372,10 @@ fn cliamp_false_hides_the_section_and_leaves_the_directory_alone() {
 // ---- S2: the channels and their facts ---------------------------------------
 
 #[test]
-fn the_channels_list_with_their_counts_and_listeners() {
+fn the_channels_list_with_their_track_counts() {
+    // The listener count no longer sits on the channel row: it moved to
+    // the channel's live row, where the channel is actually played
+    // (issue #68). The channel row says only how many songs it holds.
     let mut view = view();
     view.open_place(Place::Cliamp);
     assert_eq!(
@@ -380,16 +385,8 @@ fn the_channels_list_with_their_counts_and_listeners() {
         view.labels()
     );
     let rows = view.visible_rows();
-    assert_eq!(
-        rows[0].fact, "120 tracks · ● 3 listening now",
-        "the fact carries the track count and the listeners, got: {:?}",
-        rows[0]
-    );
-    assert_eq!(
-        rows[1].fact, "12 tracks · ● 0 listening now",
-        "zero listeners is a fact too, got: {:?}",
-        rows[1]
-    );
+    assert_eq!(rows[0].fact, "120 tracks", "got: {:?}", rows[0]);
+    assert_eq!(rows[1].fact, "12 tracks", "got: {:?}", rows[1]);
 }
 
 #[test]
@@ -418,6 +415,124 @@ fn a_channel_row_opens_the_songs_place() {
         view.place(),
         &channel_place(),
         "enter opens the channel's songs place"
+    );
+}
+
+// ---- issue #68: the live row -----------------------------------------------
+
+#[test]
+fn the_channel_place_leads_with_the_live_row_above_its_songs() {
+    let mut view = bare();
+    view.set_cliamp_channels(channels());
+    view.open_place(channel_place());
+    view.set_cliamp_songs(channel_place(), songs());
+    assert_eq!(
+        view.labels(),
+        ["LoFi Beats — live", "Dawn", "Dusk"],
+        "the live row is the first row of the channel, got: {:?}",
+        view.labels()
+    );
+    // The live row takes no number, so the songs keep counting from one,
+    // and the header still counts the songs alone.
+    let screen = screen(&view);
+    assert!(
+        screen.contains("LoFi Beats — live"),
+        "the live row names the channel, got:\n{screen}"
+    );
+    assert!(
+        screen.contains("1. Dawn"),
+        "the first song is numbered one, got:\n{screen}"
+    );
+    assert!(
+        screen.contains("[2 songs]"),
+        "the header counts the songs, not the live row (which would make it three), got:\n{screen}"
+    );
+}
+
+#[test]
+fn the_live_row_carries_the_listener_count() {
+    // The count moved here from the channel row (issue #68): it belongs
+    // to the row that plays the channel live.
+    let mut view = bare();
+    view.set_cliamp_channels(channels());
+    view.set_cliamp_listeners(listeners());
+    view.open_place(channel_place());
+    let fact = &view.visible_rows()[0].fact;
+    assert_eq!(
+        fact, "● 3 listening now",
+        "the listeners stand on the live row, got: {fact:?}"
+    );
+}
+
+#[test]
+fn without_statistics_the_live_row_stands_without_a_count() {
+    // `/statistics` failing must not break the row: the count simply is
+    // not there (S4).
+    let mut view = bare();
+    view.set_cliamp_channels(channels());
+    view.open_place(channel_place());
+    let row = &view.visible_rows()[0];
+    assert_eq!(
+        row.label, "LoFi Beats — live",
+        "the row stands whatever the statistics did"
+    );
+    assert_eq!(row.fact, "", "no listeners known, no count shown");
+}
+
+#[test]
+fn enter_on_the_live_row_asks_to_play_the_stream_not_the_first_song() {
+    let mut view = bare();
+    view.set_cliamp_channels(channels());
+    view.open_place(channel_place());
+    view.set_cliamp_songs(channel_place(), songs());
+    let outcome = press(&mut view, KeyCode::Enter);
+    assert_eq!(
+        outcome,
+        RadioOutcome::Play {
+            url: String::from("https://radio.cliamp.stream/lofi/stream"),
+            name: String::from("LoFi Beats"),
+            configured: false,
+        },
+        "enter asks for the channel's own live stream, unexpanded — the
+         station path the shell already has — never the first song"
+    );
+    assert_eq!(view.place(), &channel_place(), "playing does not navigate");
+}
+
+#[test]
+fn a_channel_without_a_stream_has_no_live_row() {
+    let mut without = channels();
+    without[0].stream = String::new();
+    let mut view = bare();
+    view.set_cliamp_channels(without);
+    view.open_place(channel_place());
+    view.set_cliamp_songs(channel_place(), songs());
+    assert_eq!(
+        view.labels(),
+        ["Dawn", "Dusk"],
+        "no stream, no live row: the songs are all the channel plays, got: {:?}",
+        view.labels()
+    );
+}
+
+#[test]
+fn the_playing_stream_marks_the_live_row() {
+    let mut view = bare();
+    view.set_cliamp_channels(channels());
+    view.open_place(channel_place());
+    view.set_cliamp_songs(channel_place(), songs());
+    view.set_playing(Some((
+        String::from("https://radio.cliamp.stream/lofi/stream"),
+        PlayState::Playing,
+    )));
+    let screen = screen(&view);
+    assert!(
+        screen.contains("▶ LoFi Beats — live"),
+        "the live row carries the playing marker like any station row, got:\n{screen}"
+    );
+    assert!(
+        !screen.contains("▶ 1. Dawn"),
+        "the songs carry no playing marker, got:\n{screen}"
     );
 }
 
@@ -686,6 +801,48 @@ fn a_failing_statistics_drops_only_the_counts_and_says_so_once() {
     assert_eq!(data.take_message(), None, "said once");
 }
 
+// ---- issue #68: the live row plays through the station path -----------------
+
+#[test]
+fn the_shell_plays_the_channel_stream_as_a_station_from_the_live_row() {
+    let canned = Arc::new(
+        Canned::new()
+            .stations(STATIONS_FIXTURE)
+            .statistics(STATISTICS_FIXTURE)
+            .tracks(TRACKS_FIXTURE),
+    );
+    let mut app = App::new(Vec::new());
+    app.set_radio_wire(Box::new(wired(Arc::clone(&canned))));
+    shell(&mut app, KeyCode::Char('R')); // the radio opens over its wiring
+    shell(&mut app, KeyCode::Enter); // into the cliamp section
+    // The channels come back on the wiring's worker; the ticks bring them
+    // into the view, the way the event loop would.
+    for _ in 0..400 {
+        app.tick();
+        if app_screen(&app).contains("LoFi Beats") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    shell(&mut app, KeyCode::Enter); // into the first channel's place
+
+    let action = shell(&mut app, KeyCode::Enter); // the live row
+    assert_eq!(
+        action,
+        Action::PlayQueue { from: 0 },
+        "the player was asked to start what the queue just took"
+    );
+    assert_eq!(
+        app.queue(),
+        [Entry::Station {
+            url: String::from("https://radio.cliamp.stream/lofi/stream"),
+            name: String::from("LoFi Beats"),
+        }],
+        "the channel's live stream joined the queue as the station it is —
+         never its first song as a file entry"
+    );
+}
+
 // ---- the songs over the wiring ----------------------------------------------
 
 #[test]
@@ -713,8 +870,11 @@ fn entering_a_channel_loads_its_songs_through_the_wiring() {
     });
 
     let rows = view.visible_rows();
-    assert_eq!(rows[0].label, "Dawn");
-    assert_eq!(rows[0].fact, "Tide · Harbor", "got: {:?}", rows[0]);
+    assert_eq!(
+        rows[1].label, "Dawn",
+        "the live row stands first (issue #68); the songs follow it"
+    );
+    assert_eq!(rows[1].fact, "Tide · Harbor", "got: {:?}", rows[1]);
     let calls = canned.calls();
     assert!(
         calls[2].contains("/lofi/tracks"),
