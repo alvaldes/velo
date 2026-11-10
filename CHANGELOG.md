@@ -1,6 +1,10 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.34.0] - 2026-11-10
+
+### Features
+- **keys:** The cliamp keymap, where velo has the same verb
 ## [0.33.0] - 2026-11-10
 
 ### Features
