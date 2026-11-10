@@ -520,7 +520,11 @@ naming the key; a bad value names the file and the line.
 
 ### Subsonic servers (early access)
 
-velo can talk to a Subsonic-compatible server (Navidrome and friends).
+velo talks to any server that exposes the Subsonic API: Navidrome, Airsonic,
+Gonic and the ones that ship the API as an add-on. It does not talk to Plex,
+Spotify, Tidal, Qobuz, YouTube or the rest of the services cliamp lists —
+each speaks its own protocol and several only serve DRM-protected audio, and
+a client per service is not something one binary without a daemon carries.
 This is early access, and playback works by caching: what exists today is
 the connection and its authentication, one command that answers
 "can I use this server?", one command that syncs the server's library into
