@@ -1,6 +1,10 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.41.0] - 2026-11-10
+
+### Features
+- **theme:** The factory palette has its own colours, and transparency is a switch
 ## [0.40.1] - 2026-11-10
 
 ### Fixes
