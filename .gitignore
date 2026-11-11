@@ -5,3 +5,5 @@
 .DS_Store
 .atl/
 .worktrees/
+# docs/media/render.sh records each screenshot to a GIF and keeps one frame.
+docs/media/*.gif

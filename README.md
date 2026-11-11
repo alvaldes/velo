@@ -13,11 +13,11 @@ no daemon, no server.
 
 Site, with a player you can press play on: <https://alvaldes.github.io/velo/>
 
-![The library's tracks view while a track plays: the now-playing block with its clock and spectrum, the transport, and seven tracks with the playing row marked](docs/media/shot-library.png)
+![The library's tracks view while a track plays: the now-playing block with its clock and spectrum, the transport, and the library's tracks with the playing row marked](docs/media/shot-library.png)
 
 | The visualizer over the whole window (`V`) | A radio channel: the live row, then its songs |
 |:--|:--|
-| ![The spectrum drawn as bars across the full height of the terminal](docs/media/shot-visualizer.png) | ![Radio › Lofi: a live row with its listener count above the channel's numbered songs](docs/media/shot-radio.png) |
+| ![The spectrum drawn as bars across the full height of the terminal](docs/media/shot-visualizer.png) | ![Radio › Lofi while it plays: the live row with its listener count above the channel's numbered songs](docs/media/shot-radio.png) |
 
 ## Features
 
