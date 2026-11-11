@@ -150,6 +150,16 @@ source's own keys stay its own once it is open. A launch that names files on
 the command line skips the first screen: those files are what plays, and
 there is no source to choose between.
 
+## Privacy
+
+velo sends no usage data: no analytics endpoint, no install id, no first-run
+question to answer. It asks the network only for what you pointed it at — the
+Radio Browser directory, the cliamp service, your own Subsonic server — plus
+one request of its own, the update check: `GET
+api.github.com/repos/alvaldes/velo/releases/latest`, no identifier attached,
+once a day by default (`[update] check = "never"` turns it off for good, and
+`weekly` makes it rarer). Nothing about what you listen to is sent anywhere.
+
 ## Install
 
 **Prebuilt release binary** — download `velo-<tag>-<target>.tar.gz` for your
