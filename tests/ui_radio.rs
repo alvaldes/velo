@@ -2794,6 +2794,40 @@ fn the_help_card_covers_the_radio_view_it_is_opened_over() {
     );
 }
 
+#[test]
+fn the_footer_names_the_radios_keys_wherever_the_radio_was_opened_from() {
+    // With `R`, and through the `Radio` row of the first screen (`Sources`)
+    // alike: the radio is what is on screen, so its keys are the ones the
+    // footer names — not the keys of the screen it was opened over.
+    for through_sources in [false, true] {
+        let mut app = App::browse(None);
+        app.set_radio_wire(Box::new(RadioData::<HttpTransport>::new(None, None, None)));
+        if through_sources {
+            // The launch opens the sources screen (`src/bin/velo.rs`, issue
+            // #3); `App::browse` alone starts on the library, so the test
+            // takes the same launch step before pressing `Enter`. Radio leads
+            // `Sources`, so it is the cursor's first row.
+            app.open_sources();
+            shell(&mut app, KeyCode::Enter);
+        } else {
+            shell(&mut app, KeyCode::Char('R'));
+        }
+        let screen = app_screen(&app);
+        assert!(
+            screen.contains("Radio"),
+            "the radio is on screen (through sources: {through_sources}):\n{screen}"
+        );
+        let hints = screen
+            .lines()
+            .find(|line| line.contains("q quit"))
+            .unwrap_or_else(|| panic!("no key hints in:\n{screen}"));
+        for hint in ["enter select", "esc back", "f fav", "tab queue"] {
+            assert!(hints.contains(hint), "no {hint:?} in: {hints}");
+        }
+        assert!(!hints.contains("enter open"), "{hints}");
+    }
+}
+
 // ---- the cliamp paging keys (issue #38) -------------------------------------
 
 /// `home` and `end` jump to the ends of the radio's list, the way `g` and

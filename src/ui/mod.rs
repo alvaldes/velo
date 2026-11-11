@@ -6741,6 +6741,22 @@ impl<'lib> App<'lib> {
                 ("esc", "cancel"),
             ];
         }
+        // The radio replaces the body wherever it was opened over (issue
+        // #35), so its keys are the footer's on any view underneath — the
+        // sources screen included. The queue stays its own screen: over it
+        // the radio draws nothing, so the queue's keys are the footer's.
+        if self.radio_on_screen() {
+            return &[
+                ("j/k", "move"),
+                ("enter", "select"),
+                ("esc", "back"),
+                ("/", "search"),
+                ("f", "fav"),
+                ("tab", "queue"),
+                ("?", "help"),
+                ("q", "quit"),
+            ];
+        }
         match self.view {
             // The working list: its own editing keys, and `tab` is the way
             // back out, not the way in.
@@ -6763,18 +6779,8 @@ impl<'lib> App<'lib> {
                 ("?", "help"),
                 ("q", "quit"),
             ],
-            // The radio's rows are places and stations alike, so `enter`
-            // is named for both.
-            View::Library if self.radio_on_screen() => &[
-                ("j/k", "move"),
-                ("enter", "select"),
-                ("esc", "back"),
-                ("/", "search"),
-                ("f", "fav"),
-                ("tab", "queue"),
-                ("?", "help"),
-                ("q", "quit"),
-            ],
+            // The radio's rows are places and stations alike, hoisted above:
+            // `enter` is named for both.
             View::Library => match self.position {
                 // The command line's files: one flat level, nothing above.
                 Position::Files => &[
