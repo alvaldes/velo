@@ -1,0 +1,371 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>velo — a terminal music player, one binary</title>
+<meta name="description" content="velo indexes your music from its own tags and plays it gaplessly in your terminal: one Rust binary, no daemon, no server, no account, no telemetry.">
+<link rel="stylesheet" href="style.css?v=8">
+</head>
+<body>
+
+<!-- The backdrop of the whole page: a fixed canvas where fog.js draws the fog,
+     over a CSS fog that is all there is when WebGL is not. The hearth video in
+     the hero sits on top of it and fades out at its lower edge, so the room
+     dissolves into the same air the rest of the page is read through. -->
+<div class="fog" aria-hidden="true"><canvas id="fog-canvas"></canvas></div>
+
+<header class="top">
+  <div class="wrap top-inner">
+    <span class="brand">velo</span>
+    <nav class="top-links" aria-label="Project">
+      <a href="#features">features</a>
+      <a href="#keys">keys</a>
+      <a href="https://github.com/alvaldes/velo">github ↗</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <section class="hero" aria-labelledby="hero-h">
+    <div class="hero-media" aria-hidden="true">
+      <video id="hearth" autoplay muted loop playsinline preload="auto" poster="media/hearth.jpg">
+        <source src="media/hearth.mp4" type="video/mp4">
+      </video>
+    </div>
+
+    <div class="wrap hero-grid">
+      <div class="pitch">
+        <h1 id="hero-h">Your music, in the terminal you already have open.</h1>
+        <p class="lede">velo reads your files' own tags, plays them gaplessly and
+        draws the cover art. It is one Rust binary: no daemon, no server, no
+        account, no telemetry.</p>
+
+        <div class="install" id="install">
+          <fieldset class="picker-field">
+            <legend>Install on</legend>
+            <div class="picker" role="radiogroup" aria-label="Platform">
+              <label><input type="radio" name="platform" value="aarch64-apple-darwin" checked><span>mac arm64</span></label>
+              <label><input type="radio" name="platform" value="x86_64-apple-darwin"><span>mac x64</span></label>
+              <label><input type="radio" name="platform" value="x86_64-unknown-linux-gnu"><span>linux x64</span></label>
+              <label><input type="radio" name="platform" value="aarch64-unknown-linux-gnu"><span>linux arm64</span></label>
+              <label><input type="radio" name="platform" value="source"><span>source</span></label>
+            </div>
+          </fieldset>
+
+          <div class="cmd">
+            <span class="prompt" aria-hidden="true">$</span>
+            <code id="line">curl -fsSL https://raw.githubusercontent.com/alvaldes/velo/main/install.sh | sh</code>
+            <button type="button" class="copy" data-copy-from="line">copy</button>
+          </div>
+
+          <p class="hint" id="hint">The script picks the binary for this machine,
+          checks it against the .sha256 CI published beside it, and puts velo in
+          ~/.local/bin. No sudo.</p>
+
+          <p class="actions">
+            <a class="cta" id="download" href="https://github.com/alvaldes/velo/releases/latest">Download for macOS (Apple silicon)</a>
+            <span class="release" id="release">.tar.gz from the latest release</span>
+          </p>
+          <p class="more-install"><a href="https://github.com/alvaldes/velo#install">All install options in the README</a></p>
+        </div>
+      </div>
+
+      <!-- The player, drawn the way it draws itself, and working: the track is a
+           CC0 file that ships with the page, so play, pause, seek and volume are
+           real and the spectrum is the music's own. Everything else the
+           interface does answers with the card at the bottom of this block.
+           The panel is glass: the room behind it shows through, blurred, which
+           is what `transparent_background = true` looks like in a terminal that
+           blurs its window. -->
+      <div class="app" id="player" role="group" tabindex="0" aria-label="A working demo of the velo interface. Space plays and pauses, the arrows seek, plus and minus change the volume.">
+        <audio id="track" preload="none" src="media/wave-maker.mp3"></audio>
+
+        <div class="app-nav">
+          <span class="app-tabs"><button type="button" class="on" data-more>sources</button><button type="button" data-more>queue</button></span>
+          <span class="app-mark" aria-hidden="true">V E L O</span>
+        </div>
+
+        <div class="app-title">♫ HoliznaCC0 – Wave Maker ( Lofi , Dreamy , Retro )</div>
+
+        <div class="app-clock">
+          <span><span id="clock">0:00</span> / <span id="length">3:05</span><span class="app-state" id="state">■ stopped</span></span>
+          <span class="app-of">track 80 of 120</span>
+        </div>
+
+        <div class="app-spectrum" id="spectrum" aria-hidden="true">
+          <i style="--h:58"></i><i style="--h:72"></i><i style="--h:66"></i><i style="--h:61"></i>
+          <i style="--h:55"></i><i style="--h:52"></i><i style="--h:54"></i><i style="--h:58"></i>
+          <i style="--h:62"></i><i style="--h:41"></i><i style="--h:68"></i><i style="--h:76"></i>
+          <i style="--h:70"></i><i style="--h:57"></i><i style="--h:49"></i><i style="--h:37"></i>
+          <i style="--h:44"></i><i style="--h:51"></i><i style="--h:29"></i><i style="--h:33"></i>
+          <i style="--h:26"></i><i style="--h:22"></i><i style="--h:17"></i><i style="--h:12"></i>
+        </div>
+
+        <input class="app-seek" id="seek" type="range" min="0" max="185" step="1" value="0" aria-label="Position in the track">
+
+        <div class="app-transport">
+          <span class="app-buttons">
+            <button type="button" class="dim" data-more aria-label="Previous track">◂◂</button>
+            <button type="button" class="app-primary" id="toggle">▶ play</button>
+            <button type="button" class="dim" data-more aria-label="Next track">▸▸</button>
+          </span>
+          <label class="app-volume">VOL
+            <input id="volume" type="range" min="0" max="100" step="1" value="95" aria-label="Volume">
+            <output id="volume-value" for="volume">95</output>
+          </label>
+        </div>
+
+        <div class="app-header">Radio › Lofi <span class="dim">[120 songs]</span></div>
+
+        <ol class="app-rows">
+          <li><button type="button" class="app-row" data-more><span class="app-num">76.</span><span class="app-name">Tranquil Mindscape ( Lofi , Happy , Reflection )</span><span class="app-fact">HoliznaCC0 · Public Domain Lofi</span></button></li>
+          <li><button type="button" class="app-row" data-more><span class="app-num">77.</span><span class="app-name">Waiting Around ( LoFi , Calm )</span><span class="app-fact">HoliznaCC0 · Public Domain Lofi</span></button></li>
+          <li><button type="button" class="app-row" data-more><span class="app-num">78.</span><span class="app-name">Walking Away ( Lofi , Peaceful , Motivating )</span><span class="app-fact">HoliznaCC0 · Public Domain Lofi</span></button></li>
+          <li><button type="button" class="app-row" data-more><span class="app-num">79.</span><span class="app-name">Warm Fuzz ( LoFi , Retro )</span><span class="app-fact">HoliznaCC0 · Public Domain Lofi</span></button></li>
+          <li><button type="button" class="app-row selected" id="row"><span class="app-num"><span id="marker" aria-hidden="true"></span>80.</span><span class="app-name">Wave Maker ( Lofi , Dreamy , Retro )</span><span class="app-fact">HoliznaCC0 · Public Domain Lofi</span></button></li>
+          <li><button type="button" class="app-row" data-more><span class="app-num">81.</span><span class="app-name">Waves</span><span class="app-fact">HoliznaCC0 · Lazy Summer Lofi</span></button></li>
+          <li><button type="button" class="app-row" data-more><span class="app-num">82.</span><span class="app-name">Wetlands ( Lofi , Calm , Relaxed )</span><span class="app-fact">HoliznaCC0 · Public Domain Lofi</span></button></li>
+          <li><button type="button" class="app-row" data-more><span class="app-num">83.</span><span class="app-name">When I Was Human ( LoFi , Chill )</span><span class="app-fact">HoliznaCC0 · Public Domain Lofi</span></button></li>
+          <li><button type="button" class="app-row" data-more><span class="app-num">84.</span><span class="app-name">When Time Called Me Darling ( Lofi, Relaxing, Chill)</span><span class="app-fact">HoliznaCC0 · Public Domain Lofi</span></button></li>
+          <li><button type="button" class="app-row" data-more><span class="app-num">85.</span><span class="app-name">Windows Down</span><span class="app-fact">HoliznaCC0 · Lazy Summer Lofi</span></button></li>
+          <li><button type="button" class="app-row" data-more><span class="app-num">86.</span><span class="app-name">Winter Blues</span><span class="app-fact">HoliznaCC0 · Winter Lofi</span></button></li>
+        </ol>
+
+        <div class="app-footer" aria-hidden="true">
+          <span><b>j/k</b> move</span><span><b>enter</b> play</span><span><b>space</b> pause</span>
+          <span><b>←/→</b> seek</span><span><b>+/-</b> volume</span><span><b>?</b> help</span>
+        </div>
+
+        <div class="app-card" id="more" role="dialog" aria-labelledby="more-h" hidden>
+          <p class="app-card-title" id="more-h">That one needs the real velo</p>
+          <p>Here you can play, pause, seek and change the volume. Browsing,
+          the queue, search, radio and the nine visualizers come with the
+          install.</p>
+          <p class="app-card-actions">
+            <a class="cta" href="#install">Install velo</a>
+            <a href="#features">See the other features</a>
+          </p>
+          <p class="app-card-close"><button type="button" id="more-close"><b>esc</b> closes</button></p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="wrap page" id="features">
+
+    <section class="band" aria-labelledby="sound-h">
+      <div class="band-copy">
+        <h2 id="sound-h">It plays the file, not an approximation of it</h2>
+        <dl class="points">
+          <div>
+            <dt>Gapless</dt>
+            <dd>A join trims what the encoder inserted, so the seam carries music
+            only: the LAME delay and padding for MP3, the edit list for M4A.</dd>
+          </div>
+          <div>
+            <dt>ReplayGain</dt>
+            <dd>Read from the files' own tags and applied with clipping
+            protection. velo can also measure an album the EBU R128 way and write
+            true-peak tags, and only when you add <code>--apply</code>.</dd>
+          </div>
+          <div>
+            <dt>Bit-perfect</dt>
+            <dd><code>bit_perfect = true</code> reopens the device at each track's
+            own rate. ReplayGain and the volume step aside, and one status line
+            says so.</dd>
+          </div>
+          <div>
+            <dt>Formats</dt>
+            <dd>MP3, FLAC, M4A/AAC, OGG Vorbis, OGG Opus and WAV, with no dynamic
+            dependency.</dd>
+          </div>
+        </dl>
+      </div>
+      <figure class="term">
+        <figcaption>Measure an album, then write the tags</figcaption>
+<pre><span class="p">$</span> velo --replaygain-scan album/*.flac
+<span class="c"># measure and print — a dry run</span>
+
+<span class="p">$</span> velo --replaygain-scan --apply album/*.flac
+<span class="c"># write the tags</span></pre>
+      </figure>
+    </section>
+
+    <section class="band flip" aria-labelledby="library-h">
+      <div class="band-copy">
+        <h2 id="library-h">Your folder is the library</h2>
+        <dl class="points">
+          <div>
+            <dt>Four views</dt>
+            <dd>Artists, albums, tracks and genres, indexed from the tags and
+            refreshed in the background at every launch.</dd>
+          </div>
+          <div>
+            <dt>Fuzzy search</dt>
+            <dd><kbd>/</kbd> searches the whole library: <code>lofi</code> finds
+            <code>Lo-Fi Scientists</code>.</dd>
+          </div>
+          <div>
+            <dt>A queue you edit</dt>
+            <dd><kbd>a</kbd> appends without stopping playback, <kbd>tab</kbd>
+            goes to the queue and back, <kbd>z</kbd> shuffles what is left.</dd>
+          </div>
+          <div>
+            <dt>Favourites and playlists</dt>
+            <dd><kbd>f</kbd> marks a favourite and <kbd>S</kbd> saves the queue
+            as a playlist. <code>.m3u</code>, <code>.m3u8</code> and
+            <code>.pls</code> files import and export from the shell.</dd>
+          </div>
+          <div>
+            <dt>Recently played</dt>
+            <dd><code>velo history --json</code> hands your last 500 plays to a
+            script.</dd>
+          </div>
+        </dl>
+      </div>
+      <figure class="term">
+        <figcaption>An import says what it could not find</figcaption>
+<pre><span class="p">$</span> velo playlist import ~/music/noche.m3u
+1 of 3 entries are gone
+/Users/you/music/old-take.flac
+imported "noche" with 2 of 3 entries</pre>
+      </figure>
+    </section>
+
+    <section class="radio" aria-labelledby="radio-h">
+      <h2 id="radio-h">Radio that reads like radio</h2>
+      <div class="radio-grid">
+        <p class="stat"><b>58,000</b> stations in the Radio Browser directory</p>
+        <p class="stat"><b>241</b> countries, with yours listed first</p>
+        <ul class="plain">
+          <li>Browse by country, region or tag. <kbd>f</kbd> favourites a station
+          or pins a place.</li>
+          <li>A live row carries <span class="live">● live</span> and the
+          listener count when the service reports one.</li>
+          <li><kbd>u</kbd> plays any stream URL without saving it.</li>
+          <li>A station that cannot play is marked <code>✗</code> and says why at
+          once, and <kbd>i</kbd> drafts the bug report for you to send.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="band" aria-labelledby="look-h">
+      <div class="band-copy">
+        <h2 id="look-h">It looks like your terminal</h2>
+        <dl class="points">
+          <div>
+            <dt>Your colours</dt>
+            <dd>Seven theme colours in <code>config.toml</code>, or the
+            terminal's own background and text.
+            <code>transparent_background = true</code> lets whatever is behind
+            the window show through, which is what this page is doing.</dd>
+          </div>
+          <div>
+            <dt>Nine visualizers</dt>
+            <dd>bars, bars-outline, wave, scatter, flame, matrix, scope, mirror
+            and none. <kbd>v</kbd> cycles them and <kbd>V</kbd> gives one the
+            whole screen.</dd>
+          </div>
+          <div>
+            <dt>Cover art</dt>
+            <dd>Drawn where the terminal speaks the kitty, sixel or iTerm2
+            protocol. Elsewhere the status line says why it is hidden.</dd>
+          </div>
+          <div>
+            <dt>Low power</dt>
+            <dd><kbd>P</kbd> redraws the screen at a quarter of the rate and
+            leaves the spectrum out. Playback does not change.</dd>
+          </div>
+        </dl>
+      </div>
+      <figure class="term">
+        <figcaption>The factory theme, in config.toml</figcaption>
+<pre>[theme]
+background = <span class="sw" style="--c:#141c28"></span>"#141c28"
+text       = <span class="sw" style="--c:#f4f0e2"></span>"#f4f0e2"
+dim        = <span class="sw" style="--c:#767676"></span>"#767676"
+accent     = <span class="sw" style="--c:#f4baa3"></span>"#f4baa3"
+secondary  = <span class="sw" style="--c:#a6c8e2"></span>"#a6c8e2"
+border     = <span class="sw" style="--c:#252939"></span>"#252939"
+ink        = <span class="sw" style="--c:#000000"></span>"#000000"
+transparent_background = true</pre>
+      </figure>
+    </section>
+
+    <section class="keys" id="keys" aria-labelledby="keys-h">
+      <h2 id="keys-h">Driven from the keyboard</h2>
+      <p class="section-lede">Sixteen of the keys. <kbd>?</kbd> opens the rest
+      inside velo, and the system's media keys reach play, next and previous on
+      macOS and on a Linux desktop with MPRIS.</p>
+      <dl class="keymap">
+        <div><dt><kbd>j</kbd> <kbd>k</kbd></dt><dd>move down and up</dd></div>
+        <div><dt><kbd>enter</kbd></dt><dd>open, or play from here</dd></div>
+        <div><dt><kbd>space</kbd></dt><dd>pause and resume</dd></div>
+        <div><dt><kbd>←</kbd> <kbd>→</kbd></dt><dd>seek 5 s, 30 s with shift</dd></div>
+        <div><dt><kbd>:</kbd></dt><dd>jump to 70%, 1:20 or 90 s</dd></div>
+        <div><dt><kbd>/</kbd></dt><dd>fuzzy search</dd></div>
+        <div><dt><kbd>1</kbd>–<kbd>4</kbd></dt><dd>artists, albums, tracks, genres</dd></div>
+        <div><dt><kbd>tab</kbd></dt><dd>to the queue and back</dd></div>
+        <div><dt><kbd>a</kbd></dt><dd>append to the queue</dd></div>
+        <div><dt><kbd>z</kbd></dt><dd>shuffle what is left</dd></div>
+        <div><dt><kbd>r</kbd></dt><dd>repeat: off, all, one</dd></div>
+        <div><dt><kbd>+</kbd> <kbd>-</kbd></dt><dd>volume, 5% at a time</dd></div>
+        <div><dt><kbd>f</kbd></dt><dd>favourite</dd></div>
+        <div><dt><kbd>R</kbd></dt><dd>radio</dd></div>
+        <div><dt><kbd>v</kbd></dt><dd>next visualizer</dd></div>
+        <div><dt><kbd>d</kbd></dt><dd>choose the output device</dd></div>
+      </dl>
+    </section>
+
+    <section class="notes" aria-label="Servers, privacy and what is missing">
+      <div>
+        <h2>Your own server</h2>
+        <p>Early access: velo talks to servers that expose the Subsonic API,
+        Navidrome, Airsonic and Gonic among them. <code>velo --sync</code> brings
+        the server's library into the index, and a remote track plays through a
+        cache.</p>
+      </div>
+      <div>
+        <h2>What velo sends</h2>
+        <p>No usage data: no analytics endpoint, no install id, no first-run
+        question. One request is its own, the update check to
+        <code>api.github.com</code>, once a day with no identifier, and
+        <code>check = "never"</code> turns it off.</p>
+      </div>
+      <div>
+        <h2>Not yet</h2>
+        <p>Windows is untested. Subsonic cannot stream a track before the whole
+        file is cached. Playlists are saved, renamed and reordered, and have no
+        editor beyond that.</p>
+      </div>
+    </section>
+
+    <section class="start" aria-labelledby="start-h">
+      <h2 id="start-h">Three lines to the first song</h2>
+      <figure class="term">
+<pre><span class="p">$</span> <span id="start-line">curl -fsSL https://raw.githubusercontent.com/alvaldes/velo/main/install.sh | sh</span>
+<span class="p">$</span> velo --library /path/to/your/music --index
+<span class="p">$</span> velo --library /path/to/your/music</pre>
+        <button type="button" class="copy" data-copy-from="start-line">copy the first</button>
+      </figure>
+      <p class="section-lede">Linux or macOS. Building from source needs Rust 1.88
+      or newer.</p>
+    </section>
+  </div>
+</main>
+
+<div class="wrap">
+  <footer class="bottom">
+    <span>velo is free software, MIT licensed. The demo track is Wave Maker by HoliznaCC0, CC0.</span>
+    <span class="footer-links">
+      <a href="https://github.com/alvaldes/velo/blob/main/README.md">README</a>
+      <a href="https://github.com/alvaldes/velo/blob/main/CHANGELOG.md">CHANGELOG</a>
+      <a href="https://github.com/alvaldes/velo/releases">Releases</a>
+    </span>
+  </footer>
+</div>
+<script src="app.js?v=8"></script>
+<script type="module" src="fog.js?v=8"></script>
+</body>
+</html>

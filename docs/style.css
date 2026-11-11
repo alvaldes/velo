@@ -1,0 +1,883 @@
+/* velo's landing page.
+ *
+ * The tokens are the player's own factory palette — the same seven colours
+ * `themes/velo.toml` ships — so the page wears the product it describes.
+ * Two deviations, deliberate: `--dim` is lifted above the palette's `dim`
+ * (#767676 on #141c28 is 3.3:1 and fails AA for body text), and `--soft` is
+ * the reading colour for prose set over the video and the fog, where the
+ * backdrop is never one flat value.
+ *
+ * The hero is the room the terminal sits in — a looping hearth video — with
+ * the player drawn as glass over it: `transparent_background = true` is what
+ * the app does, so the room behind the page is what would be behind the
+ * terminal. Under the hero the video dissolves into a fog drawn by fog.js
+ * (three.js, vendored), and the rest of the page is read through it.
+ *
+ * No build step, no framework: everything the page loads is in this folder,
+ * system fonts only.
+ */
+
+:root {
+  --bg: #141c28;
+  --line: #252939;
+  --text: #f4f0e2;
+  --soft: #c9cdd3;
+  --dim: #9aa3ae;
+  --accent: #f4baa3;
+  --accent-ink: #141c28;
+  --cool: #a6c8e2;
+  --hair: rgba(244, 240, 226, 0.16);
+  --glass: rgba(9, 11, 16, 0.42);
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+html {
+  background: #07090d;
+  color: var(--text);
+  font-family: var(--sans);
+  line-height: 1.6;
+  scroll-behavior: smooth;
+  scroll-padding-top: 2rem;
+}
+
+body { margin: 0; position: relative; overflow-x: hidden; }
+
+a { color: var(--cool); }
+
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+.app:focus-visible,
+label:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+[hidden] { display: none !important; }
+
+/* ---- the fog the page is read through ---- */
+
+/* The base does not depend on WebGL: soft clouds of warm brown and slate over
+   near-black. fog.js paints its canvas on top of this; a browser that cannot
+   still gets fog, never a flat plate. */
+.fog {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(60% 50% at 50% 0%, rgba(201, 138, 75, 0.34) 0%, rgba(201, 138, 75, 0) 70%),
+    radial-gradient(50% 45% at 22% 62%, rgba(74, 53, 36, 0.6) 0%, rgba(74, 53, 36, 0) 72%),
+    radial-gradient(45% 40% at 82% 78%, rgba(43, 58, 77, 0.5) 0%, rgba(43, 58, 77, 0) 70%),
+    #07090d;
+}
+
+.fog canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.wrap {
+  position: relative;
+  z-index: 1;
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 0 2rem;
+}
+
+/* ---- header ---- */
+
+.top {
+  position: absolute;
+  inset: 0 0 auto;
+  z-index: 2;
+}
+
+.top-inner {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-top: 1.6rem;
+  padding-bottom: 1.6rem;
+}
+
+.brand {
+  font-family: var(--mono);
+  letter-spacing: 0.42em;
+  text-transform: uppercase;
+  font-size: 0.95rem;
+  color: var(--accent);
+}
+
+.top-links {
+  display: flex;
+  gap: 1.6rem;
+}
+
+.top-links a {
+  font-size: 0.85rem;
+  text-decoration: none;
+  color: var(--text);
+}
+
+.top-links a:hover { color: var(--accent); }
+
+/* ---- hero ---- */
+
+.hero {
+  position: relative;
+  z-index: 1;
+  min-height: 100svh;
+  display: flex;
+  align-items: center;
+  padding: 6rem 0 18vh;
+}
+
+/* The room. It is opaque down to the last third, then lets go: the mask takes
+   the video and its scrims out together, and what is left is the fog. */
+.hero-media {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(180deg, #000 0%, #000 58%, rgba(0, 0, 0, 0.55) 78%, transparent 100%);
+  mask-image: linear-gradient(180deg, #000 0%, #000 58%, rgba(0, 0, 0, 0.55) 78%, transparent 100%);
+}
+
+.hero-media video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: 50% 40%;
+}
+
+/* Two scrims, both for reading: the left one puts the pitch on a dark wall,
+   the top one keeps the brand legible over the bright plaster. */
+.hero-media::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(90deg, rgba(7, 9, 13, 0.86) 0%, rgba(7, 9, 13, 0.6) 34%, rgba(7, 9, 13, 0) 62%),
+    linear-gradient(180deg, rgba(7, 9, 13, 0.6) 0%, rgba(7, 9, 13, 0) 22%);
+}
+
+.hero-grid {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 1fr 1.08fr;
+  gap: 3rem;
+  align-items: center;
+}
+
+.hero-grid > * { min-width: 0; }
+
+h1 {
+  font-size: clamp(2.1rem, 3.6vw, 3.3rem);
+  line-height: 1.08;
+  letter-spacing: -0.025em;
+  font-weight: 650;
+  margin: 0 0 1.2rem;
+  text-wrap: balance;
+}
+
+.lede {
+  color: var(--soft);
+  font-size: 1.08rem;
+  max-width: 44ch;
+  margin: 0 0 2.2rem;
+}
+
+/* ---- install ---- */
+
+.picker-field {
+  border: 0;
+  padding: 0;
+  margin: 0 0 0.7rem;
+}
+
+.picker-field legend {
+  font-size: 0.82rem;
+  color: var(--soft);
+  padding: 0;
+  margin-bottom: 0.5rem;
+}
+
+.picker {
+  display: inline-flex;
+  flex-wrap: wrap;
+  border: 1px solid var(--hair);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--glass);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+}
+
+.picker label {
+  position: relative;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  color: var(--soft);
+  padding: 0.42rem 0.6rem;
+  cursor: pointer;
+  border-right: 1px solid var(--hair);
+  white-space: nowrap;
+}
+
+.picker label:last-child { border-right: 0; }
+.picker label:hover { color: var(--text); }
+
+.picker label:has(input:checked) {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+.picker input {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+}
+
+.cmd {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.7rem;
+  background: var(--glass);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+  border: 1px solid var(--hair);
+  border-radius: 8px;
+  padding: 0.75rem 0.8rem 0.75rem 1rem;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+}
+
+.prompt { color: var(--accent); flex: none; line-height: 1.5; }
+
+/* The whole command is always on screen: it wraps instead of scrolling, so
+   what gets copied is what was read. */
+.cmd code {
+  color: var(--text);
+  flex: 1;
+  min-width: 0;
+  /* Wrapped the way a terminal wraps a long line: at the edge, not at a word. */
+  word-break: break-all;
+  line-height: 1.5;
+}
+
+.copy {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  background: transparent;
+  border: 1px solid var(--hair);
+  color: var(--soft);
+  border-radius: 5px;
+  padding: 0.28rem 0.6rem;
+  cursor: pointer;
+  flex: none;
+}
+
+.copy:hover { color: var(--text); border-color: var(--soft); }
+
+.hint {
+  font-size: 0.8rem;
+  color: var(--soft);
+  margin: 0.8rem 0 0;
+  max-width: 50ch;
+}
+
+.actions {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  flex-wrap: wrap;
+  margin: 1.5rem 0 0;
+}
+
+.cta {
+  display: inline-block;
+  background: var(--accent);
+  color: var(--accent-ink);
+  text-decoration: none;
+  font-size: 0.9rem;
+  font-weight: 600;
+  padding: 0.62rem 1.1rem;
+  border-radius: 6px;
+}
+
+.cta:hover { filter: brightness(1.06); }
+
+.release {
+  font-family: var(--mono);
+  font-size: 0.74rem;
+  color: var(--soft);
+}
+
+.more-install {
+  margin: 0.9rem 0 0;
+  font-size: 0.8rem;
+}
+
+.more-install a { color: var(--soft); }
+.more-install a:hover { color: var(--text); }
+
+/* ---- the interface, drawn as it draws itself ---- */
+
+.app {
+  position: relative;
+  padding: 1.1rem 1.25rem 0.9rem;
+  border: 1px solid var(--hair);
+  border-radius: 12px;
+  /* Glass: a thin dark tint for contrast, and the room behind it out of focus. */
+  background: var(--glass);
+  -webkit-backdrop-filter: blur(22px) saturate(1.35);
+  backdrop-filter: blur(22px) saturate(1.35);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.1),
+    0 30px 80px -20px rgba(0, 0, 0, 0.7);
+  font-family: var(--mono);
+  font-size: 0.74rem;
+  line-height: 1.55;
+  color: var(--text);
+}
+
+.app button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+  text-align: left;
+}
+
+.app .dim { color: var(--dim); }
+.app button.dim:hover { color: var(--text); }
+
+.app-nav {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 0.5rem;
+}
+
+.app-tabs { display: inline-flex; gap: 1.1rem; }
+.app-tabs button { color: var(--dim); }
+.app-tabs button:hover { color: var(--text); }
+.app-tabs button.on { color: var(--text); font-weight: 600; }
+
+.app-mark {
+  color: var(--accent);
+  letter-spacing: 0.32em;
+}
+
+.app-title {
+  color: var(--accent);
+  font-weight: 600;
+  margin-bottom: 1.1rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-clock {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 0.55rem;
+}
+
+.app-state { color: var(--accent); margin-left: 1.5ch; }
+.app-of { color: var(--dim); }
+
+.app-spectrum {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 68px;
+  margin: 0 0 0.5rem;
+  /* Before the first play the bars are a still picture of a spectrum, dimmed. */
+  opacity: 0.45;
+}
+
+.app.is-live .app-spectrum { opacity: 1; }
+
+.app-spectrum i {
+  flex: 1;
+  height: calc(var(--h) * 1%);
+  background: linear-gradient(180deg, #f8d2c0 0%, #f4baa3 55%, #d98f72 100%);
+  transform-origin: bottom;
+}
+
+/* The two sliders are the interface's own lines: a hairline, a round knob. */
+.app input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  height: 16px;
+  margin: 0;
+  cursor: pointer;
+  --rail: rgba(154, 163, 174, 0.5);
+  --done: var(--rail);
+}
+
+.app input[type="range"]::-webkit-slider-runnable-track {
+  height: 2px;
+  background: linear-gradient(90deg, var(--done) var(--p, 0%), var(--rail) var(--p, 0%));
+}
+
+.app input[type="range"]::-moz-range-track {
+  height: 2px;
+  background: linear-gradient(90deg, var(--done) var(--p, 0%), var(--rail) var(--p, 0%));
+}
+
+.app input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 9px;
+  height: 9px;
+  margin-top: -3.5px;
+  border-radius: 50%;
+  background: var(--text);
+}
+
+.app input[type="range"]::-moz-range-thumb {
+  width: 9px;
+  height: 9px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--text);
+}
+
+.app-seek {
+  display: block;
+  width: 100%;
+  --done: var(--accent);
+  margin-bottom: 0.5rem !important;
+}
+
+.app-transport {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  padding-bottom: 0.9rem;
+  border-bottom: 1px solid rgba(154, 163, 174, 0.2);
+  margin-bottom: 0.8rem;
+}
+
+.app-buttons {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.9rem;
+}
+
+.app button.app-primary {
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 700;
+  padding: 0.16rem 0.7rem;
+  border-radius: 2px;
+  min-width: 10ch;
+  text-align: center;
+}
+
+.app button.app-primary:hover { filter: brightness(1.08); }
+
+.app-volume {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+  color: var(--dim);
+}
+
+.app-volume input { width: 150px; }
+.app-volume output { color: var(--text); min-width: 3ch; text-align: right; }
+
+.app-header {
+  font-weight: 600;
+  margin-bottom: 0.2rem;
+}
+
+.app-rows {
+  list-style: none;
+  margin: 0 0 0.6rem;
+  padding: 0;
+}
+
+.app button.app-row {
+  display: grid;
+  grid-template-columns: 3.4ch 1fr auto;
+  gap: 1ch;
+  align-items: baseline;
+  width: calc(100% + 0.6rem);
+  margin: 0 -0.3rem;
+  padding: 0.04rem 0.3rem;
+  border-radius: 1px;
+}
+
+.app button.app-row:hover { background: rgba(244, 240, 226, 0.07); }
+
+.app-num {
+  color: var(--dim);
+  text-align: right;
+  white-space: nowrap;
+}
+
+.app-name,
+.app-fact {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-fact {
+  color: var(--dim);
+  max-width: 30ch;
+  text-align: right;
+}
+
+.app button.app-row.selected {
+  grid-template-columns: 5ch 1fr auto;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 600;
+}
+
+.app-row.selected .app-num,
+.app-row.selected .app-fact { color: var(--accent-ink); }
+
+#marker { margin-right: 0.6ch; }
+
+.app-footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.2rem 0.9rem;
+  padding-top: 0.7rem;
+  border-top: 1px solid rgba(154, 163, 174, 0.2);
+  color: var(--dim);
+  font-size: 0.7rem;
+}
+
+.app-footer b {
+  color: var(--cool);
+  font-weight: 400;
+}
+
+/* The card every other key opens: the interface's own kind of overlay. */
+.app-card {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(88%, 25rem);
+  padding: 1.1rem 1.3rem 0.9rem;
+  background: rgba(13, 17, 25, 0.96);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.6);
+  font-family: var(--sans);
+  font-size: 0.86rem;
+  color: var(--soft);
+}
+
+.app-card p { margin: 0 0 0.8rem; }
+
+.app-card-title {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.app-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 1rem;
+}
+
+.app-card .app-card-close {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  color: var(--dim);
+}
+
+.app-card-close b { color: var(--cool); font-weight: 400; }
+
+/* ---- the rest of the page ---- */
+
+.page { padding-top: 1rem; }
+
+h2 {
+  font-size: clamp(1.55rem, 2.5vw, 2.15rem);
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+  font-weight: 650;
+  margin: 0 0 1.8rem;
+  max-width: 22ch;
+  text-wrap: balance;
+}
+
+.page p,
+.page dd,
+.page li { color: var(--soft); }
+
+.page code {
+  font-family: var(--mono);
+  font-size: 0.88em;
+  color: var(--text);
+  background: rgba(244, 240, 226, 0.09);
+  padding: 0.08em 0.36em;
+  border-radius: 3px;
+}
+
+kbd {
+  font-family: var(--mono);
+  font-size: 0.84em;
+  color: var(--cool);
+  border: 1px solid rgba(166, 200, 226, 0.4);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 0 0.4em;
+  white-space: nowrap;
+}
+
+.section-lede {
+  max-width: 62ch;
+  margin: 0;
+}
+
+/* A band: prose on one side, the thing itself on the other. */
+.band {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 4.5rem;
+  align-items: center;
+  padding: 5.5rem 0;
+}
+
+.band.flip .band-copy { order: 2; }
+
+.points {
+  display: grid;
+  gap: 1.15rem;
+  margin: 0;
+}
+
+.points dt {
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 0.1rem;
+}
+
+.points dd {
+  margin: 0;
+  max-width: 54ch;
+}
+
+/* A terminal's worth of glass: commands, their output, a config file. */
+.term {
+  position: relative;
+  margin: 0;
+  padding: 1.2rem 1.4rem 1.3rem;
+  border: 1px solid var(--hair);
+  border-radius: 12px;
+  background: var(--glass);
+  -webkit-backdrop-filter: blur(18px);
+  backdrop-filter: blur(18px);
+  box-shadow: 0 30px 70px -30px rgba(0, 0, 0, 0.7);
+}
+
+.term figcaption {
+  font-size: 0.8rem;
+  color: var(--soft);
+  margin-bottom: 0.9rem;
+}
+
+.term pre {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  line-height: 1.75;
+  color: var(--text);
+  overflow-x: auto;
+}
+
+.term .p { color: var(--accent); }
+.term .c { color: var(--dim); }
+
+.sw {
+  display: inline-block;
+  width: 0.72em;
+  height: 0.72em;
+  margin-right: 0.55em;
+  border-radius: 2px;
+  background: var(--c);
+  outline: 1px solid rgba(244, 240, 226, 0.35);
+}
+
+/* ---- radio ---- */
+
+.radio { padding: 5.5rem 0; }
+
+.radio-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1.7fr;
+  gap: 3rem;
+  align-items: start;
+}
+
+.stat {
+  margin: 0;
+  max-width: 20ch;
+}
+
+.stat b {
+  display: block;
+  font-size: clamp(2.8rem, 6vw, 4.8rem);
+  line-height: 1;
+  letter-spacing: -0.04em;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  margin-bottom: 0.6rem;
+}
+
+.plain {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.85rem;
+}
+
+.live { color: var(--accent); font-family: var(--mono); font-size: 0.88em; }
+
+/* ---- keys ---- */
+
+.keys { padding: 5.5rem 0; }
+.keys h2 { margin-bottom: 1rem; }
+
+.keymap {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  column-gap: 2.5rem;
+  margin: 2.2rem 0 0;
+  border-top: 1px solid var(--hair);
+}
+
+.keymap div {
+  display: grid;
+  grid-template-columns: 4.6rem 1fr;
+  gap: 0.6rem;
+  align-items: baseline;
+  padding: 0.75rem 0;
+  border-bottom: 1px solid var(--hair);
+  font-size: 0.86rem;
+}
+
+.keymap dt { white-space: nowrap; }
+.keymap dd { margin: 0; }
+
+/* ---- servers, privacy, what is missing ---- */
+
+.notes {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 3rem;
+  padding: 4rem 0 5rem;
+}
+
+.notes h2 {
+  font-size: 1.05rem;
+  letter-spacing: 0;
+  margin-bottom: 0.6rem;
+}
+
+.notes p {
+  margin: 0;
+  font-size: 0.92rem;
+}
+
+/* ---- the last word ---- */
+
+.start { padding: 4rem 0 2rem; }
+
+.start .term {
+  max-width: 54rem;
+  margin-bottom: 1.2rem;
+  padding-right: 9rem;
+}
+
+.start .copy {
+  position: absolute;
+  top: 1.1rem;
+  right: 1.1rem;
+}
+
+/* ---- footer ---- */
+
+.bottom {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem 2rem;
+  flex-wrap: wrap;
+  border-top: 1px solid var(--hair);
+  margin-top: 3.2rem;
+  padding: 1.5rem 0 3rem;
+  font-size: 0.8rem;
+  color: var(--soft);
+}
+
+.footer-links { display: inline-flex; gap: 1.4rem; }
+
+/* ---- narrow screens ---- */
+
+@media (max-width: 980px) {
+  .wrap { padding: 0 1.25rem; }
+  .hero { padding: 5.5rem 0 14vh; }
+  .hero-grid { grid-template-columns: minmax(0, 1fr); gap: 2.5rem; }
+  .hero-media::after {
+    background: linear-gradient(180deg, rgba(7, 9, 13, 0.82) 0%, rgba(7, 9, 13, 0.62) 45%, rgba(7, 9, 13, 0.2) 100%);
+  }
+  .lede { max-width: none; }
+  .top-links { gap: 1.1rem; }
+
+  .app { font-size: 0.68rem; }
+  .app-fact { max-width: 12ch; }
+  .app-volume input { width: 84px; }
+
+  .band { grid-template-columns: minmax(0, 1fr); gap: 2.2rem; padding: 3.5rem 0; }
+  .band.flip .band-copy { order: 0; }
+  .radio, .keys { padding: 3.5rem 0; }
+  .radio-grid { grid-template-columns: 1fr 1fr; gap: 2rem; }
+  .radio-grid .plain { grid-column: 1 / -1; }
+  .keymap { grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 1.5rem; }
+  .notes { grid-template-columns: minmax(0, 1fr); gap: 2rem; padding: 3rem 0; }
+  .start .term { padding-right: 1.4rem; padding-bottom: 3.6rem; }
+  .start .copy { top: auto; bottom: 1rem; right: auto; left: 1.4rem; }
+}
+
+@media (max-width: 560px) {
+  .keymap { grid-template-columns: 1fr; }
+  .app-fact { display: none; }
+  .app button.app-row,
+  .app button.app-row.selected { grid-template-columns: 5ch 1fr; }
+}
+
+/* ---- motion, only when the reader allows it ---- */
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .cta { transition: filter 0.15s ease; }
+}
