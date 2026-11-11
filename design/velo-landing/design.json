@@ -1,0 +1,27 @@
+{
+  "title": "velo landing page",
+  "brief": "Landing page for velo, a single-binary terminal music player, to publish on GitHub Pages; modelled on cliamp.stream, whose install section is a one-liner per platform with copy buttons. Content comes from velo's README: install commands and release targets, gapless/ReplayGain/bit-perfect/mono, the four library views, radio (Radio Browser plus the cliamp channels), themes as TOML files, and the one-binary-no-daemon-no-telemetry promise.",
+  "artboards": [
+    {
+      "file": "01-terminal-first.html",
+      "title": "Terminal first",
+      "tradeoff": "Shows the product itself above the fold, in velo's own factory palette, so the pitch is verifiable at a glance; the install block sits below it, and a six-card grid carries the feature detail.",
+      "width": 1440,
+      "height": 1100
+    },
+    {
+      "file": "02-manual-single-column.html",
+      "title": "Manual, single column",
+      "tradeoff": "Reads like the documentation a person would trust to install software: one 44rem measure, numbered chapters, install as a stepped list. Weakest emotional pull, strongest legibility and the easiest to keep in sync with the README.",
+      "width": 1440,
+      "height": 1000
+    },
+    {
+      "file": "03-split-live.html",
+      "title": "Split hero, live panel",
+      "tradeoff": "Product-forward: the promise and a platform-aware install one-liner on the left, a playing panel with a moving spectrum on the right, so the page feels like the app. Less room for feature detail above the fold; the spectrum is decorative and stops under prefers-reduced-motion.",
+      "width": 1440,
+      "height": 950
+    }
+  ]
+}

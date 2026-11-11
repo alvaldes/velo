@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>velo — a manual you can install</title>
+<style>
+  :root{
+    --paper:#faf7ef; --ink:#141c28; --muted:#5b5f66; --rule:#dcd6c8;
+    --accent:#9c4520; --link:#1d5f86; --code-bg:#f1ece0;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+    --serif:Georgia,"Iowan Old Style","Palatino Linotype",serif;
+  }
+  *{box-sizing:border-box}
+  html{background:var(--paper);color:var(--ink);font-family:var(--serif);font-size:17px;line-height:1.62}
+  body{max-width:44rem;margin:0 auto;padding:4rem 1.5rem 6rem}
+  a{color:var(--link)}
+  a:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+  .masthead{display:flex;justify-content:space-between;align-items:baseline;border-bottom:2px solid var(--ink);padding-bottom:.6rem;margin-bottom:3rem}
+  .masthead strong{font-family:var(--mono);letter-spacing:.4em;text-transform:uppercase;font-size:.95rem}
+  .masthead span{font-size:.8rem;color:var(--muted);font-family:var(--mono)}
+  h1{font-size:clamp(1.7rem,4vw,2.5rem);line-height:1.2;margin:0 0 .9rem;font-weight:400;letter-spacing:-.01em}
+  .strap{color:var(--muted);margin:0 0 2.5rem;font-size:1.02rem}
+  h2{font-family:var(--mono);font-size:.78rem;letter-spacing:.22em;text-transform:uppercase;color:var(--accent);margin:3rem 0 .35rem;font-weight:600}
+  h2::before{content:counters(chapter,".") "  ";counter-increment:chapter;color:var(--mxuted,#8a8f96)}
+  body{counter-reset:chapter}
+  h3{font-size:1.05rem;margin:1.9rem 0 .3rem;font-weight:600}
+  p{margin:0 0 1.05rem}
+  code{font-family:var(--mono);font-size:.86em;background:var(--code-bg);padding:.1em .35em;border-radius:3px}
+  .block{background:var(--code-bg);border-left:3px solid var(--accent);padding:1rem 1.1rem;margin:1.2rem 0;font-family:var(--mono);font-size:.84rem;line-height:1.7;overflow-x:auto}
+  .block .comment{color:var(--muted)}
+  ol.steps{margin:.6rem 0 1.4rem;padding-left:1.4rem}
+  ol.steps li{margin:.55rem 0}
+  ol.steps li::marker{font-family:var(--mono);color:var(--accent);font-weight:600}
+  .note{border:1px solid var(--rule);border-radius:4px;padding:.85rem 1rem;margin:1.4rem 0;font-size:.92rem;color:var(--muted);background:#fffdf7}
+  .note strong{color:var(--ink)}
+  dl{margin:1rem 0 1.5rem}
+  dt{font-family:var(--mono);font-size:.86rem;margin-top:.8rem}
+  dd{margin:.1rem 0 0;color:var(--muted);font-size:.95rem}
+  hr{border:0;border-top:1px solid var(--rule);margin:2.6rem 0}
+  .end{display:flex;gap:1rem;flex-wrap:wrap;align-items:center;justify-content:space-between;margin-top:3rem;border-top:2px solid var(--ink);padding-top:1.1rem}
+  .end a{font-family:var(--mono);font-size:.88rem}
+  footer{font-size:.82rem;color:var(--muted);margin-top:1.5rem;font-family:var(--mono)}
+</style>
+</head>
+<body>
+
+<header class="masthead">
+  <strong>velo</strong>
+  <span>a terminal music player · rust · mit</span>
+</header>
+
+<main>
+  <h1>A player, a library, and nothing running behind them.</h1>
+  <p class="strap">velo indexes the music you already have, from the files' own
+  tags, and plays it gaplessly inside the terminal you are already in. One
+  binary. No daemon, no server, no account, no usage data.</p>
+
+  <h2 id="install">Install</h2>
+
+  <h3>1. A prebuilt binary, if your platform is on the list</h3>
+  <p>Release archives are built by CI for
+  <code>x86_64-unknown-linux-gnu</code>, <code>aarch64-unknown-linux-gnu</code>,
+  <code>x86_64-apple-darwin</code> and <code>aarch64-apple-darwin</code>.</p>
+  <ol class="steps">
+    <li>Take <code>velo-&lt;tag&gt;-&lt;target&gt;.tar.gz</code> from
+      <a href="https://github.com/alvaldes/velo/releases">Releases</a>.</li>
+    <li>Unpack it anywhere stable: <code>tar -xzf velo-*.tar.gz -C ~/.local/bin</code>.</li>
+    <li>Make sure that directory is on your <code>PATH</code>, then run <code>velo</code>.</li>
+  </ol>
+
+  <h3>2. From a clone, with cargo</h3>
+  <div class="block"><span class="comment"># needs Rust 1.88 or newer</span>
+git clone https://github.com/alvaldes/velo
+cd velo
+cargo install --path .</div>
+  <p>On Linux the audio stack wants the ALSA development headers; the toolchain
+  covers everything else. <code>cargo install velo</code> will work once the
+  crate is published.</p>
+
+  <div class="note"><strong>What you get:</strong> a single executable. Its first
+  launch writes its own comments to <code>~/.config/velo/config.toml</code> and a
+  <code>themes/</code> folder beside it, and tells you how to point it at a music
+  folder — <code>L</code> in the interface, or <code>--library</code> on the command
+  line.</div>
+
+  <h2 id="first-run">First run</h2>
+  <div class="block">velo --library ~/Music --index   <span class="comment"># point, index</span>
+velo --library ~/Music           <span class="comment"># the browser, indexed in the background</span>
+velo song.flac song.mp3          <span class="comment"># play exactly these, gaplessly</span>
+velo --play song.flac            <span class="comment"># play and exit when it ends</span>
+velo --info song.flac            <span class="comment"># format, frames, length</span></div>
+
+  <h2 id="keys">The whole interface, from the keyboard</h2>
+  <p>Four numbered views — artists, albums, tracks, genres — with <code>enter</code>
+  to descend and to play, <code>/</code> to search anything, <code>tab</code> for the
+  queue, <code>space</code> to pause, <code>←</code>/<code>→</code> to seek,
+  <code>v</code> to change the spectrum, <code>ctrl+p</code> for settings and a theme
+  picker, <code>?</code> for the full key map. A cover card describes the track that
+  plays; <code>d</code> lists the machine's output devices.</p>
+
+  <h2 id="what-it-does">What it does with the sound</h2>
+  <dl>
+    <dt>gapless</dt>
+    <dd>The next track is decoded before the current one ends.</dd>
+    <dt>replaygain</dt>
+    <dd>Track or album gain, read from the files' own tags.</dd>
+    <dt>bit-perfect</dt>
+    <dd>The device reopens at the file's rate, volume pinned; a rate the device
+    cannot take falls back to converting, and says so once.</dd>
+    <dt>mono</dt>
+    <dd>A session downmix, refused under bit-perfect rather than faked.</dd>
+    <dt>radio</dt>
+    <dd>The Radio Browser directory and the cliamp channels: favourites, pinned
+    places, live ICY titles, and a refusal instead of a hang on what cannot play.</dd>
+    <dt>subsonic</dt>
+    <dd>Navidrome and friends, browsable and searchable, media keys and scrobbling
+    included.</dd>
+  </dl>
+
+  <div class="note"><strong>Privacy, in one line:</strong> velo sends no usage data.
+  It asks the network only for what you pointed it at — a station, a directory, your
+  own server. There is no analytics endpoint to opt out of.</div>
+
+  <hr>
+
+  <h2 id="read">Read more</h2>
+  <p>The <a href="https://github.com/alvaldes/velo/blob/main/README.md">README</a>
+  documents every key, every configuration table, the exit codes and the known gaps;
+  <a href="https://github.com/alvaldes/velo/blob/main/CHANGELOG.md">CHANGELOG</a> says
+  what changed and when.</p>
+</main>
+
+<div class="end">
+  <span style="color:var(--muted);font-size:.92rem">Free software, MIT licensed.</span>
+  <a href="https://github.com/alvaldes/velo">github.com/alvaldes/velo →</a>
+</div>
+
+<footer>velo is a single Rust binary: the interface and the audio live in the process you started.</footer>
+</body>
+</html>
