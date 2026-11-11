@@ -177,6 +177,15 @@ once a day by default (`[update] check = "never"` turns it off for good, and
 
 ## Install
 
+**With Homebrew** — on macOS or Linux:
+
+```sh
+brew install alvaldes/velo/velo
+```
+
+The [tap](https://github.com/alvaldes/homebrew-velo) follows each release
+within the hour; `brew upgrade velo` moves to the next one.
+
 **With the install script** — on Linux or macOS:
 
 ```sh
