@@ -81,12 +81,19 @@ pub fn listeners(count: u32) -> String {
     format!("{count} listening now")
 }
 
-/// `Name — live` — the one way a row says it plays the channel itself,
-/// not one of its songs (issue #68): the channel's live stream, through
-/// the same path a directory station takes.
+/// `Name — live`, or `★ Name — live` when the channel's stream is marked —
+/// the one way a row says it plays the channel itself, not one of its songs
+/// (issue #68): the channel's live stream, through the same path a
+/// directory station takes. The mark is [`starred`], the one marker every
+/// marked row wears.
 #[must_use]
-pub fn live(name: &str) -> String {
-    format!("{name} — live")
+pub fn live(name: &str, favourite: bool) -> String {
+    let label = if favourite {
+        starred(name)
+    } else {
+        name.to_owned()
+    };
+    format!("{label} — live")
 }
 
 /// The dim note after a row's name: the parts that are known, joined by
@@ -138,7 +145,12 @@ mod tests {
 
     #[test]
     fn the_live_row_names_the_channel_and_its_listeners() {
-        assert_eq!(live("Lofi"), "Lofi — live");
+        assert_eq!(live("Lofi", false), "Lofi — live");
+        assert_eq!(
+            live("Lofi", true),
+            "★ Lofi — live",
+            "a marked live row wears the one star every marked row wears"
+        );
         assert_eq!(listening(47), "● 47 listening now");
     }
 

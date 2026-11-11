@@ -39,7 +39,7 @@ use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, ListState, Para
 use crate::radio::cliamp::{Channel, Listeners, Song};
 use crate::radio::client::{Country, Order, State, Station, Tag};
 use crate::radio::directory::{is_playable_codec, is_playable_station, refusal, refusal_for};
-use crate::radio::store::{Favorite, Pinned, RadioStore, station_key};
+use crate::radio::store::{Favorite, Pinned, RadioStore, Toggled, station_key};
 
 use super::plural;
 use super::rowtext::{listeners, listening, live, note, starred, station_label, tail};
@@ -121,6 +121,14 @@ pub enum RadioOutcome {
         /// its metadata is what the entry keeps so the song stays nameable
         /// from the file alone.
         song: Song,
+    },
+    /// The line a cliamp `f` leaves for the status bar (the author's
+    /// flow): the mark itself already lives in the view's store and saves
+    /// with the rest; the line only confirms it — what was marked, that it
+    /// came off, or why a channel without a live stream cannot be marked.
+    Status {
+        /// The line, ready to stand on the shell's status bar.
+        line: String,
     },
     /// Not a radio key: the rest of the keymap may have it.
     Pass,
@@ -1270,17 +1278,34 @@ impl RadioView {
             .is_some_and(|row| matches!(row.kind, RowKind::AskCountry { .. }))
     }
 
+    /// The status line a cliamp `f` asks the shell to stand (the author's
+    /// flow): the toggle already happened in the view's store, so the line
+    /// only confirms it — the starred name when the mark went on, the way
+    /// the marked row itself reads, and the bare name when it came off.
+    fn cliamp_mark_line(name: &str, toggled: Toggled) -> String {
+        match toggled {
+            Toggled::On => format!("velo: ★ {name}"),
+            Toggled::Off => format!("velo: {name} — unmarked"),
+            // `toggle_favorite` never answers `Already` for a favourite
+            // (only adding, which a favourite has no path to), so this arm
+            // exists for the match's sake alone.
+            Toggled::Already => format!("velo: {name}"),
+        }
+    }
+
     /// `f` on the selected row: a station toggles its favourite, a place
-    /// toggles its pin, the cliamp live row marks the channel's stream —
-    /// it plays through the station path, so its mark is a station's — a
-    /// cliamp song is handed to the shell ([`RadioOutcome::MarkSong`]: a
-    /// song is a track, and its mark lives in `library.toml`, the shell's
-    /// file), and a browse row, a channel row, a tag or a header row does
-    /// nothing. The channel row is a place, not a play: the channel is
-    /// marked through its live row, and a channel without a stream is
-    /// marked through its songs, so the row itself never marks. Both
-    /// store toggles decide on the station key, never on the URL as
-    /// written. Every change marks the store for saving (T6b).
+    /// toggles its pin, a cliamp channel or its live row marks the
+    /// channel's stream — it plays through the station path, so its mark
+    /// is a station's, the same one from either row (the author's flow),
+    /// and the favourites block cannot disagree with either. Either mark
+    /// answers [`RadioOutcome::Status`], a line the shell stands; a
+    /// channel the service gave no stream for has nothing to mark, writes
+    /// nothing and says so on that same line. A cliamp song is handed to
+    /// the shell ([`RadioOutcome::MarkSong`]: a song is a track, and its
+    /// mark lives in `library.toml`, the shell's file), and a browse row,
+    /// a tag or a header row does nothing. Every store toggle decides on
+    /// the station key, never on the URL as written, and every change
+    /// marks the store for saving (T6b).
     pub fn toggle_mark(&mut self) -> RadioOutcome {
         let Some(row) = self.selection() else {
             return RadioOutcome::Handled;
@@ -1311,7 +1336,10 @@ impl RadioView {
             RowKind::CliampLive { channel } => {
                 // The live row is the channel itself (issue #68): its own
                 // stream is the identity, marked exactly the way a
-                // directory station is, into the same `radio.toml`.
+                // directory station is, into the same `radio.toml` — the
+                // very mark a channel row makes, so the two rows can never
+                // disagree.
+                let name = channel.name.clone();
                 let toggled = self.store.toggle_favorite(Favorite {
                     name: channel.name,
                     url: channel.stream,
@@ -1319,6 +1347,33 @@ impl RadioView {
                     codec: String::new(),
                 });
                 self.dirty |= toggled.needs_save();
+                return RadioOutcome::Status {
+                    line: Self::cliamp_mark_line(&name, toggled),
+                };
+            }
+            RowKind::CliampChannel { channel } => {
+                // The channel row marks the live stream the channel plays
+                // (the author's flow): the same station key the live row
+                // marks, so `f` from either row agrees with the other and
+                // with the favourites block. A channel the service gave no
+                // stream for has nothing to mark: no store write, one
+                // honest line instead.
+                if channel.stream.is_empty() {
+                    return RadioOutcome::Status {
+                        line: format!("velo: {} has no live stream to mark", channel.name),
+                    };
+                }
+                let name = channel.name.clone();
+                let toggled = self.store.toggle_favorite(Favorite {
+                    name: channel.name,
+                    url: channel.stream,
+                    countrycode: String::new(),
+                    codec: String::new(),
+                });
+                self.dirty |= toggled.needs_save();
+                return RadioOutcome::Status {
+                    line: Self::cliamp_mark_line(&name, toggled),
+                };
             }
             RowKind::CliampSong { song } => {
                 // A cliamp song is a track (the author's storage split):
@@ -1344,7 +1399,6 @@ impl RadioView {
             | RowKind::BrowseCountries
             | RowKind::BrowseTags
             | RowKind::BrowseNoCountry
-            | RowKind::CliampChannel { .. }
             | RowKind::Tag { .. }
             | RowKind::AskCountry { .. }
             | RowKind::Rule
@@ -1450,8 +1504,10 @@ impl RadioView {
     }
 
     /// The rows of one cliamp channel's place (issue #68): the live row
-    /// first — the channel's own stream, labelled `Name — live`, with the
-    /// `●` listener count as its fact when `/statistics` answered (S4:
+    /// first — the channel's own stream, labelled `Name — live`, or
+    /// `★ Name — live` when the stream stands in the store (the author's
+    /// flow: the mark a channel row made is visible here at once) — with
+    /// the `●` listener count as its fact when `/statistics` answered (S4:
     /// a failed answer leaves the count out, never the row) — then the
     /// songs, which render only in the channel that asked for them, the
     /// way a place's stations do (S9, issue #48). A channel the service
@@ -1467,7 +1523,7 @@ impl RadioView {
                 .find(|row| row.id == channel.id)
                 .map(|row| row.active);
             rows.push(Row {
-                label: live(&channel.name),
+                label: live(&channel.name, self.store.is_favorite(&channel.stream)),
                 fact: listeners.map_or_else(String::new, listening),
                 kind: RowKind::CliampLive {
                     channel: channel.clone(),

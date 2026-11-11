@@ -4109,6 +4109,14 @@ impl<'lib> App<'lib> {
                 self.status = format!("velo: added {}", plural(1, "track", "tracks"));
                 Some(Action::None)
             }
+            radio::RadioOutcome::Status { line } => {
+                // The line a cliamp `f` asked for (the author's flow): the
+                // mark is already in the view's store, the shell only
+                // stands its confirmation. `radio_poll` has run, so no
+                // wiring message writes over it before it stands.
+                self.status = line;
+                Some(Action::None)
+            }
             radio::RadioOutcome::MarkSong { song } => {
                 // A cliamp song is a track (the author's storage split):
                 // `f` marks it in the saved store, `library.toml`, exactly

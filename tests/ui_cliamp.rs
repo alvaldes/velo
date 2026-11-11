@@ -1904,24 +1904,238 @@ fn a_marked_cliamp_song_still_says_radio_on_the_sources_screen() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A channel's row is a place, not a play: the channel is marked through its
-/// live row (its stream) and its songs one by one, so `f` on a channel row
-/// does nothing — no store change, no save ask.
+/// `f` on a channel row marks the live stream the channel plays — the
+/// author asked for exactly this, from the channel list and from the live
+/// row alike: "si se guarda en radio.toml pero no se ve en la TUI, ademas
+/// tanto desde la lista de canales como desde dentro donde dice live di se
+/// presiona f debe de poder agregarlo a fav a ese canal de cliamp." The
+/// store holds the channel's stream under the one station key, the mark
+/// asks for its save, and the top's favourites block has it without a
+/// restart.
 #[test]
-fn f_on_a_channel_row_marks_nothing() {
+fn f_on_a_channel_row_marks_its_live_stream() {
     let mut view = view();
     view.open_place(Place::Cliamp);
-    let labels = view.labels();
+    assert_eq!(
+        view.selection().map(|row| row.label),
+        Some(String::from("LoFi Beats")),
+        "the cursor opens the section on the first channel"
+    );
+
+    press(&mut view, KeyCode::Char('f'));
+    assert!(
+        view.store()
+            .is_favorite("https://radio.cliamp.stream/lofi/stream"),
+        "the channel's live stream is marked in the station store"
+    );
+    assert!(
+        view.store()
+            .favorite
+            .iter()
+            .any(|favorite| favorite.name == "LoFi Beats"),
+        "the entry keeps the channel's own name"
+    );
+    assert!(
+        view.take_dirty(),
+        "the mark asks for a save, the way every station toggle does"
+    );
+
+    // The live row inside the channel shows the mark without a restart, and
+    // so does the top's favourites block.
+    view.set_cliamp_songs(channel_place(), songs());
+    view.open_place(channel_place());
+    assert_eq!(
+        view.visible_rows()[0].label,
+        "★ LoFi Beats — live",
+        "the live row carries the star the store just put on"
+    );
+    view.open_place(Place::Top);
+    assert!(
+        screen(&view).contains("★ LoFi Beats"),
+        "the favourites block shows the channel, got:\n{}",
+        screen(&view)
+    );
+}
+
+/// Either row's `f` says what happened on the status line — the line the
+/// shell stands. A silent `Handled` is what the author saw and read as
+/// `no me deja`; a mark that lands is never mute again.
+#[test]
+fn the_mark_says_so_on_the_status_line_from_either_row() {
+    let mut view = view();
+    view.open_place(Place::Cliamp);
 
     assert_eq!(
         press(&mut view, KeyCode::Char('f')),
-        RadioOutcome::Handled,
-        "`f` stays a handled key, it only refuses this row"
+        RadioOutcome::Status {
+            line: String::from("velo: ★ LoFi Beats"),
+        },
+        "the channel row's mark is confirmed by name"
     );
-    assert_eq!(view.labels(), labels, "the list is untouched");
+    assert_eq!(
+        press(&mut view, KeyCode::Char('f')),
+        RadioOutcome::Status {
+            line: String::from("velo: LoFi Beats — unmarked"),
+        },
+        "the channel row's unmark is confirmed too"
+    );
+
+    view.open_place(channel_place());
+    assert_eq!(
+        press(&mut view, KeyCode::Char('f')),
+        RadioOutcome::Status {
+            line: String::from("velo: ★ LoFi Beats"),
+        },
+        "the live row's mark is confirmed by the same line"
+    );
+    assert_eq!(
+        press(&mut view, KeyCode::Char('f')),
+        RadioOutcome::Status {
+            line: String::from("velo: LoFi Beats — unmarked"),
+        },
+        "the live row's unmark is confirmed too"
+    );
+}
+
+/// The status line through the shell, the way the author saw its absence:
+/// `f` on the live row, then on the channel row, each stands its line.
+#[test]
+fn the_shell_stands_the_mark_line_for_both_rows() {
+    let canned = Arc::new(
+        Canned::new()
+            .stations(STATIONS_FIXTURE)
+            .statistics(STATISTICS_FIXTURE)
+            .tracks(TRACKS_FIXTURE),
+    );
+    let mut app = App::new(Vec::new());
+    app.set_radio_wire(Box::new(wired(Arc::clone(&canned))));
+    shell(&mut app, KeyCode::Char('R')); // the radio opens over its wiring
+    shell(&mut app, KeyCode::Enter); // into the cliamp section
+    for _ in 0..400 {
+        app.tick();
+        if app_screen(&app).contains("LoFi Beats") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    shell(&mut app, KeyCode::Enter); // into the first channel's place
+
+    shell(&mut app, KeyCode::Char('f')); // the live row
+    assert_eq!(
+        app.status(),
+        "velo: ★ LoFi Beats",
+        "the shell stands the line the live row's mark asked for, got: {:?}",
+        app.status()
+    );
+
+    shell(&mut app, KeyCode::Char('f'));
+    assert_eq!(
+        app.status(),
+        "velo: LoFi Beats — unmarked",
+        "the unmark says so too, got: {:?}",
+        app.status()
+    );
+
+    // Back on the channel list, the cursor rests on the channel that opened
+    // the place: its `f` asks for the very same line.
+    shell(&mut app, KeyCode::Esc);
+    shell(&mut app, KeyCode::Char('f'));
+    assert_eq!(
+        app.status(),
+        "velo: ★ LoFi Beats",
+        "the channel row's mark stands the same line, got: {:?}",
+        app.status()
+    );
+}
+
+/// A channel the service gave no stream for has no live row and nothing to
+/// mark: `f` on its channel row writes nothing and says so — never a junk
+/// station key in `radio.toml`.
+#[test]
+fn f_on_a_streamless_channel_row_writes_nothing_and_says_so() {
+    let mut without = channels();
+    without[0].stream = String::new();
+    let mut view = bare();
+    view.set_cliamp_channels(without);
+    view.open_place(Place::Cliamp);
+
+    assert_eq!(
+        press(&mut view, KeyCode::Char('f')),
+        RadioOutcome::Status {
+            line: String::from("velo: LoFi Beats has no live stream to mark"),
+        },
+        "the refusal is said, not silent"
+    );
     assert!(
         view.store().favorite.is_empty(),
-        "no channel row leaked into the station store"
+        "no junk key leaked into the station store"
     );
-    assert!(!view.take_dirty(), "a refused mark never asks for a save");
+    assert!(!view.take_dirty(), "nothing was written, nothing to save");
+}
+
+/// The star travels with the live row and comes off again: `f` marks the
+/// stream and the row reads `★ Name — live`, the same starred form every
+/// other marked row uses; a second `f` restores the bare `Name — live`.
+/// The unmarked wording itself never changes.
+#[test]
+fn the_live_row_carries_its_star_while_it_is_marked() {
+    let mut view = bare();
+    view.set_cliamp_channels(channels());
+    view.open_place(channel_place());
+    assert_eq!(
+        view.visible_rows()[0].label,
+        "LoFi Beats — live",
+        "an unmarked live row keeps its wording"
+    );
+
+    press(&mut view, KeyCode::Char('f'));
+    assert_eq!(
+        view.visible_rows()[0].label,
+        "★ LoFi Beats — live",
+        "the star is the store's own marker, the one every marked row wears"
+    );
+
+    press(&mut view, KeyCode::Char('f'));
+    assert_eq!(
+        view.visible_rows()[0].label,
+        "LoFi Beats — live",
+        "unmarking drops the star again"
+    );
+}
+
+/// One store, one key: what the channel row wrote the live row shows and
+/// can take off, and what the live row takes off the channel row can write
+/// again — the two rows and the favourites block never disagree.
+#[test]
+fn the_two_rows_toggle_one_and_the_same_mark() {
+    let mut view = view();
+    view.open_place(Place::Cliamp);
+    press(&mut view, KeyCode::Char('f')); // the channel row marks
+
+    view.open_place(channel_place());
+    assert_eq!(
+        view.visible_rows()[0].label,
+        "★ LoFi Beats — live",
+        "the live row shows what the channel row wrote"
+    );
+    press(&mut view, KeyCode::Char('f')); // the live row unmarks
+    assert!(
+        !view
+            .store()
+            .is_favorite("https://radio.cliamp.stream/lofi/stream"),
+        "unmarking from the live row cleared the channel row's mark"
+    );
+    assert_eq!(
+        view.visible_rows()[0].label,
+        "LoFi Beats — live",
+        "the live row drops the star with the store"
+    );
+
+    view.open_place(Place::Cliamp);
+    press(&mut view, KeyCode::Char('f')); // the channel row marks again
+    assert!(
+        view.store()
+            .is_favorite("https://radio.cliamp.stream/lofi/stream"),
+        "marking from the channel row restores the one mark"
+    );
 }
