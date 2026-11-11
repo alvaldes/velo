@@ -243,6 +243,13 @@ fn a_failed_fetch_spares_the_stream_that_exists() {
     let (line, keeps) = App::fetch_failure_for_tests(None, "the fetch failed");
     assert!(!keeps, "no stream at all is the plain stop");
     assert_eq!(line, "velo: the fetch failed");
+
+    let (line, keeps) = App::fetch_failure_for_tests(Some(PlayState::Stopped), "the fetch failed");
+    assert!(
+        !keeps,
+        "a stopped stream is the plain stop, never a stream that goes on"
+    );
+    assert_eq!(line, "velo: the fetch failed");
 }
 
 /// The waiting line of a handover whose new stream has not sounded yet:
@@ -284,6 +291,31 @@ fn a_pause_at_the_open_stops_the_old_stream_instead_of_fading() {
     assert!(
         !App::handover_fades_under_for_tests(PlayState::Paused),
         "a paused stream is stopped outright — its fade would never advance"
+    );
+}
+
+/// A pause cancels only a handover whose fade is not armed yet (issue #65,
+/// the author's ask): an unarmed one waits for a stream a pause would
+/// never let sound, so the old player would sit in the slot forever;
+/// an armed one is already falling and a pause must not truncate it —
+/// [`App::poll_crossfade`] is what stops that old player, fade and all.
+#[test]
+fn a_pause_cancels_only_a_handover_whose_fade_is_not_armed() {
+    assert!(
+        App::pause_cancels_handover_for_tests(PlayState::Playing, false),
+        "an unarmed handover would never be armed by a paused stream"
+    );
+    assert!(
+        !App::pause_cancels_handover_for_tests(PlayState::Playing, true),
+        "an armed fade keeps its course; the tick stops the old player"
+    );
+    assert!(
+        !App::pause_cancels_handover_for_tests(PlayState::Paused, false),
+        "a pause over a paused stream cancels nothing"
+    );
+    assert!(
+        !App::pause_cancels_handover_for_tests(PlayState::Stopped, false),
+        "there is no stream to cancel"
     );
 }
 

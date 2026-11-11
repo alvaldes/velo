@@ -8556,6 +8556,28 @@ impl<'lib> App<'lib> {
         Self::handover_fades_under(state)
     }
 
+    /// Whether a pause cancels the handover it finds (issue #65, the
+    /// author's ask): only one whose fade is not armed yet. A paused stream
+    /// never sounds, so no tick would arm the fade-out of an unarmed wait and
+    /// the old player would sit in the slot forever, sounding while nothing
+    /// plays; an armed one keeps its course — the fade was armed while the
+    /// new stream still sounded, it falls on its own, and
+    /// [`Self::poll_crossfade`] stops the old player when it has fully
+    /// fallen. A pause over anything but a sounding stream cancels nothing.
+    fn pause_cancels_handover(state: PlayState, armed: bool) -> bool {
+        state == PlayState::Playing && !armed
+    }
+
+    /// Drives [`Self::pause_cancels_handover`] for the tests: the guard sits
+    /// behind the `crossfading` slot, which holds a `Player` no test can
+    /// build, so the decision itself is reached through this hook. Hidden from
+    /// the docs.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn pause_cancels_handover_for_tests(state: PlayState, armed: bool) -> bool {
+        Self::pause_cancels_handover(state, armed)
+    }
+
     /// Drives the carried handover answer for the tests (issue #65): the
     /// decision is made once, at the start, and travels inside
     /// [`PendingStart`] — this reads it back from the pending slot, which
@@ -8727,6 +8749,11 @@ impl<'lib> App<'lib> {
         // The handover answer is not remade here (issue #65): the start
         // decided it before it waited, and a fetch is part of that same
         // start — the stream it kept sounding is the one to hand over.
+        // Whether that handover fades is asked again, though: a pause taken
+        // during the wait leaves a paused stream to stop, not one to fade
+        // (L35), and only a fade that stands clears the fetching line it
+        // replaced — a paused open is still waiting for sound, and says so.
+        let fading = handover && Self::handover_fades_under(self.state);
         // The player reads the queue it is given, so the interface keeps the
         // handle and edits it in place (T18).
         let queue = Arc::new(Mutex::new(paths.clone()));
@@ -8764,7 +8791,7 @@ impl<'lib> App<'lib> {
                     // holds its fade where it was (L35) — so the wait's old
                     // player stops here instead of never finishing a fade
                     // no callback advances.
-                    if Self::handover_fades_under(self.state) {
+                    if fading {
                         player.begin_crossfade_in();
                         self.crossfading = Some(Crossfading {
                             player: old,
@@ -8785,15 +8812,16 @@ impl<'lib> App<'lib> {
                 // A fetching line outlives a plain start (issue #60): the
                 // wait it names is only beginning, and `fetch_status` clears
                 // it when the track sounds. Every other message has had its
-                // moment. Under a handover the fetching line has done its
-                // job instead (issue #65): `fetch_status` keeps it exactly
-                // while the new stream has not sounded — the same window the
-                // handover waits through — so preserved there it would
-                // outtalk [`Self::note_handover_waiting`] forever, and it
-                // gives way here so the waiting line can speak on the next
-                // tick. (This clears under a `Player`, so no machine test
-                // reaches it.)
-                if handover || !self.status.starts_with("⟳ fetching ") {
+                // moment. Under a handover that fades, the fetching line has
+                // done its job instead (issue #65): `fetch_status` keeps it
+                // exactly while the new stream has not sounded — the same
+                // window the handover waits through — so preserved there it
+                // would outtalk [`Self::note_handover_waiting`] forever, and
+                // it gives way here so the waiting line can speak on the next
+                // tick. A handover under a pause keeps the line instead: it is
+                // still waiting for sound. (This clears under a `Player`, so
+                // no machine test reaches it.)
+                if fading || !self.status.starts_with("⟳ fetching ") {
                     self.status.clear();
                 }
             }
@@ -9012,7 +9040,9 @@ impl<'lib> App<'lib> {
         self.pending_resolve = None;
         // The handover answer is not remade here either (issue #65): the
         // rebuild decided it before it waited, and the stream it kept
-        // sounding is the one to hand over.
+        // sounding is the one to hand over. Whether it fades is asked again,
+        // for the same pause L35 stops instead of fades.
+        let fading = handover && Self::handover_fades_under(self.state);
         let queue = Arc::new(Mutex::new(self.queue.clone()));
         self.shared = Some(Arc::clone(&queue));
         // A skip or a seek reaches its entry at selection time too (T12c):
@@ -9049,7 +9079,7 @@ impl<'lib> App<'lib> {
                     // fully fallen ([`Self::poll_crossfade`]) — except under
                     // a pause, which nothing advances, so the wait's old
                     // player stops here (L35).
-                    if Self::handover_fades_under(self.state) {
+                    if fading {
                         player.begin_crossfade_in();
                         self.crossfading = Some(Crossfading {
                             player: old,
@@ -9070,9 +9100,10 @@ impl<'lib> App<'lib> {
                 // start does: `fetch_status` keeps it exactly while the new
                 // stream has not sounded, which is the window the handover
                 // waits through, so the waiting line must speak on the next
-                // tick. (This clears under a `Player`, so no machine test
-                // reaches it.)
-                if handover || !self.status.starts_with("⟳ fetching ") {
+                // tick. A handover under a pause keeps the line instead: it is
+                // still waiting for sound. (This clears under a `Player`, so
+                // no machine test reaches it.)
+                if fading || !self.status.starts_with("⟳ fetching ") {
                     self.status.clear();
                 }
             }
@@ -9101,12 +9132,12 @@ impl<'lib> App<'lib> {
         // handover already mid-fade keeps its course: the fade was armed
         // while the new stream still sounded, it falls on its own, and
         // [`Self::poll_crossfade`] stops the old player when it has fully
-        // fallen. A no-op when no handover — or no unarmed one — is held.
-        if self.state == PlayState::Playing
-            && self
-                .crossfading
-                .as_ref()
-                .is_some_and(|handover| !handover.armed)
+        // fallen ([`Self::pause_cancels_handover`]). A no-op when no
+        // handover — or no unarmed one — is held.
+        if self
+            .crossfading
+            .as_ref()
+            .is_some_and(|handover| Self::pause_cancels_handover(self.state, handover.armed))
         {
             self.drop_crossfade();
         }
