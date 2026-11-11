@@ -1322,7 +1322,7 @@ const SCREEN_WITHOUT_COVER_ART: &str = concat!(
     "│                                                                              │\n",
     "│                                                                              │\n",
     "│                                                                              │\n",
-    "│ j/k move  enter play  space pause  ←/→ seek  / search  ? help  q quit        │\n",
+    "│ j/k move  enter play  / search  a add  tab queue  ? help  q quit             │\n",
     "╰──────────────────────────────────────────────────────────────────────────────╯",
 );
 
@@ -1616,6 +1616,67 @@ fn the_help_names_the_device_the_track_card_and_the_suspend_keys() {
         "suspend to the shell; fg resumes",
     ] {
         assert!(screen.contains(row), "{row:?} in:\n{screen}");
+    }
+}
+
+// ---- the footer's hints follow the screen ----------------------------------
+
+/// The footer's hint row on an 80×24 frame of `app`.
+fn hints_of(app: &App) -> String {
+    screen_at(app, 80, 24)
+        .lines()
+        .find(|line| line.contains("q quit"))
+        .map(str::to_owned)
+        .expect("the key hints")
+}
+
+#[test]
+fn the_hints_over_a_track_list_name_the_queue_keys_and_fit_80_columns() {
+    let app = App::new(tracks(&["one.flac"]));
+    let hints = hints_of(&app);
+    for hint in [
+        "j/k move",
+        "enter play",
+        "/ search",
+        "a add",
+        "tab queue",
+        "? help",
+    ] {
+        assert!(hints.contains(hint), "no {hint:?} in: {hints}");
+    }
+    // What the header and the transport already say is not repeated.
+    for gone in ["1-4 views", "n next", "seek"] {
+        assert!(!hints.contains(gone), "{gone:?} is still in: {hints}");
+    }
+}
+
+#[test]
+fn the_hints_in_the_queue_are_the_queues_own() {
+    let mut app = App::new(tracks(&["one.flac"]));
+    press(&mut app, KeyCode::Tab);
+    let hints = hints_of(&app);
+    for hint in ["x remove", "J/K reorder", "tab back"] {
+        assert!(hints.contains(hint), "no {hint:?} in: {hints}");
+    }
+    for gone in ["tab queue", "a add", "/ search"] {
+        assert!(!hints.contains(gone), "{gone:?} is still in: {hints}");
+    }
+}
+
+#[test]
+fn the_hints_say_open_where_enter_opens_and_how_to_go_back() {
+    // The first screen lists sources: `enter` opens one, it plays nothing.
+    let mut app = App::browse(None);
+    let hints = hints_of(&app);
+    assert!(hints.contains("enter open"), "{hints}");
+    assert!(!hints.contains("enter play"), "{hints}");
+
+    // Inside the library, at the artists: still a level to open, and a
+    // level to go back to.
+    press(&mut app, KeyCode::Enter);
+    let hints = hints_of(&app);
+    for hint in ["enter open", "esc back", "a add", "tab queue"] {
+        assert!(hints.contains(hint), "no {hint:?} in: {hints}");
     }
 }
 

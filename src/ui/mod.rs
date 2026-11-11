@@ -6631,6 +6631,107 @@ impl<'lib> App<'lib> {
         format!("{}:{:02}", seconds / 60, seconds % 60)
     }
 
+    /// The footer's key hints for the screen in view: what the keys do
+    /// *here*, not one list for every screen. Each list is the handful of
+    /// keys the screen cannot be driven without — the help card (`?`) has
+    /// the rest — and each fits an 80-column window once `space pause` is
+    /// dropped: it sits third from the end, where [`hint_line`] drops first,
+    /// because the transport row already shows the pause button. What the
+    /// header (the numbered views) and the transport (skip, seek) already
+    /// say is not repeated here.
+    fn footer_hints(&self) -> &'static [(&'static str, &'static str)] {
+        if self.search.is_some() {
+            return &[
+                ("type", "to search"),
+                ("j/k", "move"),
+                ("enter", "play"),
+                ("backspace", "delete"),
+                ("esc", "cancel"),
+            ];
+        }
+        match self.view {
+            // The working list: its own editing keys, and `tab` is the way
+            // back out, not the way in.
+            View::Queue => &[
+                ("j/k", "move"),
+                ("enter", "play"),
+                ("x", "remove"),
+                ("J/K", "reorder"),
+                ("tab", "back"),
+                ("space", "pause"),
+                ("?", "help"),
+                ("q", "quit"),
+            ],
+            // A list of sources: `enter` opens one and plays nothing.
+            View::Sources => &[
+                ("j/k", "move"),
+                ("enter", "open"),
+                ("tab", "queue"),
+                ("space", "pause"),
+                ("?", "help"),
+                ("q", "quit"),
+            ],
+            // The radio's rows are places and stations alike, so `enter`
+            // is named for both.
+            View::Library if self.radio_on_screen() => &[
+                ("j/k", "move"),
+                ("enter", "select"),
+                ("esc", "back"),
+                ("/", "search"),
+                ("f", "fav"),
+                ("tab", "queue"),
+                ("?", "help"),
+                ("q", "quit"),
+            ],
+            View::Library => match self.position {
+                // The command line's files: one flat level, nothing above.
+                Position::Files => &[
+                    ("j/k", "move"),
+                    ("enter", "play"),
+                    ("/", "search"),
+                    ("a", "add"),
+                    ("tab", "queue"),
+                    ("space", "pause"),
+                    ("?", "help"),
+                    ("q", "quit"),
+                ],
+                // A level that lists levels: `enter` goes one deeper.
+                Position::Artists
+                | Position::Albums { .. }
+                | Position::AllAlbums
+                | Position::Genres
+                | Position::Playlists => &[
+                    ("j/k", "move"),
+                    ("enter", "open"),
+                    ("esc", "back"),
+                    ("/", "search"),
+                    ("a", "add"),
+                    ("tab", "queue"),
+                    ("space", "pause"),
+                    ("?", "help"),
+                    ("q", "quit"),
+                ],
+                // A level that lists tracks: `enter` plays from the row.
+                Position::Tracks { .. }
+                | Position::AllTracks
+                | Position::Genre { .. }
+                | Position::Recent
+                | Position::Favourites
+                | Position::Playlist { .. } => &[
+                    ("j/k", "move"),
+                    ("enter", "play"),
+                    ("esc", "back"),
+                    ("/", "search"),
+                    ("a", "add"),
+                    ("tab", "queue"),
+                    ("space", "pause"),
+                    ("?", "help"),
+                    ("q", "quit"),
+                ],
+            },
+        }
+    }
+
     fn draw_footer(&self, frame: &mut Frame, area: Rect) {
         let [status_row, hints_row] = Layout::vertical([
             Constraint::Length(1),
@@ -6657,45 +6758,7 @@ impl<'lib> App<'lib> {
             frame.render_widget(Paragraph::new(status), status_row);
         }
 
-        let browsing = !matches!(self.position, Position::Files);
-        let hints: &[(&str, &str)] = if self.search.is_some() {
-            &[
-                ("type", "to search"),
-                ("j/k", "move"),
-                ("enter", "play"),
-                ("backspace", "delete"),
-                ("esc", "cancel"),
-            ]
-        } else if browsing {
-            &[
-                ("j/k", "move"),
-                ("enter", "play"),
-                ("space", "pause"),
-                ("←/→", "seek"),
-                ("/", "search"),
-                // Dropped before search on a narrow row: the header already
-                // names the views and the help says which key is which.
-                ("1-4", "views"),
-                ("n", "next"),
-                ("tab", "queue"),
-                ("?", "help"),
-                ("q", "quit"),
-            ]
-        } else {
-            &[
-                ("j/k", "move"),
-                ("enter", "play"),
-                ("space", "pause"),
-                ("←/→", "seek"),
-                ("/", "search"),
-                // Dropped first on a narrow row: the transport buttons and
-                // the help already show how to skip and to see the queue.
-                ("n", "next"),
-                ("tab", "queue"),
-                ("?", "help"),
-                ("q", "quit"),
-            ]
-        };
+        let hints = self.footer_hints();
         if self.ui.hints {
             frame.render_widget(
                 Paragraph::new(hint_line(hints, hints_row.width, &self.theme)),
