@@ -162,7 +162,18 @@ once a day by default (`[update] check = "never"` turns it off for good, and
 
 ## Install
 
-**Prebuilt release binary** — download `velo-<tag>-<target>.tar.gz` for your
+**With the install script** — on Linux or macOS:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/alvaldes/velo/main/install.sh | sh
+```
+
+It picks the release binary for the machine, checks it against the `.sha256`
+CI published beside it, and puts `velo` in `~/.local/bin` — no sudo.
+`VELO_INSTALL_DIR` names another directory and `VELO_VERSION` another tag
+(`VELO_VERSION=v0.42.2`). A checksum that does not match installs nothing.
+
+**Prebuilt release binary, by hand** — download `velo-<tag>-<target>.tar.gz` for your
 platform from the repository's
 [Releases](https://github.com/alvaldes/velo/releases) page, unpack it, and put
 the `velo` binary on your `PATH`.
