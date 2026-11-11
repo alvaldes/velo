@@ -43,6 +43,7 @@
 
 use std::ffi::OsStr;
 use std::fs;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -291,6 +292,96 @@ impl Cache {
             dir: self.dir.with_file_name("covers"),
             cap: Some(Self::COVERS_CACHE_CAP),
         }
+    }
+
+    /// Begins an incremental fill of the cached file for `url` (remote-
+    /// streaming T1, D1): where [`Cache::ensure`] stores a whole body at
+    /// once, a streaming source appends its bytes as they arrive. The fill
+    /// lands through a `.part-…` file named the way [`Cache::store`]'s does,
+    /// so the prune rules keep counting it like any other file; finishing
+    /// renames it over [`Cache::path_for`]'s final name exactly as
+    /// [`Cache::store`] does, prune included. Dropping a [`CacheFill`]
+    /// without finishing leaves the `.part` file behind — the half file
+    /// never gets the final name.
+    ///
+    /// # Errors
+    ///
+    /// When the cache directory or the `.part` file cannot be created.
+    pub fn begin_fill(&self, url: &str) -> Result<CacheFill, Error> {
+        fs::create_dir_all(&self.dir).map_err(|error| {
+            Error::Config(format!(
+                "cannot create the cache directory {}: {error}",
+                self.dir.display()
+            ))
+        })?;
+        let part = self
+            .dir
+            .join(format!(".part-{}-{}", std::process::id(), temp_counter()));
+        let file = fs::File::create(&part).map_err(|error| {
+            Error::Config(format!(
+                "cannot write the cached file {}: {error}",
+                part.display()
+            ))
+        })?;
+        Ok(CacheFill {
+            cache: self.clone(),
+            part,
+            final_path: self.path_for(url),
+            file: Some(file),
+        })
+    }
+}
+
+/// One incremental fill of a cached file, the streaming path's counterpart
+/// of [`Cache::store`] (remote-streaming T1, D1): [`CacheFill::append`] as
+/// the bytes arrive, [`CacheFill::finish`] when the whole body has been
+/// delivered. Abandoned — dropped without finishing — it leaves the `.part`
+/// file in place for the prune rules to keep counting.
+#[derive(Debug)]
+pub struct CacheFill {
+    cache: Cache,
+    part: PathBuf,
+    final_path: PathBuf,
+    /// `None` once the handle was closed for the rename, or after an
+    /// unrecoverable write error.
+    file: Option<fs::File>,
+}
+
+impl CacheFill {
+    /// Appends bytes to the `.part` file.
+    ///
+    /// # Errors
+    ///
+    /// When the bytes cannot be written; the fill's owner then stops the
+    /// fill, and the half file never gets the final name.
+    pub fn append(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        let Some(file) = self.file.as_mut() else {
+            return Ok(());
+        };
+        file.write_all(bytes).map_err(|error| {
+            Error::Config(format!(
+                "cannot write the cached file {}: {error}",
+                self.part.display()
+            ))
+        })
+    }
+
+    /// Renames the filled file over its final cache name and prunes, the
+    /// way [`Cache::store`] does after a whole-body store.
+    ///
+    /// # Errors
+    ///
+    /// When the rename fails; the `.part` file stays behind.
+    pub fn finish(mut self) -> Result<(), Error> {
+        drop(self.file.take());
+        fs::rename(&self.part, &self.final_path).map_err(|error| {
+            Error::Config(format!(
+                "cannot write the cached file {}: {error}",
+                self.final_path.display()
+            ))
+        })?;
+        self.cache.prune(&self.final_path);
+        Ok(())
     }
 }
 

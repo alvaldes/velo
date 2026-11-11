@@ -14,6 +14,7 @@ pub mod loudness;
 pub mod mp4;
 pub mod opus;
 pub mod output;
+pub mod remote;
 pub mod replay_gain;
 pub mod resample;
 pub mod spectrum;
