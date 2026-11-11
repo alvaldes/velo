@@ -1,6 +1,14 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.46.1] - 2026-11-11
+
+### Fixes
+- **install:** The installer answers at a shorter address
+
+### Documentation
+- **readme:** A logo, three screenshots and the site's address
+- **site:** A logo, the interface's own screens, cliamp radio and who made it
 ## [0.46.0] - 2026-11-11
 
 ### Features
