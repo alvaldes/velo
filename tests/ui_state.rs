@@ -3,6 +3,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use clap::Parser as _;
 use lofty::config::WriteOptions;
@@ -3979,4 +3980,148 @@ fn the_tick_writes_nothing_while_the_outcome_has_not_arrived() {
         "no outcome, no write"
     );
     let _ = fs::remove_dir_all(config.parent().unwrap());
+}
+
+// ---- the check you ask for: enter on the version row (issue #69) -----------
+
+/// A transport the version-row check asks through: one canned body, with
+/// the URL it was asked recorded — the same seam the automatic check's
+/// worker runs on, so a check asked from the card never touches the
+/// network in a test.
+struct RowCheckTransport {
+    answer: Result<String, velo::radio::client::Error>,
+    asked: std::sync::atomic::AtomicBool,
+}
+
+impl velo::radio::client::Transport for RowCheckTransport {
+    fn get(&self, url: &str) -> Result<String, velo::radio::client::Error> {
+        assert_eq!(
+            url,
+            velo::update::RELEASES_URL,
+            "the check asks the releases endpoint, nothing else"
+        );
+        self.asked.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.answer.clone()
+    }
+}
+
+/// Ticks until `done` says the check's outcome landed — the worker is a
+/// real thread, so the loop gives it its moment without ever waiting
+/// forever.
+fn tick_until(app: &mut App<'_>, done: impl Fn(&App<'_>) -> bool) {
+    for _ in 0..500 {
+        app.tick();
+        if done(app) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("the check's outcome never landed");
+}
+
+/// `enter` on the version row asks for the check now (issue #69): even
+/// with `[update] check = "never"` and a fresh `last_check` — the exact
+/// state that silences the automatic check for a day — the check runs,
+/// and its answer lands the way the automatic one does: one status line,
+/// the row, and the `[update] last_check` the tick refreshes.
+#[test]
+fn enter_on_the_version_row_checks_now_even_when_the_config_says_never() {
+    let dir = config_dir("update-row-checks-now");
+    let config = dir.join("config.toml");
+    let fresh = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        &config,
+        format!(
+            "{}\n[update]\ncheck = \"never\"\nlast_check = {fresh}\n",
+            velo::config::default_config_text()
+        ),
+    )
+    .unwrap();
+    let mut app = app_with_three_tracks();
+    app.set_config_file(Some(config.clone()));
+    let transport = Arc::new(RowCheckTransport {
+        answer: Ok("{\"tag_name\":\"v9.9.9\"}".to_owned()),
+        asked: std::sync::atomic::AtomicBool::new(false),
+    });
+    app.set_update_check_transport(
+        Arc::clone(&transport) as Arc<dyn velo::radio::client::Transport + Send + Sync>
+    );
+
+    open_settings(&mut app);
+    press(&mut app, KeyCode::Char('G'));
+    assert_eq!(app.settings_focused(), "version");
+    press(&mut app, KeyCode::Enter);
+
+    // The worker is a real thread; wait for its request, however long it
+    // takes within reason — never a fixed instant.
+    let mut asked = false;
+    for _ in 0..500 {
+        if transport.asked.load(std::sync::atomic::Ordering::SeqCst) {
+            asked = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        asked,
+        "the check was asked, whatever check = \"never\" and the fresh last_check said"
+    );
+
+    // The answer lands through the same tick the automatic check's does:
+    // the status line, the row, and the refreshed timestamp — written by
+    // the loop side, never by the worker.
+    tick_until(&mut app, |app| app.status().contains("9.9.9"));
+    assert_eq!(app.update_latest(), Some("9.9.9"));
+    assert!(
+        app.version_setting_value().contains("9.9.9 available"),
+        "{}",
+        app.version_setting_value()
+    );
+    let recorded = recorded_last_check(&config).expect("the tick refreshed last_check");
+    assert!(
+        recorded >= fresh,
+        "the manual check refreshed the timestamp: {recorded} < {fresh}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// No key outside the version row's `enter` asks for the check: another
+/// row's `enter` does its own thing, and the keys with the card closed are
+/// the ordinary keys.
+#[test]
+fn no_key_outside_the_version_rows_enter_asks_for_the_check() {
+    let dir = config_dir("update-row-no-outside-key");
+    let config = dir.join("config.toml");
+    let mut app = app_with_default_config(&config);
+    let transport = Arc::new(RowCheckTransport {
+        answer: Ok("{\"tag_name\":\"v9.9.9\"}".to_owned()),
+        asked: std::sync::atomic::AtomicBool::new(false),
+    });
+    app.set_update_check_transport(
+        Arc::clone(&transport) as Arc<dyn velo::radio::client::Transport + Send + Sync>
+    );
+
+    // Another row's `enter` opens the library prompt (issue #69's guard:
+    // the version row is the card's only check key).
+    open_settings(&mut app);
+    press(&mut app, KeyCode::Char('G'));
+    press(&mut app, KeyCode::Char('k'));
+    press(&mut app, KeyCode::Enter);
+    // The card closed itself into the prompt; the ordinary keys outside
+    // ask for nothing.
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Char('j'));
+    app.tick();
+    // A started check's worker asks within moments of its thread going up.
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    assert!(
+        !transport.asked.load(std::sync::atomic::Ordering::SeqCst),
+        "no key outside the version row's enter starts a check"
+    );
+    let _ = fs::remove_dir_all(&dir);
 }

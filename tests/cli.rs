@@ -8,8 +8,7 @@
 use std::process::Command;
 
 use clap::Parser as _;
-use velo::config::Command as HistoryCommand;
-use velo::config::{Cli, HistoryAction};
+use velo::config::{Cli, Command as CliCommand, HistoryAction};
 
 #[test]
 fn the_positional_files_parse_in_order() {
@@ -452,7 +451,7 @@ fn the_history_subcommand_parses_in_its_three_shapes() {
         .unwrap_or_else(|error| panic!("parse failed: {error}"));
     assert_eq!(
         cli.command,
-        Some(HistoryCommand::History {
+        Some(CliCommand::History {
             json: false,
             action: None
         })
@@ -462,7 +461,7 @@ fn the_history_subcommand_parses_in_its_three_shapes() {
         .unwrap_or_else(|error| panic!("parse failed: {error}"));
     assert_eq!(
         cli.command,
-        Some(HistoryCommand::History {
+        Some(CliCommand::History {
             json: true,
             action: None
         })
@@ -472,7 +471,7 @@ fn the_history_subcommand_parses_in_its_three_shapes() {
         .unwrap_or_else(|error| panic!("parse failed: {error}"));
     assert_eq!(
         cli.command,
-        Some(HistoryCommand::History {
+        Some(CliCommand::History {
             json: false,
             action: Some(HistoryAction::Clear)
         })
@@ -590,6 +589,20 @@ fn a_corrupt_history_file_is_reported_not_ignored() {
     );
 
     let _ = std::fs::remove_dir_all(&home);
+}
+
+// ------------------------------------------------------- the update check (issue #69)
+
+#[test]
+fn the_update_subcommand_parses_alone() {
+    let cli = Cli::try_parse_from(["velo", "update"])
+        .unwrap_or_else(|error| panic!("parse failed: {error}"));
+    assert_eq!(cli.command, Some(CliCommand::Update));
+    assert!(cli.files.is_empty(), "update takes no files");
+    assert!(
+        Cli::try_parse_from(["velo", "update", "bogus"]).is_err(),
+        "update takes no arguments of its own"
+    );
 }
 
 // ---------------------------------------------------------- mono (issue #8)

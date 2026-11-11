@@ -653,6 +653,16 @@ failure — no retry storm, no error line. The settings card's `version` row
 (`ctrl+p`, under `about`) always names the running version, and the newer one
 when a check found it. velo never downloads, verifies or replaces itself.
 
+To ask for a check yourself: `velo update` in the shell asks now, whatever
+`check` and `last_check` say, and answers on stdout — the running version,
+the newest release, and one of two verdicts: up to date, or a newer version
+plus how to get it (`brew upgrade velo` for a Homebrew install, the release
+archive otherwise). Exit 0 for either verdict; a request or an answer that
+failed is one line on stderr and exit 1. `enter` on the `version` row of the
+settings card asks the same way in the interface, and its answer lands like
+the automatic one's: the status line, the row, and the refreshed
+`last_check`. Neither route ever downloads or replaces the binary.
+
 ### Subsonic servers (early access)
 
 velo talks to any server that exposes the Subsonic API: Navidrome, Airsonic,

@@ -337,7 +337,43 @@ fn one_shot(
     if let Some(Command::Playlist { action }) = &cli.command {
         return Some(playlist_command(config_file, action));
     }
+    // `velo update` asks for the check now (issue #69): headless like the
+    // other chores, no terminal, no library, no config table consulted.
+    if let Some(Command::Update) = &cli.command {
+        return Some(update_command());
+    }
     None
+}
+
+/// The `velo update` subcommand (issue #69): one check now, whatever
+/// `[update] check` and `last_check` say, printed to stdout — exit 0 for
+/// either verdict, 1 with one line on stderr when the request or the
+/// answer failed. "How to get it" is read from the running executable's
+/// own path, so it names the command that belongs to this install. Nothing
+/// is ever downloaded, verified or replaced (slice 2's work, out of
+/// scope).
+fn update_command() -> ExitCode {
+    let route = std::env::current_exe().ok().as_deref().map_or(
+        velo::update::InstallRoute::ReleaseArchive,
+        velo::update::install_route,
+    );
+    let transport = match velo::radio::client::HttpTransport::new() {
+        Ok(transport) => transport,
+        Err(error) => {
+            eprintln!("velo: cannot ask for the newest release: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match velo::update::manual_check(&transport, route) {
+        Ok(report) => {
+            println!("{report}");
+            ExitCode::SUCCESS
+        }
+        Err(reason) => {
+            eprintln!("velo: {reason}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn user_settings(cli: &Cli, path: Option<&Path>) -> Result<Settings, config::ConfigError> {

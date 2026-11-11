@@ -15,7 +15,14 @@
 //! like a successful one. Nothing is
 //! ever downloaded, verified or executed: replacing velo's own binary is
 //! slice 2's work, out of scope here.
+//!
+//! The check you can ask for (issue #69): `velo update` in the shell, and
+//! `enter` on the settings card's version row in the interface, run the
+//! check now, ignoring `[update] check` and `last_check` — and where the
+//! automatic check is silent, the one you asked for says why it failed, in
+//! one line.
 
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, SystemTime};
@@ -136,15 +143,115 @@ struct Release {
     tag_name: String,
 }
 
+/// How the running velo was installed, as far as the path of its own
+/// executable can say (issue #69): the answer decides what "how to get
+/// it" says when a newer version exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstallRoute {
+    /// Installed by Homebrew: the binary lives under a Homebrew prefix
+    /// (`/opt/homebrew/…` or `/usr/local/Cellar/…`), so brew owns it, and
+    /// `brew upgrade velo` is the way.
+    Homebrew,
+    /// Nothing managed: the release archive from the releases page is the
+    /// way — velo never downloads or replaces itself.
+    ReleaseArchive,
+}
+
+impl InstallRoute {
+    /// The way to get the newer version, as the manual check's report says
+    /// it: the command that belongs to the install, or the honest
+    /// download-and-replace route.
+    #[must_use]
+    pub const fn advice(self) -> &'static str {
+        match self {
+            Self::Homebrew => "brew upgrade velo",
+            Self::ReleaseArchive => {
+                "install the release archive from github.com/alvaldes/velo/releases"
+            }
+        }
+    }
+}
+
+/// Whether the binary at `executable`'s path was installed by Homebrew,
+/// from the path alone — a pure function, so it is decided without
+/// touching the filesystem (issue #69): a Homebrew prefix means Homebrew;
+/// anything else — cargo, a hand copy, a symlink of unknown origin — means
+/// the release archive.
+#[must_use]
+pub fn install_route(executable: &Path) -> InstallRoute {
+    let Some(path) = executable.to_str() else {
+        return InstallRoute::ReleaseArchive;
+    };
+    if path.starts_with("/opt/homebrew/") || path.starts_with("/usr/local/Cellar/") {
+        InstallRoute::Homebrew
+    } else {
+        InstallRoute::ReleaseArchive
+    }
+}
+
+/// What `velo update` prints (issue #69): the running version, the newest
+/// tag, and one of two verdicts. A strictly newer fetched version says so
+/// and how to get it; equal or older — the running build ahead of the
+/// releases page, say — says up to date, naming the newest release anyway,
+/// and never claims an update.
+#[must_use]
+pub fn manual_report(running: &str, fetched: &str, route: InstallRoute) -> String {
+    if newer_version(running, fetched) {
+        format!(
+            "velo {} is available — you have {}\nhow to get it: {}",
+            display_version(fetched),
+            running,
+            route.advice()
+        )
+    } else {
+        format!(
+            "velo {running} — up to date (newest release {})",
+            display_version(fetched)
+        )
+    }
+}
+
+/// Asks `transport` for the newest release tag, with every failure
+/// carried (issue #69): [`fetch_latest_tag`] is silent because the
+/// automatic check is; the check you asked for deserves one line of
+/// reason instead.
+///
+/// # Errors
+///
+/// Fails when the request cannot be completed, the answer is not the JSON
+/// velo reads, or the answer carries no tag.
+pub fn fetch_latest_reported(transport: &dyn Transport) -> Result<String, String> {
+    let body = transport
+        .get(RELEASES_URL)
+        .map_err(|error| format!("cannot ask for the newest release: {error}"))?;
+    let release: Release = miniserde::json::from_str(&body)
+        .map_err(|_| "the release answer is not the JSON velo reads".to_owned())?;
+    if release.tag_name.trim().is_empty() {
+        return Err("the release answer carries no tag".to_owned());
+    }
+    Ok(release.tag_name)
+}
+
+/// The check `velo update` runs (issue #69): ask now, decide, and report —
+/// ignoring `[update] check` and `[update] last_check` by construction,
+/// because it consults neither. Never downloads, verifies or replaces
+/// anything (slice 2's work, out of scope).
+///
+/// # Errors
+///
+/// The one-line reason the manual check prints, for a request or an
+/// answer it cannot read.
+pub fn manual_check(transport: &dyn Transport, route: InstallRoute) -> Result<String, String> {
+    let tag = fetch_latest_reported(transport)?;
+    Ok(manual_report(RUNNING_VERSION, &tag, route))
+}
+
 /// Asks `transport` for the newest release tag (issue #69). `None` on any
 /// failure — a refused request, a status, a body that is not the JSON, a
 /// tag that is not there — because the caller is silent about them all.
 #[must_use]
 pub fn fetch_latest_tag(transport: &dyn Transport) -> Option<String> {
-    let body = transport.get(RELEASES_URL).ok()?;
-    let release: Release = miniserde::json::from_str(&body).ok()?;
-    let tag = release.tag_name;
-    (!tag.trim().is_empty()).then_some(tag)
+    fetch_latest_reported(transport).ok()
 }
 
 /// What a finished check says (issue #69): the tag it fetched, or nothing —
