@@ -1,6 +1,15 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.51.0] - 2026-11-11
+
+### Features
+- **audio:** A remote URL is a seekable range-backed source
+- **audio:** A remote track streams first and falls back when it must
+- **audio:** A dropped range gets exactly one retry
+
+### Documentation
+- Install velo from alvaldes/tap
 ## [0.50.0] - 2026-11-11
 
 ### Features
