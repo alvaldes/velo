@@ -3,8 +3,44 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>velo — a terminal music player, one binary</title>
-<meta name="description" content="velo indexes your music from its own tags and plays it gaplessly in your terminal: one Rust binary, no daemon, no server, no account, no telemetry.">
+<title>velo: a terminal music player for macOS and Linux</title>
+<meta name="description" content="velo is a fast terminal music player (TUI) written in Rust: gapless playback, ReplayGain, internet radio, fuzzy search and cover art, in one binary with no daemon, no account and no telemetry. Free and MIT licensed.">
+<meta name="author" content="Angel L. Valdés">
+<meta name="theme-color" content="#141c28">
+<link rel="canonical" href="https://alvaldes.github.io/velo/">
+
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="velo">
+<meta property="og:title" content="velo: a terminal music player for macOS and Linux">
+<meta property="og:description" content="Gapless playback, ReplayGain, internet radio, fuzzy search and cover art, in one Rust binary. No daemon, no account, no telemetry.">
+<meta property="og:url" content="https://alvaldes.github.io/velo/">
+<meta property="og:image" content="https://alvaldes.github.io/velo/media/og.jpg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="The velo interface playing a track, drawn as glass over a room lit by a fireplace">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="velo: a terminal music player for macOS and Linux">
+<meta name="twitter:description" content="Gapless playback, ReplayGain, internet radio, fuzzy search and cover art, in one Rust binary. No daemon, no account, no telemetry.">
+<meta name="twitter:image" content="https://alvaldes.github.io/velo/media/og.jpg">
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "velo",
+  "description": "A terminal music player in one Rust binary: gapless playback, ReplayGain, internet radio, fuzzy search and cover art, with no daemon, no account and no telemetry.",
+  "url": "https://alvaldes.github.io/velo/",
+  "image": "https://alvaldes.github.io/velo/media/og.jpg",
+  "applicationCategory": "MultimediaApplication",
+  "operatingSystem": "macOS, Linux",
+  "license": "https://opensource.org/licenses/MIT",
+  "downloadUrl": "https://github.com/alvaldes/velo/releases/latest",
+  "codeRepository": "https://github.com/alvaldes/velo",
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+  "author": { "@type": "Person", "name": "Angel L. Valdés", "url": "https://alvaldes.dev" }
+}
+</script>
+
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="icon" href="favicon.ico" sizes="32x32">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -48,20 +84,20 @@
           <fieldset class="picker-field">
             <legend>Install</legend>
             <div class="picker" role="radiogroup" aria-label="How to install">
-              <label><input type="radio" name="platform" value="script" checked><span>macOS and Linux</span></label>
+              <label><input type="radio" name="platform" value="brew" checked><span>Homebrew</span></label>
+              <label><input type="radio" name="platform" value="script"><span>curl</span></label>
               <label><input type="radio" name="platform" value="source"><span>from source</span></label>
             </div>
           </fieldset>
 
           <div class="cmd">
             <span class="prompt" aria-hidden="true">$</span>
-            <code id="line">curl -fsSL https://alvaldes.github.io/velo/install.sh | sh</code>
+            <code id="line">brew install alvaldes/velo/velo</code>
             <button type="button" class="copy" data-copy-from="line">copy</button>
           </div>
 
-          <p class="hint" id="hint">The script picks the binary for this machine,
-          checks it against the .sha256 CI published beside it, and puts velo in
-          ~/.local/bin. No sudo.</p>
+          <p class="hint" id="hint">macOS and Linux. The tap follows each release
+          within the hour, and brew upgrade velo moves you to the next one.</p>
 
           <p class="more-install"><a href="https://github.com/alvaldes/velo#install">All install options in the README</a></p>
         </div>
@@ -378,7 +414,7 @@
       <div class="band-copy">
         <h2 id="start-h">Install it, open it, point it at your music</h2>
         <figure class="term">
-<pre><span class="p">$</span> <span id="start-line">curl -fsSL https://alvaldes.github.io/velo/install.sh | sh</span>
+<pre><span class="p">$</span> <span id="start-line">brew install alvaldes/velo/velo</span>
 <span class="p">$</span> velo</pre>
           <button type="button" class="copy" data-copy-from="start-line">copy the first</button>
         </figure>
@@ -420,7 +456,7 @@
     </span>
   </footer>
 </div>
-<script src="app.js?v=14"></script>
+<script src="app.js?v=23"></script>
 <script type="module" src="fog.js?v=8"></script>
 </body>
 </html>

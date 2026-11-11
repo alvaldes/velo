@@ -6,6 +6,10 @@
 const REPO = 'alvaldes/velo';
 
 const installs = {
+  brew: {
+    line: 'brew install alvaldes/velo/velo',
+    hint: 'macOS and Linux. The tap follows each release within the hour, and brew upgrade velo moves you to the next one.',
+  },
   script: {
     line: 'curl -fsSL https://alvaldes.github.io/velo/install.sh | sh',
     hint: 'The script picks the binary for this machine, checks it against the .sha256 CI published beside it, and puts velo in ~/.local/bin. No sudo.',
@@ -22,7 +26,7 @@ const $ = (id) => document.getElementById(id);
 
 function showInstall() {
   const checked = document.querySelector('input[name="platform"]:checked');
-  const install = installs[checked?.value] ?? installs.script;
+  const install = installs[checked?.value] ?? installs.brew;
   $('line').textContent = install.line;
   $('hint').textContent = install.hint;
 }
