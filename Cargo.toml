@@ -34,6 +34,11 @@ nucleo-matcher = "0.3.1"
 ratatui = "0.28"
 ratatui-image = { version = "2", default-features = false, features = ["crossterm", "rustix"] }
 rtrb = "0.4.1"
+# The `ctrl+z` suspend (issue #66): `kill_process(getpid(), SIGTSTP)` through
+# a safe API — the crate stays free of `unsafe`. The lock already resolves
+# rustix 0.38 through ratatui-image; `process` enables one more feature, no
+# new crate.
+rustix = { version = "0.38", features = ["process"] }
 # Media keys / now-playing (issue #12): registers velo with the OS's
 # media session so play/pause, next and previous reach the same actions
 # the interface keys perform, and publishes what is playing. Best effort

@@ -368,6 +368,22 @@ fn z_shuffles_the_queue_and_z_again_puts_it_back_in_order() {
     );
 }
 
+/// Issue #66: `ctrl+z` hands the process to the shell — it must never
+/// collapse into the plain `z` arm and shuffle instead.
+#[test]
+fn ctrl_z_suspends_instead_of_toggling_shuffle() {
+    let mut app = app_with_three_tracks();
+    assert_eq!(app.on_key(ctrl(KeyCode::Char('z'))), Action::Suspend);
+}
+
+/// The same guard from the other side: a bare `z` keeps its shuffle answer
+/// even though `ctrl+z` now carries its own.
+#[test]
+fn bare_z_still_toggles_shuffle() {
+    let mut app = app_with_three_tracks();
+    assert_eq!(app.on_key(key(KeyCode::Char('z'))), Action::ToggleShuffle);
+}
+
 #[test]
 fn a_track_queued_while_shuffled_follows_the_rest_when_shuffle_ends() {
     let (mut app, mut paths) = five_queued();

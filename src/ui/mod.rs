@@ -125,6 +125,12 @@ pub enum Action {
     /// Refresh the index of the configured library in the background; the
     /// shell runs it and reports back with [`App::index_finished`].
     Reindex,
+    /// Stop the process the way a shell's `ctrl+z` does (issue #66). The
+    /// app keeps every bit of its state: the terminal guard is taken down
+    /// and put back by the shell loop around the event loop, which owns
+    /// the terminal and answers this action by suspending the process and
+    /// repainting on resume.
+    Suspend,
 }
 
 /// The four ways to look at the library, on the keys `1` to `4`.
@@ -3576,6 +3582,14 @@ impl<'lib> App<'lib> {
                     self.select_page(true);
                     return Action::None;
                 }
+                // `ctrl+z` (issue #66) sits in this ctrl block, beside the
+                // other ctrl pairs, so it cannot collapse into the plain
+                // `z` arm: the plain arm below refuses CONTROL for exactly
+                // this reason. It answers `Suspend` from any screen the
+                // overlay-less keymap reaches — an open prompt still owns
+                // its keys first, the way `ctrl+c` does not quit from
+                // inside one either.
+                KeyCode::Char('z') => return Action::Suspend,
                 // `ctrl+r` stays the radio's refresh and `ctrl+v` the
                 // visualizer picker's; the plain keymap's own guards keep
                 // them apart below.
@@ -3774,7 +3788,12 @@ impl<'lib> App<'lib> {
                 Action::None
             }
             // Shuffle (issue #38): cliamp's `z`, where `s` used to sit.
-            KeyCode::Char('z') => Action::ToggleShuffle,
+            // The CONTROL refusal keeps `ctrl+z` (issue #66) out of this
+            // arm: without it, the modifier would be swallowed and the
+            // suspend key would shuffle the queue instead.
+            KeyCode::Char('z') if !event.modifiers.contains(KeyModifiers::CONTROL) => {
+                Action::ToggleShuffle
+            }
             // The mono downmix (issue #8, S2): a session setting, `m` on and
             // off (issue #38 moved it here from `M`). The refusal under
             // bit-perfect lives in `apply`, with the rest of the answers.
@@ -4403,7 +4422,10 @@ impl<'lib> App<'lib> {
     /// the status message instead of leaving the interface.
     pub fn apply(&mut self, action: Action) {
         match action {
-            Action::None => {}
+            // `Suspend` is handed to the shell as well (issue #66): the
+            // terminal is the event loop's, not the app's. Nothing to
+            // change here — the app resumes exactly as it stood.
+            Action::None | Action::Suspend => {}
             Action::SetVolume(percent) => {
                 self.set_volume(percent);
                 // Saved when it leaves what the file says (S2): `+` at the

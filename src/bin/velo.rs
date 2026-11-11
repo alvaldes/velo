@@ -25,6 +25,7 @@ use crossterm::event::{Event, KeyEventKind};
 use crossterm::{execute, terminal};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use rustix::process::{Signal, getpid, kill_process};
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -1337,6 +1338,50 @@ fn report_outcome(outcome: std::io::Result<()>) -> ExitCode {
     }
 }
 
+/// Stops the process the way a shell's `ctrl+z` does, and restores the
+/// terminal on both sides of the stop (issue #66).
+///
+/// The sequence mirrors [`with_terminal`], taken down in the order it was
+/// put up: raw mode off, alternate screen left, cursor shown. Then the stop
+/// itself — `kill_process(getpid(), SIGTSTP)`, the exact signal the shell's
+/// job control sends, through rustix's safe API so the crate keeps its
+/// `unsafe_code = "forbid"`. That call does not return until the process is
+/// resumed (typically `fg`), so the guard goes back up straight after it,
+/// in this same function: no signal handler, no `SIGCONT` handler.
+///
+/// The order decides the failure edges. Raw mode is off *before* the stop,
+/// so a failed stop never leaves it on: the error returns up through
+/// [`event_loop`] and [`with_terminal`] restores the rest again on the way
+/// out. A platform where the call cannot work therefore ends velo with a
+/// reason and an intact terminal — the worst outcome is never a wedged
+/// screen.
+///
+/// A suspended process runs no threads, so the audio stream stops by
+/// itself: there is no pause/resume logic here, and none is wanted — that
+/// is the daemon's problem, and velo has none.
+///
+/// The terminal itself is not testable here: every step below writes ANSI
+/// or asks the OS for job control. What is testable is the keymap guard
+/// that routes `ctrl+z` here, pinned in `tests/ui_state.rs`.
+fn suspend_and_resume(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> std::io::Result<()> {
+    terminal::disable_raw_mode()?;
+    execute!(
+        std::io::stdout(),
+        terminal::LeaveAlternateScreen,
+        crossterm::cursor::Show
+    )?;
+    kill_process(getpid(), Signal::Tstp).map_err(std::io::Error::from)?;
+
+    // Resumed: put the guard back and force a whole frame repaint. The
+    // screen's contents belong to the shell now, so a diff against the
+    // buffer from before the stop would redraw nothing — `clear` marks
+    // every cell dirty instead.
+    terminal::enable_raw_mode()?;
+    execute!(std::io::stdout(), terminal::EnterAlternateScreen)?;
+    terminal.hide_cursor()?;
+    terminal.clear()
+}
+
 fn event_loop(
     app: &mut App<'_>,
     library: Option<&Library>,
@@ -1370,6 +1415,13 @@ fn event_loop(
             && key.kind == KeyEventKind::Press
         {
             let action = app.on_key(key);
+            // `ctrl+z` hands the terminal to the shell before anything is
+            // painted: a frame here would write half a screen behind the
+            // suspend point (issue #66).
+            if action == Action::Suspend {
+                suspend_and_resume(terminal)?;
+                continue;
+            }
             // Paint what the key set before applying it: an action can block
             // on the network — opening a station connects and reads its
             // headers before anything plays — and a wait that shows nothing
