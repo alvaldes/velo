@@ -98,7 +98,7 @@ Every key below is what the code does today.
 | `V` | The visualizer over the whole body: no list, no now-playing block, but the header and the footer stay. `V` again — or `esc` — returns to exactly the view it came from, and the transport keys keep working full screen: `space` still pauses, the arrows still seek, `n`/`.` still skip, the volume and `q` are not swallowed |
 | `enter` (queue view) | Play the queue from the selected entry |
 | `?` (or `ctrl+k`) | Help card: `j`/`k` (or `↓`/`↑`) scroll it and `g`/`G` (or `home`/`end`) jump to its ends; `/` filters it by key or description (`enter` keeps the filter, `esc` clears it, a second `esc` or `?` closes the help). The card keeps its full size however few rows the filter leaves, and every other key waits until it closes — `q` and `space` included |
-| `ctrl+p` | Settings card: everything in `config.toml` — replay gain, repeat, shuffle, the theme, the `[ui]` switches and the visualizer and the library folder (the volume is not a row: it stays on `+`/`-`; the seven `[theme]` colours are the theme's inside and stay editable in the file, not on the card). `j`/`k` (or `↓`/`↑`) move between the settings (the `sound`/`theme`/`screen`/`library` headers are never focused), `g`/`G` jump to the ends, `enter` or `←`/`→` step the focused row (`enter` on the `theme` row opens the theme picker — one row per theme, the cursor's move previews it on the spot, `enter` applies, `esc` restores —, `enter` on the `spectrum` row opens the visualizer picker the same way, and the `folder` row opens the library prompt), `esc` closes — and every other key waits until it does, `q` and `space` included |
+| `ctrl+p` | Settings card: everything in `config.toml` — replay gain, repeat, shuffle, the theme, the `[ui]` switches and the visualizer and the library folder (the volume is not a row: it stays on `+`/`-`; the seven `[theme]` colours are the theme's inside and stay editable in the file; the read-only `version` row names the running version and whether a newer one exists). `j`/`k` (or `↓`/`↑`) move between the settings (the `sound`/`theme`/`screen`/`library`/`about` headers are never focused), `g`/`G` jump to the ends, `enter` or `←`/`→` step the focused row (`enter` on the `theme` row opens the theme picker — one row per theme, the cursor's move previews it on the spot, `enter` applies, `esc` restores —, `enter` on the `spectrum` row opens the visualizer picker the same way, and the `folder` row opens the library prompt), `esc` closes — and every other key waits until it does, `q` and `space` included |
 | `R` | Radio view, straight from either screen: the shortcut for `Sources` → `Radio` |
 | `f` | On a track of the library: mark it as a favourite — press again to unmark; the mark is kept in `library.toml` and the track shows `★` in every library list. In the radio view: favourite the selected station, or pin the selected country or region |
 | `F` (radio view) | Filter the list already loaded, without asking the directory — `enter` keeps the filter, `esc` clears it |
@@ -590,6 +590,20 @@ naming the key; a bad value names the file and the line.
 the name here only when it changed. A name the machine no longer has falls back
 to the default device with one notice in the status line, never a refusal to
 start; a device that refuses to open leaves the current output playing.
+
+### `[update]` — knowing a newer velo exists
+
+| Key | Meaning | Default |
+|:--|:--|:--|
+| `check` | How often velo may ask GitHub whether a newer velo is out: `daily`, `weekly` or `never` — `never` means no request at all | `daily` |
+| `last_check` | When the check last asked, as unix seconds — written by velo itself, never edited by hand; delete the line to make the next launch ask at once | absent |
+
+A due check is one request to `https://api.github.com/repos/alvaldes/velo/releases/latest`
+on its own thread, off the event loop; it says nothing while it runs, says one
+line in the interface when a newer version exists, and is silent on any
+failure — no retry storm, no error line. The settings card's `version` row
+(`ctrl+p`, under `about`) always names the running version, and the newer one
+when a check found it. velo never downloads, verifies or replaces itself.
 
 ### Subsonic servers (early access)
 

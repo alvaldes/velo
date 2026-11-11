@@ -20,6 +20,7 @@ use velo::config::{
 };
 use velo::ui::visualizer::Visualizer;
 use velo::ui::{BrowseBy, View};
+use velo::update::CheckMode;
 
 /// Makes `<temp>/<name>`, verifies the directory can be removed, and returns
 /// the path. Each test gets its own directory, so tests cannot see each other.
@@ -2404,5 +2405,92 @@ fn the_shipped_themes_never_touch_ones_you_edited() {
         "an edited velo.toml is the user's, and it wins"
     );
 
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------- [update]
+
+/// The `[update]` table round-trips every `check` value, and the default is
+/// `daily` (issue #69).
+#[test]
+fn the_update_check_key_round_trips_and_defaults_to_daily() {
+    let dir = temp_dir("update-check");
+    for (text, expected) in [
+        ("[update]\ncheck = \"never\"\n", CheckMode::Never),
+        ("[update]\ncheck = \"daily\"\n", CheckMode::Daily),
+        ("[update]\ncheck = \"weekly\"\n", CheckMode::Weekly),
+    ] {
+        let path = write_config(&dir, text);
+        let config =
+            Config::load_from(&path).unwrap_or_else(|error| panic!("load failed: {error}"));
+        assert_eq!(
+            config.merged(&cli_with_no_flags()).update_check,
+            expected,
+            "{text}"
+        );
+    }
+
+    // No table, or a table without the key: `daily`, the default.
+    let settings = Config::default().merged(&cli_with_no_flags());
+    assert_eq!(settings.update_check, CheckMode::Daily);
+    let path = write_config(&dir, "[update]\n");
+    let config = Config::load_from(&path).unwrap_or_else(|error| panic!("load failed: {error}"));
+    assert_eq!(
+        config.merged(&cli_with_no_flags()).update_check,
+        CheckMode::Daily
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// An unknown `check` value is an error, the way the file's enum-valued
+/// keys are read (the `replay_gain` convention): serde's own
+/// unknown-variant error names the value it refused and every allowed one,
+/// and the load fails with the file and the line (issue #69).
+#[test]
+fn an_unknown_update_check_value_is_an_error_naming_the_value() {
+    let dir = temp_dir("update-check-bad");
+    let path = write_config(&dir, "[update]\ncheck = \"hourly\"\n");
+    let error = Config::load_from(&path).expect_err("an unknown value is refused");
+    let message = error.to_string();
+    assert!(
+        message.contains("hourly"),
+        "the message names the refused value: {message}"
+    );
+    assert!(
+        message.contains("daily") && message.contains("weekly") && message.contains("never"),
+        "the message names every allowed value: {message}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// The check's own timestamp round-trips: `set_value` opens the `[update]`
+/// table when the file has none, and the next load reads the timestamp
+/// back (issue #69). The table's other keys and the rest of the file stay
+/// byte for byte.
+#[test]
+fn the_update_last_check_key_round_trips_through_the_file() {
+    let dir = temp_dir("update-last-check");
+    let path = write_config(&dir, "[update]\ncheck = \"weekly\"\n");
+    set_value(&path, Some("update"), "last_check", "1728000000")
+        .unwrap_or_else(|error| panic!("write failed: {error}"));
+    let config = Config::load_from(&path).unwrap_or_else(|error| panic!("load failed: {error}"));
+    let settings = config.merged(&cli_with_no_flags());
+    assert_eq!(settings.update_last_check, Some(1_728_000_000));
+    assert_eq!(settings.update_check, CheckMode::Weekly, "the key stayed");
+    assert!(
+        fs::read_to_string(&path)
+            .unwrap()
+            .contains("check = \"weekly\""),
+        "the written file still carries check"
+    );
+
+    // No table in the file at all: the write opens the table at the end.
+    let path = write_config(&dir, "bit_perfect = false\n");
+    set_value(&path, Some("update"), "last_check", "0")
+        .unwrap_or_else(|error| panic!("write failed: {error}"));
+    let config = Config::load_from(&path).unwrap_or_else(|error| panic!("load failed: {error}"));
+    let settings = config.merged(&cli_with_no_flags());
+    assert_eq!(settings.update_last_check, Some(0));
+    assert!(!settings.bit_perfect, "the rest of the file stayed");
     let _ = fs::remove_dir_all(&dir);
 }

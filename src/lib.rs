@@ -9,3 +9,4 @@ pub mod radio;
 pub mod saved;
 pub mod subsonic;
 pub mod ui;
+pub mod update;

@@ -2525,13 +2525,16 @@ fn the_settings_cursor_moves_between_settings_only_and_stops_at_the_ends() {
     press(&mut app, KeyCode::Char('G'));
     assert_eq!(
         app.settings_focused(),
-        "folder",
-        "G jumps to the last setting"
+        "version",
+        "G jumps to the last setting: the version row ends the card (issue #69)"
     );
+    press(&mut app, KeyCode::Char('k'));
+    assert_eq!(app.settings_focused(), "folder");
+    press(&mut app, KeyCode::Char('G'));
     press(&mut app, KeyCode::Char('j'));
     assert_eq!(
         app.settings_focused(),
-        "folder",
+        "version",
         "j stops at the last setting"
     );
 
@@ -2601,6 +2604,10 @@ fn enter_on_the_folder_row_opens_the_library_prompt() {
 
     open_settings(&mut app);
     press(&mut app, KeyCode::Char('G'));
+    // The version row (issue #69) ends the card now; the folder row is one
+    // step above it.
+    assert_eq!(app.settings_focused(), "version");
+    press(&mut app, KeyCode::Char('k'));
     assert_eq!(app.settings_focused(), "folder");
     press(&mut app, KeyCode::Enter);
 
@@ -3037,8 +3044,9 @@ fn the_settings_card_has_one_theme_row_and_no_colour_rows() {
             "advisories",
             "view numbers",
             "folder",
+            "version",
         ],
-        "one theme row, no colour rows, folder still last"
+        "one theme row, no colour rows: the version row ends the card (issue #69)"
     );
 }
 
@@ -3790,4 +3798,168 @@ fn an_open_overlay_keeps_its_grip_on_the_new_global_keys() {
     );
     assert_eq!(app.on_key(ctrl(KeyCode::Char('c'))), Action::None);
     assert!(app.help_open(), "ctrl+c never quits through the help");
+}
+
+// ---- the version row and the update check (issue #69, slice 1) -------------
+
+/// The settings card's `version` row names the running version (issue #69),
+/// and the newer one — `v` off — when a check found it.
+#[test]
+fn the_version_row_names_the_running_version_and_a_newer_one() {
+    let mut app = app_with_three_tracks();
+    assert_eq!(
+        app.version_setting_value(),
+        velo::update::RUNNING_VERSION,
+        "the row names the version in force"
+    );
+
+    // A check that found a newer version names it, without the `v`.
+    app.show_update_latest(Some("v9.9.9".to_owned()));
+    assert_eq!(
+        app.version_setting_value(),
+        format!("{} — 9.9.9 available", velo::update::RUNNING_VERSION)
+    );
+    assert_eq!(app.update_latest(), Some("9.9.9"));
+}
+
+/// The tick turns the check's one answer into one status line and the
+/// settings row (issue #69): a newer version is said once, a failed check
+/// is silence, and a tag that is not a newer version says nothing.
+#[test]
+fn the_tick_says_a_newer_version_once_and_a_failure_never() {
+    use velo::update::CheckOutcome;
+
+    // A newer tag: one status line, the row learns it, and the handle is
+    // spent — a later tick says nothing more.
+    let mut app = app_with_three_tracks();
+    let (check, sender) = velo::update::UpdateCheck::loopback();
+    app.set_update_check(check);
+    sender.send(CheckOutcome::Tag("v9.9.9".to_owned())).unwrap();
+    app.tick();
+    assert!(
+        app.status().contains("9.9.9"),
+        "the status line names the newer version: {}",
+        app.status()
+    );
+    assert_eq!(app.update_latest(), Some("9.9.9"));
+    let said = app.status().to_owned();
+    app.tick();
+    assert_eq!(app.status(), said, "the check is one-shot");
+
+    // A failed check is silence: no error line, nothing stored.
+    let mut app = app_with_three_tracks();
+    let (check, sender) = velo::update::UpdateCheck::loopback();
+    app.set_update_check(check);
+    sender.send(CheckOutcome::Failed).unwrap();
+    app.tick();
+    assert_eq!(app.status(), "", "a failed check says nothing");
+    assert_eq!(app.update_latest(), None);
+
+    // An equal or older tag is not news either.
+    let mut app = app_with_three_tracks();
+    let (check, sender) = velo::update::UpdateCheck::loopback();
+    app.set_update_check(check);
+    sender.send(CheckOutcome::Tag("v0.0.1".to_owned())).unwrap();
+    app.tick();
+    assert_eq!(app.status(), "", "a downgrade is never reported");
+    assert_eq!(app.update_latest(), None);
+}
+
+/// The `[update] last_check` a recorded tick leaves in `config`, as unix
+/// seconds, or `None` when the file carries no such line.
+fn recorded_last_check(config: &Path) -> Option<u64> {
+    let line = fs::read_to_string(config)
+        .unwrap()
+        .lines()
+        .find(|line| line.starts_with("last_check"))?
+        .rsplit('=')
+        .next()
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    Some(line)
+}
+
+/// The tick, not the check's worker thread, owns the `[update] last_check`
+/// write (issue #69): the worker does the network only and hands back its
+/// answer, so no two threads ever read-modify-write the config file. When
+/// the tick consumes the outcome, it records the timestamp through the
+/// same [`App`] seam every user setting uses — and a newer version is
+/// still said.
+#[test]
+fn the_tick_records_the_last_check_when_the_outcome_arrives() {
+    let config = config_dir("update-tick-records").join("config.toml");
+    let mut app = app_with_default_config(&config);
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let (check, sender) = velo::update::UpdateCheck::loopback();
+    app.set_update_check(check);
+    sender
+        .send(velo::update::CheckOutcome::Tag("v9.9.9".to_owned()))
+        .unwrap();
+    app.tick();
+    assert!(
+        app.status().contains("9.9.9"),
+        "the status line still says the newer version: {}",
+        app.status()
+    );
+    let recorded = recorded_last_check(&config).expect("the tick recorded last_check");
+    assert!(
+        recorded >= before,
+        "the timestamp is the moment of the recording, not something stale"
+    );
+    // One recording, not one per tick: the handle is spent, so a later
+    // tick has no outcome to act on and rewrites nothing.
+    app.tick();
+    let lines = fs::read_to_string(&config)
+        .unwrap()
+        .lines()
+        .filter(|line| line.starts_with("last_check"))
+        .count();
+    assert_eq!(lines, 1, "the recording is one write, not one per tick");
+    assert_eq!(recorded_last_check(&config), Some(recorded));
+    let _ = fs::remove_dir_all(config.parent().unwrap());
+}
+
+/// A failed check records its timestamp too (issue #69): the anti-storm
+/// rule — a refused request waits a whole interval — belongs to the
+/// recording, and the tick records whatever the answer was, while staying
+/// silent about the failure itself.
+#[test]
+fn the_tick_records_the_last_check_even_when_the_check_failed() {
+    let config = config_dir("update-tick-failed").join("config.toml");
+    let mut app = app_with_default_config(&config);
+    let (check, sender) = velo::update::UpdateCheck::loopback();
+    app.set_update_check(check);
+    sender.send(velo::update::CheckOutcome::Failed).unwrap();
+    app.tick();
+    assert_eq!(app.status(), "", "a failed check says nothing");
+    assert!(
+        recorded_last_check(&config).is_some(),
+        "the failed check still recorded its timestamp"
+    );
+    let _ = fs::remove_dir_all(config.parent().unwrap());
+}
+
+/// Until the outcome arrives, the tick writes nothing (issue #69): the
+/// config file belongs to the loop side only after the answer is in hand,
+/// so an outcome that never lands — the process exits first, say — leaves
+/// the user's file byte for byte.
+#[test]
+fn the_tick_writes_nothing_while_the_outcome_has_not_arrived() {
+    let config = config_dir("update-tick-silent").join("config.toml");
+    let mut app = app_with_default_config(&config);
+    let (check, _sender) = velo::update::UpdateCheck::loopback();
+    app.set_update_check(check);
+    let before = fs::read_to_string(&config).unwrap();
+    app.tick();
+    assert_eq!(
+        fs::read_to_string(&config).unwrap(),
+        before,
+        "no outcome, no write"
+    );
+    let _ = fs::remove_dir_all(config.parent().unwrap());
 }
