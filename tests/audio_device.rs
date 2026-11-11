@@ -88,26 +88,52 @@ fn file_entry() -> Entry {
     Entry::File(std::path::PathBuf::from("/music/track.flac"))
 }
 
+/// A queue entry the network has to deliver first: a cliamp channel's song,
+/// which the resolver fetches before any player can open it (issue #60).
+fn remote_entry() -> Entry {
+    Entry::File(std::path::PathBuf::from("https://radio.example/song.mp3"))
+}
+
 /// The handover decision (issue #65): a station start over a sounding
-/// stream is a crossfade, not a cut — and every other start keeps the plain
-/// switch. The old source keeps producing until the new one can take over;
-/// a file opens in milliseconds and gains nothing from a fade.
+/// stream is a crossfade, not a cut — and every start that opens in
+/// milliseconds keeps the plain switch. The old source keeps producing
+/// until the new one can take over; a file opens in milliseconds and gains
+/// nothing from a fade.
 #[test]
 fn a_station_start_over_a_sounding_stream_is_a_crossfade_not_a_cut() {
     let mut app = App::new(Vec::new());
     app.set_play_state_for_tests(PlayState::Playing);
 
     assert!(
-        app.crossfade_wanted_for_tests(Some(&station())),
+        app.handover_wanted_for_tests(Some(&station()), false),
         "a station start over a sounding stream crossfades"
     );
     assert!(
-        !app.crossfade_wanted_for_tests(Some(&file_entry())),
+        !app.handover_wanted_for_tests(Some(&file_entry()), false),
         "a file start keeps the plain switch — the gapless rule is untouched"
     );
     assert!(
-        !app.crossfade_wanted_for_tests(None),
+        !app.handover_wanted_for_tests(None, false),
         "a start with no first entry is not a handover"
+    );
+}
+
+/// A start that has to fetch is the same wait a station's open is (issue
+/// #65, issue #60): the stream that is sounding keeps playing while the
+/// download runs, and the handover happens when the file is finally on
+/// disk — never a cut followed by seconds of silence.
+#[test]
+fn a_fetch_the_network_owes_keeps_the_sounding_stream() {
+    let mut app = App::new(Vec::new());
+    app.set_play_state_for_tests(PlayState::Playing);
+
+    assert!(
+        app.handover_wanted_for_tests(Some(&remote_entry()), true),
+        "an uncached remote track is a download, and the old stream waits it out"
+    );
+    assert!(
+        !app.handover_wanted_for_tests(Some(&remote_entry()), false),
+        "a remote file already on disk opens in milliseconds: the plain switch"
     );
 }
 
@@ -118,13 +144,17 @@ fn a_stream_that_is_not_sounding_switches_plainly() {
     let mut paused = App::new(Vec::new());
     paused.set_play_state_for_tests(PlayState::Paused);
     assert!(
-        !paused.crossfade_wanted_for_tests(Some(&station())),
+        !paused.handover_wanted_for_tests(Some(&station()), false),
         "a paused stream is not handed over from"
+    );
+    assert!(
+        !paused.handover_wanted_for_tests(Some(&remote_entry()), true),
+        "nor is a paused stream kept through a fetch"
     );
 
     let stopped = App::new(Vec::new());
     assert!(
-        !stopped.crossfade_wanted_for_tests(Some(&station())),
+        !stopped.handover_wanted_for_tests(Some(&station()), false),
         "a fresh start with no stream to hand over from never fades"
     );
 }
@@ -140,8 +170,12 @@ fn bit_perfect_keeps_the_plain_switch_a_fade_never_touches_its_samples() {
     app.set_bit_perfect(true);
 
     assert!(
-        !app.crossfade_wanted_for_tests(Some(&station())),
+        !app.handover_wanted_for_tests(Some(&station()), false),
         "bit-perfect takes the plain path, never the fade"
+    );
+    assert!(
+        !app.handover_wanted_for_tests(Some(&remote_entry()), true),
+        "bit-perfect cannot keep a second stream alive at another rate"
     );
 }
 
