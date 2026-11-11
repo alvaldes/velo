@@ -1,6 +1,10 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [1.0.0] - 2026-11-11
+
+### Fixes
+- **ui:** The cliamp channel list wears its star
 ## [0.51.0] - 2026-11-11
 
 ### Features
