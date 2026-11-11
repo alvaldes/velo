@@ -106,3 +106,29 @@ thread serves the session for the interface's length and ends when the
 channels close. A failed `MediaControls::new` or `attach` says one line
 through the init channel; the thread then simply ends, and the session
 never learns anything more.
+
+**L6** — `ctrl+z` suspends velo the way a shell's job control does
+(issue #66). The keymap gained `Action::Suspend`: a `ctrl+z` arm sits in
+the ctrl block, and the plain `z` shuffle arm now refuses CONTROL, so the
+modifier is never swallowed (issue #38's `ctrl` pairs stay apart from the
+plain arms). The event loop answers `Suspend` by taking the terminal
+guard down in the order `with_terminal` put it up — raw mode off,
+alternate screen left, cursor shown — then `rustix::process::kill_process`
+with `SIGTSTP` through the safe API (`rustix = { version = "0.38",
+features = ["process"] }`, resolved by the lock's existing 0.38.44; the
+crate keeps `unsafe_code = "forbid"`). That call does not return until
+the shell resumes the process, so the guard goes back up straight after
+it in the same function, ending with a full-frame repaint via
+`terminal.clear()`. Raw mode is off before the stop, so a failed stop
+never wedges the terminal: the error propagates and `with_terminal`
+restores again on the way out. A suspended process runs no threads, so
+the audio stream stops by itself; there is no pause/resume logic here —
+that is the daemon's problem, and velo has none. What is deterministic
+is tested (`ctrl_z_suspends_instead_of_toggling_shuffle`,
+`bare_z_still_toggles_shuffle` in `tests/ui_state.rs`); the terminal
+itself is not testable here, and the doc comment on
+`suspend_and_resume` says so plainly. Verified: `cargo fmt`,
+`cargo test --test ui_state --test cli --test ui_render` (143 + 32 + 63
+passing), `cargo clippy --all-targets` — no warnings from this change;
+the remaining ones are pre-existing (clippy 1.99 lints on untouched
+code, souvlaki's `block` future-incompat from L2).

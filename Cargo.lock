@@ -3112,6 +3112,7 @@ dependencies = [
  "rtrb",
  "rubato",
  "rusqlite",
+ "rustix 0.38.44",
  "serde",
  "souvlaki",
  "symphonia",
