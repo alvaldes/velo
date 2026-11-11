@@ -84,6 +84,102 @@ impl<T: RangeTransport + ?Sized> RangeTransport for Arc<T> {
     }
 }
 
+/// How a URL can play — the probe's answer to the start (remote-streaming
+/// T2): the range-backed source the player opens, or the typed verdict that
+/// the server cannot answer ranges and the start falls back to cache-on-play
+/// (S4). Not an error: a server without ranges is a way of playing, not a
+/// failure.
+#[derive(Debug)]
+pub enum RemoteOpen {
+    /// The ranged source: opened, it sounds as its bytes arrive (S1) and —
+    /// with the cache fill attached — leaves the body behind it (D1).
+    Streams(RemoteSource),
+    /// The server does not answer ranges: there is no ranged source, and the
+    /// start plays the entry the way it always has — the whole body into the
+    /// cache, `.part` + rename, then the open.
+    NoRanges,
+}
+
+/// Asks a URL how it plays (remote-streaming T2): one probe request, the
+/// [`RemoteSource`] constructor's own — so the call embeds the probe on
+/// whichever thread its caller chose. The start runs it on its resolve
+/// worker, never on the event loop.
+///
+/// # Errors
+///
+/// Fails with the transport's error when the probe request fails. A server
+/// that cannot answer ranges is [`RemoteOpen::NoRanges`], never an error.
+pub fn open(transport: impl RangeTransport + 'static, url: &str) -> Result<RemoteOpen, Error> {
+    open_shared(Arc::new(transport), url)
+}
+
+fn open_shared(transport: Arc<dyn RangeTransport>, url: &str) -> Result<RemoteOpen, Error> {
+    let answer = transport.range(url, 0, Some(WINDOW_BYTES - 1))?;
+    match answer {
+        RangeAnswer::Partial { bytes, total } => Ok(RemoteOpen::Streams(RemoteSource {
+            transport,
+            url: url.to_owned(),
+            total,
+            pos: 0,
+            window_from: 0,
+            window: bytes,
+            fill: None,
+        })),
+        RangeAnswer::NoRanges => Ok(RemoteOpen::NoRanges),
+    }
+}
+
+/// [`open`] with the cache fill attached to the streamed answer (D1): the
+/// bytes it reads from byte 0 on are appended to the cache's `.part` file for
+/// `url`, renamed into place when the whole body has been delivered — the
+/// same rules [`RemoteSource::with_cache_fill`] follows. A `NoRanges` answer
+/// attaches no fill; a URL the cache already holds fills nothing.
+///
+/// # Errors
+///
+/// As [`open`], plus when the `.part` file cannot be created.
+pub fn open_with_fill(
+    transport: impl RangeTransport + 'static,
+    url: &str,
+    cache: &Cache,
+) -> Result<RemoteOpen, Error> {
+    open_shared_with_fill(Arc::new(transport), url, cache)
+}
+
+fn open_shared_with_fill(
+    transport: Arc<dyn RangeTransport>,
+    url: &str,
+    cache: &Cache,
+) -> Result<RemoteOpen, Error> {
+    let mut source = match open_shared(transport, url)? {
+        // The fallback begins no fill: the whole-body download and the fill
+        // would race onto one URL's `.part` files (S4).
+        RemoteOpen::NoRanges => return Ok(RemoteOpen::NoRanges),
+        RemoteOpen::Streams(source) => source,
+    };
+    if source.total == 0 || cache.path_for(url).is_file() {
+        return Ok(RemoteOpen::Streams(source));
+    }
+    source.fill = Some(FillState {
+        fill: cache.begin_fill(url)?,
+        next: 0,
+    });
+    // The probe's window is the fill's first bytes.
+    let seeded = std::mem::take(&mut source.window);
+    source.apply_fill(&seeded, 0);
+    source.window = seeded;
+    Ok(RemoteOpen::Streams(source))
+}
+
+/// The probe's answer as an error, for the callers that asked for a source
+/// outright: the sentence a `NoRanges` verdict carries there. The fallback
+/// for it is the start's (T3).
+fn no_ranges() -> Error {
+    Error::Unreachable {
+        detail: "the server does not answer range requests".to_owned(),
+    }
+}
+
 /// The cache fill running behind the reads: `next` is the first body byte
 /// the `.part` file does not hold yet, so an append is only sound when it
 /// continues at `next` — otherwise a seek has opened a gap and the fill is
@@ -122,7 +218,10 @@ impl RemoteSource {
     /// with a sentence naming the missing ranges when the server answers
     /// [`RangeAnswer::NoRanges`] — the fallback for that is T3's.
     pub fn new(transport: impl RangeTransport + 'static, url: &str) -> Result<Self, Error> {
-        Self::over(Arc::new(transport), url)
+        match open(Arc::new(transport), url)? {
+            RemoteOpen::Streams(source) => Ok(source),
+            RemoteOpen::NoRanges => Err(no_ranges()),
+        }
     }
 
     /// The same source, filling the cache behind its sequential reads (D1):
@@ -139,37 +238,9 @@ impl RemoteSource {
         url: &str,
         cache: &Cache,
     ) -> Result<Self, Error> {
-        let mut source = Self::over(Arc::new(transport), url)?;
-        if source.total == 0 || cache.path_for(url).is_file() {
-            return Ok(source);
-        }
-        source.fill = Some(FillState {
-            fill: cache.begin_fill(url)?,
-            next: 0,
-        });
-        // The probe's window is the fill's first bytes.
-        let seeded = std::mem::take(&mut source.window);
-        source.apply_fill(&seeded, 0);
-        source.window = seeded;
-        Ok(source)
-    }
-
-    /// The probe-and-seed constructor both public entries share.
-    fn over(transport: Arc<dyn RangeTransport>, url: &str) -> Result<Self, Error> {
-        let answer = transport.range(url, 0, Some(WINDOW_BYTES - 1))?;
-        match answer {
-            RangeAnswer::Partial { bytes, total } => Ok(Self {
-                transport,
-                url: url.to_owned(),
-                total,
-                pos: 0,
-                window_from: 0,
-                window: bytes,
-                fill: None,
-            }),
-            RangeAnswer::NoRanges => Err(Error::Unreachable {
-                detail: "the server does not answer range requests".to_owned(),
-            }),
+        match open_with_fill(Arc::new(transport), url, cache)? {
+            RemoteOpen::Streams(source) => Ok(source),
+            RemoteOpen::NoRanges => Err(no_ranges()),
         }
     }
 

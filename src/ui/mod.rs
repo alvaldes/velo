@@ -38,6 +38,8 @@ use std::sync::mpsc::TryRecvError;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use symphonia::core::io::MediaSource;
+
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Style, Stylize};
@@ -78,6 +80,15 @@ pub const NO_LIBRARY_OR_SERVER_MESSAGE: &str = "velo: no library and no server c
 /// one sentence — at startup, on stderr, and in the status line when `M` is
 /// pressed under bit-perfect. Never applied silently.
 pub const MONO_WITH_BIT_PERFECT_REFUSED: &str = "velo: --mono cannot be combined with bit_perfect";
+
+/// The fetching line's own words (issue #60): what one starts with, so only
+/// a line this machinery wrote is its to clear.
+const FETCHING_LINE_PREFIX: &str = "⟳ fetching ";
+
+/// The streaming line's own words (remote-streaming T2, S1): the way the
+/// track plays — its bytes arriving as they are read, nothing being fetched
+/// whole ahead of them.
+const STREAMING_LINE_PREFIX: &str = "▸ streaming ";
 
 /// What one key press asks the runtime to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -227,14 +238,36 @@ enum PendingStart {
 /// play, skip or seek replaces it, and the displaced worker's answer is
 /// dropped unread — its download, if one started, lands in the cache and is
 /// simply reused later.
+/// What a worker's resolve answers with: the way the entry will play
+/// (remote-streaming T2). Carried, never re-derived: the decision the worker
+/// made at the probe is the one the start runs.
+enum Resolved {
+    /// Cache-on-play (S4): the entry's file is on disk — a local file, a
+    /// cache hit, or the no-range fallback's downloaded body. The start
+    /// re-resolves the first entry (now a cache hit) exactly as today's
+    /// start does; the path itself needs no carrying, the resolver finds it.
+    File,
+    /// The remote URL streams (S1): the source is already open — the probe
+    /// ran on the worker — and rides to the player's constructor here, where
+    /// the device is opened on its format and the producer's first turn
+    /// consumes it.
+    Streams(Box<dyn MediaSource>),
+}
+
+/// The first entry's resolve, running on its worker while the event loop
+/// paints (issue #60's second half). The slot is the whole state: a newer
+/// play, skip or seek replaces it, and the displaced worker's answer is
+/// dropped unread — its download, if one started, lands in the cache and is
+/// simply reused later.
 struct PendingResolve {
     /// The entry being resolved, for the status line: the file's path.
     path: PathBuf,
-    /// The worker's answer, polled on the tick and never waited on: the
-    /// resolved file for a finished fetch, the reason for a failed one.
-    /// The error is carried as its own sentence — the status line's shape —
-    /// so the answer needs nothing else.
-    answer: std::sync::mpsc::Receiver<Result<PathBuf, String>>,
+    /// The worker's answer, polled on the tick and never waited on: the way
+    /// the entry will play — the file for cache-on-play, the open source for
+    /// a stream — or the reason for a failed one. The error is carried as
+    /// its own sentence — the status line's shape — so the answer needs
+    /// nothing else.
+    answer: std::sync::mpsc::Receiver<Result<Resolved, String>>,
     /// What the finished fetch starts.
     start: PendingStart,
 }
@@ -4335,6 +4368,23 @@ impl<'lib> App<'lib> {
         self.radio_refusal_status();
     }
 
+    /// The streaming line: the entry's name and the way it plays. Pure — a
+    /// name in, a sentence out — so the tests can hold the sentence without
+    /// a device; production reaches it when the worker's carried answer
+    /// opens the player.
+    fn streaming_line(name: &str) -> String {
+        format!("{STREAMING_LINE_PREFIX}{name}…")
+    }
+
+    /// Drives [`Self::streaming_line`] for the tests: the sentence is a pure
+    /// function of the name, and this is how the suite reaches it. Hidden
+    /// from the docs.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn streaming_line_for_tests(name: &str) -> String {
+        Self::streaming_line(name)
+    }
+
     /// The fetching fact on the status line (issue #60): while the queue is
     /// fetching a remote entry it has not cached yet, the line names it —
     /// `⟳ fetching <name>…` — and clears when the entry starts producing
@@ -4348,7 +4398,10 @@ impl<'lib> App<'lib> {
         // start itself, when the worker answers, decides what stands
         // afterwards; a tick never clears the line from under the wait.
         if let Some(pending) = self.pending_resolve.as_ref() {
-            let line = format!("⟳ fetching {}…", self.fetching_name(&pending.path));
+            let line = format!(
+                "{FETCHING_LINE_PREFIX}{}…",
+                self.fetching_name(&pending.path)
+            );
             if self.status != line {
                 self.status = line;
             }
@@ -4356,7 +4409,7 @@ impl<'lib> App<'lib> {
         }
         let fetching = self.fetching_entry().map(|entry| {
             let path = entry.as_path().unwrap_or(Path::new(""));
-            format!("⟳ fetching {}…", self.fetching_name(path))
+            format!("{FETCHING_LINE_PREFIX}{}…", self.fetching_name(path))
         });
         if let Some(line) = fetching {
             if self.status != line {
@@ -4364,7 +4417,12 @@ impl<'lib> App<'lib> {
             }
             return;
         }
-        if !self.status.starts_with("⟳ fetching ") {
+        // Only a line this machinery wrote is this machinery's to clear: the
+        // fetching line (cache-on-play) and the streaming line (S1) both wait
+        // for the track's first samples.
+        if !self.status.starts_with(FETCHING_LINE_PREFIX)
+            && !self.status.starts_with(STREAMING_LINE_PREFIX)
+        {
             return;
         }
         // The fetch is over; what may be left is the wait for sound: a
@@ -4449,27 +4507,40 @@ impl<'lib> App<'lib> {
             return;
         }
         let name = self.fetching_name(path);
-        self.status = format!("⟳ fetching {name}…");
+        self.status = format!("{FETCHING_LINE_PREFIX}{name}…");
     }
 
     /// Hands the first entry's resolve to a worker (issue #60's second
     /// half): the resolve is a download the event loop must never wait for,
     /// so it runs here, the status line says `⟳ fetching <name>…` — the
     /// caller's gate (`is_uncached_remote`) has just said so — and `apply`
-    /// goes on, the loop painting while the worker fetches. One slot: the
-    /// caller ahead of this one replaces whatever waited, and its answer is
-    /// dropped unread — a download it started lands in the cache and is
-    /// simply reused. Polled by [`Self::poll_pending_resolve`].
+    /// goes on, the loop painting while the worker fetches. The worker is
+    /// also where the streaming ask runs (remote-streaming T2): it asks the
+    /// resolver how the entry plays, and a ranged server's open source —
+    /// the probe included — rides in the answer; the fallback question
+    /// (`None`) and a failing ask run today's resolve path untouched. One
+    /// slot: the caller ahead of this one replaces whatever waited, and its
+    /// answer is dropped unread — a download it started lands in the cache
+    /// and is simply reused. Polled by [`Self::poll_pending_resolve`].
     fn start_as_pending(&mut self, path: PathBuf, start: PendingStart) {
         let name = self.fetching_name(&path);
-        self.status = format!("⟳ fetching {name}…");
+        self.status = format!("{FETCHING_LINE_PREFIX}{name}…");
         let seam = self.resolver.clone();
         let queued = path.clone();
         let (send, answer) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let resolved = match seam {
-                Some(seam) => seam.resolve(&queued),
-                None => Ok(queued),
+                Some(seam) => match seam.open_streaming(&queued) {
+                    // A ranged server streams (S1): the open source — probe
+                    // included — is the decision, carried to the open.
+                    Ok(Some(source)) => Ok(Resolved::Streams(source)),
+                    // The entry plays the cache-on-play way (S4): the
+                    // whole-body download and the open from its file are
+                    // today's start, unregressed.
+                    Ok(None) => seam.resolve(&queued).map(|_| Resolved::File),
+                    Err(error) => Err(error),
+                },
+                None => Ok(Resolved::File),
             };
             // A dropped receiver — a superseded resolve — answers into
             // nothing and is gone; the download, if it ran, already landed
@@ -4507,17 +4578,41 @@ impl<'lib> App<'lib> {
         };
         let pending = self.pending_resolve.take().expect("checked above");
         match answer {
-            Ok(_) => match pending.start {
+            // The way is streaming (S1): the line says so — the track is not
+            // being fetched, it is sounding its first bytes' way in — and the
+            // carried source rides to the open, never a re-derivation. The
+            // line clears when the track sounds ([`Self::fetch_status`]), the
+            // same window the fetching line waits through.
+            Ok(Resolved::Streams(source)) => {
+                let name = self.fetching_name(&pending.path);
+                self.status = Self::streaming_line(&name);
+                match pending.start {
+                    PendingStart::Stream {
+                        paths,
+                        playback,
+                        handover,
+                    } => self.open_stream(paths, playback, handover, Some(source)),
+                    PendingStart::TrackAt {
+                        track,
+                        offset,
+                        handover,
+                    } => self.open_track_at(track, offset, handover, Some(source)),
+                }
+            }
+            // Cache-on-play (S4): the fetching line already says so, and the
+            // open's own fetch is over — the line outlives it until the
+            // track sounds, exactly as before.
+            Ok(Resolved::File) => match pending.start {
                 PendingStart::Stream {
                     paths,
                     playback,
                     handover,
-                } => self.open_stream(paths, playback, handover),
+                } => self.open_stream(paths, playback, handover, None),
                 PendingStart::TrackAt {
                     track,
                     offset,
                     handover,
-                } => self.open_track_at(track, offset, handover),
+                } => self.open_track_at(track, offset, handover, None),
             },
             Err(reason) => {
                 self.pending_resolve = None;
@@ -8739,7 +8834,7 @@ impl<'lib> App<'lib> {
             );
             return;
         }
-        self.open_stream(paths, playback, handover);
+        self.open_stream(paths, playback, handover, None);
     }
 
     /// The synchronous half of a fresh start: local files and already-cached
@@ -8749,7 +8844,13 @@ impl<'lib> App<'lib> {
     /// is the one the user asked for. Production reaches this through
     /// [`Self::start_stream`] and, once a fetch has landed, through
     /// [`Self::poll_pending_resolve`].
-    fn open_stream(&mut self, paths: Vec<Entry>, playback: Playback, handover: bool) {
+    fn open_stream(
+        &mut self,
+        paths: Vec<Entry>,
+        playback: Playback,
+        handover: bool,
+        first: Option<Box<dyn MediaSource>>,
+    ) {
         // A finished fetch replays here — the wait outlived the player it
         // started from — but a start of any kind retires the slot all the
         // same, so a stale wait can never start behind it.
@@ -8769,7 +8870,7 @@ impl<'lib> App<'lib> {
         // (T12c): an uncached remote one is a download the user waits for,
         // so the status line says so before the wait begins (issue #60).
         self.note_fetching(paths.first());
-        match Player::play_gapless_at_full(
+        match Player::play_gapless_at_preopened(
             Arc::clone(&queue),
             0,
             Duration::ZERO,
@@ -8784,6 +8885,10 @@ impl<'lib> App<'lib> {
             // The interface owns the screen: a device error says itself on
             // the status line, never on stderr mid-frame.
             Screen::Interface,
+            // The worker's carried answer, when the entry streams (T2): the
+            // source is the first entry's own and opens here, never a new
+            // probe. `None` is the cache-on-play open.
+            first,
         ) {
             Ok(player) => {
                 player.set_volume(self.volume);
@@ -8819,17 +8924,20 @@ impl<'lib> App<'lib> {
                 self.state = PlayState::Playing;
                 // A fetching line outlives a plain start (issue #60): the
                 // wait it names is only beginning, and `fetch_status` clears
-                // it when the track sounds. Every other message has had its
-                // moment. Under a handover that fades, the fetching line has
-                // done its job instead (issue #65): `fetch_status` keeps it
-                // exactly while the new stream has not sounded — the same
-                // window the handover waits through — so preserved there it
-                // would outtalk [`Self::note_handover_waiting`] forever, and
-                // it gives way here so the waiting line can speak on the next
+                // it when the track sounds. The streaming line (T2) waits
+                // the same way. Every other message has had its moment. Under
+                // a handover that fades, both lines have done their job
+                // instead (issue #65): `fetch_status` keeps either exactly
+                // while the new stream has not sounded — the same window the
+                // handover waits through — so preserved there either would
+                // outtalk [`Self::note_handover_waiting`] forever, and it
+                // gives way here so the waiting line can speak on the next
                 // tick. A handover under a pause keeps the line instead: it is
                 // still waiting for sound. (This clears under a `Player`, so
                 // no machine test reaches it.)
-                if fading || !self.status.starts_with("⟳ fetching ") {
+                let waiting = self.status.starts_with(FETCHING_LINE_PREFIX)
+                    || self.status.starts_with(STREAMING_LINE_PREFIX);
+                if fading || !waiting {
                     self.status.clear();
                 }
             }
@@ -9032,7 +9140,7 @@ impl<'lib> App<'lib> {
             );
             return;
         }
-        self.open_track_at(track, offset, handover);
+        self.open_track_at(track, offset, handover, None);
     }
 
     /// The synchronous half of a rebuild: local files and already-cached
@@ -9041,7 +9149,13 @@ impl<'lib> App<'lib> {
     /// waiting in the slot. Production reaches this through
     /// [`Self::start_track_at`] and, once a fetch has landed, through
     /// [`Self::poll_pending_resolve`].
-    fn open_track_at(&mut self, track: usize, offset: Duration, handover: bool) {
+    fn open_track_at(
+        &mut self,
+        track: usize,
+        offset: Duration,
+        handover: bool,
+        first: Option<Box<dyn MediaSource>>,
+    ) {
         // A finished fetch replays here — the wait outlived the player it
         // started from — but a rebuild of any kind retires the slot all the
         // same, so a stale wait can never start behind it.
@@ -9058,7 +9172,7 @@ impl<'lib> App<'lib> {
         // the wait begins (issue #60).
         let fetching = self.queue.get(track).cloned();
         self.note_fetching(fetching.as_ref());
-        match Player::play_gapless_at_full(
+        match Player::play_gapless_at_preopened(
             queue,
             track,
             offset,
@@ -9074,6 +9188,10 @@ impl<'lib> App<'lib> {
             // The interface owns the screen: a device error says itself on
             // the status line, never on stderr mid-frame.
             Screen::Interface,
+            // The worker's carried answer, when the entry streams (T2): the
+            // seek's offset is applied to the source the worker probed, so a
+            // seek into a streaming track is a range at the seek point (S3).
+            first,
         ) {
             Ok(player) => {
                 // A rebuilt player starts at its own default level; without this
@@ -9103,15 +9221,18 @@ impl<'lib> App<'lib> {
                 self.player = Some(player);
                 self.state = PlayState::Playing;
                 // A fetching line outlives a plain rebuild (issue #60), the
-                // same rule a plain fresh start follows. A handover's rebuild
-                // clears the line instead (issue #65), the same way a fresh
-                // start does: `fetch_status` keeps it exactly while the new
-                // stream has not sounded, which is the window the handover
-                // waits through, so the waiting line must speak on the next
-                // tick. A handover under a pause keeps the line instead: it is
+                // same rule a plain fresh start follows, the streaming line
+                // (T2) waiting the same way. A handover's rebuild clears the
+                // line instead (issue #65), the same way a fresh start does:
+                // `fetch_status` keeps it exactly while the new stream has
+                // not sounded, which is the window the handover waits
+                // through, so the waiting line must speak on the next tick.
+                // A handover under a pause keeps the line instead: it is
                 // still waiting for sound. (This clears under a `Player`, so
                 // no machine test reaches it.)
-                if fading || !self.status.starts_with("⟳ fetching ") {
+                let waiting = self.status.starts_with(FETCHING_LINE_PREFIX)
+                    || self.status.starts_with(STREAMING_LINE_PREFIX);
+                if fading || !waiting {
                     self.status.clear();
                 }
             }

@@ -9,15 +9,20 @@
 //! as an argument.
 
 use std::fs;
-use std::io::{Read, Seek};
+use std::io::Read;
+use std::io::Seek as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use symphonia::core::io::MediaSource;
-use velo::audio::remote::{RangeAnswer, RangeTransport, RemoteSource, WINDOW_BYTES};
+use velo::audio::TrackSource;
+use velo::audio::output::{Entry, PathResolver, SharedQueue, drain_headless_with_preopen};
+use velo::audio::remote::{RangeAnswer, RangeTransport, RemoteOpen, RemoteSource, WINDOW_BYTES};
+use velo::config::ReplayGainMode;
 use velo::subsonic::Error;
-use velo::subsonic::cache::Cache;
-use velo::subsonic::client::parse_content_range;
+use velo::subsonic::cache::{Cache, RemoteResolver};
+use velo::subsonic::client::{Transport, parse_content_range};
 
 /// One stream URL every test shares; the fixture answers it regardless.
 const URL: &str = "https://music.example.com/rest/stream?id=t1&format=raw";
@@ -63,6 +68,8 @@ fn part_files(dir: &Path) -> Vec<PathBuf> {
 struct Fixture {
     body: Vec<u8>,
     honor_ranges: bool,
+    /// Every request fails, the way an unreachable server does.
+    fail: bool,
     requests: Mutex<Vec<(u64, Option<u64>)>>,
 }
 
@@ -71,6 +78,7 @@ impl Fixture {
         Arc::new(Self {
             body: body(len),
             honor_ranges: true,
+            fail: false,
             requests: Mutex::new(Vec::new()),
         })
     }
@@ -79,6 +87,29 @@ impl Fixture {
         Arc::new(Self {
             body: body(len),
             honor_ranges: false,
+            fail: false,
+            requests: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// A transport whose every request fails, the way a connection to a
+    /// server that is down does.
+    fn failing() -> Arc<Self> {
+        Arc::new(Self {
+            body: Vec::new(),
+            honor_ranges: true,
+            fail: true,
+            requests: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// A transport serving one real body — a decodable track's bytes — so
+    /// the audio path can open and decode what it reads.
+    fn over(body: Vec<u8>) -> Arc<Self> {
+        Arc::new(Self {
+            body,
+            honor_ranges: true,
+            fail: false,
             requests: Mutex::new(Vec::new()),
         })
     }
@@ -91,6 +122,11 @@ impl Fixture {
 impl RangeTransport for Fixture {
     fn range(&self, _url: &str, from: u64, to: Option<u64>) -> Result<RangeAnswer, Error> {
         self.requests.lock().unwrap().push((from, to));
+        if self.fail {
+            return Err(Error::Unreachable {
+                detail: "the fixture is down".to_owned(),
+            });
+        }
         if !self.honor_ranges {
             return Ok(RangeAnswer::NoRanges);
         }
@@ -375,4 +411,308 @@ fn a_backwards_seek_keeps_the_fill_and_completes_it_without_duplicates() {
         part_files(&dir).is_empty(),
         "no .part file survives the completion"
     );
+}
+
+// ------------------------------------------------- the start's ask (T2, T3)
+
+/// The probe's typed answer (T2): a ranged server gives the source the player
+/// opens; a server without ranges answers the typed verdict, not an error —
+/// the cache-on-play fallback is the start's decision to make (S4).
+#[test]
+fn the_probe_answers_how_the_url_plays() {
+    let fixture = Fixture::ranging(10_000);
+    assert!(
+        matches!(
+            velo::audio::remote::open(Arc::clone(&fixture), URL).expect("the probe answers"),
+            RemoteOpen::Streams(_)
+        ),
+        "a ranged server streams"
+    );
+
+    let ignoring = Fixture::ignoring_ranges(10_000);
+    assert!(
+        matches!(
+            velo::audio::remote::open(Arc::clone(&ignoring), URL)
+                .expect("no ranges is not an error"),
+            RemoteOpen::NoRanges
+        ),
+        "a server without ranges is a verdict, never an error"
+    );
+}
+
+/// The fill rides on the streamed answer only: a `NoRanges` verdict attaches
+/// none, so the fallback download and the fill never race onto one `.part`
+/// file (S4).
+#[test]
+fn a_no_ranges_answer_begins_no_fill() {
+    let dir = temp_dir("no-fill");
+    let cache = Cache::new(dir.clone());
+    let fixture = Fixture::ignoring_ranges(10_000);
+
+    let answer =
+        velo::audio::remote::open_with_fill(Arc::clone(&fixture), URL, &cache).expect("no error");
+    assert!(matches!(answer, RemoteOpen::NoRanges));
+    assert!(
+        part_files(&dir).is_empty(),
+        "a no-ranges answer began no fill"
+    );
+}
+
+/// A whole-body `get` (the trait the fallback download uses), so the fixture
+/// doubles as the remote-song resolver's own transport.
+impl Transport for Fixture {
+    fn get(&self, _url: &str) -> Result<Vec<u8>, Error> {
+        Ok(self.body.clone())
+    }
+}
+
+/// A track streamed once is a cache hit the second time (D1): the first play
+/// streams and fills, `cached` answers true afterwards, and the second play
+/// streams over an untouched cached file — no second fill, no `.part` file.
+#[test]
+fn a_track_played_twice_is_a_cache_hit_the_second_time() {
+    let dir = temp_dir("twice");
+    let cache = Cache::new(dir.clone());
+    let len = usize::try_from(WINDOW_BYTES).expect("small window") * 2 + 500;
+    let fixture = Fixture::ranging(len);
+    let resolver = RemoteResolver::new(Arc::clone(&fixture), cache, None)
+        .with_stream_transport(fixture.clone());
+    let url_path = Path::new(URL);
+    let final_path = cache_path(&dir, URL);
+
+    assert!(
+        !PathResolver::cached(&resolver, url_path),
+        "the track is a miss to begin with"
+    );
+    let Some(mut source) = resolver
+        .open_streaming(url_path)
+        .expect("a ranged server streams")
+    else {
+        panic!("a ranged server streams");
+    };
+    drain_source(&mut *source);
+    assert!(
+        PathResolver::cached(&resolver, url_path),
+        "the fill renamed the body into place: a replay is a cache hit"
+    );
+    assert_eq!(fs::read(&final_path).expect("the cached file"), body(len));
+
+    let mut second = resolver
+        .open_streaming(url_path)
+        .expect("the second play asks again")
+        .expect("a ranged server still streams");
+    drain_source(&mut second);
+    assert_eq!(
+        fs::read(&final_path).expect("the cached file"),
+        body(len),
+        "the cached bytes stand, exactly once"
+    );
+    assert!(
+        part_files(&dir).is_empty(),
+        "the second play filled nothing — the track was already cached"
+    );
+}
+
+/// A ranged URL streams through the resolver seam (T2): the open source rides
+/// out of the ask, whether or not the cache already holds the body.
+#[test]
+fn a_ranged_url_streams_through_the_resolver() {
+    let cache = Cache::new(temp_dir("ask-ranged"));
+    let fixture = Fixture::ranging(10_000);
+    let resolver = RemoteResolver::new(Arc::clone(&fixture), cache, None)
+        .with_stream_transport(fixture.clone());
+
+    let source = resolver
+        .open_streaming(Path::new(URL))
+        .expect("the ask answers");
+    assert!(source.is_some(), "a ranged server streams");
+}
+
+/// A server without ranges answers the resolver seam `None` — the start falls
+/// back to cache-on-play — and a failing range request is the failure it is,
+/// never a fallback in disguise (S4).
+#[test]
+fn a_no_ranges_url_answers_the_fallback_and_a_failure_fails() {
+    let cache = Cache::new(temp_dir("ask-fallback"));
+    let ignoring = Fixture::ignoring_ranges(10_000);
+    let resolver =
+        RemoteResolver::new(Arc::clone(&ignoring), cache, None).with_stream_transport(ignoring);
+    assert!(
+        resolver
+            .open_streaming(Path::new(URL))
+            .expect("no ranges is not an error")
+            .is_none(),
+        "the no-ranges verdict is the cache-on-play fallback (S4)"
+    );
+
+    let cache = Cache::new(temp_dir("ask-failure"));
+    let broken = Fixture::failing();
+    let resolver =
+        RemoteResolver::new(Arc::clone(&broken), cache, None).with_stream_transport(broken);
+    assert!(
+        resolver.open_streaming(Path::new(URL)).is_err(),
+        "a failing request is a failure, never a silent fallback"
+    );
+}
+
+/// Entries that are not a radio channel's song URL never stream: a
+/// `subsonic://` row stays on cache-on-play for this slice, and a local file
+/// is not a remote ask at all.
+#[test]
+fn rows_that_are_not_song_urls_never_stream() {
+    let cache = Cache::new(temp_dir("ask-others"));
+    let fixture = Fixture::ranging(10_000);
+    let resolver =
+        RemoteResolver::new(Arc::clone(&fixture), cache, None).with_stream_transport(fixture);
+
+    assert!(
+        resolver
+            .open_streaming(Path::new("subsonic://home.server/42"))
+            .expect("the ask answers")
+            .is_none(),
+        "a subsonic:// row stays on cache-on-play for this slice"
+    );
+    assert!(
+        resolver
+            .open_streaming(Path::new("/music/track.flac"))
+            .expect("the ask answers")
+            .is_none(),
+        "a local file is not a remote ask"
+    );
+}
+
+// --------------------------------------------- the audio path over the source
+
+/// The hash path one URL takes in a cache directory — [`Cache::path_for`]'s
+/// own spelling, read back from the outside.
+fn cache_path(dir: &Path, url: &str) -> PathBuf {
+    Cache::new(dir.to_path_buf()).path_for(url)
+}
+
+/// Reads a boxed source to its end, the way a decoder does.
+fn drain_source(source: &mut dyn std::io::Read) {
+    let mut buf = [0_u8; 4_096];
+    loop {
+        if source.read(&mut buf).expect("the reads work") == 0 {
+            return;
+        }
+    }
+}
+
+/// The streamed turn over the headless drain: the fixture serves one WAV
+/// body by range, the track opens through `open_remote`, and the drained
+/// samples are exactly the local file's (T2, S1).
+#[test]
+fn a_streaming_first_turn_sounds_as_the_local_file_would() {
+    let wav = fs::read(wav_fixture()).expect("the fixture reads");
+    let dir = temp_dir("turn");
+    let cache = Cache::new(dir.clone());
+    let fixture = Fixture::over(wav.clone());
+    let answer =
+        velo::audio::remote::open_with_fill(Arc::clone(&fixture), URL, &cache).expect("the probe");
+    let RemoteOpen::Streams(source) = answer else {
+        panic!("a ranged server streams");
+    };
+    let opened = TrackSource::open_remote(Box::new(source)).expect("the track opens");
+    let spec = opened.spec();
+
+    let queue: SharedQueue = Arc::new(std::sync::Mutex::new(vec![Entry::File(PathBuf::from(URL))]));
+    let mut heard = Vec::new();
+    let mut failures = Vec::new();
+    drain_headless_with_preopen(
+        queue,
+        0,
+        0,
+        spec,
+        ReplayGainMode::default(),
+        opened,
+        &AtomicBool::new(false),
+        &mut |block| heard.extend_from_slice(block),
+        &mut |failure| failures.push(failure),
+    )
+    .expect("the sequence drains");
+
+    assert!(
+        failures.is_empty(),
+        "the streaming turn is never skipped: {failures:?}"
+    );
+    assert_eq!(
+        heard,
+        local_samples(&wav, 0),
+        "the streamed body decodes to exactly the local file's samples"
+    );
+    assert!(
+        Cache::new(dir).path_for(URL).is_file(),
+        "the fill completed behind the drained reads (D1)"
+    );
+}
+
+/// A seek into a streamed track lands where the local file's seek lands (S3):
+/// the rebuild's offset is applied to the carried source, never to the end of
+/// the track and never to a prefix re-download.
+#[test]
+fn a_seek_into_a_streaming_track_lands_where_the_local_file_does() {
+    let wav = fs::read(wav_fixture()).expect("the fixture reads");
+    let dir = temp_dir("turn-seek");
+    let cache = Cache::new(dir);
+    let fixture = Fixture::over(wav.clone());
+    let answer =
+        velo::audio::remote::open_with_fill(Arc::clone(&fixture), URL, &cache).expect("the probe");
+    let RemoteOpen::Streams(source) = answer else {
+        panic!("a ranged server streams");
+    };
+    let opened = TrackSource::open_remote(Box::new(source)).expect("the track opens");
+    let spec = opened.spec();
+
+    let queue: SharedQueue = Arc::new(std::sync::Mutex::new(vec![Entry::File(PathBuf::from(URL))]));
+    let mut heard = Vec::new();
+    let mut failures = Vec::new();
+    drain_headless_with_preopen(
+        queue,
+        0,
+        1_000,
+        spec,
+        ReplayGainMode::default(),
+        opened,
+        &AtomicBool::new(false),
+        &mut |block| heard.extend_from_slice(block),
+        &mut |failure| failures.push(failure),
+    )
+    .expect("the sequence drains");
+
+    assert!(
+        failures.is_empty(),
+        "the seeked streaming turn is never skipped: {failures:?}"
+    );
+    assert_eq!(
+        heard,
+        local_samples(&wav, 1_000),
+        "the seek plays the same frames the local file's seek does"
+    );
+}
+
+/// The WAV fixture's path, for the bodies the audio path decodes.
+fn wav_fixture() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("mono-tone.wav")
+}
+
+/// The samples a local open of the WAV's own bytes answers, drained block by
+/// block from `offset_frames` in — the reference the streaming turn is held to.
+fn local_samples(wav: &[u8], offset_frames: u64) -> Vec<f32> {
+    let dir = temp_dir("local-reference");
+    let path = dir.join("reference.wav");
+    fs::write(&path, wav).expect("the reference writes");
+    let mut source = if offset_frames == 0 {
+        TrackSource::open(&path).expect("the reference opens")
+    } else {
+        TrackSource::open_at(&path, offset_frames).expect("the reference opens")
+    };
+    let mut samples = Vec::new();
+    while let Some(block) = source.read_block().expect("the reference decodes") {
+        samples.extend_from_slice(&block);
+    }
+    samples
 }
