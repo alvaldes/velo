@@ -1,6 +1,13 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.44.0] - 2026-11-11
+
+### Features
+- **update:** Say once when a newer velo exists
+
+### Fixes
+- **ui:** One live marker per row, and a short block that reads
 ## [0.43.0] - 2026-11-10
 
 ### Features
