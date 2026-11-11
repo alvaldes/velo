@@ -19,6 +19,12 @@ commits releases nothing, and the script says so.
 
 Pushing the tag (`git push --follow-tags`) runs `.github/workflows/release.yml`.
 
+## Before pushing
+
+Run `scripts/check.sh` — it is the same three steps CI runs (`fmt --check`,
+`clippy -D warnings`, `test`). CI turns clippy *warnings* into failures, so a
+plain `cargo clippy` passing means nothing there.
+
 ## Commits
 
 Conventional Commits, no AI attribution. The changelog is generated from them,
