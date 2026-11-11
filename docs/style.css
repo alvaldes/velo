@@ -274,75 +274,19 @@ h1 {
   font-size: 0.78rem;
 }
 
-.prompt { color: var(--accent); flex: none; line-height: 1.5; }
-
-/* The whole command is always on screen: it wraps instead of scrolling, so
-   what gets copied is what was read. */
-.cmd code {
-  color: var(--text);
-  flex: 1;
-  min-width: 0;
-  /* Wrapped the way a terminal wraps a long line: at the edge, not at a word. */
-  word-break: break-all;
-  line-height: 1.5;
-}
-
-.copy {
-  font-family: var(--mono);
-  font-size: 0.72rem;
-  background: transparent;
-  border: 1px solid var(--hair);
-  color: var(--soft);
-  border-radius: 5px;
-  padding: 0.28rem 0.6rem;
-  cursor: pointer;
-  flex: none;
-}
-
-.copy:hover { color: var(--text); border-color: var(--soft); }
-
-.hint {
-  font-size: 0.8rem;
-  color: var(--soft);
-  margin: 0.8rem 0 0;
-  max-width: 50ch;
-}
-
-.cta {
-  -webkit-user-select: none;
-  user-select: none;
-}
-
-.picker label:last-child { border-right: 0; }
-.picker label:hover { color: var(--text); }
-
-.picker label:has(input:checked) {
-  background: var(--accent);
-  color: var(--accent-ink);
-}
-
-.picker input {
-  position: absolute;
-  opacity: 0;
-  width: 1px;
-  height: 1px;
-}
-
-.cmd {
-  display: flex;
-  align-items: flex-start;
-  gap: 0.7rem;
-  background: var(--glass);
-  -webkit-backdrop-filter: blur(14px);
-  backdrop-filter: blur(14px);
-  border: 1px solid var(--hair);
-  border-radius: 8px;
-  padding: 0.75rem 0.8rem 0.75rem 1rem;
-  font-family: var(--mono);
-  font-size: 0.78rem;
+/* On a wide screen the command box stops where the paragraph above it does. */
+@media (min-width: 981px) {
+  .cmd { width: 89%; }
 }
 
 .prompt { color: var(--accent); flex: none; line-height: 1.5; }
+
+/* The variants of a swap share one grid cell: the cell is as tall as the
+   tallest of them, and only the chosen one is visible. */
+.swap { display: grid; }
+.swap > * { grid-area: 1 / 1; visibility: hidden; }
+.swap > .on { visibility: visible; }
+.cmd .swap { flex: 1; min-width: 0; }
 
 /* The whole command is always on screen: it wraps instead of scrolling, so
    what gets copied is what was read. */
@@ -1152,17 +1096,33 @@ kbd {
 
 /* ---- cliamp radio ---- */
 
-.cliamp { padding: 5.5rem 0; }
+/* It belongs to the radio band above it: no section of its own, so it is
+   pulled up under that band instead of standing a full gap away. */
+.cliamp { margin-top: -2.5rem; padding: 0 0 5.5rem; }
 
 .cliamp-head {
   display: grid;
   grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
   gap: 4.5rem;
-  align-items: end;
-  margin-bottom: 2.4rem;
+  align-items: start;
+  margin-bottom: 1.4rem;
 }
 
-.cliamp h2 { margin-bottom: 1rem; }
+.cliamp h3 {
+  margin: 0 0 0.8rem;
+  font-size: 1.3rem;
+  font-weight: 600;
+}
+
+/* The channels by name, in the interface's own type: what is there, without
+   a count per channel that the service changes on its own. */
+.channels-line {
+  margin: 1rem 0 0;
+  max-width: 62ch;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  color: var(--soft);
+}
 
 /* A thank-you in the first person, set apart by the accent, not by a box. */
 .thanks {
@@ -1185,50 +1145,135 @@ kbd {
   color: var(--soft);
 }
 
-/* The channels as the interface would list them: a name, a count, and what
-   the channel plays. */
-.channels {
-  padding: 1.2rem 1.4rem 1.3rem;
-  border: 1px solid var(--hair);
-  border-radius: 12px;
-  background: var(--glass);
-  -webkit-backdrop-filter: blur(18px);
-  backdrop-filter: blur(18px);
-  box-shadow: 0 30px 70px -30px rgba(0, 0, 0, 0.7);
+/* The thank-you is a remark on the text beside it, so it starts level with
+   that text, under the heading, and an arrow in the gutter points back at
+   what it is about. */
+.cliamp .thanks {
+  position: relative;
+  margin-top: 2.7rem;
+}
+
+.cliamp .thanks::before {
+  content: "←";
+  position: absolute;
+  left: -2.6rem;
+  top: 0.05rem;
   font-family: var(--mono);
+  font-size: 1.05rem;
+  color: var(--accent);
+}
+
+/* Who is saying it, the way a shared document shows who else is writing:
+   a name tag in the accent, with a face. Still, it signs the remark; while
+   the remark is being typed it hangs from the caret and goes where it goes. */
+.thanks footer .who {
+  display: inline-block;
+  margin-top: 0.3rem;
+  text-decoration: none;
+}
+
+.who-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.16rem 0.6rem 0.16rem 0.2rem;
+  border-radius: 3px 999px 999px 999px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-family: var(--sans);
   font-size: 0.76rem;
-}
-
-.channels-head { margin: 0 0 0.9rem; }
-.channels-head b { color: var(--text); font-weight: 600; }
-.channels-head span { color: var(--dim); }
-
-.channels ul {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  column-gap: 2.5rem;
-}
-
-.channels li {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 0.1rem 1rem;
-  padding: 0.6rem 0;
-  border-top: 1px solid var(--hair);
-}
-
-.ch-name { color: var(--text); font-weight: 600; }
-.ch-songs { color: var(--accent); }
-
-.ch-what {
-  grid-column: 1 / -1;
-  color: var(--dim);
-  overflow: hidden;
-  text-overflow: ellipsis;
+  font-weight: 600;
+  line-height: 1.5;
   white-space: nowrap;
+}
+
+.who-tag img {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+
+/* While it is being typed: what is not written yet keeps its room, so the
+   block never changes height, and a caret stands where the next letter goes.
+   The room under the last line is the tag's, when the caret reaches it. */
+.thanks.typing { padding-bottom: 2.3rem; }
+.thanks .unwritten { visibility: hidden; }
+
+/* The caret is an empty inline: it takes no width and, unlike a box, it is
+   no place to break a line, so a word it stands inside wraps as it would
+   whole and the paragraph keeps its lines. The bar is its own layer: it
+   blinks, the tag hanging from it does not. */
+.thanks .caret { position: relative; }
+
+.thanks .caret::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0.12em;
+  width: 2px;
+  height: 1.1em;
+  background: var(--accent);
+}
+
+.thanks .caret .who-tag {
+  position: absolute;
+  top: calc(1.45em + 2px);
+  left: 0;
+}
+
+/* Past the middle of the line the tag hangs to the left, so it never leaves
+   the column. */
+.thanks .caret.flip .who-tag {
+  left: auto;
+  right: -2px;
+  border-radius: 999px 3px 999px 999px;
+}
+
+@keyframes caret {
+  0%, 55% { opacity: 1; }
+  56%, 100% { opacity: 0; }
+}
+
+/* For the readers a screen cannot type for: the sentence, whole. */
+.vh {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* On air: the interface's own live mark, in front of the channels. */
+.on-air {
+  position: relative;
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
+  margin-right: 0.7rem;
+  border-radius: 50%;
+  background: var(--accent);
+  vertical-align: 0.05em;
+}
+
+.on-air::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 1px solid var(--accent);
+  opacity: 0;
+}
+
+@keyframes point {
+  0%, 100% { transform: translateX(0); }
+  50% { transform: translateX(-0.45rem); }
+}
+
+@keyframes on-air {
+  0% { transform: scale(1); opacity: 0.7; }
+  70%, 100% { transform: scale(2.8); opacity: 0; }
 }
 
 .cliamp-note {
@@ -1407,9 +1452,11 @@ kbd {
   .keys { padding: 3.5rem 0; }
   .stats { gap: 2rem; }
   .keymap { grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 1.5rem; }
-  .cliamp { padding: 3.5rem 0; }
+  .cliamp { margin-top: -1rem; padding: 0 0 3.5rem; }
   .cliamp-head { grid-template-columns: minmax(0, 1fr); gap: 1.8rem; }
-  .channels ul { grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 1.5rem; }
+  /* One column: the remark stands under the text, so the arrow points up. */
+  .cliamp .thanks::before { content: "↑"; left: 1.4rem; top: -1.7rem; }
+  .cliamp .thanks { margin-top: 1.4rem; }
   .notes { grid-template-columns: minmax(0, 1fr); gap: 2rem; padding: 3rem 0; }
   .maker { grid-template-columns: auto minmax(0, 1fr); gap: 1.4rem; padding: 1.4rem; }
   .maker img { width: 72px; height: 72px; }
@@ -1418,12 +1465,26 @@ kbd {
 
 @media (max-width: 560px) {
   .keymap { grid-template-columns: 1fr; }
-  .channels ul { grid-template-columns: minmax(0, 1fr); }
   .app-fact { display: none; }
   .scene .app-fact { display: inline; }
   .s-transport .s-gap.dim:not(:last-of-type),
   .s-transport .s-gap + .dim { display: none; }
   .app button.app-row { grid-template-columns: 3.4ch 1fr; }
+}
+
+/* The install block, pointed at from the player's card: an outline for a
+   moment instead of a scroll, since on a wide window it is already in view. */
+.install {
+  outline: 2px solid transparent;
+  outline-offset: 12px;
+  border-radius: 6px;
+}
+
+.install.nudge { outline-color: var(--accent); }
+
+@keyframes nudge {
+  0%, 100% { outline-color: transparent; }
+  15%, 70% { outline-color: var(--accent); }
 }
 
 /* ---- motion, only when the reader allows it ---- */
@@ -1434,4 +1495,8 @@ kbd {
 
 @media (prefers-reduced-motion: no-preference) {
   .cta { transition: filter 0.15s ease; }
+  .install.nudge { animation: nudge 1.8s ease; }
+  .cliamp .thanks::before { animation: point 2.4s ease-in-out infinite; }
+  .on-air::after { animation: on-air 2.2s ease-out infinite; }
+  .thanks .caret::before { animation: caret 1s steps(1) infinite; }
 }

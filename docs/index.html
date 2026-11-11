@@ -44,7 +44,7 @@
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="icon" href="favicon.ico" sizes="32x32">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
-<link rel="stylesheet" href="style.css?v=28">
+<link rel="stylesheet" href="style.css?v=35">
 </head>
 <body>
 
@@ -92,12 +92,19 @@
 
           <div class="cmd">
             <span class="prompt" aria-hidden="true">$</span>
-            <code id="line">brew install alvaldes/velo/velo</code>
+            <span class="swap" id="line">
+              <code class="on" data-for="brew">brew install alvaldes/velo/velo</code>
+              <code data-for="script">curl -fsSL https://alvaldes.github.io/velo/install.sh | sh</code>
+              <code data-for="source">git clone https://github.com/alvaldes/velo &amp;&amp; cd velo &amp;&amp; cargo install --path .</code>
+            </span>
             <button type="button" class="copy" data-copy-from="line">copy</button>
           </div>
 
-          <p class="hint" id="hint">macOS and Linux. The tap follows each release
-          within the hour, and brew upgrade velo moves you to the next one.</p>
+          <p class="hint swap" id="hint">
+            <span class="on" data-for="brew">macOS and Linux. The tap follows each release within the hour, and brew upgrade velo moves you to the next one.</span>
+            <span data-for="script">The script picks the binary for this machine, checks it against the .sha256 CI published beside it, and puts velo in ~/.local/bin. No sudo.</span>
+            <span data-for="source">A clone and cargo: needs Rust 1.88 or newer, cmake or a system libopus, and the ALSA development headers on Linux.</span>
+          </p>
 
           <p class="more-install"><a href="https://github.com/alvaldes/velo#install">All install options in the README</a></p>
         </div>
@@ -186,42 +193,7 @@
 
   <div class="wrap page" id="features">
 
-    <section class="band" aria-labelledby="sound-h">
-      <div class="band-copy">
-        <h2 id="sound-h">It plays the file, not an approximation of it</h2>
-        <dl class="points">
-          <div>
-            <dt>Gapless</dt>
-            <dd>A join trims what the encoder inserted, so the seam carries music
-            only: the LAME delay and padding for MP3, the edit list for M4A.</dd>
-          </div>
-          <div>
-            <dt>ReplayGain</dt>
-            <dd>Read from the files' own tags and applied with clipping
-            protection: a track that declares its own peak is never pushed past
-            full scale. The transport says which mode is on, <code>RG track</code>
-            or <code>RG album</code>.</dd>
-          </div>
-          <div>
-            <dt>Bit-perfect</dt>
-            <dd><code>bit_perfect = true</code> reopens the device at each track's
-            own rate. ReplayGain and the volume step aside, and one status line
-            says so.</dd>
-          </div>
-          <div>
-            <dt>Formats</dt>
-            <dd>MP3, FLAC, M4A/AAC, OGG Vorbis, OGG Opus and WAV, with no dynamic
-            dependency.</dd>
-          </div>
-        </dl>
-      </div>
-      <figure class="scene-fig">
-        <div class="app scene" role="img" aria-label="velo playing Wave Maker from the tracks view: the clock against the length, a spectrum of bars, the transport with pause and RG track, and seven tracks with the playing row marked"><div class="app-nav"><span class="app-tabs"><span class="on">sources</span><span>queue</span></span><span class="app-mark">V E L O</span></div><div class="s-title">♫ Wave Maker ( Lofi , Dreamy , Retro )</div><div class="s-sub">HoliznaCC0 · Public Domain Lofi</div><div class="app-clock"><span>00:06 / 03:05<span class="app-state">▶ playing</span></span><span class="app-of">track 1 of 4</span></div><div class="app-spectrum"><i style="--h:0"></i><i style="--h:0"></i><i style="--h:0"></i><i style="--h:0"></i><i style="--h:0"></i><i style="--h:0"></i><i style="--h:0"></i><i style="--h:0"></i><i style="--h:0"></i><i style="--h:8"></i><i style="--h:8"></i><i style="--h:14"></i><i style="--h:22"></i><i style="--h:22"></i><i style="--h:22"></i><i style="--h:22"></i><i style="--h:8"></i><i style="--h:8"></i><i style="--h:14"></i><i style="--h:14"></i><i style="--h:18"></i><i style="--h:26"></i><i style="--h:26"></i><i style="--h:22"></i><i style="--h:22"></i><i style="--h:8"></i><i style="--h:18"></i><i style="--h:18"></i><i style="--h:8"></i><i style="--h:6"></i><i style="--h:24"></i><i style="--h:24"></i><i style="--h:18"></i><i style="--h:8"></i><i style="--h:18"></i><i style="--h:22"></i><i style="--h:14"></i><i style="--h:14"></i><i style="--h:8"></i></div><div class="s-progress"><span style="width:4%"></span></div><div class="s-transport"><span><span class="dim">◂◂</span><b class="s-primary">❚❚ pause</b><span class="dim">▸▸</span><span class="dim s-gap">shuffle</span><span class="dim">repeat off</span></span><span><span class="dim">RG</span> <span class="s-cool">track</span><span class="dim s-gap">VOL</span><span class="s-gauge"><span style="left:10%"></span></span>10</span></div><div class="s-head"><span class="dim">1 artists</span><span class="dim">2 albums</span><b>3 tracks</b><span class="dim">4 genres</span><span class="dim">[7 tracks]</span></div><div class="s-rows"><div class="s-row"><span></span><span class="app-num">1.</span><span class="app-name">Blue Skies<span class="s-meta">HoliznaCC0 · Lazy Summer Lofi</span></span><span class="app-fact">2:55</span></div><div class="s-row"><span></span><span class="app-num">2.</span><span class="app-name">Before Everything ( LoFi , Nostalgic )<span class="s-meta">HoliznaCC0 · Public Domain Lofi</span></span><span class="app-fact">2:51</span></div><div class="s-row"><span></span><span class="app-num">3.</span><span class="app-name">Birds ( LoFi , Chill )<span class="s-meta">HoliznaCC0 · Public Domain Lofi</span></span><span class="app-fact">2:49</span></div><div class="s-row selected"><span>▶</span><span class="app-num">4.</span><span class="app-name">Wave Maker ( Lofi , Dreamy , Retro )<span class="s-meta">HoliznaCC0 · Public Domain Lofi</span></span><span class="app-fact">3:05</span></div><div class="s-row"><span></span><span class="app-num">5.</span><span class="app-name">2 Hour Delay<span class="s-meta">HoliznaCC0 · Winter Lofi</span></span><span class="app-fact">2:11</span></div><div class="s-row"><span></span><span class="app-num">6.</span><span class="app-name">Fire Place<span class="s-meta">HoliznaCC0 · Winter Lofi</span></span><span class="app-fact">2:50</span></div><div class="s-row"><span></span><span class="app-num">7.</span><span class="app-name">First Snow<span class="s-meta">HoliznaCC0 · Winter Lofi</span></span><span class="app-fact">2:54</span></div></div><div class="app-footer"><span><b>j/k</b> move</span><span><b>enter</b> play</span><span><b>esc</b> back</span><span><b>/</b> search</span><span><b>a</b> add</span><span><b>tab</b> queue</span><span><b>?</b> help</span><span><b>q</b> quit</span></div></div>
-        <figcaption>A track playing, with the list it came from underneath</figcaption>
-      </figure>
-    </section>
-
-    <section class="band flip" aria-labelledby="library-h">
+    <section class="band" aria-labelledby="library-h">
       <div class="band-copy">
         <h2 id="library-h">Your folder is the library</h2>
         <dl class="points">
@@ -247,6 +219,13 @@
             <kbd>K</kbd> reorder its tracks.</dd>
           </div>
           <div>
+            <dt>Or your own server</dt>
+            <dd>Early access: Navidrome, Airsonic, Gonic and any other server
+            that speaks the Subsonic API. <code>velo --sync</code> brings its
+            library into the same index, and a remote track plays through a
+            local cache.</dd>
+          </div>
+          <div>
             <dt>Recently played</dt>
             <dd>A source of its own on the first screen: what you played,
             newest first, stations included.</dd>
@@ -256,6 +235,48 @@
       <figure class="scene-fig">
         <div class="app scene" role="img" aria-label="The search view after typing wave: one match, Wave Maker, selected and playing"><div class="app-nav"><span class="app-tabs"><span class="on">sources</span><span>queue</span></span><span class="app-mark">V E L O</span></div><div class="s-title">♫ Wave Maker ( Lofi , Dreamy , Retro )</div><div class="s-sub">HoliznaCC0 · Public Domain Lofi</div><div class="app-clock"><span>00:12 / 03:05<span class="app-state">▶ playing</span></span><span class="app-of">track 1 of 4</span></div><div class="app-spectrum"><i style="--h:0"></i><i style="--h:0"></i><i style="--h:0"></i><i style="--h:0"></i><i style="--h:8"></i><i style="--h:8"></i><i style="--h:14"></i><i style="--h:22"></i><i style="--h:22"></i><i style="--h:22"></i><i style="--h:22"></i><i style="--h:8"></i><i style="--h:8"></i><i style="--h:14"></i><i style="--h:14"></i><i style="--h:18"></i><i style="--h:26"></i><i style="--h:26"></i><i style="--h:22"></i><i style="--h:22"></i><i style="--h:8"></i><i style="--h:18"></i><i style="--h:18"></i><i style="--h:8"></i><i style="--h:6"></i><i style="--h:24"></i><i style="--h:24"></i><i style="--h:18"></i><i style="--h:8"></i><i style="--h:18"></i><i style="--h:22"></i><i style="--h:14"></i><i style="--h:14"></i><i style="--h:8"></i><i style="--h:0"></i><i style="--h:0"></i><i style="--h:0"></i><i style="--h:0"></i><i style="--h:0"></i></div><div class="s-progress"><span style="width:7%"></span></div><div class="s-transport"><span><span class="dim">◂◂</span><b class="s-primary">❚❚ pause</b><span class="dim">▸▸</span><span class="dim s-gap">shuffle</span><span class="dim">repeat off</span></span><span><span class="dim">RG</span> <span class="s-cool">track</span><span class="dim s-gap">VOL</span><span class="s-gauge"><span style="left:10%"></span></span>10</span></div><div class="s-head"><b>Search /wave</b><span class="dim">[1 match]</span></div><div class="s-rows"><div class="s-row selected"><span>▶</span><span class="app-num">1.</span><span class="app-name">Wave Maker ( Lofi , Dreamy , Retro )<span class="s-meta">HoliznaCC0 · Public Domain Lofi</span></span><span class="app-fact">3:05</span></div></div><div class="s-space"></div><div class="s-status">/wave</div><div class="app-footer"><span><b>type</b> to search</span><span><b>j/k</b> move</span><span><b>enter</b> play</span><span><b>backspace</b> delete</span><span><b>esc</b> cancel</span></div></div>
         <figcaption><kbd>/</kbd> and four letters</figcaption>
+      </figure>
+    </section>
+
+    <section class="band flip" aria-labelledby="sound-h">
+      <div class="band-copy">
+        <h2 id="sound-h">It plays the file, not an approximation of it</h2>
+        <dl class="points">
+          <div>
+            <dt>Gapless</dt>
+            <dd>A join trims what the encoder inserted, so the seam carries music
+            only: the LAME delay and padding for MP3, the edit list for M4A.</dd>
+          </div>
+          <div>
+            <dt>ReplayGain</dt>
+            <dd>Read from the files' own tags and applied with clipping
+            protection: a track that declares its own peak is never pushed past
+            full scale. The transport says which mode is on, <code>RG track</code>
+            or <code>RG album</code>, and <code>velo --replaygain-scan</code>
+            measures an album and writes the tags it is missing.</dd>
+          </div>
+          <div>
+            <dt>Bit-perfect</dt>
+            <dd><code>bit_perfect = true</code> reopens the device at each track's
+            own rate. ReplayGain and the volume step aside, and one status line
+            says so.</dd>
+          </div>
+          <div>
+            <dt>Pick the output</dt>
+            <dd><kbd>d</kbd> lists the machine's audio devices with the one in
+            use marked. <kbd>enter</kbd> moves playback there and keeps the
+            position in the track, and velo remembers the choice.</dd>
+          </div>
+          <div>
+            <dt>Formats</dt>
+            <dd>MP3, FLAC, M4A/AAC, OGG Vorbis, OGG Opus and WAV, with no dynamic
+            dependency.</dd>
+          </div>
+        </dl>
+      </div>
+      <figure class="scene-fig">
+        <div class="app scene" role="img" aria-label="velo playing Wave Maker from the tracks view: the clock against the length, a spectrum of bars, the transport with pause and RG track, and seven tracks with the playing row marked"><div class="app-nav"><span class="app-tabs"><span class="on">sources</span><span>queue</span></span><span class="app-mark">V E L O</span></div><div class="s-title">♫ Wave Maker ( Lofi , Dreamy , Retro )</div><div class="s-sub">HoliznaCC0 · Public Domain Lofi</div><div class="app-clock"><span>00:06 / 03:05<span class="app-state">▶ playing</span></span><span class="app-of">track 1 of 4</span></div><div class="app-spectrum"><i style="--h:0"></i><i style="--h:0"></i><i style="--h:0"></i><i style="--h:0"></i><i style="--h:0"></i><i style="--h:0"></i><i style="--h:0"></i><i style="--h:0"></i><i style="--h:0"></i><i style="--h:8"></i><i style="--h:8"></i><i style="--h:14"></i><i style="--h:22"></i><i style="--h:22"></i><i style="--h:22"></i><i style="--h:22"></i><i style="--h:8"></i><i style="--h:8"></i><i style="--h:14"></i><i style="--h:14"></i><i style="--h:18"></i><i style="--h:26"></i><i style="--h:26"></i><i style="--h:22"></i><i style="--h:22"></i><i style="--h:8"></i><i style="--h:18"></i><i style="--h:18"></i><i style="--h:8"></i><i style="--h:6"></i><i style="--h:24"></i><i style="--h:24"></i><i style="--h:18"></i><i style="--h:8"></i><i style="--h:18"></i><i style="--h:22"></i><i style="--h:14"></i><i style="--h:14"></i><i style="--h:8"></i></div><div class="s-progress"><span style="width:4%"></span></div><div class="s-transport"><span><span class="dim">◂◂</span><b class="s-primary">❚❚ pause</b><span class="dim">▸▸</span><span class="dim s-gap">shuffle</span><span class="dim">repeat off</span></span><span><span class="dim">RG</span> <span class="s-cool">track</span><span class="dim s-gap">VOL</span><span class="s-gauge"><span style="left:10%"></span></span>10</span></div><div class="s-head"><span class="dim">1 artists</span><span class="dim">2 albums</span><b>3 tracks</b><span class="dim">4 genres</span><span class="dim">[7 tracks]</span></div><div class="s-rows"><div class="s-row"><span></span><span class="app-num">1.</span><span class="app-name">Blue Skies<span class="s-meta">HoliznaCC0 · Lazy Summer Lofi</span></span><span class="app-fact">2:55</span></div><div class="s-row"><span></span><span class="app-num">2.</span><span class="app-name">Before Everything ( LoFi , Nostalgic )<span class="s-meta">HoliznaCC0 · Public Domain Lofi</span></span><span class="app-fact">2:51</span></div><div class="s-row"><span></span><span class="app-num">3.</span><span class="app-name">Birds ( LoFi , Chill )<span class="s-meta">HoliznaCC0 · Public Domain Lofi</span></span><span class="app-fact">2:49</span></div><div class="s-row selected"><span>▶</span><span class="app-num">4.</span><span class="app-name">Wave Maker ( Lofi , Dreamy , Retro )<span class="s-meta">HoliznaCC0 · Public Domain Lofi</span></span><span class="app-fact">3:05</span></div><div class="s-row"><span></span><span class="app-num">5.</span><span class="app-name">2 Hour Delay<span class="s-meta">HoliznaCC0 · Winter Lofi</span></span><span class="app-fact">2:11</span></div><div class="s-row"><span></span><span class="app-num">6.</span><span class="app-name">Fire Place<span class="s-meta">HoliznaCC0 · Winter Lofi</span></span><span class="app-fact">2:50</span></div><div class="s-row"><span></span><span class="app-num">7.</span><span class="app-name">First Snow<span class="s-meta">HoliznaCC0 · Winter Lofi</span></span><span class="app-fact">2:54</span></div></div><div class="app-footer"><span><b>j/k</b> move</span><span><b>enter</b> play</span><span><b>esc</b> back</span><span><b>/</b> search</span><span><b>a</b> add</span><span><b>tab</b> queue</span><span><b>?</b> help</span><span><b>q</b> quit</span></div></div>
+        <figcaption>A track playing, with the list it came from underneath</figcaption>
       </figure>
     </section>
 
@@ -275,6 +296,9 @@
           <li>A live row carries <span class="live">● live</span> and the
           listener count when the service reports one.</li>
           <li><kbd>u</kbd> plays any stream URL without saving it.</li>
+          <li>Changing station crossfades: what you were hearing keeps
+          playing until the new stream sounds, then one fades into the
+          other.</li>
           <li>A station that cannot play is marked <code>✗</code> and says why at
           once, and <kbd>i</kbd> drafts the bug report for you to send.</li>
         </ul>
@@ -288,38 +312,20 @@
     <section class="cliamp" aria-labelledby="cliamp-h">
       <div class="cliamp-head">
         <div>
-          <h2 id="cliamp-h">cliamp radio is the first row</h2>
-          <p class="section-lede">Fifteen channels that the
+          <h3 id="cliamp-h">cliamp radio is the first row</h3>
+          <p class="section-lede">Channels that the
           <a href="https://cliamp.stream">cliamp</a> project runs itself, always
           on and with no account. In velo they lead the radio view: a channel
           opens on its live row, with the listeners it has right now, and then
           its songs, each one a track you can play, seek and queue.</p>
+          <p class="channels-line"><span class="on-air" aria-hidden="true"></span>Lofi, Meditative, Synthwave, EDM, Omarchy,
+          Chiptunes, Amiga and eight NoCopyrightSounds channels.</p>
         </div>
-        <blockquote class="thanks">
-          <p>I listen to these channels a lot. Thank you to the people behind
+        <blockquote class="thanks" id="thanks">
+          <p id="thanks-text">I listen to these channels a lot. Thank you to the people behind
           cliamp for building the service and keeping it free and always on.</p>
-          <footer><a href="#maker">Angel</a></footer>
+          <footer><a class="who" href="#maker"><span class="who-tag"><img src="media/alvaldes.jpg" alt="" width="18" height="18">Angel</span></a></footer>
         </blockquote>
-      </div>
-      <div class="channels">
-        <p class="channels-head"><b>Radio › cliamp radio</b> <span>[15 channels]</span></p>
-        <ul>
-          <li><span class="ch-name">Lofi</span><span class="ch-songs">120 songs</span><span class="ch-what">Lofi 24/7 with StreamBeats</span></li>
-          <li><span class="ch-name">Meditative</span><span class="ch-songs">25 songs</span><span class="ch-what">Calm ambient instrumentals for focus and rest</span></li>
-          <li><span class="ch-name">Synthwave</span><span class="ch-songs">100 songs</span><span class="ch-what">Synthwave 24/7 with StreamBeats</span></li>
-          <li><span class="ch-name">EDM</span><span class="ch-songs">100 songs</span><span class="ch-what">EDM 24/7 with StreamBeats</span></li>
-          <li><span class="ch-name">Omarchy</span><span class="ch-songs">33 songs</span><span class="ch-what">Songs about Omarchy by Ryan R. Hughes</span></li>
-          <li><span class="ch-name">Chiptunes</span><span class="ch-songs">108 songs</span><span class="ch-what">8-bit and tracker music, all Creative Commons</span></li>
-          <li><span class="ch-name">Amiga</span><span class="ch-songs">68 songs</span><span class="ch-what">Amiga tracker modules from the demoscene</span></li>
-          <li><span class="ch-name">NCS</span><span class="ch-songs">48 songs</span><span class="ch-what">NoCopyrightSounds, top tracks 24/7</span></li>
-          <li><span class="ch-name">NCS House</span><span class="ch-songs">99 songs</span><span class="ch-what">NoCopyrightSounds, House 24/7</span></li>
-          <li><span class="ch-name">NCS Dubstep</span><span class="ch-songs">80 songs</span><span class="ch-what">NoCopyrightSounds, Dubstep 24/7</span></li>
-          <li><span class="ch-name">NCS Drum &amp; Bass</span><span class="ch-songs">100 songs</span><span class="ch-what">NoCopyrightSounds, Drum &amp; Bass 24/7</span></li>
-          <li><span class="ch-name">NCS Trap</span><span class="ch-songs">100 songs</span><span class="ch-what">NoCopyrightSounds, Trap 24/7</span></li>
-          <li><span class="ch-name">NCS Phonk</span><span class="ch-songs">60 songs</span><span class="ch-what">NoCopyrightSounds, Phonk 24/7</span></li>
-          <li><span class="ch-name">NCS Pop</span><span class="ch-songs">56 songs</span><span class="ch-what">NoCopyrightSounds, Pop 24/7</span></li>
-          <li><span class="ch-name">NCS Chill</span><span class="ch-songs">37 songs</span><span class="ch-what">NoCopyrightSounds, Chill 24/7</span></li>
-        </ul>
       </div>
       <p class="cliamp-note">The service is theirs, not velo's, at
       <a href="https://radio.cliamp.stream">radio.cliamp.stream</a>. If you would
@@ -358,11 +364,6 @@
             <dd>Drawn where the terminal speaks the kitty, sixel or iTerm2
             protocol. Elsewhere the status line says why it is hidden.</dd>
           </div>
-          <div>
-            <dt>Low power</dt>
-            <dd><kbd>P</kbd> redraws the screen at a quarter of the rate and
-            leaves the spectrum out. Playback does not change.</dd>
-          </div>
         </dl>
       </div>
       <figure class="scene-fig">
@@ -396,6 +397,7 @@
       <dl class="keymap">
         <div><dt><kbd>j</kbd> <kbd>k</kbd></dt><dd>move down and up</dd></div>
         <div><dt><kbd>enter</kbd></dt><dd>open, or play from here</dd></div>
+        <div><dt><kbd>esc</kbd></dt><dd>back one level</dd></div>
         <div><dt><kbd>space</kbd></dt><dd>pause and resume</dd></div>
         <div><dt><kbd>←</kbd> <kbd>→</kbd></dt><dd>seek 5 s, 30 s with shift</dd></div>
         <div><dt><kbd>:</kbd></dt><dd>jump to 70%, 1:20 or 90 s</dd></div>
@@ -403,23 +405,37 @@
         <div><dt><kbd>1</kbd>–<kbd>4</kbd></dt><dd>artists, albums, tracks, genres</dd></div>
         <div><dt><kbd>tab</kbd></dt><dd>to the queue and back</dd></div>
         <div><dt><kbd>a</kbd></dt><dd>append to the queue</dd></div>
+        <div><dt><kbd>x</kbd></dt><dd>remove from the queue</dd></div>
         <div><dt><kbd>z</kbd></dt><dd>shuffle what is left</dd></div>
         <div><dt><kbd>r</kbd></dt><dd>repeat: off, all, one</dd></div>
         <div><dt><kbd>+</kbd> <kbd>-</kbd></dt><dd>volume, 5% at a time</dd></div>
         <div><dt><kbd>f</kbd></dt><dd>favourite</dd></div>
         <div><dt><kbd>R</kbd></dt><dd>radio</dd></div>
-        <div><dt><kbd>v</kbd></dt><dd>next visualizer</dd></div>
-        <div><dt><kbd>d</kbd></dt><dd>choose the output device</dd></div>
       </dl>
     </section>
 
-    <section class="notes" aria-label="Servers, privacy and what is missing">
+    <section class="band" aria-labelledby="headless-h">
+      <div class="band-copy">
+        <h2 id="headless-h">It answers without the interface too</h2>
+        <p class="section-lede">Some questions need no screen. These run
+        without a terminal, so they work over ssh and inside a script, and
+        each one says how it went in its exit code.</p>
+      </div>
+      <figure class="term">
+<pre><span class="p">$</span> velo history --json            <span class="c"># what played, newest first</span>
+<span class="p">$</span> velo playlist import mix.m3u   <span class="c"># .m3u, .m3u8 and .pls</span>
+<span class="p">$</span> velo --replaygain-scan *.flac  <span class="c"># measure loudness: a dry run</span>
+<span class="p">$</span> velo --radio-test &lt;URL&gt;        <span class="c"># can this stream play?</span>
+<span class="p">$</span> velo --index                   <span class="c"># refresh the library, print counts</span></pre>
+      </figure>
+    </section>
+
+    <section class="notes" aria-label="Where it runs, privacy and what is missing">
       <div>
-        <h2>Your own server</h2>
-        <p>Early access: velo talks to servers that expose the Subsonic API,
-        Navidrome, Airsonic and Gonic among them. <code>velo --sync</code> brings
-        the server's library into the index, and a remote track plays through a
-        cache.</p>
+        <h2>Where it runs</h2>
+        <p>Linux and macOS, on x86_64 and aarch64, as one binary with no
+        dynamic dependency. Windows is untested. Cover art needs a terminal
+        that speaks the kitty, sixel or iTerm2 protocol.</p>
       </div>
       <div>
         <h2>What velo sends</h2>
@@ -430,9 +446,11 @@
       </div>
       <div>
         <h2>Not yet</h2>
-        <p>Windows is untested. Subsonic cannot stream a track before the whole
-        file is cached. Playlists are saved, renamed and reordered, and have no
-        editor beyond that.</p>
+        <p>YouTube links, played through <code>yt-dlp</code>, are planned in
+        <a href="https://github.com/alvaldes/velo/issues/70">issue #70</a>.
+        Subsonic cannot stream a track before the whole file is cached.
+        Playlists are saved, renamed and reordered, and have no editor
+        beyond that.</p>
       </div>
     </section>
 
@@ -482,7 +500,7 @@
     </span>
   </footer>
 </div>
-<script src="app.js?v=23"></script>
+<script src="app.js?v=27"></script>
 <script type="module" src="fog.js?v=8"></script>
 </body>
 </html>

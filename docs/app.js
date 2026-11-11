@@ -3,32 +3,19 @@
 //
 // Everything the page loads is in this folder; it asks nobody else for anything.
 
-const REPO = 'alvaldes/velo';
-
-const installs = {
-  brew: {
-    line: 'brew install alvaldes/velo/velo',
-    hint: 'macOS and Linux. The tap follows each release within the hour, and brew upgrade velo moves you to the next one.',
-  },
-  script: {
-    line: 'curl -fsSL https://alvaldes.github.io/velo/install.sh | sh',
-    hint: 'The script picks the binary for this machine, checks it against the .sha256 CI published beside it, and puts velo in ~/.local/bin. No sudo.',
-  },
-  source: {
-    line: `git clone https://github.com/${REPO} && cd velo && cargo install --path .`,
-    hint: 'A clone and cargo: needs Rust 1.88 or newer, cmake or a system libopus, and the ALSA development headers on Linux.',
-  },
-};
-
 const $ = (id) => document.getElementById(id);
 
 // ---- install ----
 
+// Every way to install is already in the page, stacked in one cell: choosing
+// one only changes which is visible, so the block keeps the height of its
+// tallest and nothing below it moves.
 function showInstall() {
   const checked = document.querySelector('input[name="platform"]:checked');
-  const install = installs[checked?.value] ?? installs.brew;
-  $('line').textContent = install.line;
-  $('hint').textContent = install.hint;
+  const key = checked?.value ?? 'brew';
+  for (const variant of document.querySelectorAll('#line [data-for], #hint [data-for]')) {
+    variant.classList.toggle('on', variant.dataset.for === key);
+  }
 }
 
 for (const radio of document.querySelectorAll('input[name="platform"]')) {
@@ -39,7 +26,8 @@ for (const button of document.querySelectorAll('.copy')) {
   const label = button.textContent;
   button.addEventListener('click', async () => {
     try {
-      await navigator.clipboard.writeText($(button.dataset.copyFrom).textContent);
+      const source = $(button.dataset.copyFrom);
+      await navigator.clipboard.writeText((source.querySelector('.on') ?? source).textContent.trim());
       button.textContent = 'copied';
     } catch {
       button.textContent = 'select it';
@@ -185,6 +173,23 @@ toggle.addEventListener('click', togglePlay);
 $('row').addEventListener('click', togglePlay);
 $('more-close').addEventListener('click', hideMore);
 for (const link of more.querySelectorAll('a')) link.addEventListener('click', () => { more.hidden = true; });
+
+// "Install velo" points at the install block, which on a wide window stands
+// right beside the player: following the anchor there scrolled the page a few
+// lines to pin the block to the top, a jump with nothing new to show. So the
+// page moves only as far as the block needs to be in view — not at all when it
+// already is — and the block is outlined for a moment, so the eye finds it.
+const install = $('install');
+more.querySelector('a[href="#install"]').addEventListener('click', (event) => {
+  event.preventDefault();
+  install.scrollIntoView({ block: 'nearest' });
+  install.classList.remove('nudge');
+  // Reading the box restarts the animation when the card is used twice.
+  void install.offsetWidth;
+  install.classList.add('nudge');
+  install.querySelector('.copy')?.focus({ preventScroll: true });
+  setTimeout(() => install.classList.remove('nudge'), 1800);
+});
 for (const control of player.querySelectorAll('[data-more]')) control.addEventListener('click', showMore);
 
 track.addEventListener('play', showState);
@@ -263,3 +268,77 @@ function settleHearth() {
 
 calm.addEventListener('change', settleHearth);
 settleHearth();
+
+// ---- the thank-you, typed ----
+
+// The remark beside cliamp is written while the reader watches, over and
+// over: a letter at a time, a breath after each sentence, a rest when it is
+// whole, then it is taken back and written again. A name tag hangs from the
+// caret and follows it, the way a shared document shows who is writing.
+//
+// The sentence itself stays in the page whole — hidden from the eye, not from
+// a screen reader — and the copy that is typed keeps the room of its
+// unwritten part, so nothing below it moves. Nothing is typed while the block
+// is off screen. Readers who asked for less motion get the sentence as it is,
+// signed in its footer.
+const thanks = $('thanks');
+const thanksText = $('thanks-text');
+
+if (thanks && thanksText && !calm.matches && 'IntersectionObserver' in window) {
+  const sentence = thanksText.textContent.replace(/\s+/g, ' ').trim();
+  const typed = document.createElement('p');
+  typed.setAttribute('aria-hidden', 'true');
+  const written = document.createElement('span');
+  const caret = document.createElement('span');
+  caret.className = 'caret';
+  const tag = thanks.querySelector('.who-tag').cloneNode(true);
+  const label = tag.lastChild;
+  caret.append(tag);
+  const unwritten = document.createElement('span');
+  unwritten.className = 'unwritten';
+  unwritten.textContent = sentence;
+  typed.append(written, caret, unwritten);
+  thanksText.classList.add('vh');
+  thanksText.after(typed);
+  // The tag signs the remark from the caret now; the footer would say it twice.
+  thanks.querySelector('footer').hidden = true;
+  thanks.classList.add('typing');
+
+  let inView = false;
+  new IntersectionObserver((entries) => {
+    inView = entries[entries.length - 1].isIntersecting;
+  }, { threshold: 0.4 }).observe(thanks);
+
+  const show = (at) => {
+    written.textContent = sentence.slice(0, at);
+    unwritten.textContent = sentence.slice(at);
+    caret.classList.toggle('flip', caret.offsetLeft > typed.clientWidth / 2);
+  };
+
+  // One step of the loop, then the wait before the next: `at` letters are
+  // written, and `erasing` says which way the caret is going.
+  const step = (at, erasing) => {
+    if (!inView) {
+      setTimeout(() => step(at, erasing), 400);
+      return;
+    }
+    show(at);
+    if (erasing) {
+      if (at === 0) setTimeout(() => step(1, false), 700);
+      else setTimeout(() => step(at - 1, true), 12);
+      return;
+    }
+    if (at === sentence.length) {
+      label.textContent = 'Angel';
+      setTimeout(() => step(at - 1, true), 3600);
+      return;
+    }
+    label.textContent = 'Angel is typing…';
+    const last = sentence[at - 1];
+    const pause = last === '.' ? 420 : last === ',' ? 180 : 24 + Math.random() * 38;
+    setTimeout(() => step(at + 1, false), pause);
+  };
+
+  show(0);
+  step(0, true);
+}
