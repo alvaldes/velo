@@ -99,3 +99,45 @@ passed; config + ui_state + cli + ui_render + lib); `cargo clippy
 new). Risk: the timestamp is recorded at consumption time, not ask time —
 a check that takes long shifts the interval that far; a whole-interval
 granularity makes this immaterial.
+
+## The check you ask for (issue #69: `velo update` and the version row's enter; slice 2 still out of scope)
+
+The author's report: `velo update` did not exist, and the card had no way to
+ask. New, still with no download and no self-replacement: the `update`
+subcommand (`Command::Update` in `src/config.rs`, dispatched beside the
+one-shot modes in `src/bin/velo.rs`) runs `manual_check` at once — ignoring
+`[update] check` and `last_check` — and prints the running version, the
+newest tag, and one of two verdicts; exit 0 for either verdict, 1 with one
+`velo:` line on stderr when the request or the answer failed. "How to get
+it" is honest about the install: `install_route` is a pure function of the
+executable's own path — `/opt/homebrew/` or `/usr/local/Cellar/` says
+`brew upgrade velo`, anything else names the release archive. In the
+interface, `enter` on the `version` row starts the same check now
+(`App::check_for_update_now`, the card's only check key), and its answer
+lands through the same tick the automatic one uses: the status line, the
+row, and `[update] last_check` recorded by the loop side — never by a
+worker thread. A check already on its way is not replaced. To carry the
+failure the manual command says, `fetch_latest_tag` now delegates to
+`fetch_latest_reported`; its silence is unchanged and pinned by a test.
+
+Tests: `tests/update.rs` (new; 12) — the install route (Homebrew prefixes,
+arbitrary paths), the advice per route, the verdict text (newer × both
+routes, equal, a running build ahead of the releases), `manual_check` over
+the injected transport (one request to `RELEASES_URL`, success, failing
+transport one-line error, non-JSON body), and `fetch_latest_tag`'s silence
+preserved. `tests/ui_state.rs` (+2): `enter` on the version row checks now
+even with `check = "never"` and a fresh `last_check` — asked, status, row,
+refreshed `last_check`, transport injected so no test touches the network —
+and no key outside the version row's `enter` asks. `tests/cli.rs` (+1):
+`velo update` parses alone. README's `[update]` section documents both
+routes in.
+
+Existing tests changed: the `Command` import alias in `tests/cli.rs`
+(`HistoryCommand` → `CliCommand`) reads honestly now that the enum carries
+two subcommands; no assertion weakened.
+
+Verification, all exit 0: `cargo fmt`; `./scripts/check.sh` (fmt --check,
+clippy -D warnings, the whole test suite). Not testable without a network:
+the real `velo update` binary end to end — its transport is built inside
+the process, and tests must not reach the network — so the failure path is
+proven one level down, over the injected transport seam.

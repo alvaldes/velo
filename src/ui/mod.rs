@@ -1020,6 +1020,12 @@ pub struct App<'lib> {
     /// nothing found yet — and says nothing about a failed check, which is
     /// never said at all.
     update_latest: Option<String>,
+    /// The transport the next manual check asks through (issue #69):
+    /// `None` means the radio client's HTTP transport, which is what the
+    /// interface builds when the check is asked for. Tests install a
+    /// canned one here, so a check asked from the card never touches the
+    /// network. Consumed by the next check.
+    update_transport: Option<Arc<dyn crate::radio::client::Transport + Send + Sync>>,
     /// The media keys (issue #12), when the launch could start them: the OS
     /// client lives on its own thread; the tick drains its commands and
     /// publishes what is playing. `None` — headless refusal, no session
@@ -1138,6 +1144,7 @@ impl<'lib> App<'lib> {
             subsonic_warning: None,
             update_check: None,
             update_latest: None,
+            update_transport: None,
             media: None,
             media_published: None,
             saved_low_power: false,
@@ -1249,6 +1256,7 @@ impl<'lib> App<'lib> {
             subsonic_warning: None,
             update_check: None,
             update_latest: None,
+            update_transport: None,
             media: None,
             media_published: None,
             saved_low_power: false,
@@ -2413,6 +2421,45 @@ impl<'lib> App<'lib> {
     /// polls the one answer and records the timestamp itself.
     pub fn set_update_check(&mut self, check: crate::update::UpdateCheck) {
         self.update_check = Some(check);
+    }
+
+    /// Installs the transport the next manual check asks through (issue
+    /// #69). Tests only: production builds the radio client's HTTP
+    /// transport when the check is asked for.
+    #[doc(hidden)]
+    pub fn set_update_check_transport(
+        &mut self,
+        transport: Arc<dyn crate::radio::client::Transport + Send + Sync>,
+    ) {
+        self.update_transport = Some(transport);
+    }
+
+    /// The check the version row's `enter` asks for (issue #69): one check
+    /// now, ignoring `[update] check` and `[update] last_check` — a check
+    /// you can ask for is a check that runs. The answer lands through the
+    /// same tick the automatic check's does: the status line, the row, and
+    /// the `[update] last_check` the tick records. A check already on its
+    /// way is not replaced — one at a time.
+    pub fn check_for_update_now(&mut self) {
+        if self.update_check.is_some() {
+            return;
+        }
+        let transport = match self.update_transport.take() {
+            Some(transport) => transport,
+            None => match crate::radio::client::HttpTransport::new() {
+                Ok(transport) => {
+                    Arc::new(transport) as Arc<dyn crate::radio::client::Transport + Send + Sync>
+                }
+                // A transport that cannot be had is silence, the way the
+                // automatic check's transport is (issue #69).
+                Err(_) => return,
+            },
+        };
+        // A thread that cannot start is silence too; the transport was
+        // already consumed, so the next ask builds its own.
+        if let Ok(check) = crate::update::UpdateCheck::spawn(transport) {
+            self.update_check = Some(check);
+        }
     }
 
     /// The newer version a finished check found, with the leading `v` off
@@ -4989,6 +5036,10 @@ impl<'lib> App<'lib> {
                     // The visualizer is chosen in its own picker too (issue
                     // #40): the row's `enter` opens it, the arrows step it.
                     self.open_visualizer_picker();
+                } else if key == SettingsKey::Version {
+                    // A read-only row with one act (issue #69): `enter`
+                    // asks for the check now, whatever the config says.
+                    self.check_for_update_now();
                 } else {
                     self.change_setting(key, true);
                 }

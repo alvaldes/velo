@@ -252,6 +252,12 @@ pub enum Command {
         #[command(subcommand)]
         action: PlaylistAction,
     },
+    /// Ask GitHub now whether a newer velo is out, and say so (issue #69):
+    /// the running version, the newest release, and — when there is a
+    /// newer one — the way to get it for this install. Runs the check
+    /// whatever `[update] check` and `last_check` say, and never downloads
+    /// or replaces the binary.
+    Update,
 }
 
 /// A playlist verb (issue #9): read a `.m3u`, `.m3u8` or `.pls` into the

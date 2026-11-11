@@ -173,6 +173,7 @@ Everything below runs without a terminal, so it works over ssh and in scripts.
 ```sh
 velo --index                                  # refresh the library index, print counts
 velo history [--json | clear]                 # what played, newest first
+velo update                                   # is a newer velo out?
 velo playlist import mix.m3u                  # .m3u, .m3u8 and .pls
 velo playlist export Mix ~/backup/mix.m3u
 velo --replaygain-scan album/*.flac           # measure loudness — a dry run
@@ -212,6 +213,30 @@ key, leaving your comments and ordering alone. The ones worth knowing:
 
 An unknown key is an error that names the key; a bad value names the file and
 the line.
+
+### `[update]` — knowing a newer velo exists
+
+| Key | Meaning | Default |
+|:--|:--|:--|
+| `check` | How often velo may ask GitHub whether a newer velo is out: `daily`, `weekly` or `never` — `never` means no request at all | `daily` |
+| `last_check` | When the check last asked, as unix seconds — written by velo itself, never edited by hand; delete the line to make the next launch ask at once | absent |
+
+A due check is one request to `https://api.github.com/repos/alvaldes/velo/releases/latest`
+on its own thread, off the event loop; it says nothing while it runs, says one
+line in the interface when a newer version exists, and is silent on any
+failure — no retry storm, no error line. The settings card's `version` row
+(`ctrl+p`, under `about`) always names the running version, and the newer one
+when a check found it. velo never downloads, verifies or replaces itself.
+
+To ask for a check yourself: `velo update` in the shell asks now, whatever
+`check` and `last_check` say, and answers on stdout — the running version,
+the newest release, and one of two verdicts: up to date, or a newer version
+plus how to get it (`brew upgrade velo` for a Homebrew install, the release
+archive otherwise). Exit 0 for either verdict; a request or an answer that
+failed is one line on stderr and exit 1. `enter` on the `version` row of the
+settings card asks the same way in the interface, and its answer lands like
+the automatic one's: the status line, the row, and the refreshed
+`last_check`. Neither route ever downloads or replaces the binary.
 
 ## Privacy
 
