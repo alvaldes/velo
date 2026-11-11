@@ -959,6 +959,145 @@ kbd {
 
 .s-card-list .on { color: var(--accent); }
 
+/* ---- the themes, tried on the picture ----
+ *
+ * Each rule below is one of the themes built into the binary, with the seven
+ * colours `src/ui/theme/builtins.rs` gives it, mapped onto the tokens the
+ * picture already draws with: background → --glass, text → --text, dim →
+ * --dim, accent → --accent, ink → --accent-ink, secondary → --cool, border →
+ * --hair. `velo` has no rule: it is the page's own palette, and the picture
+ * stays glass. `default terminal` has no chip: it is the reader's terminal,
+ * which a web page cannot show. No script — the checked radio is the state. */
+
+.themes { margin: 1.2rem 0 0; }
+
+/* Twelve names do not fit one row, and a segmented bar that wraps reads as
+   a broken table: here each theme is a chip of its own, so a second row is
+   just more chips. Nothing clips, so the focus ring is drawn whole. */
+.themes .picker {
+  display: flex;
+  gap: 0.4rem;
+  border: 0;
+  border-radius: 0;
+  overflow: visible;
+  background: none;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+.themes .picker label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.68rem;
+  padding: 0.3rem 0.6rem 0.3rem 0.45rem;
+  border: 1px solid var(--hair);
+  border-radius: 999px;
+  background: var(--glass);
+}
+
+.themes .picker label:last-child { border-right: 1px solid var(--hair); }
+.themes .picker label:focus-within { outline-offset: 2px; }
+
+.themes .picker label:has(input:checked) {
+  border-color: var(--accent);
+}
+
+/* The theme's own accent on its own background: the chip shows what the
+   name means before it is chosen. */
+.themes .picker label::before {
+  content: "";
+  flex: none;
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 50%;
+  background: var(--sw);
+  border: 2px solid var(--sw-bg);
+  box-shadow: 0 0 0 1px var(--hair);
+}
+
+/* A chosen theme paints its own background: nothing shows through it. */
+.look:has(input[name="theme"]:not([value="velo"]):checked) .scene {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  box-shadow: 0 30px 80px -20px rgba(0, 0, 0, 0.7);
+}
+
+.look:has(input[name="theme"]:not([value="velo"]):checked) .scene .app-spectrum i {
+  background: var(--accent);
+}
+
+.look:has(input[name="theme"]:not([value="velo"]):checked) .scene :is(.s-progress, .s-gauge) {
+  background: var(--hair);
+}
+
+.look:has(input[name="theme"]:not([value="velo"]):checked) .scene .app-footer {
+  border-top-color: var(--hair);
+}
+
+.look:has(input[name="theme"]:not([value="velo"]):checked) .scene .s-card {
+  background: var(--glass);
+}
+
+.look:has(input[name="theme"]:not([value="velo"]):checked) .scene .s-card-title {
+  background: linear-gradient(180deg, transparent 45%, var(--glass) 45%);
+}
+
+.look:has(input[value="catppuccin-latte"]:checked) .scene {
+  --glass: #eff1f5; --text: #4c4f69; --dim: #9ca0b0; --accent: #8839ef;
+  --accent-ink: #eff1f5; --cool: #1e66f5; --hair: #ccd0da;
+}
+
+.look:has(input[value="catppuccin-mocha"]:checked) .scene {
+  --glass: #1e1e2e; --text: #cdd6f4; --dim: #7f849c; --accent: #cba6f7;
+  --accent-ink: #1e1e2e; --cool: #89b4fa; --hair: #313244;
+}
+
+.look:has(input[value="dracula"]:checked) .scene {
+  --glass: #282a36; --text: #f8f8f2; --dim: #6272a4; --accent: #bd93f9;
+  --accent-ink: #282a36; --cool: #8be9fd; --hair: #44475a;
+}
+
+.look:has(input[value="gruvbox-dark"]:checked) .scene {
+  --glass: #282828; --text: #ebdbb2; --dim: #928374; --accent: #fe8019;
+  --accent-ink: #282828; --cool: #83a598; --hair: #3c3836;
+}
+
+.look:has(input[value="monokai"]:checked) .scene {
+  --glass: #272822; --text: #f8f8f2; --dim: #75715e; --accent: #a6e22e;
+  --accent-ink: #272822; --cool: #66d9ef; --hair: #49483e;
+}
+
+.look:has(input[value="nord"]:checked) .scene {
+  --glass: #2e3440; --text: #eceff4; --dim: #7b88a1; --accent: #88c0d0;
+  --accent-ink: #2e3440; --cool: #81a1c1; --hair: #434c5e;
+}
+
+.look:has(input[value="one-dark"]:checked) .scene {
+  --glass: #282c34; --text: #abb2bf; --dim: #5c6370; --accent: #61afef;
+  --accent-ink: #282c34; --cool: #c678dd; --hair: #3e4451;
+}
+
+.look:has(input[value="one-light"]:checked) .scene {
+  --glass: #fafafa; --text: #383a42; --dim: #a0a1a7; --accent: #0184bc;
+  --accent-ink: #fafafa; --cool: #a626a4; --hair: #d4d4d4;
+}
+
+.look:has(input[value="solarized-dark"]:checked) .scene {
+  --glass: #002b36; --text: #839496; --dim: #586e75; --accent: #268bd2;
+  --accent-ink: #fdf6e3; --cool: #2aa198; --hair: #073642;
+}
+
+.look:has(input[value="solarized-light"]:checked) .scene {
+  --glass: #fdf6e3; --text: #657b83; --dim: #93a1a1; --accent: #268bd2;
+  --accent-ink: #fdf6e3; --cool: #2aa198; --hair: #eee8d5;
+}
+
+.look:has(input[value="tokyo-night"]:checked) .scene {
+  --glass: #1a1b26; --text: #c0caf5; --dim: #565f89; --accent: #7aa2f7;
+  --accent-ink: #1a1b26; --cool: #bb9af7; --hair: #292e42;
+}
+
 .s-card-prompt {
   /* Raised so its title lands in the empty spectrum rows, clear of the transport. */
   top: calc(50% - 2.4rem);
