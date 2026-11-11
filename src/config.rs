@@ -79,182 +79,150 @@ pub struct SubsonicConfig {
     pub insecure: bool,
 }
 
+/// The colours of `--help`: bold green headings, cyan for what is typed.
+/// clap strips them when the output is not a terminal or `NO_COLOR` is set.
+const HELP_STYLES: clap::builder::Styles = {
+    use clap::builder::styling::{AnsiColor, Effects, Styles};
+    Styles::styled()
+        .header(AnsiColor::Green.on_default().effects(Effects::BOLD))
+        .usage(AnsiColor::Green.on_default().effects(Effects::BOLD))
+        .literal(AnsiColor::Cyan.on_default().effects(Effects::BOLD))
+        .placeholder(AnsiColor::Cyan.on_default())
+};
+
+/// What follows the options in `--help`: examples, the keys worth knowing
+/// before `?` is within reach, and where the files live. The escape codes
+/// repeat [`HELP_STYLES`] by hand — `\x1b[1;32m` a heading, `\x1b[1;36m`
+/// something typed, `\x1b[0m` back to plain — because this text is not
+/// clap's to style; clap strips them for a pipe all the same.
+///
+/// The full list of keys is the in-app help card (`?`) and the full list of
+/// config keys is the comments of the generated `config.toml`: neither is
+/// repeated here, where it could only go stale.
+const AFTER_HELP: &str = "\
+\x1b[1;32mExamples:\x1b[0m
+  \x1b[1;36mvelo\x1b[0m                                   Browse and play your library
+  \x1b[1;36mvelo song.flac song.mp3\x1b[0m                Open the interface over these files
+  \x1b[1;36mvelo --play album/*.flac\x1b[0m               Play gaplessly, then exit
+  \x1b[1;36mvelo --library ~/Music --index\x1b[0m         Index a folder and print its counts
+  \x1b[1;36mvelo history --json\x1b[0m                    Recently played, as JSON for a script
+  \x1b[1;36mvelo playlist import mix.m3u\x1b[0m           Import a playlist file
+  \x1b[1;36mvelo --replaygain-scan album/*.flac\x1b[0m    Print the ReplayGain tags (dry run)
+  \x1b[1;36mvelo --radio-test <URL>\x1b[0m                Check whether a stream URL can play
+
+\x1b[1;32mKeys:\x1b[0m
+  \x1b[1;36mj/k\x1b[0m move   \x1b[1;36menter\x1b[0m open or play   \x1b[1;36mesc\x1b[0m back   \x1b[1;36m/\x1b[0m search   \x1b[1;36mspace\x1b[0m pause
+  \x1b[1;36m←/→\x1b[0m seek   \x1b[1;36mn\x1b[0m next   \x1b[1;36m,\x1b[0m previous   \x1b[1;36m+/-\x1b[0m volume   \x1b[1;36mz\x1b[0m shuffle   \x1b[1;36mr\x1b[0m repeat
+  \x1b[1;36mtab\x1b[0m queue   \x1b[1;36ma\x1b[0m add to it   \x1b[1;36mx\x1b[0m remove   \x1b[1;36mJ/K\x1b[0m reorder
+  \x1b[1;36mo\x1b[0m library folder   \x1b[1;36mR\x1b[0m radio   \x1b[1;36mctrl+p\x1b[0m settings   \x1b[1;36m?\x1b[0m every key   \x1b[1;36mq\x1b[0m quit
+
+\x1b[1;32mFiles:\x1b[0m
+  \x1b[1;36m~/.config/velo/config.toml\x1b[0m   Every setting, with a comment per key
+  \x1b[1;36m~/.cache/velo\x1b[0m                Cached remote tracks and covers
+  \x1b[1;36m$XDG_CONFIG_HOME\x1b[0m and \x1b[1;36m$XDG_CACHE_HOME\x1b[0m move them when set.
+
+A terminal with the kitty, sixel or iTerm2 protocol shows cover art.
+Exit codes: 0 success, 1 runtime error, 2 usage or config error.
+Docs: https://github.com/alvaldes/velo";
+
 /// The parsed command line.
 ///
 /// The observable contract is the one the hand-rolled loop had: positional
 /// files, `--info`, `--play`, `--index`, `--library <PATH>`, `-h`/`--help`;
 /// exit code 2 for a usage error, 1 for a missing file or library root, 0
 /// for `--help` and for success.
+///
+/// Every option's doc comment is one short paragraph on purpose: it is the
+/// option's line in `--help`, and a second paragraph would switch clap to
+/// its long, one-block-per-option layout. The reasons behind an option live
+/// in `//` comments beside it.
 #[derive(Debug, Parser)]
 #[command(
     name = "velo",
     version,
     args_conflicts_with_subcommands = true,
+    styles = HELP_STYLES,
     about = "A fast, single-binary music player for your terminal",
-    long_about = "A fast, single-binary music player for your terminal.
-
-With files it plays them as one continuous, gapless stream. Without files it \
-browses the library index in a terminal interface with a queue you can edit, \
-fuzzy search and cover art.",
-    after_help = "File modes:
-    velo <file>...               Open the terminal interface over the files
-    velo --info <file>...        Report format, frame count and length, then exit
-    velo --play <file>...        Play as one continuous stream and exit
-Library mode:
-    velo                         Browse and play the library index
-    velo --index                 Build or refresh the library index, print
-                                     track, album and artist counts, then exit
-Subsonic:
-    velo --subsonic-test         Probe the configured Subsonic server, report
-                                     what it supports, then exit
-    velo --sync                  Sync the server's library into the index
-                                     (browse and search reach it; playback
-                                     comes with the cache), print counts
-                                     per source, then exit
-    velo --cache-clean           Empty both Subsonic caches (tracks and
-                                     covers), print per cache how many
-                                     files and how much space were freed,
-                                     then exit
-History:
-    velo history                 What was played recently, newest first, one
-                                     line per entry, then exit
-    velo history --json          The same entries as a JSON array, for a
-                                     script, then exit
-    velo history clear           Empty the history file, then exit — all
-                                     three run without a terminal
-Playlists:
-    velo playlist import <file>  Import a .m3u/.m3u8/.pls as a saved playlist
-                                     named after the file's stem; relative
-                                     entries resolve against the file's own
-                                     directory, and entries whose file is
-                                     gone are reported, not stored
-    velo playlist export <name> <file>
-                                 Write the saved playlist as an .m3u with
-                                     absolute paths — both run without a
-                                     terminal
-ReplayGain:
-    velo --replaygain-scan <file>...   Measure each file (all files in one
-                                     invocation are one album) and print the
-                                     ReplayGain tags velo would write — a dry
-                                     run; nothing is ever written
-    velo --replaygain-scan --apply <file>...
-                                 Write those tags into the files, keeping
-                                     every tag they already carry
-
-Interface keys: j/k move, enter open/play, tab switches to the queue view
-    (a append, d remove, J/K move, enter play from there), / search, ←/→ or
-    ,/. seek ±5 s, space pause, +/- volume, ? help, q quit. Cover art is
-    drawn when the terminal supports the kitty, sixel or iTerm2 protocols.
-
-Audio must share one channel layout: sample rates are converted to the
-    output device, channel layouts are not. With bit_perfect in the config,
-    rates are not converted either — the device is reopened at each track's
-    own rate, the volume is pinned to 100% and ReplayGain is skipped. With
-    --mono, both channels carry the average of the mix; the combination with
-    bit_perfect is refused.
-
-Configuration: $XDG_CONFIG_HOME/velo/config.toml, or
-    ~/.config/velo/config.toml — keys: library, bit_perfect, replay_gain, and
-    the tables [state] (volume, shuffle, repeat and the open node),
-    [theme] (every colour, as \"#rrggbb\", plus name and
-    transparent_background), [ui] (cover_art, spectrum,
-    visualizer, low_power, hints, top_bar, advisories, view_numbers) and the optional
-    [subsonic] table (url, user, api_key, insecure) for a Subsonic-compatible
-    server; the optional [update] table (check: \"never\", \"daily\" or
-    \"weekly\", how often velo may ask GitHub whether a newer velo exists); `velo --subsonic-test` answers \"can I use this server?\" and works
-    over ssh;
-    `velo --radio-test <URL>` probes one live station URL the same way.
-    When the file is missing, velo writes it with every key at its default and
-    a comment per key; an unknown key is an error. library (and --library)
-    takes an absolute path, ~/... or a path relative to the current directory.
-    With no library set, the interface no longer demands a folder: with a
-    [subsonic] server configured the synced index is the library, and with
-    neither, one sentence says what to configure; press L to enter a folder
-    in a floating prompt that starts at ~/ (tab completes folders) and saves
-    the answer to the file; velo --index needs one and exits 2 without."
+    // The doc comment above is for rustdoc, not for `--help`.
+    long_about = None,
+    after_help = AFTER_HELP
 )]
-// The four flags are four distinct modes the user asks for; folding them
-// into an enum would not simplify the parse or the match in main.
+// The flags are distinct modes the user asks for; folding them into an enum
+// would not simplify the parse or the match in main.
 #[expect(
     clippy::struct_excessive_bools,
     reason = "each flag is an independent mode the user asks for"
 )]
 pub struct Cli {
-    /// Tracks to play as one continuous, gapless stream. Without files, the
-    /// terminal interface browses the library index.
+    /// Tracks to open; without any, velo browses your library.
     #[arg(value_name = "FILE")]
     pub files: Vec<PathBuf>,
 
-    /// Report format, frame count and length of each file, then exit.
-    #[arg(long)]
-    pub info: bool,
-
-    /// Play the files and exit, without the terminal interface.
-    #[arg(long)]
+    /// Play the files gaplessly and exit, without the interface.
+    #[arg(long, help_heading = "Playback")]
     pub play: bool,
 
-    /// Start this session in mono: both output channels carry the average of
-    /// the mix, after `ReplayGain`, before the ring. `M` toggles it while
-    /// playing. A session setting only — there is no config key, and nothing
-    /// is persisted — and refused when the config turns `bit_perfect` on
-    /// (issue #8).
-    #[arg(long)]
+    /// Print each file's format, frame count and length, then exit.
+    #[arg(long, help_heading = "Playback")]
+    pub info: bool,
+
+    /// Start in mono, the average of both channels (m toggles).
+    // A session setting only — no config key, nothing persisted — applied
+    // after `ReplayGain`, before the ring, and refused when the config turns
+    // `bit_perfect` on (issue #8).
+    #[arg(long, help_heading = "Playback")]
     pub mono: bool,
 
-    /// Start this session in low power (issue #11, S1): the screen redraws
-    /// at a quarter of its ordinary rate and the spectrum stays out.
-    /// Playback and every other key are unchanged. `P` toggles it while
-    /// playing, and the last state is remembered under `[ui] low_power`,
-    /// the way shuffle is remembered under `[state]`.
-    #[arg(long)]
+    /// Start in low power: slower redraws, no spectrum (P toggles).
+    // Issue #11, S1: a quarter of the ordinary redraw rate. Playback and
+    // every other key are unchanged, and the last state is remembered under
+    // `[ui] low_power`, the way shuffle is remembered under `[state]`.
+    #[arg(long, help_heading = "Playback")]
     pub low_power: bool,
 
-    /// Build or refresh the library index, print its counts, then exit.
-    #[arg(long)]
+    /// Music folder for this run, overriding the config.
+    #[arg(long, value_name = "PATH", help_heading = "Library")]
+    pub library: Option<PathBuf>,
+
+    /// Refresh the library index, print its counts, then exit.
+    #[arg(long, help_heading = "Library")]
     pub index: bool,
 
-    /// Probe the configured Subsonic server: report what it is, what it
-    /// advertises and which authentication worked, then exit.
-    #[arg(long)]
+    /// Probe the configured server and its authentication.
+    #[arg(long, help_heading = "Subsonic")]
     pub subsonic_test: bool,
 
-    /// Probe one live radio stream URL (issue #13): resolve one wrapper
-    /// level, report the URL it really points at, the response headers that
-    /// matter (`content-type`, `icy-metaint`, redirects), the codec, whether
-    /// this build can play it and the result of decoding the first seconds
-    /// of audio, then exit. Exit 0 when the URL plays end to end, 1 with a
-    /// one-line reason when it does not.
-    #[arg(long, value_name = "URL")]
-    pub radio_test: Option<String>,
-
-    /// Sync the configured Subsonic server into the library index: fetch
-    /// every album, write the rows, print the counts per source, then exit.
-    /// Never runs automatically.
-    #[arg(long)]
+    /// Copy the server's library into the index, then exit.
+    // Fetches every album, writes the rows, prints the counts per source.
+    // Never runs automatically.
+    #[arg(long, help_heading = "Subsonic")]
     pub sync: bool,
 
-    /// Remove every cached remote track and cover from both Subsonic caches
-    /// (the track cache and the covers cache), print per cache how many
-    /// files and how much space were freed, then exit. Nothing outside the
-    /// two cache directories is ever touched.
-    #[arg(long)]
+    /// Delete every cached remote track and cover, then exit.
+    // Both caches (tracks and covers); prints per cache how many files and
+    // how much space were freed. Nothing outside the two cache directories
+    // is ever touched.
+    #[arg(long, help_heading = "Subsonic")]
     pub cache_clean: bool,
 
-    /// Measure EBU R128 loudness for each file (every file in one invocation
-    /// is one album) and print the `ReplayGain` tags velo would write — a dry
-    /// run: nothing is ever written without `--apply` (T13).
-    #[arg(long)]
+    /// Probe a stream URL: exit 0 if it plays, 1 if not.
+    // Issue #13: resolves one wrapper level, reports the URL it really
+    // points at, the response headers that matter (`content-type`,
+    // `icy-metaint`, redirects), the codec, whether this build can play it
+    // and the result of decoding the first seconds of audio.
+    #[arg(long, value_name = "URL", help_heading = "Radio")]
+    pub radio_test: Option<String>,
+
+    /// Measure loudness and print the tags; a dry run.
+    // EBU R128; nothing is ever written without `--apply` (T13).
+    #[arg(long, help_heading = "ReplayGain")]
     pub replaygain_scan: bool,
 
-    /// With `--replaygain-scan`: write the measured `ReplayGain` tags into the
-    /// files, preserving every tag they already carry. Without the scan this
-    /// is a usage error; no other velo command ever writes to a music file.
-    #[arg(long, requires = "replaygain_scan")]
+    /// Write those tags, keeping every tag already there.
+    // Without the scan this is a usage error; no other velo command ever
+    // writes to a music file.
+    #[arg(long, requires = "replaygain_scan", help_heading = "ReplayGain")]
     pub apply: bool,
-
-    /// Library root to index or browse; overrides `library` in the config file.
-    #[arg(long, value_name = "PATH")]
-    pub library: Option<PathBuf>,
 
     /// A headless answer, `velo history …`. Every other mode stays a flag.
     #[command(subcommand)]
@@ -276,8 +244,8 @@ pub enum Command {
         #[command(subcommand)]
         action: Option<HistoryAction>,
     },
-    /// Import and export saved playlists (issue #9), headless like
-    /// `history`: no terminal, no library index.
+    /// Import and export saved playlists (.m3u, .m3u8, .pls).
+    // Issue #9, headless like `history`: no terminal, no library index.
     #[command(args_conflicts_with_subcommands = true)]
     Playlist {
         /// The verb: import a playlist file, or export a saved one.
@@ -290,17 +258,16 @@ pub enum Command {
 /// saved library, or write a saved playlist back out as `.m3u`.
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 pub enum PlaylistAction {
-    /// Import a `.m3u`, `.m3u8` or `.pls` file as a new saved playlist,
-    /// named after the file's stem. Entries whose file is gone are
-    /// reported, not stored.
+    /// Save a .m3u, .m3u8 or .pls file as a playlist named after the file.
+    // Entries whose file is gone are reported, not stored.
     Import {
         /// The playlist file to read; relative entries resolve against its
         /// own directory.
         #[arg(value_name = "FILE")]
         file: PathBuf,
     },
-    /// Export a saved playlist as an `.m3u` file with absolute paths and
-    /// the `#EXTM3U`/`#EXTINF` lines the importer reads back.
+    /// Write a saved playlist as an .m3u file with absolute paths.
+    // With the `#EXTM3U`/`#EXTINF` lines the importer reads back.
     Export {
         /// The saved playlist's name, exactly as it is stored.
         #[arg(value_name = "NAME")]

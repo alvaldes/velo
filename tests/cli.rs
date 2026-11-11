@@ -150,6 +150,47 @@ fn the_help_screen_exits_zero_and_names_the_new_features() {
 }
 
 #[test]
+fn the_help_screen_is_grouped_plain_when_piped_and_names_the_real_keys() {
+    let home = temp_home("helpshape");
+    let output = Command::new(binary())
+        .arg("--help")
+        .env("HOME", &home)
+        .env_remove("XDG_CONFIG_HOME")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap_or_else(|error| panic!("cannot run {}: {error}", binary()));
+    let help = String::from_utf8_lossy(&output.stdout).into_owned();
+    // The colours are for a terminal: a pipe gets plain text.
+    assert!(!help.contains('\u{1b}'), "escape codes in a pipe:\n{help}");
+    for section in [
+        "Playback:",
+        "Library:",
+        "Subsonic:",
+        "Radio:",
+        "ReplayGain:",
+        "Examples:",
+        "Keys:",
+        "Files:",
+    ] {
+        assert!(help.contains(section), "no {section:?} section:\n{help}");
+    }
+    // The keys the interface really answers to: `o` sets the folder and `x`
+    // removes from the queue — not the `L` and `d` an older help named.
+    for key in ["o library folder", "x remove"] {
+        assert!(help.contains(key), "--help must name {key:?}:\n{help}");
+    }
+    for stale in ["d remove", "press L", "`M` toggles"] {
+        assert!(
+            !help.contains(stale),
+            "--help still says {stale:?}:\n{help}"
+        );
+    }
+    // A screen, not a manual.
+    let lines = help.lines().count();
+    assert!(lines <= 70, "--help is {lines} lines long:\n{help}");
+}
+
+#[test]
 fn no_arguments_opens_the_interface() {
     // Since T4, no arguments browse the library; headless the interface
     // refuses with exit 1 and a message. This pins what is, not what was.
