@@ -1386,3 +1386,234 @@ const TRACKS_FIXTURE: &str = r#"{"station":"lofi","name":"LoFi Beats","count":2,
     {"id":"t2","title":"Dusk","artist":"Sable","album":"Views",
      "filename":"t2.mp3","url":"https://radio.cliamp.stream/lofi/tracks/t2"}
 ]}"#;
+
+// ---- marking in the cliamp places: `f` reaches every play -------------------
+
+/// A scratch directory the store files live in, outside the repository.
+fn marks_dir(tag: &str) -> PathBuf {
+    let path =
+        std::env::temp_dir().join(format!("velo-ui-cliamp-marks-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&path);
+    std::fs::create_dir_all(&path).expect("the scratch directory is created");
+    path
+}
+
+/// `f` on the live row marks the channel through the station store: the
+/// channel's stream into `radio.toml`, exactly the way a directory station
+/// is marked, and a second `f` unmarks it again.
+#[test]
+fn f_on_the_live_row_toggles_the_channel_in_the_station_store() {
+    let mut view = bare();
+    view.set_cliamp_channels(channels());
+    view.open_place(channel_place());
+    assert_eq!(
+        view.selection().map(|row| row.label),
+        Some(String::from("LoFi Beats — live")),
+        "the cursor opens the place on the live row"
+    );
+
+    press(&mut view, KeyCode::Char('f'));
+    assert!(
+        view.store()
+            .is_favorite("https://radio.cliamp.stream/lofi/stream"),
+        "the channel's stream is marked in the station store"
+    );
+    assert!(
+        view.take_dirty(),
+        "the mark asks for a save, the way every station toggle does"
+    );
+
+    press(&mut view, KeyCode::Char('f'));
+    assert!(
+        !view
+            .store()
+            .is_favorite("https://radio.cliamp.stream/lofi/stream"),
+        "a second `f` unmarks the channel"
+    );
+    assert!(view.take_dirty(), "the unmark asks for a save too");
+}
+
+/// The save ask becomes the file: the wiring writes the channel's stream
+/// into `radio.toml`, and the untoggle removes it.
+#[test]
+fn f_on_the_live_row_writes_the_stream_into_radio_toml() {
+    let dir = marks_dir("live-store");
+    let store = dir.join("radio.toml");
+    let canned = Arc::new(
+        Canned::new()
+            .stations(STATIONS_FIXTURE)
+            .statistics(STATISTICS_FIXTURE),
+    );
+    let mut data = RadioData::new(Some(Shared(Arc::clone(&canned))), Some(store.clone()), None);
+    let mut view = data.view();
+
+    press(&mut view, KeyCode::Enter); // the cliamp section
+    settle(&mut data, &mut view, &canned, |view, _| {
+        view.labels() == ["LoFi Beats", "Jazz Cafe"]
+    });
+    press(&mut view, KeyCode::Enter); // onto the channel's place, the live row
+    press(&mut view, KeyCode::Char('f'));
+
+    for _ in 0..100 {
+        data.poll(&mut view);
+        if store.exists() {
+            break;
+        }
+    }
+    let saved = std::fs::read_to_string(&store).expect("the toggle wrote radio.toml");
+    assert!(
+        saved.contains("url = \"https://radio.cliamp.stream/lofi/stream\""),
+        "the channel's stream is in the file, got:\n{saved}"
+    );
+
+    press(&mut view, KeyCode::Char('f'));
+    for _ in 0..100 {
+        data.poll(&mut view);
+        let Ok(saved) = std::fs::read_to_string(&store) else {
+            continue;
+        };
+        if !saved.contains("lofi/stream") {
+            break;
+        }
+    }
+    let saved = std::fs::read_to_string(&store).expect("the file stays readable");
+    assert!(
+        !saved.contains("[[favorite]]"),
+        "the second `f` removed the entry, got:\n{saved}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `f` on a cliamp song marks it as a track: a `[[favorite]]` whose path is
+/// the song's URL (its identity everywhere, cliamp S3) and whose metadata is
+/// what the service knows, written to `library.toml` at once — and a second
+/// `f` removes it again.
+#[test]
+fn f_marks_a_cliamp_song_in_library_toml_and_shows_the_star() {
+    let dir = marks_dir("song-mark");
+    let config = dir.join("config.toml");
+    let mut app = App::new(Vec::new());
+    app.set_config_file(Some(config.clone()));
+    shell(&mut app, KeyCode::Char('R')); // the radio opens over its wiring
+    app.show_radio_cliamp_songs(channel_place(), songs());
+
+    shell(&mut app, KeyCode::Char('f'));
+    let library = dir.join("library.toml");
+    let saved = std::fs::read_to_string(&library).expect("the toggle wrote library.toml");
+    assert!(
+        saved.contains("[[favorite]]"),
+        "the song is a track, stored in the favourites table, got:\n{saved}"
+    );
+    assert!(
+        saved.contains("path = \"https://radio.cliamp.stream/lofi/tracks/t1\""),
+        "the song's URL is the path, got:\n{saved}"
+    );
+    assert!(
+        saved.contains("artist = \"Tide\"")
+            && saved.contains("album = \"Harbor\"")
+            && saved.contains("title = \"Dawn\""),
+        "the metadata the service knows is copied in, got:\n{saved}"
+    );
+    assert!(
+        app_screen(&app).contains("★ Dawn"),
+        "the marked song shows its star in the channel's list at once, got:\n{}",
+        app_screen(&app)
+    );
+
+    shell(&mut app, KeyCode::Char('f'));
+    let saved = std::fs::read_to_string(&library).expect("the file stays readable");
+    assert!(
+        !saved.contains("[[favorite]]") && !saved.contains("lofi/tracks/t1"),
+        "the second `f` removed the entry, got:\n{saved}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The sources screen says where cliamp playback comes from: a song plays
+/// as a file whose path is its `https://` URL, so the Radio row carries the
+/// marker — never a bare row that says nothing.
+#[test]
+fn a_playing_cliamp_song_marks_the_radio_row_on_the_sources_screen() {
+    let mut app = App::browse(None);
+    app.show_playing_for_tests(
+        Entry::File(PathBuf::from("https://radio.cliamp.stream/lofi/tracks/t1")),
+        Duration::ZERO,
+        None,
+        None,
+    );
+    app.open_sources();
+
+    let screen = app_screen(&app);
+    let radio_row = screen
+        .lines()
+        .find(|line| line.contains("Radio"))
+        .expect("the Radio row is on the screen");
+    assert!(
+        radio_row.contains("▶"),
+        "a cliamp song came from the radio side, and the marker says so, got: {radio_row:?}"
+    );
+}
+
+/// A cliamp song marked in `library.toml` still says Radio: the origin is
+/// where playback came from, not where the mark lives — the URL check
+/// stands before the favourites check.
+#[test]
+fn a_marked_cliamp_song_still_says_radio_on_the_sources_screen() {
+    let dir = marks_dir("song-source");
+    let config = dir.join("config.toml");
+    std::fs::write(
+        dir.join("library.toml"),
+        "[[favorite]]\npath = \"https://radio.cliamp.stream/lofi/tracks/t1\"\n",
+    )
+    .expect("the store is written");
+    let mut app = App::browse(None);
+    app.set_config_file(Some(config));
+    app.show_playing_for_tests(
+        Entry::File(PathBuf::from("https://radio.cliamp.stream/lofi/tracks/t1")),
+        Duration::ZERO,
+        None,
+        None,
+    );
+    app.open_sources();
+
+    let screen = app_screen(&app);
+    let radio_row = screen
+        .lines()
+        .find(|line| line.contains("Radio"))
+        .expect("the Radio row is on the screen");
+    assert!(
+        radio_row.contains("▶"),
+        "the song says Radio even though its mark is in the favourites store, got: {radio_row:?}"
+    );
+    let favourites_row = screen
+        .lines()
+        .find(|line| line.contains("Favourites"))
+        .expect("the Favourites row is on the screen");
+    assert!(
+        !favourites_row.contains("▶"),
+        "the mark never pretends the song plays from the Favourites source, got: {favourites_row:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A channel's row is a place, not a play: the channel is marked through its
+/// live row (its stream) and its songs one by one, so `f` on a channel row
+/// does nothing — no store change, no save ask.
+#[test]
+fn f_on_a_channel_row_marks_nothing() {
+    let mut view = view();
+    view.open_place(Place::Cliamp);
+    let labels = view.labels();
+
+    assert_eq!(
+        press(&mut view, KeyCode::Char('f')),
+        RadioOutcome::Handled,
+        "`f` stays a handled key, it only refuses this row"
+    );
+    assert_eq!(view.labels(), labels, "the list is untouched");
+    assert!(
+        view.store().favorite.is_empty(),
+        "no channel row leaked into the station store"
+    );
+    assert!(!view.take_dirty(), "a refused mark never asks for a save");
+}

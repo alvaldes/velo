@@ -1752,7 +1752,18 @@ impl<'lib> App<'lib> {
             })
         });
         self.radio_from = self.view;
-        self.radio = Some(wire.view());
+        let mut view = wire.view();
+        // The saved store's marks are the shell's to hand over (the
+        // author's storage split): a cliamp song marked in an earlier
+        // session shows its star at once, before any key is pressed.
+        let starred: Vec<String> = self
+            .favourites
+            .favorite
+            .iter()
+            .map(|favorite| favorite.path.clone())
+            .collect();
+        view.set_favourite_songs(starred);
+        self.radio = Some(view);
         // The playing fact is handed over at birth too (S15, issue #32):
         // the view must not wait for the next tick to learn what plays —
         // a station already sounding when the radio opens is marked at
@@ -1870,13 +1881,12 @@ impl<'lib> App<'lib> {
         let Some(track) = self.tracks.get(self.selected) else {
             return;
         };
-        let known = |text: &str| (!text.is_empty()).then(|| text.to_owned());
-        let favorite = crate::saved::Favorite {
-            path: track.path.to_string_lossy().into_owned(),
-            artist: known(&track.artist),
-            album: known(&track.album),
-            title: known(&track.title),
-        };
+        let favorite = saved_favorite(
+            track.path.to_string_lossy().into_owned(),
+            &track.artist,
+            &track.album,
+            &track.title,
+        );
         self.favourites.toggle_favorite(favorite);
         self.save_marks();
     }
@@ -4037,6 +4047,28 @@ impl<'lib> App<'lib> {
                 }
                 self.edit_queue(|queue| queue.push(Entry::File(PathBuf::from(url))));
                 self.status = format!("velo: added {}", plural(1, "track", "tracks"));
+                Some(Action::None)
+            }
+            radio::RadioOutcome::MarkSong { song } => {
+                // A cliamp song is a track (the author's storage split):
+                // `f` marks it in the saved store, `library.toml`, exactly
+                // the way a library track row is marked — the song's URL is
+                // the path, and the metadata the service knows is copied in
+                // so the entry stays nameable from the file alone.
+                // `save_marks` stays the file's only writer; the view is
+                // told the star, never guesses it.
+                let favorite = saved_favorite(song.url, &song.artist, &song.album, &song.title);
+                self.favourites.toggle_favorite(favorite);
+                self.save_marks();
+                let starred: Vec<String> = self
+                    .favourites
+                    .favorite
+                    .iter()
+                    .map(|favorite| favorite.path.clone())
+                    .collect();
+                if let Some(view) = self.radio.as_mut() {
+                    view.set_favourite_songs(starred);
+                }
                 Some(Action::None)
             }
             radio::RadioOutcome::ReportIssue { title, body } => {
@@ -6333,16 +6365,25 @@ impl<'lib> App<'lib> {
 
     /// The rows of the sources screen (issue #3): one per source, in the
     /// order it shows them.
-    /// The source what plays came from, for the marker on the first screen: a
-    /// station is radio, a file the index knows is the local library, a file the
-    /// store marks is a favourite. Anything else says nothing — a playlist keeps
-    /// no origin for its tracks, and a guess would be worse than a bare row.
+    /// The source what plays came from, for the marker on the first screen:
+    /// a station is radio, a remote file — a cliamp song — is radio too,
+    /// whatever its mark: its URL came from the radio side, and the origin
+    /// is where playback came from, not where the mark lives. A file the
+    /// index knows is the local library, a file the store marks is a
+    /// favourite. Anything else says nothing — a playlist keeps no origin
+    /// for its tracks, and a guess would be worse than a bare row.
     fn playing_source(&self) -> Option<sources::Source> {
         match self.playing_entry()? {
             Entry::Station { .. } => Some(sources::Source::Radio),
             Entry::File(path) => {
                 let path = path.to_string_lossy();
-                if self
+                // A remote file plays through the radio's side (the
+                // author's call): an `http(s)://` path is a cliamp song or
+                // stream, and it says Radio before the library and the
+                // favourites checks can mistake it for theirs.
+                if path.starts_with("http://") || path.starts_with("https://") {
+                    Some(sources::Source::Radio)
+                } else if self
                     .tracks
                     .iter()
                     .any(|entry| entry.path.to_string_lossy() == path)
@@ -8759,6 +8800,22 @@ enum RowMark {
     Stopped,
     /// `⏸` in the accent: the track on this row is paused.
     Paused,
+}
+
+/// The saved-store entry a marked track becomes (issue #7, and the radio's
+/// cliamp songs, the author's storage split): the path verbatim — the
+/// identity, a `subsonic://` path and a song's `https://` URL stay
+/// themselves — and the metadata the row carried, an absent field staying
+/// absent, never an empty string. Both `f` marks go through here, so the
+/// entries keep one shape in `library.toml`.
+fn saved_favorite(path: String, artist: &str, album: &str, title: &str) -> crate::saved::Favorite {
+    let known = |text: &str| (!text.is_empty()).then(|| text.to_owned());
+    crate::saved::Favorite {
+        path,
+        artist: known(artist),
+        album: known(album),
+        title: known(title),
+    }
 }
 
 /// What one list row says, before it is laid out.

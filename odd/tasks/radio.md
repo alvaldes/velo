@@ -835,3 +835,47 @@ stopped, bit-perfect no). What no machine test can reach is the handover
 itself — two real streams overlapping on one device needs the device — so
 that stays ears-pending like the rest of T5d: start a track, press enter on a
 station, and hear the old one recede instead of cut.
+
+**L33** — **issue (author report): nothing in cliamp radio could be marked, and
+the Sources screen lied about where playback comes from.** Two bugs, both with
+the author's storage split decided in the report: a cliamp song is a track, its
+mark goes to `library.toml` through `saved::Saved::toggle_favorite` with the
+song's URL as the path plus the metadata the service knows — the same shape a
+remote file already plays and caches by; the channel's live row is a station,
+its mark goes to `radio.toml` through `RadioStore::toggle_favorite` with the
+stream URL. No third store.
+
+- **The live row marks through the station path** (`toggle_mark`, `CliampLive`
+  arm): the channel's stream into `radio.toml`, the same `Favorite` shape and
+  the same `dirty` → wiring-save ask any directory station uses; a second `f`
+  unmarks.
+- **A cliamp song is handed to the shell** (new `RadioOutcome::MarkSong`): the
+  view cannot reach `library.toml`, and the file keeps exactly one writer
+  (`App::save_marks`). The shell toggles through `saved_favorite` — the helper
+  `toggle_favourite` already used, now shared so both `f` marks keep one entry
+  shape — and hands the starred paths back to the view
+  (`RadioView::set_favourite_songs`), which draws `★ Title` on the song rows
+  from `rowtext::starred`, the one way a row says favourite. The star arrives
+  at the view's birth too, so a song marked in an earlier session shows it at
+  once.
+- **A channel's row is a place, not a play**: the channel is marked through its
+  live row, and a channel without a stream through its songs, so `f` on a
+  `CliampChannel` row does nothing — no store change, no save ask (pinned by
+  test). Headers and rules were already unreachable by the cursor; nothing new
+  to refuse there.
+- **The Sources screen checks the URL first** (`playing_source`): a file whose
+  path is an `http(s)://` URL came from the radio side and marks the Radio row,
+  before the library and favourites checks can mistake a marked cliamp song for
+  a favourite playing. The radio view's own playing marks needed nothing — the
+  song and live rows already matched the transport's URL identity
+  (`station_row_key`, issue #59/#68).
+
+Tests, RED first (all five observed failing before the change, then green):
+`f_on_the_live_row_toggles_the_channel_in_the_station_store`,
+`f_on_the_live_row_writes_the_stream_into_radio_toml` (the wiring writes the
+file), `f_marks_a_cliamp_song_in_library_toml_and_shows_the_star` (write,
+metadata, immediate star, untoggle), the two Sources-screen tests
+(`a_playing_cliamp_song_marks_the_radio_row_on_the_sources_screen` and
+`a_marked_cliamp_song_still_says_radio_on_the_sources_screen`), plus the no-op
+pin `f_on_a_channel_row_marks_nothing`.
+`./scripts/check.sh` green (fmt, clippy `-D warnings`, full suite).
