@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/media/logo.svg" width="96" height="96" alt="The velo mark: seven spectrum bars standing in the shape of a V">
+</p>
+
 # velo
 
 [![CI](https://github.com/alvaldes/velo/actions/workflows/ci.yml/badge.svg)](https://github.com/alvaldes/velo/actions/workflows/ci.yml)
@@ -7,6 +11,17 @@ and it indexes your library from your files' own tags, browses by artist,
 album, track or genre, plays gaplessly, and renders cover art — all from one
 Rust binary, with no daemon and no server. A fuzzy search and an editable
 queue make it a player you actually drive, not a playlist viewer.
+
+The site, with a player you can press play on: <https://alvaldes.github.io/velo/>.
+
+![The library's tracks view while a track plays: the now-playing block with its clock and spectrum, the transport, and seven tracks with the playing row marked](docs/media/shot-library.png)
+
+| The visualizer over the whole body (`V`) | A cliamp radio channel: the live row, then its songs |
+|:--|:--|
+| ![The spectrum drawn as bars across the full height of the terminal](docs/media/shot-visualizer.png) | ![Radio › Lofi: a live row with its listener count above the channel's numbered songs](docs/media/shot-radio.png) |
+
+The screenshots are velo 0.45.0 with the factory theme, playing CC0 tracks by
+HoliznaCC0. The same screen in text, before anything plays:
 
 ```
 ╭──────────────────────────────────────────────────────────────────────────────╮
@@ -165,7 +180,7 @@ once a day by default (`[update] check = "never"` turns it off for good, and
 **With the install script** — on Linux or macOS:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/alvaldes/velo/main/install.sh | sh
+curl -fsSL https://alvaldes.github.io/velo/install.sh | sh
 ```
 
 It picks the release binary for the machine, checks it against the `.sha256`
