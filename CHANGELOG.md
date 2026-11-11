@@ -1,6 +1,10 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.50.0] - 2026-11-11
+
+### Features
+- **ui:** A cliamp channel is markable from either row, and the live row says so
 ## [0.49.3] - 2026-11-11
 
 ### Fixes
