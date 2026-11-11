@@ -1,6 +1,10 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.49.2] - 2026-11-11
+
+### Fixes
+- **ui:** A handover says its wait, and a pause cancels only an unarmed one
 ## [0.49.1] - 2026-11-11
 
 ### Fixes
