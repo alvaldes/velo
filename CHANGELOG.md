@@ -1,6 +1,17 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.49.0] - 2026-11-11
+
+### Features
+- **themes:** The config folder ships one file per theme
+
+### Fixes
+- **ui:** A start that waits for the network keeps the stream playing
+
+### Documentation
+- **site:** The footer names the keys velo really shows
+- **media:** Record the README's screenshots from a real velo
 ## [0.48.1] - 2026-11-11
 
 ### Fixes
