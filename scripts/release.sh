@@ -8,6 +8,11 @@
 #
 #   feat → minor   fix, perf → patch   breaking → minor while 0.x
 #
+# Pass a version to cut it exactly as given instead of letting the log decide —
+# the first 1.0.0, or any number the author fixes on purpose:
+#
+#   scripts/release.sh 1.0.0
+#
 # Needs git-cliff (`brew install git-cliff`).
 set -euo pipefail
 
@@ -40,9 +45,14 @@ if ! grep -Eq '^(feat|fix|perf)(\([^)]*\))?!?:|^BREAKING CHANGE' <<<"$messages";
   exit 0
 fi
 
-next=$(git cliff --bumped-version 2>/dev/null)
+given=${1-}
+if [[ -n "$given" ]]; then
+  next="v${given#v}"
+else
+  next=$(git cliff --bumped-version 2>/dev/null)
+fi
 version=${next#v}
-[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "git-cliff proposed '$next'"
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "not a version: '$next'"
 git rev-parse -q --verify "refs/tags/$next" >/dev/null && fail "$next is already tagged"
 
 # The package version is the first `version =` line of Cargo.toml.
