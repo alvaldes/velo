@@ -99,18 +99,10 @@ label:focus-within {
 
 .top-inner {
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-end;
   align-items: center;
   padding-top: 1.6rem;
   padding-bottom: 1.6rem;
-}
-
-.brand {
-  font-family: var(--mono);
-  letter-spacing: 0.42em;
-  text-transform: uppercase;
-  font-size: 0.95rem;
-  color: var(--accent);
 }
 
 .top-links {
@@ -176,6 +168,21 @@ label:focus-within {
 
 .hero-grid > * { min-width: 0; }
 
+/* The name, the way the interface writes it in its own corner. */
+.lockup {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin: 0 0 1.6rem;
+  font-family: var(--mono);
+  font-size: 1.9rem;
+  letter-spacing: 0.42em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.lockup img { display: block; width: 60px; height: 60px; }
+
 h1 {
   font-size: clamp(2.1rem, 3.6vw, 3.3rem);
   line-height: 1.08;
@@ -227,6 +234,15 @@ h1 {
   cursor: pointer;
   border-right: 1px solid var(--hair);
   white-space: nowrap;
+}
+
+/* Controls, not prose: a drag across them should not paint a selection. */
+.picker,
+.app,
+.copy,
+.cta {
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 .picker label:last-child { border-right: 0; }
@@ -292,12 +308,72 @@ h1 {
   max-width: 50ch;
 }
 
-.actions {
+.cta {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.picker label:last-child { border-right: 0; }
+.picker label:hover { color: var(--text); }
+
+.picker label:has(input:checked) {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+.picker input {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+}
+
+.cmd {
   display: flex;
-  gap: 1rem;
-  align-items: center;
-  flex-wrap: wrap;
-  margin: 1.5rem 0 0;
+  align-items: flex-start;
+  gap: 0.7rem;
+  background: var(--glass);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+  border: 1px solid var(--hair);
+  border-radius: 8px;
+  padding: 0.75rem 0.8rem 0.75rem 1rem;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+}
+
+.prompt { color: var(--accent); flex: none; line-height: 1.5; }
+
+/* The whole command is always on screen: it wraps instead of scrolling, so
+   what gets copied is what was read. */
+.cmd code {
+  color: var(--text);
+  flex: 1;
+  min-width: 0;
+  /* Wrapped the way a terminal wraps a long line: at the edge, not at a word. */
+  word-break: break-all;
+  line-height: 1.5;
+}
+
+.copy {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  background: transparent;
+  border: 1px solid var(--hair);
+  color: var(--soft);
+  border-radius: 5px;
+  padding: 0.28rem 0.6rem;
+  cursor: pointer;
+  flex: none;
+}
+
+.copy:hover { color: var(--text); border-color: var(--soft); }
+
+.hint {
+  font-size: 0.8rem;
+  color: var(--soft);
+  margin: 0.8rem 0 0;
+  max-width: 50ch;
 }
 
 .cta {
@@ -312,12 +388,6 @@ h1 {
 }
 
 .cta:hover { filter: brightness(1.06); }
-
-.release {
-  font-family: var(--mono);
-  font-size: 0.74rem;
-  color: var(--soft);
-}
 
 .more-install {
   margin: 0.9rem 0 0;
@@ -515,9 +585,12 @@ h1 {
   grid-template-columns: 3.4ch 1fr auto;
   gap: 1ch;
   align-items: baseline;
+  position: relative;
   width: calc(100% + 0.6rem);
   margin: 0 -0.3rem;
-  padding: 0.04rem 0.3rem;
+  /* Every row keeps two cells for the marker, the way the interface does: the
+     numbers and names never move when a row starts to play. */
+  padding: 0.04rem 0.3rem 0.04rem calc(0.3rem + 2ch);
   border-radius: 1px;
 }
 
@@ -543,7 +616,6 @@ h1 {
 }
 
 .app button.app-row.selected {
-  grid-template-columns: 5ch 1fr auto;
   background: var(--accent);
   color: var(--accent-ink);
   font-weight: 600;
@@ -552,7 +624,12 @@ h1 {
 .app-row.selected .app-num,
 .app-row.selected .app-fact { color: var(--accent-ink); }
 
-#marker { margin-right: 0.6ch; }
+#marker {
+  position: absolute;
+  left: 0.3rem;
+  width: 2ch;
+  text-align: left;
+}
 
 .app-footer {
   display: flex;
@@ -655,14 +732,16 @@ kbd {
 }
 
 /* A band: prose on one side, the thing itself on the other. */
+/* The picture column is the width of the player in the hero. */
 .band {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 572px);
   gap: 4.5rem;
   align-items: center;
   padding: 5.5rem 0;
 }
 
+.band.flip { grid-template-columns: minmax(0, 572px) minmax(0, 1fr); }
 .band.flip .band-copy { order: 2; }
 
 .points {
@@ -723,15 +802,187 @@ kbd {
   outline: 1px solid rgba(244, 240, 226, 0.35);
 }
 
+/* Scenes: other screens of the interface, drawn in the same glass as the
+   player in the hero and at its width, from captures of the real thing. They
+   are pictures, not controls. */
+.scene-fig { margin: 0; }
+
+.scene-fig figcaption {
+  margin-top: 0.8rem;
+  font-size: 0.82rem;
+  color: var(--soft);
+}
+
+.scene {
+  font-size: 0.72rem;
+  cursor: default;
+  overflow: hidden;
+}
+
+.scene .app-tabs span { color: var(--dim); }
+.scene .app-tabs span.on { color: var(--text); font-weight: 600; }
+
+.s-title { font-weight: 600; }
+.s-sub { color: var(--dim); margin-bottom: 0.8rem; }
+.s-stopped { margin-left: 2ch; }
+
+.scene .app-spectrum {
+  opacity: 1;
+  height: 44px;
+  gap: 4px;
+  margin-bottom: 0.4rem;
+}
+
+.s-progress {
+  height: 2px;
+  background: rgba(154, 163, 174, 0.3);
+  margin-bottom: 0.6rem;
+}
+
+.s-progress span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+
+.s-transport {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 0.9rem;
+  white-space: nowrap;
+}
+
+.s-transport > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 1ch;
+}
+
+.s-primary {
+  background: var(--accent);
+  color: var(--accent-ink);
+  padding: 0 1ch;
+}
+
+.s-gap { margin-left: 2ch; }
+.s-cool { color: var(--cool); }
+
+.s-gauge {
+  position: relative;
+  width: 7ch;
+  height: 2px;
+  background: rgba(154, 163, 174, 0.5);
+}
+
+.s-gauge span {
+  position: absolute;
+  top: -3px;
+  width: 8px;
+  height: 8px;
+  margin-left: -4px;
+  border-radius: 50%;
+  background: var(--text);
+}
+
+.s-head {
+  display: flex;
+  gap: 2ch;
+  padding-left: 3ch;
+  margin-bottom: 0.1rem;
+  white-space: nowrap;
+}
+
+.s-head b { font-weight: 600; }
+
+.s-rows { margin-bottom: 0.7rem; }
+
+.s-row {
+  display: grid;
+  grid-template-columns: 2ch 3ch minmax(0, 1fr) auto;
+  gap: 1ch;
+  margin: 0 -0.3rem;
+  padding: 0.03rem 0.3rem;
+}
+
+.s-row .app-name { min-width: 0; }
+.s-meta { color: var(--dim); margin-left: 2ch; }
+
+.s-row.selected {
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 600;
+}
+
+.s-row.selected .app-num,
+.s-row.selected .app-fact,
+.s-row.selected .s-meta { color: var(--accent-ink); }
+
+.s-space { height: 5.5rem; }
+
+.s-status {
+  color: var(--accent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-bottom: 0.3rem;
+}
+
+/* The interface's own cards: a thin frame with its title set into the edge. */
+.s-card {
+  position: absolute;
+  display: grid;
+  padding: 0.7rem 1.4ch 0.5rem;
+  background: rgb(13, 16, 23);
+  border: 1px solid var(--dim);
+  border-radius: 4px;
+}
+
+.s-card-title {
+  position: absolute;
+  top: -0.8em;
+  left: 1ch;
+  padding: 0 0.6ch;
+  color: var(--accent);
+  font-weight: 600;
+  background: linear-gradient(180deg, transparent 45%, rgb(13, 16, 23) 45%);
+}
+
+/* Both cards sit in the middle of the screen, as the interface places them. */
+.s-card-list,
+.s-card-prompt {
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+}
+
+.s-card-list .on { color: var(--accent); }
+
+.s-card-prompt {
+  /* Raised so its title lands in the empty spectrum rows, clear of the transport. */
+  top: calc(50% - 2.4rem);
+  width: min(86%, 44ch);
+  gap: 0.05rem;
+}
+
+.s-card-keys { margin-top: 0.7rem; }
+
+.s-caret {
+  display: inline-block;
+  width: 1px;
+  height: 1.1em;
+  margin-left: 1px;
+  vertical-align: text-bottom;
+  background: var(--text);
+}
+
 /* ---- radio ---- */
 
-.radio { padding: 5.5rem 0; }
-
-.radio-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr 1.7fr;
+.stats {
+  display: flex;
   gap: 3rem;
-  align-items: start;
+  margin-bottom: 1.8rem;
 }
 
 .stat {
@@ -741,7 +992,7 @@ kbd {
 
 .stat b {
   display: block;
-  font-size: clamp(2.8rem, 6vw, 4.8rem);
+  font-size: clamp(2.4rem, 4.4vw, 3.6rem);
   line-height: 1;
   letter-spacing: -0.04em;
   font-weight: 650;
@@ -759,6 +1010,93 @@ kbd {
 }
 
 .live { color: var(--accent); font-family: var(--mono); font-size: 0.88em; }
+
+/* ---- cliamp radio ---- */
+
+.cliamp { padding: 5.5rem 0; }
+
+.cliamp-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
+  gap: 4.5rem;
+  align-items: end;
+  margin-bottom: 2.4rem;
+}
+
+.cliamp h2 { margin-bottom: 1rem; }
+
+/* A thank-you in the first person, set apart by the accent, not by a box. */
+.thanks {
+  margin: 0;
+  padding-left: 1.4rem;
+  border-left: 2px solid var(--accent);
+}
+
+.thanks p {
+  margin: 0 0 0.6rem;
+  font-size: 1.08rem;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.thanks footer a { color: inherit; }
+
+.thanks footer {
+  font-size: 0.82rem;
+  color: var(--soft);
+}
+
+/* The channels as the interface would list them: a name, a count, and what
+   the channel plays. */
+.channels {
+  padding: 1.2rem 1.4rem 1.3rem;
+  border: 1px solid var(--hair);
+  border-radius: 12px;
+  background: var(--glass);
+  -webkit-backdrop-filter: blur(18px);
+  backdrop-filter: blur(18px);
+  box-shadow: 0 30px 70px -30px rgba(0, 0, 0, 0.7);
+  font-family: var(--mono);
+  font-size: 0.76rem;
+}
+
+.channels-head { margin: 0 0 0.9rem; }
+.channels-head b { color: var(--text); font-weight: 600; }
+.channels-head span { color: var(--dim); }
+
+.channels ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  column-gap: 2.5rem;
+}
+
+.channels li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.1rem 1rem;
+  padding: 0.6rem 0;
+  border-top: 1px solid var(--hair);
+}
+
+.ch-name { color: var(--text); font-weight: 600; }
+.ch-songs { color: var(--accent); }
+
+.ch-what {
+  grid-column: 1 / -1;
+  color: var(--dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cliamp-note {
+  margin: 1.2rem 0 0;
+  font-size: 0.86rem;
+  max-width: 70ch;
+}
 
 /* ---- keys ---- */
 
@@ -806,19 +1144,87 @@ kbd {
   font-size: 0.92rem;
 }
 
+/* ---- who makes it ---- */
+
+/* The same glass as every panel on the page, with the links set the way the
+   interface sets its keys: the label in the cool colour, the value beside it. */
+.maker {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 2.2rem;
+  align-items: center;
+  margin-top: 4rem;
+  padding: 1.8rem 2rem;
+  border: 1px solid var(--hair);
+  border-radius: 12px;
+  background: var(--glass);
+  -webkit-backdrop-filter: blur(18px);
+  backdrop-filter: blur(18px);
+  box-shadow: 0 30px 70px -30px rgba(0, 0, 0, 0.7);
+}
+
+/* The portrait takes the page's light: no colour of its own, warmed a little,
+   inside a ring of the accent. */
+.maker img {
+  display: block;
+  width: 112px;
+  height: 112px;
+  border-radius: 50%;
+  filter: grayscale(1) sepia(0.35) contrast(1.05) brightness(0.92);
+  outline: 1px solid var(--accent);
+  outline-offset: 4px;
+}
+
+.maker h2 {
+  font-size: clamp(1.3rem, 2vw, 1.6rem);
+  margin-bottom: 0.6rem;
+  max-width: none;
+}
+
+.maker p {
+  margin: 0;
+  max-width: 56ch;
+  font-size: 0.95rem;
+}
+
+.maker-links {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 0 2.2rem;
+  border-left: 1px solid var(--hair);
+  display: grid;
+  gap: 0.55rem;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+}
+
+.maker-links a {
+  display: grid;
+  grid-template-columns: 5ch auto;
+  gap: 1ch;
+  color: var(--text);
+  text-decoration: none;
+}
+
+.maker-links b { color: var(--cool); font-weight: 400; }
+.maker-links a:hover { color: var(--accent); }
+
 /* ---- the last word ---- */
 
-.start { padding: 4rem 0 2rem; }
-
 .start .term {
-  max-width: 54rem;
   margin-bottom: 1.2rem;
-  padding-right: 9rem;
+  padding-bottom: 3.4rem;
+}
+
+/* The command is always whole: it wraps the way a terminal wraps a long line. */
+.start .term pre {
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 
 .start .copy {
   position: absolute;
-  top: 1.1rem;
+  bottom: 1.2rem;
   right: 1.1rem;
 }
 
@@ -855,21 +1261,30 @@ kbd {
   .app-volume input { width: 84px; }
 
   .band { grid-template-columns: minmax(0, 1fr); gap: 2.2rem; padding: 3.5rem 0; }
+  .band.flip { grid-template-columns: minmax(0, 1fr); }
   .band.flip .band-copy { order: 0; }
-  .radio, .keys { padding: 3.5rem 0; }
-  .radio-grid { grid-template-columns: 1fr 1fr; gap: 2rem; }
-  .radio-grid .plain { grid-column: 1 / -1; }
+  .scene { font-size: 0.62rem; }
+  .s-meta { display: none; }
+  .keys { padding: 3.5rem 0; }
+  .stats { gap: 2rem; }
   .keymap { grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 1.5rem; }
+  .cliamp { padding: 3.5rem 0; }
+  .cliamp-head { grid-template-columns: minmax(0, 1fr); gap: 1.8rem; }
+  .channels ul { grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 1.5rem; }
   .notes { grid-template-columns: minmax(0, 1fr); gap: 2rem; padding: 3rem 0; }
-  .start .term { padding-right: 1.4rem; padding-bottom: 3.6rem; }
-  .start .copy { top: auto; bottom: 1rem; right: auto; left: 1.4rem; }
+  .maker { grid-template-columns: auto minmax(0, 1fr); gap: 1.4rem; padding: 1.4rem; }
+  .maker img { width: 72px; height: 72px; }
+  .maker-links { grid-column: 1 / -1; padding: 1.1rem 0 0; border-left: 0; border-top: 1px solid var(--hair); }
 }
 
 @media (max-width: 560px) {
   .keymap { grid-template-columns: 1fr; }
+  .channels ul { grid-template-columns: minmax(0, 1fr); }
   .app-fact { display: none; }
-  .app button.app-row,
-  .app button.app-row.selected { grid-template-columns: 5ch 1fr; }
+  .scene .app-fact { display: inline; }
+  .s-transport .s-gap.dim:not(:last-of-type),
+  .s-transport .s-gap + .dim { display: none; }
+  .app button.app-row { grid-template-columns: 3.4ch 1fr; }
 }
 
 /* ---- motion, only when the reader allows it ---- */

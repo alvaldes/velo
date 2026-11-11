@@ -1,25 +1,17 @@
 // The landing page's behaviour: the install picker, the copy buttons, the
 // working player, and the hearth video's manners.
 //
-// Everything the page loads is in this folder. The one request that leaves it
-// is the one velo itself makes: GitHub's latest-release answer, which turns the
-// download button into a direct link to the archive for the chosen platform.
-// When it fails the button still goes to the Releases page.
+// Everything the page loads is in this folder; it asks nobody else for anything.
 
 const REPO = 'alvaldes/velo';
-const INSTALL = `curl -fsSL https://raw.githubusercontent.com/${REPO}/main/install.sh | sh`;
-const SOURCE = `git clone https://github.com/${REPO} && cd velo && cargo install --path .`;
-const SCRIPT_HINT =
-  'The script picks the binary for this machine, checks it against the .sha256 CI published beside it, and puts velo in ~/.local/bin. No sudo.';
 
-const platforms = {
-  'aarch64-apple-darwin': { name: 'macOS (Apple silicon)', line: INSTALL, hint: SCRIPT_HINT },
-  'x86_64-apple-darwin': { name: 'macOS (Intel)', line: INSTALL, hint: SCRIPT_HINT },
-  'x86_64-unknown-linux-gnu': { name: 'Linux (x64)', line: INSTALL, hint: SCRIPT_HINT },
-  'aarch64-unknown-linux-gnu': { name: 'Linux (arm64)', line: INSTALL, hint: SCRIPT_HINT },
+const installs = {
+  script: {
+    line: 'curl -fsSL https://alvaldes.github.io/velo/install.sh | sh',
+    hint: 'The script picks the binary for this machine, checks it against the .sha256 CI published beside it, and puts velo in ~/.local/bin. No sudo.',
+  },
   source: {
-    name: 'source',
-    line: SOURCE,
+    line: `git clone https://github.com/${REPO} && cd velo && cargo install --path .`,
     hint: 'A clone and cargo: needs Rust 1.88 or newer, cmake or a system libopus, and the ALSA development headers on Linux.',
   },
 };
@@ -28,79 +20,15 @@ const $ = (id) => document.getElementById(id);
 
 // ---- install ----
 
-const line = $('line');
-const hint = $('hint');
-const download = $('download');
-const releaseNote = $('release');
-
-// Filled in by the latest-release answer: the tag, and each archive by target.
-let release = null;
-
-function megabytes(bytes) {
-  return `${(bytes / 1_048_576).toFixed(1)} MB`;
-}
-
-function chosen() {
+function showInstall() {
   const checked = document.querySelector('input[name="platform"]:checked');
-  return platforms[checked?.value] ? checked.value : 'aarch64-apple-darwin';
-}
-
-function showPlatform() {
-  const key = chosen();
-  const platform = platforms[key];
-  line.textContent = platform.line;
-  hint.textContent = platform.hint;
-
-  if (key === 'source') {
-    download.textContent = 'Download the source';
-    download.href = release
-      ? `https://github.com/${REPO}/archive/refs/tags/${release.tag}.tar.gz`
-      : `https://github.com/${REPO}`;
-    releaseNote.textContent = release ? `${release.tag}, .tar.gz` : 'from GitHub';
-    return;
-  }
-
-  const asset = release?.assets.get(key);
-  download.textContent = `Download for ${platform.name}`;
-  download.href = asset ? asset.url : `https://github.com/${REPO}/releases/latest`;
-  releaseNote.textContent = asset
-    ? `${release.tag}, ${megabytes(asset.size)} .tar.gz`
-    : '.tar.gz from the latest release';
-}
-
-// A guess, never a lock: the picker stays the reader's. An Apple silicon Mac
-// reports itself as Intel, so macOS keeps the arm64 default.
-function guessPlatform() {
-  const agent = navigator.userAgent;
-  let key = null;
-  if (/Linux/.test(agent) && !/Android/.test(agent)) {
-    key = /aarch64|arm64/.test(agent) ? 'aarch64-unknown-linux-gnu' : 'x86_64-unknown-linux-gnu';
-  }
-  const radio = key && document.querySelector(`input[name="platform"][value="${key}"]`);
-  if (radio) radio.checked = true;
-}
-
-async function findRelease() {
-  try {
-    const answer = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`, {
-      headers: { Accept: 'application/vnd.github+json' },
-    });
-    if (!answer.ok) return;
-    const body = await answer.json();
-    const assets = new Map();
-    for (const asset of body.assets ?? []) {
-      const target = Object.keys(platforms).find((key) => asset.name === `velo-${body.tag_name}-${key}.tar.gz`);
-      if (target) assets.set(target, { url: asset.browser_download_url, size: asset.size });
-    }
-    release = { tag: body.tag_name, assets };
-    showPlatform();
-  } catch {
-    // Offline or refused: the button keeps pointing at the Releases page.
-  }
+  const install = installs[checked?.value] ?? installs.script;
+  $('line').textContent = install.line;
+  $('hint').textContent = install.hint;
 }
 
 for (const radio of document.querySelectorAll('input[name="platform"]')) {
-  radio.addEventListener('change', showPlatform);
+  radio.addEventListener('change', showInstall);
 }
 
 for (const button of document.querySelectorAll('.copy')) {
@@ -116,9 +44,7 @@ for (const button of document.querySelectorAll('.copy')) {
   });
 }
 
-guessPlatform();
-showPlatform();
-findRelease();
+showInstall();
 
 // ---- the player ----
 
