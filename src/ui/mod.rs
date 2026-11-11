@@ -5921,12 +5921,12 @@ impl<'lib> App<'lib> {
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 
-    /// The buttons on the left, the volume slider on the right. `dense` is the
-    /// short block's row: the transport and the volume with its number, and
-    /// nothing between them. Shuffle, repeat and the ReplayGain mode need a row
-    /// of their own to read, so on a three-row block they step out (`z`, `r` and
-    /// the settings card still reach them); crammed in they printed as
-    /// `shuffleRG track`.
+    /// The buttons on the left, the volume on the right, and the ladder that
+    /// decides what else fits. The play button and the volume's number are the
+    /// row; as the width runs out the gauge goes first, then the ReplayGain
+    /// mode, then shuffle and repeat, then the two skip arrows — RG outranks
+    /// nothing here, which is what it used to do while shuffle left. `dense` is
+    /// the short block, where RG, shuffle and repeat are not offered at all.
     fn draw_transport(&self, frame: &mut Frame, area: Rect, volume: u8, dense: bool) {
         let button = Style::new().fg(self.theme.secondary);
         let lit = |on: bool| {
@@ -5936,51 +5936,92 @@ impl<'lib> App<'lib> {
                 self.theme.dim
             }
         };
-        let primary = if self.state == PlayState::Playing {
-            " ❚❚ pause "
-        } else {
-            " ▶ play "
-        };
-        let mut buttons = vec![
-            Span::styled(" ◂◂ ", button),
-            Span::raw(" "),
+        let width = usize::from(area.width);
+        let measure = |spans: &[Span<'static>]| Line::from(spans.to_vec()).width();
+
+        let primary = vec![Span::styled(
+            if self.state == PlayState::Playing {
+                " ❚❚ pause "
+            } else {
+                " ▶ play "
+            },
+            Style::new().bg(self.theme.accent).fg(self.theme.ink).bold(),
+        )];
+        let previous = vec![Span::styled(" ◂◂ ", button), Span::raw(" ")];
+        let next = vec![Span::raw(" "), Span::styled(" ▸▸ ", button)];
+        // Shuffle and repeat: dim while off, the accent while on.
+        let extras = vec![
+            Span::raw("   "),
+            Span::styled("shuffle", Style::new().fg(lit(self.shuffle))),
+            Span::styled("  repeat ", Style::new().fg(self.theme.dim)),
             Span::styled(
-                primary,
-                Style::new().bg(self.theme.accent).fg(self.theme.ink).bold(),
+                self.repeat.label(),
+                Style::new().fg(lit(self.repeat != Repeat::Off)),
             ),
-            Span::raw(" "),
-            Span::styled(" ▸▸ ", button),
         ];
-        if !dense {
-            // Shuffle and repeat: dim while off, the accent while on.
-            buttons.extend([
-                Span::raw("   "),
-                Span::styled("shuffle", Style::new().fg(lit(self.shuffle))),
-                Span::styled("  repeat ", Style::new().fg(self.theme.dim)),
-                Span::styled(
-                    self.repeat.label(),
-                    Style::new().fg(lit(self.repeat != Repeat::Off)),
-                ),
-            ]);
-        }
-        let mut right = if dense {
-            Vec::new()
-        } else {
-            // The ReplayGain mode in the config's own words, padded to the
-            // longest so the slider never moves with it (ui-redesign T10).
-            let mode = match self.replay_gain {
-                ReplayGainMode::Track => "track",
-                ReplayGainMode::Album => "album",
-                ReplayGainMode::Off => "off",
-            };
-            vec![
-                Span::styled("RG ", Style::new().fg(self.theme.dim)),
-                Span::styled(format!("{mode:<5}"), Style::new().fg(self.theme.secondary)),
-                Span::raw("   "),
-            ]
+        // The ReplayGain mode in the config's own words, padded to the longest
+        // so the slider never moves with it (ui-redesign T10).
+        let mode = match self.replay_gain {
+            ReplayGainMode::Track => "track",
+            ReplayGainMode::Album => "album",
+            ReplayGainMode::Off => "off",
         };
-        right.extend(volume_slider(volume, VOLUME_CELLS, &self.theme));
-        split_row(frame, area, Line::from(buttons), Line::from(right));
+        let gain = vec![
+            Span::styled("RG ", Style::new().fg(self.theme.dim)),
+            Span::styled(format!("{mode:<5}"), Style::new().fg(self.theme.secondary)),
+            Span::raw("   "),
+        ];
+
+        let mut gauge = VOLUME_CELLS;
+        let mut arrows = true;
+        let mut with_extras = !dense;
+        let mut with_gain = !dense;
+        // Give pieces up one at a time, in the ladder's order, until the row
+        // fits. The play button and `VOL` plus its number always fit: a window
+        // narrower than that clips, it does not lose the transport.
+        for _ in 0..u16::MAX {
+            let left = measure(&primary)
+                + if arrows {
+                    measure(&previous) + measure(&next)
+                } else {
+                    0
+                }
+                + if with_extras { measure(&extras) } else { 0 };
+            let right = measure(&volume_slider(volume, gauge, &self.theme))
+                + if with_gain { measure(&gain) } else { 0 };
+            if left + right + 1 <= width {
+                break;
+            }
+            if gauge > 0 {
+                gauge -= 1;
+            } else if with_gain {
+                with_gain = false;
+            } else if with_extras {
+                with_extras = false;
+            } else if arrows {
+                arrows = false;
+            } else {
+                break;
+            }
+        }
+
+        let mut left = Vec::new();
+        if arrows {
+            left.extend(previous);
+        }
+        left.extend(primary);
+        if arrows {
+            left.extend(next);
+        }
+        if with_extras {
+            left.extend(extras);
+        }
+        let mut right = Vec::new();
+        if with_gain {
+            right.extend(gain);
+        }
+        right.extend(volume_slider(volume, gauge, &self.theme));
+        split_row(frame, area, Line::from(left), Line::from(right));
     }
 
     /// The position, and the length when it is known; a dim placeholder
@@ -6239,15 +6280,44 @@ impl<'lib> App<'lib> {
 
     /// The rows of the sources screen (issue #3): one per source, in the
     /// order it shows them.
+    /// The source what plays came from, for the marker on the first screen: a
+    /// station is radio, a file the index knows is the local library, a file the
+    /// store marks is a favourite. Anything else says nothing — a playlist keeps
+    /// no origin for its tracks, and a guess would be worse than a bare row.
+    fn playing_source(&self) -> Option<sources::Source> {
+        match self.playing_entry()? {
+            Entry::Station { .. } => Some(sources::Source::Radio),
+            Entry::File(path) => {
+                let path = path.to_string_lossy();
+                if self
+                    .tracks
+                    .iter()
+                    .any(|entry| entry.path.to_string_lossy() == path)
+                {
+                    Some(sources::Source::Library)
+                } else if self.favourites.is_favorite(&path) {
+                    Some(sources::Source::Favourites)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
     fn source_rows(&self, width: u16) -> Vec<ListItem<'static>> {
         let digits = digits(sources::Source::ALL.len());
+        let playing = self.playing_source();
         sources::Source::ALL
             .into_iter()
             .enumerate()
             .map(|(index, source)| {
                 ListItem::new(list_row(
                     ListRow {
-                        mark: RowMark::None,
+                        mark: if playing == Some(source) {
+                            RowMark::Playing
+                        } else {
+                            RowMark::None
+                        },
                         number: Some(index + 1),
                         digits,
                         name: source.label().to_owned(),

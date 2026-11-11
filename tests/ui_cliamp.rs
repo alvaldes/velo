@@ -372,10 +372,10 @@ fn cliamp_false_hides_the_section_and_leaves_the_directory_alone() {
 // ---- S2: the channels and their facts ---------------------------------------
 
 #[test]
-fn the_channels_list_with_their_track_counts() {
-    // The listener count no longer sits on the channel row: it moved to
-    // the channel's live row, where the channel is actually played
-    // (issue #68). The channel row says only how many songs it holds.
+fn the_channels_list_counts_its_tracks_and_its_listeners() {
+    // The list is where someone scans fifteen channels and picks one, so each
+    // row says what it holds and who is on it. The live row inside the channel
+    // repeats the count, because that is where `enter` plays (issue #68).
     let mut view = view();
     view.open_place(Place::Cliamp);
     assert_eq!(
@@ -385,8 +385,16 @@ fn the_channels_list_with_their_track_counts() {
         view.labels()
     );
     let rows = view.visible_rows();
-    assert_eq!(rows[0].fact, "120 tracks", "got: {:?}", rows[0]);
-    assert_eq!(rows[1].fact, "12 tracks", "got: {:?}", rows[1]);
+    assert_eq!(
+        rows[0].fact, "120 tracks · 3 listening now",
+        "got: {:?}",
+        rows[0]
+    );
+    assert_eq!(
+        rows[1].fact, "12 tracks · 0 listening now",
+        "got: {:?}",
+        rows[1]
+    );
 }
 
 #[test]

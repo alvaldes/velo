@@ -200,7 +200,8 @@ fn the_title_bar_lights_sources_anywhere_inside_it_and_the_queue_on_the_queue() 
 
     // Back on the sources screen, the radio drawn over it stays inside it.
     press(&mut app, KeyCode::Tab);
-    press(&mut app, KeyCode::Char('j')); // onto Radio
+    // Radio leads the list now (the author's order), so it is the row the
+    // cursor starts on and `enter` opens it without moving.
     press(&mut app, KeyCode::Enter);
     assert!(app.radio_open());
     assert_eq!(cell_at(&app, sources_x, 1).fg, theme.accent);
@@ -969,6 +970,109 @@ fn a_station_row_in_the_queue_reads_as_live() {
     assert!(
         !track_row.contains("● live"),
         "a track row is not live, got: {track_row:?}"
+    );
+}
+
+// ---- the first screen says where the sound comes from ---------------------
+
+/// The Sources screen is where a person chooses an origin, so it also answers
+/// "what is playing, and from where": the row that owns the playing entry
+/// carries `▶`, the way a list row does. A station is radio; a file the index
+/// knows is the local library.
+#[test]
+fn the_sources_screen_marks_the_row_what_plays_came_from() {
+    let mut app = App::browse(None);
+    app.set_library_root(Some(std::path::PathBuf::from("/music")));
+    app.show_playing_for_tests(
+        Entry::Station {
+            url: String::from("https://stream.example/nova.mp3"),
+            name: String::from("Radio Nova"),
+        },
+        std::time::Duration::ZERO,
+        None,
+        None,
+    );
+    app.open_sources();
+    let screen = screen_at(&app, 80, 24);
+    let radio = screen
+        .lines()
+        .find(|line| line.contains("1. Radio"))
+        .unwrap_or_else(|| panic!("the radio row is on the first screen:\n{screen}"));
+    assert!(
+        radio.contains('▶'),
+        "the radio row is marked, got: {radio:?}"
+    );
+    let library = screen
+        .lines()
+        .find(|line| line.contains("2. Local library"))
+        .unwrap_or_else(|| panic!("the library row is on the first screen:\n{screen}"));
+    assert!(
+        !library.contains('▶'),
+        "a row that does not own the playback stays bare, got: {library:?}"
+    );
+}
+
+// ---- the transport's ladder as the window narrows -------------------------
+
+/// The play button and the volume's number are the row; everything else leaves
+/// as the width runs out, and in this order (author's report): the gauge first,
+/// then the ReplayGain mode, then shuffle and repeat, then the two skip arrows.
+/// RG used to outlive shuffle, which is what this pins.
+#[test]
+fn a_narrower_window_gives_the_transport_up_in_order() {
+    let app = App::new(tracks(&["one.flac"]));
+    let row_at = |width: u16| -> String {
+        let screen = screen_at(&app, width, 30);
+        screen
+            .lines()
+            .find(|line| line.contains("VOL"))
+            .unwrap_or_default()
+            .to_owned()
+    };
+
+    let wide = row_at(120);
+    for piece in ["◂◂", "▸▸", "shuffle", "RG", "VOL"] {
+        assert!(wide.contains(piece), "{piece} fits at 120, got: {wide:?}");
+    }
+
+    // Monotonic: a piece that has left never comes back as the window narrows.
+    let widths = [120u16, 110, 100, 92, 84, 76, 68, 60, 52, 46, 40];
+    let rows: Vec<String> = widths.iter().map(|width| row_at(*width)).collect();
+    for pair in rows.windows(2) {
+        let (wider, narrower) = (&pair[0], &pair[1]);
+        for piece in ["◂◂", "shuffle", "RG"] {
+            if !wider.contains(piece) {
+                assert!(
+                    !narrower.contains(piece),
+                    "{piece} must not come back when the window narrows: {wider:?} -> {narrower:?}"
+                );
+            }
+        }
+    }
+
+    // RG leaves before shuffle does: the order the author asked for.
+    let rg_gone = rows
+        .iter()
+        .find(|row| !row.contains("RG"))
+        .expect("RG leaves at some width");
+    assert!(
+        rg_gone.contains("shuffle"),
+        "shuffle outlives RG, got: {rg_gone:?}"
+    );
+
+    // The narrowest row still carries the transport and the volume's number.
+    let narrowest = rows.last().expect("a row at every width");
+    assert!(
+        narrowest.contains("play"),
+        "the play button never leaves: {narrowest:?}"
+    );
+    assert!(
+        narrowest.contains("VOL"),
+        "the volume label never leaves: {narrowest:?}"
+    );
+    assert!(
+        narrowest.contains("100"),
+        "the volume's number never leaves: {narrowest:?}"
     );
 }
 

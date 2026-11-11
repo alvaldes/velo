@@ -315,8 +315,7 @@ fn ctrl_r_in_the_radio_view_is_the_radio_s_and_r_alone_still_cycles_repeat() {
     let mut app = App::browse(None);
     app.set_library_root(Some(PathBuf::from("/music"))); // a configured library opens no prompt
     app.open_sources();
-    press(&mut app, KeyCode::Char('j')); // onto Radio
-    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Enter); // Radio leads the list
     assert!(app.radio_open());
 
     let ctrl_r = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL);
@@ -2345,6 +2344,7 @@ fn a_recorded_view_still_parses_and_the_launch_lands_on_sources_then_the_library
     // The shell's launch path: `Sources` first, the library behind `enter`.
     app.open_sources();
     assert_eq!(app.view(), View::Sources);
+    press(&mut app, KeyCode::Char('j')); // onto Local library, the second row
     press(&mut app, KeyCode::Enter);
     assert_eq!(app.view(), View::Library);
     assert_eq!(app.level(), Some(Level::AllAlbums));
@@ -2379,6 +2379,7 @@ fn a_file_without_the_view_key_still_parses_and_restores_the_rest() {
     );
 
     app.open_sources();
+    press(&mut app, KeyCode::Char('j')); // onto Local library, the second row
     press(&mut app, KeyCode::Enter);
     assert_eq!(app.view(), View::Library);
     assert_eq!(

@@ -21,12 +21,13 @@ pub enum Source {
 }
 
 impl Source {
-    /// Every source, in the order the first screen shows them (S2).
-    /// `Favourites` and `Playlists` are last, so `j` from the top still
-    /// lands on `Radio`.
+    /// Every source, in the order the first screen shows them (S2, revised by
+    /// the author: Radio leads, because a fresh install reaches for a station
+    /// before it has a folder to index, and the local library is the second
+    /// row rather than the first).
     pub const ALL: [Self; 5] = [
-        Self::Library,
         Self::Radio,
+        Self::Library,
         Self::RecentlyPlayed,
         Self::Favourites,
         Self::Playlists,

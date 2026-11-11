@@ -42,7 +42,7 @@ use crate::radio::directory::{is_playable_codec, is_playable_station, refusal, r
 use crate::radio::store::{Favorite, Pinned, RadioStore, station_key};
 
 use super::plural;
-use super::rowtext::{listening, live, note, starred, station_label, tail};
+use super::rowtext::{listeners, listening, live, note, starred, station_label, tail};
 use super::theme::Theme;
 use super::{ListRow, PlayState, RowMark, centered, digits, draw_empty, list_row};
 
@@ -1370,16 +1370,32 @@ impl RadioView {
     fn cliamp_channel_rows(&self) -> Vec<Row> {
         self.cliamp_channels
             .iter()
-            .map(|channel| Row {
-                label: channel.name.clone(),
-                fact: plural(
+            .map(|channel| {
+                // The channel's own row says what is in it and who is on it.
+                // The live row inside the channel repeats the count because
+                // that is where a person presses enter (issue #68); the list is
+                // where they scan the fifteen of them and pick.
+                let mut fact = plural(
                     usize::try_from(channel.tracks).unwrap_or(usize::MAX),
                     "track",
                     "tracks",
-                ),
-                kind: RowKind::CliampChannel {
-                    channel: channel.clone(),
-                },
+                );
+                if let Some(count) = self
+                    .cliamp_listeners
+                    .iter()
+                    .find(|row| row.id == channel.id)
+                    .map(|row| row.active)
+                {
+                    use std::fmt::Write as _;
+                    let _ = write!(fact, " · {}", listeners(count));
+                }
+                Row {
+                    label: channel.name.clone(),
+                    fact,
+                    kind: RowKind::CliampChannel {
+                        channel: channel.clone(),
+                    },
+                }
             })
             .collect()
     }

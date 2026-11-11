@@ -353,11 +353,11 @@ fn an_unmarked_track_shows_no_star() {
 
 // ---- S4: the list ------------------------------------------------------------
 
-/// `Sources` gains `Favourites` after `Recently played`, so `j` from
-/// the top still lands on `Radio` — and `Playlists` (issue #4) is the row
-/// after it.
+/// `Sources` gains `Favourites` after `Recently played`, and `Playlists`
+/// (issue #4) is the row after it. Radio leads the list and Local library is
+/// the second row (the author's order).
 #[test]
-fn favourites_is_before_the_last_source_and_j_from_the_top_still_lands_on_radio() {
+fn favourites_sits_before_playlists_and_radio_leads_the_list() {
     let temp = TempLibrary::new("sources");
     let mut app = app(&temp);
     app.open_sources();
@@ -365,8 +365,8 @@ fn favourites_is_before_the_last_source_and_j_from_the_top_still_lands_on_radio(
     assert_eq!(
         app.sources_labels(),
         [
-            "Local library",
             "Radio",
+            "Local library",
             "Recently played",
             "Favourites",
             "Playlists"
@@ -531,7 +531,8 @@ fn the_list_reads_the_store_anew_every_time_it_opens() {
 
     // Walk back out, unmark one, and open the list again.
     press(&mut app, KeyCode::Esc);
-    press(&mut app, KeyCode::Char('g')); // the top of Sources: Local library
+    press(&mut app, KeyCode::Char('g')); // the top of Sources: Radio
+    press(&mut app, KeyCode::Char('j')); // onto Local library
     press(&mut app, KeyCode::Enter); // into the library
     assert_eq!(app.level(), Some(Level::AllTracks));
     // The selection is already on the first row: opening a source resets it.

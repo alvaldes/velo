@@ -72,6 +72,15 @@ pub fn listening(count: u32) -> String {
     format!("● {count} listening now")
 }
 
+/// `N listening now` — the same fact without the marker, for a row that has
+/// already spent its bullet on the separator before it (`120 tracks · 17
+/// listening now`). The live row keeps [`listening`]: there the bullet is the
+/// thing that says live.
+#[must_use]
+pub fn listeners(count: u32) -> String {
+    format!("{count} listening now")
+}
+
 /// `Name — live` — the one way a row says it plays the channel itself,
 /// not one of its songs (issue #68): the channel's live stream, through
 /// the same path a directory station takes.

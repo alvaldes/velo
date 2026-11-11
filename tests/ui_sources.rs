@@ -62,8 +62,8 @@ fn the_sources_screen_renders_its_header_and_all_five_rows() {
         "the header names the screen, got:\n{screen}"
     );
     for row in [
-        "Local library",
         "Radio",
+        "Local library",
         "Recently played",
         "Favourites",
         "Playlists",
@@ -73,8 +73,8 @@ fn the_sources_screen_renders_its_header_and_all_five_rows() {
 }
 
 /// S1, S2: the first screen lists what velo can play, with the cursor
-/// already on the first row. `Favourites` (issue #7) and `Playlists`
-/// (issue #4) are last, so `j` from the top still lands on `Radio`.
+/// already on the first row, `Radio`. `Favourites` (issue #7) and
+/// `Playlists` (issue #4) are last; `Local library` is one `j` from the top.
 #[test]
 fn the_sources_screen_names_the_sources_with_the_cursor_on_the_first() {
     let mut app = app();
@@ -84,8 +84,8 @@ fn the_sources_screen_names_the_sources_with_the_cursor_on_the_first() {
     assert_eq!(
         app.sources_labels(),
         [
-            "Local library",
             "Radio",
+            "Local library",
             "Recently played",
             "Favourites",
             "Playlists"
@@ -109,7 +109,7 @@ fn the_source_cursor_moves_and_wraps_at_both_ends() {
     assert_eq!(
         app.sources_selected(),
         1,
-        "the first j still lands on Radio"
+        "the first j still lands on Local library"
     );
     press(&mut app, KeyCode::Char('j'));
     assert_eq!(app.sources_selected(), 2);
@@ -144,6 +144,7 @@ fn entering_the_local_library_lands_on_the_library_and_its_keys_still_work() {
     let mut app = app_with_a_library();
     app.open_sources();
 
+    press(&mut app, KeyCode::Char('j')); // down to Local library
     press(&mut app, KeyCode::Enter);
     assert_eq!(app.view(), View::Library);
     assert_eq!(app.level(), Some(Level::Artists));
@@ -182,6 +183,7 @@ fn entering_the_local_library_lands_on_the_library_even_when_the_saved_tab_was_t
     app.open_sources();
     assert_eq!(app.view(), View::Sources);
 
+    press(&mut app, KeyCode::Char('j')); // down to Local library
     press(&mut app, KeyCode::Enter);
     assert_eq!(app.view(), View::Library);
     assert_eq!(app.level(), Some(Level::Artists));
@@ -194,6 +196,7 @@ fn entering_the_local_library_lands_on_the_library_even_when_the_saved_tab_was_t
 fn entering_the_local_library_without_one_configured_asks_for_its_path() {
     let mut app = app(); // no open index, no configured root
     app.open_sources();
+    press(&mut app, KeyCode::Char('j')); // down to Local library
     press(&mut app, KeyCode::Enter);
 
     assert_eq!(app.view(), View::Library);
@@ -228,8 +231,7 @@ fn esc_from_the_top_of_the_library_lands_on_sources_and_stays() {
 fn esc_closing_the_radio_lands_on_sources() {
     let mut app = app();
     app.open_sources();
-    press(&mut app, KeyCode::Char('j'));
-    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Enter); // Radio is the first row
     assert!(app.radio_open(), "enter on Radio opens the radio view");
 
     press(&mut app, KeyCode::Esc);
@@ -244,6 +246,7 @@ fn esc_closing_the_radio_lands_on_sources() {
 fn r_still_opens_the_radio_from_inside_the_library() {
     let mut app = app_with_a_library();
     app.open_sources();
+    press(&mut app, KeyCode::Char('j')); // down to Local library
     press(&mut app, KeyCode::Enter);
 
     assert_eq!(app.on_key(key(KeyCode::Char('R'))), Action::None);
@@ -279,7 +282,7 @@ fn the_flat_files_list_never_shows_a_sources_screen() {
 fn tab_from_the_sources_screen_reaches_the_queue_and_returns_to_it() {
     let mut app = app();
     app.open_sources();
-    press(&mut app, KeyCode::Char('j')); // onto Radio
+    press(&mut app, KeyCode::Char('j')); // onto Local library
     assert_eq!(app.sources_selected(), 1);
 
     press(&mut app, KeyCode::Tab);
