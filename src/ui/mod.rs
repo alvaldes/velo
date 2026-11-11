@@ -992,6 +992,13 @@ pub struct App<'lib> {
     /// the first tick, then gone — a warning that repeats is noise, and one
     /// that only surfaces inside a skip reason is no warning at all.
     subsonic_warning: Option<String>,
+    /// The one-shot update check (issue #69, slice 1): its thread asks off
+    /// the event loop; the tick polls the one answer and drops the handle.
+    update_check: Option<crate::update::UpdateCheck>,
+    /// The newer version a finished check found (issue #69): `None` means
+    /// nothing found yet — and says nothing about a failed check, which is
+    /// never said at all.
+    update_latest: Option<String>,
     /// The media keys (issue #12), when the launch could start them: the OS
     /// client lives on its own thread; the tick drains its commands and
     /// publishes what is playing. `None` — headless refusal, no session
@@ -1104,6 +1111,8 @@ impl<'lib> App<'lib> {
             pending_save: None,
             scrobbles: None,
             subsonic_warning: None,
+            update_check: None,
+            update_latest: None,
             media: None,
             media_published: None,
             saved_low_power: false,
@@ -1208,6 +1217,8 @@ impl<'lib> App<'lib> {
             pending_save: None,
             scrobbles: None,
             subsonic_warning: None,
+            update_check: None,
+            update_latest: None,
             media: None,
             media_published: None,
             saved_low_power: false,
@@ -2366,6 +2377,74 @@ impl<'lib> App<'lib> {
     /// world-readable `subsonic.key` (T12c's debt). Empty means the key file
     /// is private (or no key file is in play) and the status line says
     /// nothing. The warnings ride to the first tick, which says them once.
+    /// Installs the one-shot update check (issue #69, slice 1): its thread
+    /// runs off the event loop and never touches the config file; the tick
+    /// polls the one answer and records the timestamp itself.
+    pub fn set_update_check(&mut self, check: crate::update::UpdateCheck) {
+        self.update_check = Some(check);
+    }
+
+    /// The newer version a finished check found, with the leading `v` off
+    /// (issue #69); `None` when nothing has been found yet.
+    #[must_use]
+    pub fn update_latest(&self) -> Option<&str> {
+        self.update_latest
+            .as_deref()
+            .map(crate::update::display_version)
+    }
+
+    /// The value the settings card's `version` row shows (issue #69): the
+    /// running version in force, plus the newer one when a check found it.
+    #[must_use]
+    pub fn version_setting_value(&self) -> String {
+        match &self.update_latest {
+            Some(latest) => format!(
+                "{} — {} available",
+                crate::update::RUNNING_VERSION,
+                crate::update::display_version(latest)
+            ),
+            None => crate::update::RUNNING_VERSION.to_owned(),
+        }
+    }
+
+    /// What a finished check said, said once (issue #69, slice 1): the
+    /// timestamp of the check is recorded here first, on the loop thread —
+    /// the one writer the config file has — through the same
+    /// [`App::remember`] seam every user setting uses, whatever the answer
+    /// was: a failed check must also wait a whole interval, or a refused
+    /// request would be repeated on every launch. If the process exits
+    /// before a tick consumes the answer, nothing is recorded — an accepted,
+    /// harmless edge: the next launch simply checks again, once. Then a
+    /// newer version is one status line, and the settings row learns it; a
+    /// failed check is silence — no error line, no retry from here. The
+    /// handle drops either way: the check is one-shot.
+    fn update_tick(&mut self) {
+        let Some(outcome) = self
+            .update_check
+            .as_mut()
+            .and_then(crate::update::UpdateCheck::poll)
+        else {
+            return;
+        };
+        self.update_check = None;
+        // The recording comes before the status line, so the write's rule —
+        // a failed write is the status line — can never mask the news of a
+        // newer version: the newer-version line is set last and wins.
+        if let Ok(elapsed) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+            self.remember(Some("update"), "last_check", &elapsed.as_secs().to_string());
+        }
+        if let crate::update::CheckOutcome::Tag(tag) = outcome
+            && crate::update::newer_version(crate::update::RUNNING_VERSION, &tag)
+        {
+            self.status = format!(
+                "velo {} is available — you have {}",
+                crate::update::display_version(&tag),
+                crate::update::RUNNING_VERSION
+            );
+            self.update_latest = Some(tag);
+        }
+    }
+
     pub fn set_subsonic_warnings(&mut self, warnings: &[String]) {
         self.subsonic_warning = (!warnings.is_empty()).then(|| warnings.join("; "));
     }
@@ -2655,6 +2734,16 @@ impl<'lib> App<'lib> {
         self.artwork_path = None;
     }
 
+    /// Plants the newer version a finished check found (issue #69): the
+    /// integration tests' hook, because no fixture can reach a real release
+    /// tag without a network. Production never calls this, which is why it
+    /// is hidden from the docs; the wiring sets it through
+    /// [`crate::update::UpdateCheck::poll`] inside the tick instead.
+    #[doc(hidden)]
+    pub fn show_update_latest(&mut self, latest: Option<String>) {
+        self.update_latest = latest;
+    }
+
     /// Stands the open radio view in `place` and sets its catalog (T6c):
     /// the integration tests' hook, because no fixture can reach a station
     /// row through the real wiring — that needs the directory. The view
@@ -2799,6 +2888,9 @@ impl<'lib> App<'lib> {
         if let Some(warning) = self.subsonic_warning.take() {
             self.status = format!("velo: warning: {warning}");
         }
+        // The update check's one word (issue #69): a newer version is one
+        // status line, said once; a failed check is silence.
+        self.update_tick();
         // The radio wiring (T6b) turns once per tick too: a finished
         // directory request lands without a key press, and an in-flight
         // one says `⟳ loading…` on the status line.
@@ -4973,8 +5065,10 @@ impl<'lib> App<'lib> {
                 );
             }
             // The theme row is never stepped through `change_setting`
-            // (issue #37): its `enter` opens the picker.
-            SettingsKey::Theme => {}
+            // (issue #37): its `enter` opens the picker. The version row is
+            // a fact, not a choice (issue #69): the arrows and `enter`
+            // change nothing on it either.
+            SettingsKey::Theme | SettingsKey::Version => {}
             // The transparent-background switch (issue #61): a press flips
             // it, and the palette is re-resolved through the one function
             // the launch and the picker's preview resolve through
@@ -5462,6 +5556,9 @@ impl<'lib> App<'lib> {
                 };
                 if drawn { "shown" } else { "hidden" }.to_owned()
             }
+            // The version row shows the version in force, and a newer one
+            // when a check found it (issue #69).
+            SettingsKey::Version => self.version_setting_value(),
             SettingsKey::Folder => self
                 .refresh
                 .root
@@ -9012,6 +9109,7 @@ enum SettingsKey {
     Advisories,
     ViewNumbers,
     Folder,
+    Version,
 }
 
 impl SettingsKey {
@@ -9030,6 +9128,7 @@ impl SettingsKey {
             Self::Advisories => "advisories",
             Self::ViewNumbers => "view numbers",
             Self::Folder => "folder",
+            Self::Version => "version",
         }
     }
 }
@@ -9047,7 +9146,7 @@ enum SettingsRow {
 /// colour editable in the file. The volume is not a row (S7.3): it lives
 /// in `[state]` and on `+`/`-`, where it has always been changed from the
 /// keyboard.
-const SETTINGS_ROWS: [SettingsRow; 16] = [
+const SETTINGS_ROWS: [SettingsRow; 18] = [
     SettingsRow::Header("sound"),
     SettingsRow::Setting(SettingsKey::ReplayGain),
     SettingsRow::Setting(SettingsKey::Repeat),
@@ -9066,6 +9165,10 @@ const SETTINGS_ROWS: [SettingsRow; 16] = [
     SettingsRow::Setting(SettingsKey::ViewNumbers),
     SettingsRow::Header("library"),
     SettingsRow::Setting(SettingsKey::Folder),
+    // The version row (issue #69): the running version, and whether a
+    // newer one exists — a read-only row, like the headers.
+    SettingsRow::Header("about"),
+    SettingsRow::Setting(SettingsKey::Version),
 ];
 
 /// The open visualizer picker (issue #40): the row the cursor is on, and

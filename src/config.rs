@@ -160,7 +160,8 @@ Configuration: $XDG_CONFIG_HOME/velo/config.toml, or
     transparent_background), [ui] (cover_art, spectrum,
     visualizer, low_power, hints, top_bar, advisories, view_numbers) and the optional
     [subsonic] table (url, user, api_key, insecure) for a Subsonic-compatible
-    server; `velo --subsonic-test` answers \"can I use this server?\" and works
+    server; the optional [update] table (check: \"never\", \"daily\" or
+    \"weekly\", how often velo may ask GitHub whether a newer velo exists); `velo --subsonic-test` answers \"can I use this server?\" and works
     over ssh;
     `velo --radio-test <URL>` probes one live station URL the same way.
     When the file is missing, velo writes it with every key at its default and
@@ -359,6 +360,10 @@ pub struct Config {
     /// table exists. `device` is optional inside it.
     #[serde(default)]
     pub audio: Option<AudioFile>,
+    /// `[update]` — the update check (issue #69), when the table exists.
+    /// `check` and `last_check` are both optional inside it.
+    #[serde(default)]
+    pub update: Option<UpdateFile>,
 }
 
 impl Config {
@@ -436,6 +441,15 @@ impl Config {
                 .and_then(|audio| audio.device)
                 .map(|device| device.trim().to_owned())
                 .filter(|device| !device.is_empty()),
+            // The update check (issue #69): `daily` unless the file says
+            // otherwise, and the timestamp of the last check when the file
+            // carries one.
+            update_check: self
+                .update
+                .as_ref()
+                .and_then(|update| update.check)
+                .unwrap_or_default(),
+            update_last_check: self.update.as_ref().and_then(|update| update.last_check),
         }
     }
 }
@@ -475,6 +489,12 @@ pub struct Settings {
     /// The output device to open (issue #44, S3): the config's `[audio]
     /// device`. `None` is the system's default output.
     pub audio_device: Option<String>,
+    /// How often the update check may ask (issue #69): `daily` unless the
+    /// file's `[update] check` says otherwise.
+    pub update_check: crate::update::CheckMode,
+    /// When the last update check happened, as unix seconds (issue #69):
+    /// the file's `[update] last_check`, the only thing a check stores.
+    pub update_last_check: Option<u64>,
 }
 
 /// Where the next launch picks up (S3): the library view and the node that
@@ -1125,6 +1145,15 @@ view_numbers = true
 # [audio]
 # device = \"Speakers\"
 
+# How often velo may ask GitHub whether a newer velo is out: \"daily\" (the
+# default), \"weekly\" or \"never\" — never means no request at all. A check
+# is one request off the event loop; it says nothing when it fails, and it
+# never downloads or replaces velo itself. velo records when it last asked
+# as last_check (unix seconds) in this table; delete the line to make the
+# next launch ask at once.
+# [update]
+# check = \"daily\"
+
 # The cliamp radio section in the radio view: shown unless you turn it off
 # here. It is another project's service; when it changes or dies, the section
 # alone degrades — this line is what you write then, no release needed.
@@ -1560,6 +1589,21 @@ where
 pub struct AudioFile {
     #[serde(default)]
     device: Option<String>,
+}
+
+/// The serde shape of the `[update]` table (issue #69): the same keys and
+/// nothing else. `check` is how often the check may ask, `last_check` the
+/// unix timestamp of the last check — recorded by the event loop when a
+/// check's answer lands, and never edited by hand (though an old or missing
+/// one only means the next launch checks at once). An absent table, or a
+/// table without the keys, is `daily` and no timestamp.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateFile {
+    #[serde(default)]
+    check: Option<crate::update::CheckMode>,
+    #[serde(default)]
+    last_check: Option<u64>,
 }
 
 /// The serde shape of the `[radio]` table: the same keys and nothing else.

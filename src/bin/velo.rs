@@ -1148,6 +1148,10 @@ fn run_interface(
             Err(message) => app.note(format!("velo: {message}")),
         }
         app.show_artwork(picker);
+        // The one-shot update check (issue #69, slice 1): off the event
+        // loop, honouring `[update] check`, silent on failure — before the
+        // config file's path moves into the app.
+        start_update_check(&mut app, settings, config_file.as_deref());
         app.set_config_file(config_file);
         // The output device the config names (issue #44, S3): every player
         // this session builds opens it, until `d` chooses another one.
@@ -1209,6 +1213,11 @@ fn browse_interface(
             Err(message) => app.note(format!("velo: {message}")),
         }
         app.show_artwork(picker);
+        // The one-shot update check (issue #69, slice 1), as the file
+        // interface starts it: off the event loop, honouring
+        // `[update] check`, silent on failure — before the config file's
+        // path moves into the app.
+        start_update_check(&mut app, settings, config_file.as_deref());
         app.set_config_file(config_file);
         // The output device the config names (issue #44, S3), as the file
         // interface starts with.
@@ -1246,6 +1255,47 @@ fn browse_interface(
         event_loop(&mut app, opened.as_ref().ok(), terminal)
     });
     report_outcome(outcome)
+}
+
+/// Starts the one-shot update check (issue #69, slice 1), honouring
+/// `[update] check`: `never` means no request at all, and a check whose
+/// stored `[update] last_check` is younger than the mode's interval means
+/// no request either. A launch with no config file has nowhere to record
+/// the timestamp — the event loop records it after the answer lands — so
+/// it does not check: an unchecked launch must not become a check on every
+/// launch. The clock is read here, at the edge, so the decision itself
+/// stays a pure function. Best effort and silent: a transport or thread
+/// that cannot be had is a launch without the check, never an error line
+/// (issue #69).
+fn start_update_check(app: &mut App<'_>, settings: &Settings, config_file: Option<&Path>) {
+    if settings.update_check == velo::update::CheckMode::Never {
+        return;
+    }
+    if config_file.is_none() {
+        return;
+    }
+    let now = std::time::SystemTime::now();
+    let last = settings
+        .update_last_check
+        .map(std::time::Duration::from_secs)
+        .and_then(|age| std::time::UNIX_EPOCH.checked_add(age));
+    if !velo::update::check_due(settings.update_check, now, last) {
+        return;
+    }
+    // The radio client's transport does the asking: one blocking GET with
+    // the required User-Agent and a ten-second bound, no new dependency.
+    let Ok(transport) = velo::radio::client::HttpTransport::new() else {
+        return;
+    };
+    // A thread that cannot start is silence, not a status line (issue #69).
+    // The thread does the asking only: it never writes the config file. The
+    // event loop records `[update] last_check` itself, when it consumes the
+    // answer, through the same seam every other config write uses.
+    if let Ok(check) = velo::update::UpdateCheck::spawn(
+        Arc::new(transport) as Arc<dyn velo::radio::client::Transport + Send + Sync>
+    ) {
+        app.set_update_check(check);
+    }
 }
 
 /// Starts indexing `root` on a background thread with its own connection to
