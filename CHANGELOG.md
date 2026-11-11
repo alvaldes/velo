@@ -1,6 +1,13 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.47.1] - 2026-11-11
+
+### Fixes
+- **ui:** Satisfy the lints CI actually enforces
+
+### Maintenance
+- One check command, shared with a local run
 ## [0.47.0] - 2026-11-11
 
 ### Features
