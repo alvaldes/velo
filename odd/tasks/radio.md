@@ -879,3 +879,20 @@ metadata, immediate star, untoggle), the two Sources-screen tests
 `a_marked_cliamp_song_still_says_radio_on_the_sources_screen`), plus the no-op
 pin `f_on_a_channel_row_marks_nothing`.
 `./scripts/check.sh` green (fmt, clippy `-D warnings`, full suite).
+
+**L34** — **author report (branch `fix/cliamp-mark-scope`): the playing marker stayed inside the channel, and a channel whose songs failed to load once stayed blank the whole session.** Two fixes, both test-first.
+
+- **The `▶` follows the tree now.** The live row inside the channel already marked (issue #68); the ancestors did not, because `station_row_key` answered nothing for the channel row and the section row could not know which channel plays. The channel row keys on its own stream, and `marks_playing_stream` lets the `cliamp radio` section row carry the stream of every channel it lists — the marker follows the tree outward as well as inward, `▶`/`■` like any station row. `f` on a channel row still does nothing (it stays a place, L33).
+- **A lost `/tracks` answer is asked again on re-entry.** The author's channel showed the live row, `● 14 listening now` from `/statistics` — the service was answering — and no songs, with the header claiming `[0 songs]`. The service was fine (checked against the running service: `/lofi/tracks` answers 120 songs, every required field present). The wiring's trap: a failed ask is not an answer, so the cache stayed empty, but `requested` stayed set — and re-entering the channel, closing and reopening the radio, everything found no answer and still refused to ask. The fix: a poll that sees the view arrive in a channel's place with no songs held for it forgets `requested`, so the user's own act of entering asks again; standing still never re-asks. And the header stopped lying: a channel whose songs are not held says `[no songs loaded]`, never the service's own zero — a held empty answer still counts `[0 songs]`.
+- `requested` for a failed songs ask is cleared only at the entry, one spawn per entry at most; the same single-slot, no-retry rule stands for directory places (unchanged, `Ctrl+R` is their retry).
+
+Tests RED first (all observed failing before the change, then green):
+`a_playing_channel_marks_its_row_inside_the_section`,
+`a_playing_channel_marks_the_cliamp_section_row_at_the_top`,
+`a_failed_songs_ask_is_asked_again_on_reentry`,
+`a_channel_without_its_songs_does_not_claim_zero_songs`,
+plus the shell-level pins `opening_a_channel_from_the_shell_lists_its_songs_and_counts_them`,
+`leaving_a_channel_mid_flight_and_reentering_still_shows_the_songs`,
+`reopening_the_radio_still_lists_a_channel_songs` (the author's reopen flow — this one exposed the trap), and
+`a_channel_holding_an_empty_answer_says_zero_songs` (preserved behaviour, pinned).
+`./scripts/check.sh` green (fmt, clippy `-D warnings`, full suite).
