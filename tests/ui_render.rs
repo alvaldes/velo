@@ -114,13 +114,13 @@ fn the_volume_slider_shows_the_volume_and_the_help_lists_the_seek_keys() {
     app.on_key(velo::ui::crossterm::event::KeyEvent::from(
         velo::ui::crossterm::event::KeyCode::Char('?'),
     ));
-    let helped = render(&app);
-
-    assert!(
-        helped.contains("seek 5 s"),
-        "the help lists the seek keys, got: {helped}"
-    );
+    // A window tall enough for the card's first two sections: which rows a
+    // shorter one reaches is the card's layout, not this rule.
     let whole = screen_at(&app, 80, 24);
+    assert!(
+        whole.contains("seek 5 s"),
+        "the help lists the seek keys, got:\n{whole}"
+    );
     assert!(
         whole.contains("> / . / n") && whole.contains("next track"),
         "the help lists the skip keys, got:\n{whole}"
@@ -1605,6 +1605,115 @@ fn the_help_names_the_key_that_refreshes_the_index() {
     assert!(screen.contains("refresh the library index"), "{screen}");
 }
 
+#[test]
+fn the_help_names_the_device_the_track_card_and_the_suspend_keys() {
+    let mut app = App::browse(None);
+    press(&mut app, KeyCode::Char('?'));
+    let screen = screen_at(&app, 80, 70);
+    for row in [
+        "choose the audio output",
+        "describe the track: codec, bitrate, tags",
+        "suspend to the shell; fg resumes",
+    ] {
+        assert!(screen.contains(row), "{row:?} in:\n{screen}");
+    }
+}
+
+/// What a line of the help card says between its borders.
+fn card_text(line: &str) -> &str {
+    line.trim_matches(|character: char| character == '│' || character.is_whitespace())
+}
+
+/// The line of `screen` whose whole text is `text`, or the line containing
+/// it when `whole` is off.
+fn card_line(screen: &str, text: &str, whole: bool) -> Option<usize> {
+    screen.lines().position(|line| {
+        if whole {
+            card_text(line) == text
+        } else {
+            line.contains(text)
+        }
+    })
+}
+
+#[test]
+fn the_help_groups_its_keys_under_section_headers() {
+    let mut app = App::browse(None);
+    press(&mut app, KeyCode::Char('?'));
+    let screen = screen_at(&app, 80, 70);
+
+    // The sections, in the order a session meets them.
+    let headers = [
+        "move",
+        "playback",
+        "queue",
+        "library",
+        "radio",
+        "sound and screen",
+        "app",
+    ];
+    let lines: Vec<usize> = headers
+        .iter()
+        .map(|header| {
+            card_line(&screen, header, true)
+                .unwrap_or_else(|| panic!("no {header:?} header in:\n{screen}"))
+        })
+        .collect();
+    assert!(
+        lines.windows(2).all(|pair| pair[0] < pair[1]),
+        "the headers are out of order ({lines:?}):\n{screen}"
+    );
+
+    // Each key sits under the header it belongs to.
+    for (row, section) in [
+        ("move down", 0),
+        ("search the whole library", 0),
+        ("pause / resume", 1),
+        ("volume up / down", 1),
+        ("add the selection to the queue", 2),
+        ("in the queue: remove it", 2),
+        ("refresh the library index", 3),
+        ("the saved playlists", 3),
+        ("in radio: the country list", 4),
+        ("mono: both channels", 5),
+        ("choose the audio output", 5),
+        ("next visualizer", 5),
+        ("low power", 5),
+        ("settings", 6),
+        ("toggle this help", 6),
+        ("suspend to the shell", 6),
+        ("quit", 6),
+    ] {
+        let line = card_line(&screen, row, false)
+            .unwrap_or_else(|| panic!("no {row:?} row in:\n{screen}"));
+        let after = lines[section];
+        let before = lines.get(section + 1).copied().unwrap_or(usize::MAX);
+        assert!(
+            after < line && line < before,
+            "{row:?} is not under {:?}:\n{screen}",
+            headers[section]
+        );
+    }
+}
+
+#[test]
+fn a_filtered_help_shows_keys_only_never_a_section_header() {
+    let mut app = App::browse(None);
+    press(&mut app, KeyCode::Char('?'));
+    press(&mut app, KeyCode::Char('/'));
+    for character in "quit".chars() {
+        press(&mut app, KeyCode::Char(character));
+    }
+    let screen = screen_at(&app, 80, 70);
+    assert!(screen.contains("q / ctrl+c"), "{screen}");
+    for header in ["move", "playback", "queue", "library", "radio", "app"] {
+        assert!(
+            card_line(&screen, header, true).is_none(),
+            "the {header:?} header survived the filter:\n{screen}"
+        );
+    }
+}
+
 // ---- the help scrolls and filters (help-and-advisories T1, S1) -------------
 
 /// The help card open on `app`, drawn at 80×14: too short for every row.
@@ -1779,7 +1888,7 @@ fn a_help_that_fits_shows_no_position() {
     press(&mut app, KeyCode::Char('?'));
     // Tall enough for the whole card: the property is "no position line when the
     // whole table fits", not "the table has N rows".
-    let screen = screen_at(&app, 80, 50);
+    let screen = screen_at(&app, 80, 70);
     assert!(
         screen.contains("quit") && screen.contains("j / Down"),
         "{screen}"

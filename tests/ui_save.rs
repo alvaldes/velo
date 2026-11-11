@@ -565,7 +565,7 @@ fn the_help_card_names_the_save() {
     press(&mut app, key(KeyCode::Char('?')));
 
     let mut terminal =
-        velo::ui::ratatui::Terminal::new(velo::ui::ratatui::backend::TestBackend::new(80, 50))
+        velo::ui::ratatui::Terminal::new(velo::ui::ratatui::backend::TestBackend::new(80, 70))
             .expect("a test terminal");
     terminal
         .draw(|frame| app.draw(frame))

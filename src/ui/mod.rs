@@ -6800,12 +6800,18 @@ impl<'lib> App<'lib> {
     fn draw_help(frame: &mut Frame, area: Rect, help: &Help, theme: &Theme) {
         let key_width = HELP_ROWS
             .iter()
-            .map(|(key, _)| key.chars().count())
+            .map(|row| match row {
+                HelpRow::Header(_) => 0,
+                HelpRow::Key(key, _) => key.chars().count(),
+            })
             .max()
             .unwrap_or(0);
         let label_width = HELP_ROWS
             .iter()
-            .map(|(_, label)| label.chars().count())
+            .map(|row| match row {
+                HelpRow::Header(_) => 0,
+                HelpRow::Key(_, label) => label.chars().count(),
+            })
             .max()
             .unwrap_or(0);
         // Both measured before the filter, so that narrowing the contents
@@ -6836,14 +6842,16 @@ impl<'lib> App<'lib> {
                 Style::new().fg(theme.dim),
             ));
         }
-        text.extend(rows.iter().skip(top).take(shown).map(|(key, label)| {
-            Line::from(vec![
+        text.extend(rows.iter().skip(top).take(shown).map(|row| match row {
+            // Dim, like the settings card's own section headers.
+            HelpRow::Header(name) => Line::styled((*name).to_owned(), Style::new().fg(theme.dim)),
+            HelpRow::Key(key, label) => Line::from(vec![
                 Span::styled(
                     format!("{key:<key_width$}   "),
                     Style::new().fg(theme.secondary),
                 ),
                 Span::styled((*label).to_owned(), Style::new().fg(theme.text)),
-            ])
+            ]),
         }));
 
         let mut card = Block::bordered()
@@ -9195,72 +9203,93 @@ fn mmss(duration: Duration) -> String {
     format!("{:02}:{:02}", seconds / 60, seconds % 60)
 }
 
-/// Every row of the help card: the key, then what it does.
-const HELP_ROWS: [(&str, &str); 46] = [
-    ("j / Down", "move down"),
-    ("k / Up", "move up"),
-    ("g / home", "first track"),
-    ("G / end", "last track"),
-    ("pgdn / pgup", "a page at a time; ctrl+d / ctrl+u too"),
-    ("enter", "open, or play from the selection"),
-    ("esc", "back one level / close help"),
-    (
+/// One row of the help card: a section header, or a key and what it does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HelpRow {
+    Header(&'static str),
+    Key(&'static str, &'static str),
+}
+
+/// The header the radio's keys stand under: where the card opens when it
+/// is opened over the radio view (issue #31).
+const HELP_RADIO_HEADER: &str = "radio";
+
+/// Every row of the help card, grouped the way a session meets the keys:
+/// moving, playing, the queue, the library, the radio, what is heard and
+/// drawn, and the application itself. A new key goes into the section it
+/// belongs to, never at the end of the table.
+const HELP_ROWS: [HelpRow; 56] = [
+    HelpRow::Header("move"),
+    HelpRow::Key("j / Down", "move down"),
+    HelpRow::Key("k / Up", "move up"),
+    HelpRow::Key("g / home", "first track"),
+    HelpRow::Key("G / end", "last track"),
+    HelpRow::Key("pgdn / pgup", "a page at a time; ctrl+d / ctrl+u too"),
+    HelpRow::Key("enter", "open, or play from the selection"),
+    HelpRow::Key("esc", "back one level / close help"),
+    HelpRow::Key(
         "/",
         "search the whole library; in radio: the directory, by name",
     ),
-    ("space", "pause / resume"),
-    ("← / →", "seek 5 s back / forward; shift: 30 s"),
-    (": / ctrl+j", "jump to a position: 70%, 1:20 or 90"),
-    ("> / . / n", "next track"),
-    ("< / ,", "previous track"),
-    ("z", "shuffle what is left of the queue"),
-    ("r", "repeat: off, all, one"),
-    ("m", "mono: both channels carry the average of the mix"),
-    ("+ / -", "volume up / down; [ / ] a point at a time"),
-    ("? / ctrl+k", "toggle this help"),
-    ("ctrl+p", "settings"),
-    ("tab", "library / queue"),
-    ("p", "the queue, like tab going there"),
-    ("1 2 3 4", "artists, albums, tracks, genres"),
-    ("o / ctrl+l", "set the library folder"),
-    ("L", "the saved playlists"),
-    ("I", "refresh the library index"),
-    (
-        "u",
-        "open a URL: a live stream, or the songs its wrapper lists",
-    ),
-    (
+    HelpRow::Header("playback"),
+    HelpRow::Key("space", "pause / resume"),
+    HelpRow::Key("← / →", "seek 5 s back / forward; shift: 30 s"),
+    HelpRow::Key(": / ctrl+j", "jump to a position: 70%, 1:20 or 90"),
+    HelpRow::Key("> / . / n", "next track"),
+    HelpRow::Key("< / ,", "previous track"),
+    HelpRow::Key("z", "shuffle what is left of the queue"),
+    HelpRow::Key("r", "repeat: off, all, one"),
+    HelpRow::Key("+ / -", "volume up / down; [ / ] a point at a time"),
+    HelpRow::Header("queue"),
+    HelpRow::Key("tab", "library / queue"),
+    HelpRow::Key("p", "the queue, like tab going there"),
+    HelpRow::Key("a", "add the selection to the queue"),
+    HelpRow::Key("A", "add the selection to the queue and play from it"),
+    HelpRow::Key("x", "in the queue: remove it; on a playlist: delete it"),
+    HelpRow::Key("J / K", "move it down / up; shift+↓ / shift+↑ too"),
+    HelpRow::Header("library"),
+    HelpRow::Key("1 2 3 4", "artists, albums, tracks, genres"),
+    HelpRow::Key("o / ctrl+l", "set the library folder"),
+    HelpRow::Key(
         "",
         "no library set: a prompt asks for its path, tab completes",
     ),
-    ("a", "add the selection to the queue"),
-    ("A", "add the selection to the queue and play from it"),
-    ("f", "on a track: mark it as a favourite"),
-    (
+    HelpRow::Key("I", "refresh the library index"),
+    HelpRow::Key(
+        "u",
+        "open a URL: a live stream, or the songs its wrapper lists",
+    ),
+    HelpRow::Key("f", "on a track: mark it as a favourite"),
+    HelpRow::Key("L", "the saved playlists"),
+    HelpRow::Key(
         "S",
         "save the queue as a playlist; on a track: add it to one",
     ),
-    ("x", "in the queue: remove it; on a playlist: delete it"),
-    ("e", "in playlists: rename the one under the cursor"),
-    ("J / K", "move it down / up; shift+↓ / shift+↑ too"),
-    ("R", "radio: the directory, your favourites, your stations"),
-    ("v", "next visualizer"),
-    ("ctrl+v", "pick a visualizer"),
-    ("V", "the visualizer over the whole window"),
-    ("f", "in radio: favourite a station, pin a place"),
-    ("F", "in radio: filter what is already loaded"),
-    ("N", "in radio: the country list"),
-    ("ctrl+r", "in radio: refetch the place you are in"),
-    ("i", "in radio: report a station that cannot play"),
-    (
+    HelpRow::Key("e", "in playlists: rename the one under the cursor"),
+    HelpRow::Header(HELP_RADIO_HEADER),
+    HelpRow::Key("R", "radio: the directory, your favourites, your stations"),
+    HelpRow::Key("f", "in radio: favourite a station, pin a place"),
+    HelpRow::Key("F", "in radio: filter what is already loaded"),
+    HelpRow::Key("N", "in radio: the country list"),
+    HelpRow::Key("ctrl+r", "in radio: refetch the place you are in"),
+    HelpRow::Key("i", "in radio: report a station that cannot play"),
+    HelpRow::Header("sound and screen"),
+    HelpRow::Key("m", "mono: both channels carry the average of the mix"),
+    HelpRow::Key("d", "choose the audio output"),
+    HelpRow::Key("v", "next visualizer"),
+    HelpRow::Key("ctrl+v", "pick a visualizer"),
+    HelpRow::Key("V", "the visualizer over the whole window"),
+    HelpRow::Key("P", "low power: a quarter of the redraw rate, no spectrum"),
+    HelpRow::Header("app"),
+    HelpRow::Key("ctrl+i", "describe the track: codec, bitrate, tags"),
+    HelpRow::Key(
         "ctrl+s",
         "save a remote track out of the cache, to a folder you name",
     ),
-    // Kept at the end so the rows the first screenful pins stay put: the
-    // tests read `I` and `q` on a small window, where a row added above
-    // them would silently scroll them off.
-    ("P", "low power: a quarter of the redraw rate, no spectrum"),
-    ("q / ctrl+c", "quit"),
+    HelpRow::Key("ctrl+p", "settings"),
+    HelpRow::Key("? / ctrl+k", "toggle this help"),
+    HelpRow::Key("ctrl+z", "suspend to the shell; fg resumes"),
+    HelpRow::Key("q / ctrl+c", "quit"),
 ];
 
 /// The open help card (S1): which row is at its top and what it is
@@ -9291,22 +9320,31 @@ impl Help {
         help
     }
 
-    /// Where the radio's keys begin, found by their own label: a row added
+    /// Where the radio's keys begin, found by their own header: a row added
     /// above them cannot silently move where the card starts.
     fn first_radio_row() -> usize {
         HELP_ROWS
             .iter()
-            .position(|(_, label)| label.starts_with("in radio:"))
+            .position(|row| *row == HelpRow::Header(HELP_RADIO_HEADER))
             .unwrap_or(0)
     }
 
-    /// The rows the filter keeps, in their order.
-    fn rows(&self) -> Vec<(&'static str, &'static str)> {
+    /// The rows on the card, in their order: every row, headers included,
+    /// while nothing is filtered; under a filter, only the keys it keeps —
+    /// a header over a single surviving key would be noise, and a header is
+    /// never something to search for.
+    fn rows(&self) -> Vec<HelpRow> {
+        if self.filter.is_empty() {
+            return HELP_ROWS.to_vec();
+        }
         let needle = self.filter.to_lowercase();
         HELP_ROWS
             .iter()
-            .filter(|(key, label)| {
-                key.to_lowercase().contains(&needle) || label.to_lowercase().contains(&needle)
+            .filter(|row| match row {
+                HelpRow::Header(_) => false,
+                HelpRow::Key(key, label) => {
+                    key.to_lowercase().contains(&needle) || label.to_lowercase().contains(&needle)
+                }
             })
             .copied()
             .collect()
