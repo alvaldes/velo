@@ -111,6 +111,17 @@ pub enum RadioOutcome {
         /// The song's title, for the queue row's display name.
         title: String,
     },
+    /// `f` on a cliamp song (the author's storage split): the song is a
+    /// track, and its mark belongs in the saved store's `library.toml` —
+    /// a file the shell owns and writes, never the view. The shell
+    /// toggles the mark and hands the star back through
+    /// [`RadioView::set_favourite_songs`].
+    MarkSong {
+        /// The song as the row carries it: its URL is the mark's path, and
+        /// its metadata is what the entry keeps so the song stays nameable
+        /// from the file alone.
+        song: Song,
+    },
     /// Not a radio key: the rest of the keymap may have it.
     Pass,
 }
@@ -432,6 +443,12 @@ pub struct RadioView {
     cliamp_songs: Vec<Song>,
     /// The place [`Self::cliamp_songs`] is the answer to, when one is held.
     cliamp_songs_place: Option<Place>,
+    /// The song paths the shell says the saved store marks (`library.toml`,
+    /// the author's storage split): a cliamp song row whose URL is here
+    /// draws its `★`. The shell owns the file and hands the list in at the
+    /// view's birth and after every song toggle; the view never reads the
+    /// store and never guesses the star.
+    favourite_songs: Vec<String>,
 }
 
 impl RadioView {
@@ -473,6 +490,7 @@ impl RadioView {
             cliamp_listeners: Vec::new(),
             cliamp_songs: Vec::new(),
             cliamp_songs_place: None,
+            favourite_songs: Vec::new(),
         }
     }
 
@@ -537,6 +555,15 @@ impl RadioView {
     /// nothing (S4).
     pub fn set_cliamp_channels(&mut self, channels: Vec<Channel>) {
         self.cliamp_channels = channels;
+        self.clamp();
+    }
+
+    /// The song paths the saved store marks, handed in by the shell (the
+    /// author's storage split): a cliamp song is a track, its mark lives in
+    /// `library.toml`, and the file is the shell's to write — the view only
+    /// draws the star it is told, the way it draws the playing marker.
+    pub fn set_favourite_songs(&mut self, paths: Vec<String>) {
+        self.favourite_songs = paths;
         self.clamp();
     }
 
@@ -798,10 +825,7 @@ impl RadioView {
                 self.typing = true;
                 RadioOutcome::Handled
             }
-            KeyCode::Char('f') => {
-                self.toggle_mark();
-                RadioOutcome::Handled
-            }
+            KeyCode::Char('f') => self.toggle_mark(),
             KeyCode::Char('i') => self.report_issue(),
             KeyCode::Char('N') => {
                 self.open_countries();
@@ -1247,12 +1271,19 @@ impl RadioView {
     }
 
     /// `f` on the selected row: a station toggles its favourite, a place
-    /// toggles its pin, a browse row and a tag do nothing. Both toggles
-    /// decide on the station key, never on the URL as written. Every
-    /// change marks the store for saving (T6b).
-    pub fn toggle_mark(&mut self) {
+    /// toggles its pin, the cliamp live row marks the channel's stream —
+    /// it plays through the station path, so its mark is a station's — a
+    /// cliamp song is handed to the shell ([`RadioOutcome::MarkSong`]: a
+    /// song is a track, and its mark lives in `library.toml`, the shell's
+    /// file), and a browse row, a channel row, a tag or a header row does
+    /// nothing. The channel row is a place, not a play: the channel is
+    /// marked through its live row, and a channel without a stream is
+    /// marked through its songs, so the row itself never marks. Both
+    /// store toggles decide on the station key, never on the URL as
+    /// written. Every change marks the store for saving (T6b).
+    pub fn toggle_mark(&mut self) -> RadioOutcome {
         let Some(row) = self.selection() else {
-            return;
+            return RadioOutcome::Handled;
         };
         match row.kind {
             RowKind::CatalogStation { station, .. } => {
@@ -1277,6 +1308,25 @@ impl RadioView {
                 let toggled = self.store.toggle_favorite(favorite);
                 self.dirty |= toggled.needs_save();
             }
+            RowKind::CliampLive { channel } => {
+                // The live row is the channel itself (issue #68): its own
+                // stream is the identity, marked exactly the way a
+                // directory station is, into the same `radio.toml`.
+                let toggled = self.store.toggle_favorite(Favorite {
+                    name: channel.name,
+                    url: channel.stream,
+                    countrycode: String::new(),
+                    codec: String::new(),
+                });
+                self.dirty |= toggled.needs_save();
+            }
+            RowKind::CliampSong { song } => {
+                // A cliamp song is a track (the author's storage split):
+                // its mark belongs in the saved store, whose file is the
+                // shell's to write. The shell toggles and hands the star
+                // back through `set_favourite_songs`.
+                return RadioOutcome::MarkSong { song };
+            }
             RowKind::NearYou { code } | RowKind::Country { code, .. } => {
                 let name = self.country_name(&code);
                 let toggled = self.store.toggle_pin(Pinned {
@@ -1295,13 +1345,12 @@ impl RadioView {
             | RowKind::BrowseTags
             | RowKind::BrowseNoCountry
             | RowKind::CliampChannel { .. }
-            | RowKind::CliampLive { .. }
-            | RowKind::CliampSong { .. }
             | RowKind::Tag { .. }
             | RowKind::AskCountry { .. }
             | RowKind::Rule
             | RowKind::Header { .. } => {}
         }
+        RadioOutcome::Handled
     }
 
     /// The display name of one ISO code, from the index when it is there.
@@ -1433,12 +1482,18 @@ impl RadioView {
 
     /// The songs of one cliamp channel (issue #48, S2): the title as the
     /// label, `artist · album` as the dim note, each part only when the
-    /// service knows it.
+    /// service knows it. A song the saved store marks reads `★ Title` (the
+    /// author's storage split): the star comes from [`starred`], the one
+    /// way a row says it is a favourite — never hand-formatted.
     fn cliamp_song_rows(&self) -> Vec<Row> {
         self.cliamp_songs
             .iter()
             .map(|song| Row {
-                label: song.title.clone(),
+                label: if self.favourite_songs.contains(&song.url) {
+                    starred(&song.title)
+                } else {
+                    song.title.clone()
+                },
                 fact: note(&[&song.artist, &song.album]),
                 kind: RowKind::CliampSong { song: song.clone() },
             })
