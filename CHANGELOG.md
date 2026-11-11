@@ -1,6 +1,20 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.48.0] - 2026-11-11
+
+### Features
+- **ui:** The footer's hints follow the screen
+- **update:** A check you can ask for, in the shell and in the card
+
+### Fixes
+- **cli:** A --help that fits one screen and names the right keys
+- **ui:** The help card groups its keys and lists the three it missed
+- **radio:** A cliamp song and its live row can be marked, and the mark is honest
+
+### Documentation
+- **readme:** A README that fits on a few screens
+- **site:** The landing names the themes and lets you try them
 ## [0.47.1] - 2026-11-11
 
 ### Fixes
