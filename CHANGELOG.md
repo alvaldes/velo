@@ -1,6 +1,14 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.48.1] - 2026-11-11
+
+### Fixes
+- **radio:** The mark follows the tree, and a lost answer is asked again
+- **ui:** The radio's keys are the footer's whatever it was opened over
+
+### Documentation
+- **site:** The landing in the order a visitor asks, and a remark that types itself
 ## [0.48.0] - 2026-11-11
 
 ### Features
