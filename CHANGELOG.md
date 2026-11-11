@@ -1,6 +1,10 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.46.0] - 2026-11-11
+
+### Features
+- **audio:** A station start crossfades instead of cutting to silence
 ## [0.45.0] - 2026-11-11
 
 ### Features
