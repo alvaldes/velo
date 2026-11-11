@@ -27,6 +27,7 @@
 
 use std::ffi::OsStr;
 use std::fmt;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -885,14 +886,13 @@ pub fn themes_dir(config_file: &Path) -> PathBuf {
         .map_or_else(|| PathBuf::from("themes"), |dir| dir.join("themes"))
 }
 
-/// What a fresh install finds in `themes/velo.toml`: velo's own palette,
-/// which is also the built-in one, so the folder documents the format without
-/// changing how anything looks. A test pins it to [`ThemeColors::default`], so
-/// the file cannot drift from the palette it claims to be.
-pub const DEFAULT_THEME_TEMPLATE: &str = r##"# velo's own palette, which is also the built-in one: this file ships as
-# themes/velo.toml to show the format. Copy it under another name to make a
-# theme, then select it with `name` in the [theme] table of config.toml or
-# from the settings card (`ctrl+p`): `enter` on the `theme` row opens a picker of
+/// The lines every shipped theme file shares: what the folder is, how a
+/// theme is selected, and the two rules a colour follows.
+const THEME_FILE_BODY: &str = r##"#
+# This folder ships one file per theme the picker offers, so the format is
+# one `ls` away: copy one under another name to make a theme of your own,
+# then select it with `name` in the [theme] table of config.toml or from the
+# settings card (`ctrl+p`): `enter` on the `theme` row opens a picker of
 # every theme — moving the cursor previews it on the spot, `enter` applies
 # it, `esc` puts back what you had.
 #
@@ -900,83 +900,115 @@ pub const DEFAULT_THEME_TEMPLATE: &str = r##"# velo's own palette, which is also
 # line you delete keeps the built-in value, and a colour in config.toml's
 # [theme] table that is a real choice — not one of the built-in defaults, and
 # not a value velo itself wrote there — still wins over this file.
-# The screen behind everything. `transparent_background = true` in config.toml
-# shows the terminal's own instead.
-background = "#141c28"
-# The body text: row names and values, the now-playing title.
-text = "#f4f0e2"
-# What recedes: hints, section headers, the facts on the right, the footer's keys.
-dim = "#767676"
-# The frame's titles, the selected row's background, the playing marker.
-accent = "#f4baa3"
-# The transport's buttons and small controls, and the paused icon.
-secondary = "#a6c8e2"
-# The window's frame and the dotted rules.
-border = "#252939"
-# The colour drawn ON the accent, so the selected row's own text stays readable.
-ink = "#000000"
 "##;
 
-/// What a fresh install finds in `themes/default terminal.toml` (S3, issue
-/// #54): the terminal's own palette — every slot `reset` — so velo draws
-/// with exactly the colours the terminal's user already chose.
-pub const DEFAULT_TERMINAL_TEMPLATE: &str = r##"# The terminal's own colours: every slot is "reset", so velo draws with
-# whatever palette your terminal already has — theme and terminal agree by
-# construction. Select it with `name = "default terminal"` in the [theme]
-# table of config.toml, or from the settings card (`ctrl+p`): `enter` on
-# the `theme` row opens a picker of every theme.
-#
-# Every colour is "#rrggbb", or "reset" for the terminal's own colour. A
-# line you delete keeps the built-in value, and a colour in config.toml's
-# [theme] table that is a real choice — not one of the built-in defaults, and
-# not a value velo itself wrote there — still wins over this file.
-# The screen behind everything.
-background = "reset"
-# The body text: row names and values, the now-playing title.
-text = "reset"
-# What recedes: hints, section headers, the facts on the right, the footer's keys.
-dim = "reset"
-# The frame's titles, the selected row's background, the playing marker.
-accent = "reset"
-# The transport's buttons and small controls, and the paused icon.
-secondary = "reset"
-# The window's frame and the dotted rules.
-border = "reset"
-# The colour drawn ON the accent, so the selected row's own text stays readable.
-ink = "reset"
-"##;
+/// The seven slots of a theme file, in the order the file writes them: the
+/// key, and what that colour draws.
+const THEME_FILE_SLOTS: [(&str, &str); 7] = [
+    (
+        "background",
+        "The screen behind everything. `transparent_background = true` in\n# config.toml shows the terminal's own instead.",
+    ),
+    (
+        "text",
+        "The body text: row names and values, the now-playing title.",
+    ),
+    (
+        "dim",
+        "What recedes: hints, section headers, the facts on the right, the\n# footer's keys.",
+    ),
+    (
+        "accent",
+        "The frame's titles, the selected row's background, the playing marker.",
+    ),
+    (
+        "secondary",
+        "The transport's buttons and small controls, and the paused icon.",
+    ),
+    ("border", "The window's frame and the dotted rules."),
+    (
+        "ink",
+        "The colour drawn ON the accent, so the selected row's own text stays\n# readable.",
+    ),
+];
 
-/// Writes both factory themes into `dir` when nothing is there, creating
-/// the folder when it is missing: [`DEFAULT_THEME_TEMPLATE`] as
-/// `velo.toml` and [`DEFAULT_TERMINAL_TEMPLATE`] as `default terminal.toml`
-/// (S1 and S3 of issue #54). An existing file is never touched, so an
-/// edited theme and every other theme survive every launch. Answers
-/// whether it wrote anything.
+/// The first line of a shipped theme file: what that theme is, said in the
+/// theme's own name (S1 and S3 of issue #54).
+fn theme_file_note(name: &str) -> &'static str {
+    match name {
+        DEFAULT_THEME_NAME => "velo's own palette, which is also the built-in one.",
+        TERMINAL_THEME_NAME => {
+            "the terminal's own colours — every slot is \"reset\".\n# So velo draws with the palette your terminal already has."
+        }
+        _ => "one of velo's built-in themes.\n# Its palette is mapped onto velo's seven slots.",
+    }
+}
+
+/// The theme file a fresh install finds for one theme: the theme's name and
+/// what it is, [`THEME_FILE_BODY`], then every slot spelled out with its
+/// colour. The text is generated from the palette itself, so a shipped file
+/// cannot drift from the theme it claims to be.
+#[must_use]
+fn theme_file_text(name: &str, colors: ThemeColors) -> String {
+    let mut text = format!("# {name}: {}\n{THEME_FILE_BODY}", theme_file_note(name));
+    for (key, comment) in THEME_FILE_SLOTS {
+        let colour = match key {
+            "background" => colors.background,
+            "text" => colors.text,
+            "dim" => colors.dim,
+            "accent" => colors.accent,
+            "secondary" => colors.secondary,
+            "border" => colors.border,
+            _ => colors.ink,
+        };
+        let _ = write!(text, "# {comment}\n{key} = \"{}\"\n", colour.to_key());
+    }
+    text
+}
+
+/// Writes one theme file per theme the picker offers into `dir`, creating
+/// the folder when it is missing: the factory palette as `velo.toml`, then
+/// every built-in of [`builtins::catalogue`] under its own name —
+/// `tokyo-night`, `nord`, `dracula` and the rest included, `default
+/// terminal.toml` among them (S1 and S3 of issue #54). An existing file is
+/// never touched, so an edited theme and every theme of your own survive
+/// every launch. Answers whether it wrote anything.
+///
+/// A file that cannot be created never hides the ones after it: the first
+/// error is returned once every other theme had its turn.
 ///
 /// # Errors
-/// Fails when the folder or a file cannot be created.
+/// Fails when the folder or any file cannot be created.
 pub fn write_default_theme(dir: &Path) -> std::io::Result<bool> {
     fs::create_dir_all(dir)?;
     let mut wrote = false;
-    for (name, template) in [
-        (DEFAULT_THEME_NAME, DEFAULT_THEME_TEMPLATE),
-        (TERMINAL_THEME_NAME, DEFAULT_TERMINAL_TEMPLATE),
-    ] {
-        let path = dir.join(format!("{name}.toml"));
+    let mut first_error = None;
+    for theme in builtins::catalogue() {
+        let path = dir.join(format!("{}.toml", theme.name));
         let file = fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&path);
         match file {
             Ok(mut file) => {
-                std::io::Write::write_all(&mut file, template.as_bytes())?;
-                wrote = true;
+                let text = theme_file_text(&theme.name, theme.colors);
+                match std::io::Write::write_all(&mut file, text.as_bytes()) {
+                    Ok(()) => wrote = true,
+                    Err(error) => {
+                        first_error.get_or_insert(error);
+                    }
+                }
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error),
+            Err(error) => {
+                first_error.get_or_insert(error);
+            }
         }
     }
-    Ok(wrote)
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(wrote),
+    }
 }
 
 /// The Radio Browser host the directory asks through: `host` in the
@@ -1068,8 +1100,9 @@ browse_by = \"artists\"
 # The theme to use, by name: a TOML file with these same colour keys in the
 # themes/ folder beside this one (themes/<name>.toml), which you can hand to
 # another person. \"velo\" is the factory theme, built in and always there;
-# the folder ships it as themes/velo.toml, and \"default terminal\" — every
-# colour \"reset\", the terminal's own — as \"themes/default terminal.toml\".
+# the folder ships one file per built-in theme — \"velo\", \"default
+# terminal\" (every colour \"reset\") and the rest of the catalogue — so you
+# can copy one and edit it.
 # \"default\" is an old spelling of \"velo\" that still selects the same
 # palette but gets no row in the picker.
 #

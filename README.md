@@ -195,7 +195,7 @@ Everything lives in `$XDG_CONFIG_HOME/velo`, else `~/.config/velo`:
 | `radio.toml` | Favourite stations, pinned places, stations added by hand |
 | `library.toml` | Favourite tracks and saved playlists |
 | `history.toml` | What played, newest first, capped at 500 entries |
-| `themes/*.toml` | One file per custom theme |
+| `themes/*.toml` | One file per theme: every built-in ships its own, commented and ready to copy and edit |
 
 `ctrl+p` changes most settings while velo runs and writes them back key by
 key, leaving your comments and ordering alone. The ones worth knowing:
