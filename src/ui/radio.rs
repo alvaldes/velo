@@ -1732,7 +1732,13 @@ impl RadioView {
     }
 
     /// What the header line says where the view stands and how many rows it
-    /// lists.
+    /// lists. One exception: a cliamp channel's songs are the answer of one
+    /// request (`/<id>/tracks`), and until that answer is held for the
+    /// standing place the header must not claim zero — `0 songs` is the
+    /// service's word for a channel it says is empty, never the answer's
+    /// absence (author report). It names what happened instead; the reason
+    /// a load failed is the status line's, where every wiring failure
+    /// already lands.
     fn header(&self) -> (String, String) {
         let (label, one, many) = match &self.place {
             Place::Top => ("Radio".to_owned(), "section", "sections"),
@@ -1760,7 +1766,14 @@ impl RadioView {
             .iter()
             .filter(|row| row.kind.numbered())
             .count();
-        (label, plural(counted, one, many))
+        let count = if matches!(self.place, Place::CliampChannel { .. })
+            && self.cliamp_songs_place.as_ref() != Some(&self.place)
+        {
+            String::from("no songs loaded")
+        } else {
+            plural(counted, one, many)
+        };
+        (label, count)
     }
 
     /// Whether the place on screen is the one a request is in flight for:
@@ -1771,6 +1784,21 @@ impl RadioView {
     /// it, and the wiring never marks them as waiting.
     fn waiting_here(&self) -> bool {
         self.pending.as_ref() == Some(&self.place)
+    }
+
+    /// Whether the row carries the playing stream, given the playing fact's
+    /// station key. A row that names one playing URL — a station, a song,
+    /// a live row, and now a channel's row in the section — matches the key
+    /// through [`station_row_key`], and the `cliamp radio` section row
+    /// carries the stream of every channel it lists: the marker follows
+    /// the tree outward as well as inward (author report).
+    fn marks_playing_stream(&self, kind: &RowKind, key: &str) -> bool {
+        station_row_key(kind).is_some_and(|known| known == key)
+            || (matches!(kind, RowKind::BrowseCliamp)
+                && self
+                    .cliamp_channels
+                    .iter()
+                    .any(|channel| station_key(&channel.stream) == key))
     }
 
     /// Draws the view into `area`: the header line, the list with the
@@ -1854,8 +1882,7 @@ impl RadioView {
                         };
                         let mark = match &playing {
                             Some((key, state))
-                                if station_row_key(&row.kind)
-                                    .is_some_and(|known| known == key.as_str()) =>
+                                if self.marks_playing_stream(&row.kind, key.as_str()) =>
                             {
                                 match state {
                                     PlayState::Playing => RowMark::Playing,
@@ -1971,7 +1998,12 @@ fn station_row_key(kind: &RowKind) -> Option<String> {
         // The live row marks on the stream's key (issue #68): the shell
         // queues the stream as the station it is, so the playing fact —
         // the URL the transport stands on — matches it like any station's.
-        RowKind::CliampLive { channel } => Some(station_key(&channel.stream)),
+        // The channel's own row in the section carries the same stream
+        // (author report): it names the channel, and the channel is what
+        // plays, so the marker follows the tree inward through it too.
+        RowKind::CliampLive { channel } | RowKind::CliampChannel { channel } => {
+            Some(station_key(&channel.stream))
+        }
         _ => None,
     }
 }

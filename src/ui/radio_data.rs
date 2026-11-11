@@ -245,6 +245,10 @@ pub struct RadioData<T> {
     /// Whether the cliamp section shows at all (issue #48, S1): the
     /// `[radio] cliamp` switch, shown unless the config hides it.
     cliamp_enabled: bool,
+    /// The place the last poll stood in: a change into a channel's place
+    /// whose songs never answered lets the entry ask again (see
+    /// [`Self::request`]).
+    polled_place: Option<Place>,
     /// The request in flight, its answer still to be polled.
     pending: Option<Receiver<Outcome>>,
     /// The status-line message waiting to be taken.
@@ -302,6 +306,7 @@ impl<T: Transport + Send + Sync + 'static> RadioData<T> {
             cliamp_listeners: Vec::new(),
             cliamp_songs: None,
             cliamp_enabled: true,
+            polled_place: None,
             pending: None,
             message,
         }
@@ -435,11 +440,30 @@ impl<T: Transport + Send + Sync + 'static> RadioData<T> {
     /// if the single slot is free. The loaded markers are set when the
     /// request starts, so an answer — including an empty or a failed one —
     /// is not re-requested behind the user's back; `Ctrl+R` is the retry.
+    ///
+    /// One deliberate exception for a channel's songs (author report): a
+    /// failed ask is not an answer, but it left `requested` set, so
+    /// re-entering the channel would never ask again and the place would
+    /// stay blank the whole session. A poll that sees the view arrive in a
+    /// channel's place — the place changed between polls — with no songs
+    /// held for it forgets `requested`, so the user's own act of entering
+    /// asks again. Standing still never re-asks: the place only changes on
+    /// a move, and the spawn below sets `requested` right back.
     fn request(&mut self, view: &mut RadioView) {
+        let place = view.place().clone();
+        if self.polled_place.as_ref() != Some(&place)
+            && matches!(place, Place::CliampChannel { .. })
+            && self
+                .cliamp_songs
+                .as_ref()
+                .is_none_or(|(answered, _)| answered != &place)
+        {
+            self.requested = None;
+        }
+        self.polled_place = Some(place.clone());
         if self.pending.is_some() || self.client.is_none() {
             return;
         }
-        let place = view.place().clone();
         match place {
             Place::Countries if !self.countries_loaded => {
                 self.countries_loaded = true;

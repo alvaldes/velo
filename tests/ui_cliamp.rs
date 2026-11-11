@@ -36,6 +36,7 @@ struct Canned {
     tracks: String,
     fail_stations: bool,
     fail_statistics: bool,
+    fail_tracks_once: std::sync::atomic::AtomicBool,
 }
 
 impl Canned {
@@ -47,6 +48,7 @@ impl Canned {
             tracks: String::from(r#"{"station":"lofi","name":"","count":0,"tracks":[]}"#),
             fail_stations: false,
             fail_statistics: false,
+            fail_tracks_once: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -75,6 +77,13 @@ impl Canned {
         self
     }
 
+    /// Loses the first `/tracks` answer only: after that refusal the
+    /// endpoint answers, so a test can pin that a re-entry asks again.
+    fn failing_tracks_once(mut self) -> Self {
+        self.fail_tracks_once = true.into();
+        self
+    }
+
     fn calls(&self) -> Vec<String> {
         self.calls.lock().expect("call log").clone()
     }
@@ -100,6 +109,14 @@ impl Transport for Canned {
             return Ok(self.stations.clone());
         }
         if url.contains("radio.cliamp.stream/") && url.contains("/tracks") {
+            if self
+                .fail_tracks_once
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(Error::Unreachable {
+                    detail: "connection refused".to_owned(),
+                });
+            }
             return Ok(self.tracks.clone());
         }
         // The directory: an empty index, so a test can pin that a cliamp
@@ -1386,6 +1403,297 @@ const TRACKS_FIXTURE: &str = r#"{"station":"lofi","name":"LoFi Beats","count":2,
     {"id":"t2","title":"Dusk","artist":"Sable","album":"Views",
      "filename":"t2.mp3","url":"https://radio.cliamp.stream/lofi/tracks/t2"}
 ]}"#;
+
+// ---- issue #70: the playing marker reaches the ancestors ---------------------
+
+/// The playing stream marks the channel's own row inside the cliamp
+/// section: the section is where the fifteen channels are scanned, and the
+/// one that plays must be findable from the list alone — the same tree
+/// rule the live row inside the channel already follows.
+#[test]
+fn a_playing_channel_marks_its_row_inside_the_section() {
+    let mut view = view();
+    view.open_place(Place::Cliamp);
+    view.set_playing(Some((
+        String::from("https://radio.cliamp.stream/lofi/stream"),
+        PlayState::Playing,
+    )));
+    let screen = screen(&view);
+    assert!(
+        screen.contains("▶ 1. LoFi Beats"),
+        "the channel that plays marks its row in the section, got:\n{screen}"
+    );
+    assert!(
+        !screen.contains("▶ 2. Jazz Cafe") && !screen.contains("▶ Jazz Cafe"),
+        "a channel that is not playing marks nothing, got:\n{screen}"
+    );
+}
+
+/// The playing stream reaches the top too: the `cliamp radio` section row
+/// marks when one of the section's channels plays, so the marker follows
+/// the tree outward as well as inward.
+#[test]
+fn a_playing_channel_marks_the_cliamp_section_row_at_the_top() {
+    let mut view = view();
+    view.set_playing(Some((
+        String::from("https://radio.cliamp.stream/lofi/stream"),
+        PlayState::Playing,
+    )));
+    let marked = screen(&view);
+    assert!(
+        marked.contains("▶ 1. cliamp radio"),
+        "the section whose channel plays marks its row at the top, got:\n{marked}"
+    );
+    view.set_playing(None);
+    let quiet = screen(&view);
+    assert!(
+        !quiet.contains("▶ 1. cliamp radio"),
+        "with nothing playing the section row marks nothing, got:\n{quiet}"
+    );
+}
+
+// ---- issue #71: the songs over the shell -------------------------------------
+
+/// The author's flow, driven the way the event loop drives it: open the
+/// radio, enter the cliamp section, enter the first channel, and let the
+/// ticks bring `/tracks` in. The songs must stand under the live row and
+/// the header must count them — the header is not allowed to say
+/// `0 songs` while the service answered with songs.
+#[test]
+fn opening_a_channel_from_the_shell_lists_its_songs_and_counts_them() {
+    let canned = Arc::new(
+        Canned::new()
+            .stations(STATIONS_FIXTURE)
+            .statistics(STATISTICS_FIXTURE)
+            .tracks(TRACKS_FIXTURE),
+    );
+    let mut app = App::new(Vec::new());
+    app.set_radio_wire(Box::new(wired(Arc::clone(&canned))));
+    shell(&mut app, KeyCode::Char('R')); // the radio opens over its wiring
+    shell(&mut app, KeyCode::Enter); // into the cliamp section
+    for _ in 0..400 {
+        app.tick();
+        if app_screen(&app).contains("LoFi Beats") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    shell(&mut app, KeyCode::Enter); // into the first channel's place
+    for _ in 0..400 {
+        app.tick();
+        if app_screen(&app).contains("Dawn") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    let screen = app_screen(&app);
+    assert!(
+        screen.contains("Dawn") && screen.contains("Dusk"),
+        "the channel lists the songs the service answered, got:\n{screen}"
+    );
+    assert!(
+        screen.contains("[2 songs]"),
+        "the header counts the song rows, got:\n{screen}"
+    );
+    assert!(
+        !screen.contains("[0 songs]"),
+        "the header never claims zero songs while the songs stand on screen, got:\n{screen}"
+    );
+}
+
+// ---- re-entry flows: the songs must survive leaving and reopening ----------
+
+/// One key press followed by the wiring turn the shell's key handler runs
+/// (`radio_poll` runs right after every key); the ticks then keep polling
+/// while the test waits.
+fn press_and_poll<T>(data: &mut RadioData<T>, view: &mut RadioView, code: KeyCode)
+where
+    T: Transport + Send + Sync + 'static,
+{
+    press(view, code);
+    data.poll(view);
+}
+
+/// Leaving the channel while its request is still in flight and re-entering
+/// later: the answer the wiring cached must reach the view, never a blank
+/// channel with `[0 songs]`.
+#[test]
+fn leaving_a_channel_mid_flight_and_reentering_still_shows_the_songs() {
+    let canned = Arc::new(
+        Canned::new()
+            .stations(STATIONS_FIXTURE)
+            .statistics(STATISTICS_FIXTURE)
+            .tracks(TRACKS_FIXTURE),
+    );
+    let mut data = wired(Arc::clone(&canned));
+    let mut view = data.view();
+
+    press(&mut view, KeyCode::Enter); // the cliamp section
+    settle(&mut data, &mut view, &canned, |_view, canned| {
+        canned.calls().len() == 2
+    });
+    press_and_poll(&mut data, &mut view, KeyCode::Enter); // into the channel: the ask goes out
+    press_and_poll(&mut data, &mut view, KeyCode::Esc); // out before the answer lands
+    settle(&mut data, &mut view, &canned, |view, canned| {
+        canned
+            .calls()
+            .iter()
+            .any(|url| url.contains("/lofi/tracks"))
+            && view.place() == &Place::Cliamp
+    });
+
+    press_and_poll(&mut data, &mut view, KeyCode::Enter); // into the same channel again
+    settle(&mut data, &mut view, &canned, |view, _| {
+        view.labels().contains(&String::from("Dawn"))
+    });
+    assert!(
+        view.labels().contains(&String::from("Dawn")),
+        "re-entering the channel shows the songs the first ask brought, got: {:?}",
+        view.labels()
+    );
+}
+
+/// Closing the radio and opening it again in the same session: the channels
+/// come back from the wiring's memory, and entering the channel must still
+/// list its songs — the author saw `[0 songs]` after exactly this.
+#[test]
+fn reopening_the_radio_still_lists_a_channel_songs() {
+    let canned = Arc::new(
+        Canned::new()
+            .stations(STATIONS_FIXTURE)
+            .statistics(STATISTICS_FIXTURE)
+            .tracks(TRACKS_FIXTURE),
+    );
+    let mut data = wired(Arc::clone(&canned));
+    let mut view = data.view();
+
+    press(&mut view, KeyCode::Enter); // the cliamp section
+    settle(&mut data, &mut view, &canned, |_view, canned| {
+        canned.calls().len() == 2
+    });
+    press_and_poll(&mut data, &mut view, KeyCode::Enter); // into the channel; its songs load
+    settle(&mut data, &mut view, &canned, |view, canned| {
+        canned
+            .calls()
+            .iter()
+            .any(|url| url.contains("/lofi/tracks"))
+            && view.labels().contains(&String::from("Dawn"))
+    });
+    press_and_poll(&mut data, &mut view, KeyCode::Esc); // back to the section
+    press_and_poll(&mut data, &mut view, KeyCode::Esc); // back to the top
+    press_and_poll(&mut data, &mut view, KeyCode::Esc); // the radio closes
+
+    // The radio reopens over the same wiring: a fresh view, the channels
+    // already known and the songs already answered once.
+    let mut view = data.view();
+    press_and_poll(&mut data, &mut view, KeyCode::Enter); // the cliamp section
+    settle(&mut data, &mut view, &canned, |view, _| {
+        view.labels().contains(&String::from("LoFi Beats"))
+    });
+    press_and_poll(&mut data, &mut view, KeyCode::Enter); // into the channel again
+    settle(&mut data, &mut view, &canned, |view, canned| {
+        view.labels().contains(&String::from("Dawn")) || canned.calls().len() >= 4
+    });
+    assert!(
+        view.labels().contains(&String::from("Dawn")),
+        "the reopened radio lists the channel's songs, got: {:?} (calls: {:?})",
+        view.labels(),
+        canned.calls()
+    );
+}
+
+// ---- a lost answer must not strand a channel --------------------------------
+
+/// The service's answer can be lost once — a connection refused, a timeout.
+/// A failed ask is not an answer: re-entering the channel is the user asking
+/// again, and the wiring must ask. Before the fix it remembered the channel
+/// forever, so the place stayed blank with a lying `[0 songs]` for the whole
+/// session.
+#[test]
+fn a_failed_songs_ask_is_asked_again_on_reentry() {
+    let canned = Arc::new(
+        Canned::new()
+            .stations(STATIONS_FIXTURE)
+            .statistics(STATISTICS_FIXTURE)
+            .tracks(TRACKS_FIXTURE)
+            .failing_tracks_once(),
+    );
+    let mut data = wired(Arc::clone(&canned));
+    let mut view = data.view();
+
+    press(&mut view, KeyCode::Enter); // the cliamp section
+    settle(&mut data, &mut view, &canned, |_view, canned| {
+        canned.calls().len() == 2
+    });
+    press_and_poll(&mut data, &mut view, KeyCode::Enter); // into the channel: the ask goes out and fails
+    settle(&mut data, &mut view, &canned, |view, canned| {
+        canned
+            .calls()
+            .iter()
+            .any(|url| url.contains("/lofi/tracks"))
+            && view.labels().contains(&String::from("LoFi Beats — live"))
+    });
+    assert!(
+        !view.labels().contains(&String::from("Dawn")),
+        "the failed ask left no songs, got: {:?}",
+        view.labels()
+    );
+
+    press_and_poll(&mut data, &mut view, KeyCode::Esc); // back to the section
+    press_and_poll(&mut data, &mut view, KeyCode::Enter); // the user asks again by entering
+    settle(&mut data, &mut view, &canned, |_, canned| {
+        canned
+            .calls()
+            .iter()
+            .filter(|url| url.contains("/lofi/tracks"))
+            .count()
+            == 2
+    });
+    settle(&mut data, &mut view, &canned, |view, _| {
+        view.labels().contains(&String::from("Dawn"))
+    });
+    assert!(
+        view.labels().contains(&String::from("Dawn")),
+        "the re-entry asked again and the songs arrived, got: {:?} (calls: {:?})",
+        view.labels(),
+        canned.calls()
+    );
+}
+
+/// The header of a channel whose songs never arrived must not count to
+/// zero — `0 songs` is the service's word for a channel it says is empty,
+/// never the answer being absent. The honest line names what happened.
+#[test]
+fn a_channel_without_its_songs_does_not_claim_zero_songs() {
+    let mut view = bare();
+    view.set_cliamp_channels(channels());
+    view.open_place(channel_place());
+    let screen = screen(&view);
+    assert!(
+        screen.contains("[no songs loaded]"),
+        "a channel whose songs never arrived says so, got:\n{screen}"
+    );
+    assert!(
+        !screen.contains("[0 songs]"),
+        "an unloaded channel never claims the service's own zero, got:\n{screen}"
+    );
+}
+
+/// And when the answer IS held — even empty — the header counts it: zero
+/// songs is then the service's own word about the channel.
+#[test]
+fn a_channel_holding_an_empty_answer_says_zero_songs() {
+    let mut view = bare();
+    view.set_cliamp_channels(channels());
+    view.open_place(channel_place());
+    view.set_cliamp_songs(channel_place(), Vec::new());
+    let screen = screen(&view);
+    assert!(
+        screen.contains("[0 songs]"),
+        "a held empty answer is counted honestly, got:\n{screen}"
+    );
+}
 
 // ---- marking in the cliamp places: `f` reaches every play -------------------
 
