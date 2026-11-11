@@ -70,6 +70,12 @@ struct Fixture {
     honor_ranges: bool,
     /// Every request fails, the way an unreachable server does.
     fail: bool,
+    /// Ranges (by their `from`) whose first request fails and whose retry
+    /// succeeds — a connection that drops once and recovers.
+    fail_first_at: Vec<u64>,
+    /// Ranges (by their `from`) whose every request fails — a connection
+    /// that stays down.
+    fail_always_at: Vec<u64>,
     requests: Mutex<Vec<(u64, Option<u64>)>>,
 }
 
@@ -79,6 +85,8 @@ impl Fixture {
             body: body(len),
             honor_ranges: true,
             fail: false,
+            fail_first_at: Vec::new(),
+            fail_always_at: Vec::new(),
             requests: Mutex::new(Vec::new()),
         })
     }
@@ -88,6 +96,8 @@ impl Fixture {
             body: body(len),
             honor_ranges: false,
             fail: false,
+            fail_first_at: Vec::new(),
+            fail_always_at: Vec::new(),
             requests: Mutex::new(Vec::new()),
         })
     }
@@ -99,6 +109,8 @@ impl Fixture {
             body: Vec::new(),
             honor_ranges: true,
             fail: true,
+            fail_first_at: Vec::new(),
+            fail_always_at: Vec::new(),
             requests: Mutex::new(Vec::new()),
         })
     }
@@ -110,6 +122,35 @@ impl Fixture {
             body,
             honor_ranges: true,
             fail: false,
+            fail_first_at: Vec::new(),
+            fail_always_at: Vec::new(),
+            requests: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// A transport whose first request for one range fails and whose retry
+    /// of the very same range succeeds — a connection that drops once
+    /// mid-track and recovers (T4).
+    fn dropping_once(len: usize, from: u64) -> Arc<Self> {
+        Arc::new(Self {
+            body: body(len),
+            honor_ranges: true,
+            fail: false,
+            fail_first_at: vec![from],
+            fail_always_at: Vec::new(),
+            requests: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// A transport whose every request for one range fails — a connection
+    /// that stays down mid-track (T4).
+    fn down_at(len: usize, from: u64) -> Arc<Self> {
+        Arc::new(Self {
+            body: body(len),
+            honor_ranges: true,
+            fail: false,
+            fail_first_at: Vec::new(),
+            fail_always_at: vec![from],
             requests: Mutex::new(Vec::new()),
         })
     }
@@ -121,8 +162,14 @@ impl Fixture {
 
 impl RangeTransport for Fixture {
     fn range(&self, _url: &str, from: u64, to: Option<u64>) -> Result<RangeAnswer, Error> {
-        self.requests.lock().unwrap().push((from, to));
-        if self.fail {
+        let mut requests = self.requests.lock().unwrap();
+        let earlier = requests.iter().filter(|(asked, _)| *asked == from).count();
+        requests.push((from, to));
+        drop(requests);
+        let failing = self.fail
+            || self.fail_always_at.contains(&from)
+            || (self.fail_first_at.contains(&from) && earlier == 0);
+        if failing {
             return Err(Error::Unreachable {
                 detail: "the fixture is down".to_owned(),
             });
@@ -220,6 +267,167 @@ fn sequential_reads_crossing_window_boundaries_return_the_whole_body_in_order() 
     // At the end of the body the source is at EOF, not stuck.
     let mut buf = [0_u8; 16];
     assert_eq!(source.read(&mut buf).expect("eof reads"), 0);
+}
+
+// ---------------------------------------- mid-track failure: one retry (T4, S5)
+
+/// A fetch that fails mid-track is retried exactly once, for the very same
+/// window, and the retry answers the read — the station rule's shape (S5):
+/// a range request is stateless, so the second attempt asks what the first
+/// asked.
+#[test]
+fn a_failed_fetch_is_retried_once_for_the_same_window_and_answers_the_read() {
+    let len = usize::try_from(WINDOW_BYTES).expect("small window") * 3 + 3_711;
+    let fixture = Fixture::dropping_once(len, WINDOW_BYTES);
+    let mut source = RemoteSource::new(Arc::clone(&fixture), URL).expect("the probe answers");
+
+    let drained = drain(&mut source, 7_003);
+
+    assert_eq!(drained, body(len), "the retry answered the read");
+    let requested = fixture.requested();
+    assert_eq!(
+        requested,
+        vec![
+            (0, Some(WINDOW_BYTES - 1)),
+            (WINDOW_BYTES, Some(WINDOW_BYTES * 2 - 1)),
+            (WINDOW_BYTES, Some(WINDOW_BYTES * 2 - 1)),
+            (WINDOW_BYTES * 2, Some(WINDOW_BYTES * 3 - 1)),
+            (WINDOW_BYTES * 3, Some(len as u64 - 1)),
+        ],
+        "the retry asked the very same range, exactly once more: {requested:?}"
+    );
+}
+
+/// A second failure is the error, not a third request: the retry budget is
+/// spent by the first failure, and the read fails as any failed fetch does
+/// today (S5).
+#[test]
+fn a_second_failure_is_the_error_and_never_a_third_request() {
+    let len = 100_000;
+    let fixture = Fixture::down_at(len, WINDOW_BYTES);
+    let mut source = RemoteSource::new(Arc::clone(&fixture), URL).expect("the probe answers");
+
+    let mut buf = vec![0_u8; 7_003];
+    let mut drained: u64 = 0;
+    loop {
+        match source.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => drained += n as u64,
+        }
+    }
+
+    assert_eq!(
+        drained, WINDOW_BYTES,
+        "the reads stop at the window that stays down"
+    );
+    let attempts = fixture
+        .requested()
+        .into_iter()
+        .filter(|(from, _)| *from == WINDOW_BYTES)
+        .count();
+    assert_eq!(
+        attempts, 2,
+        "exactly two attempts for the dead window, never a third"
+    );
+}
+
+/// A retried window lands in the cache fill exactly once: a fetch that
+/// failed answered no bytes, so the fill's `next` never advances twice for
+/// the same bytes, and the completed file is the body byte for byte (S5,
+/// D1).
+#[test]
+fn a_retried_window_is_appended_to_the_fill_once() {
+    let dir = temp_dir("fill-retry");
+    let cache = Cache::new(dir.clone());
+    let final_path = cache.path_for(URL);
+    let len = usize::try_from(WINDOW_BYTES).expect("small window") * 2 + 500;
+    let fixture = Fixture::dropping_once(len, WINDOW_BYTES);
+    let mut source = RemoteSource::with_cache_fill(Arc::clone(&fixture), URL, &cache)
+        .expect("the probe answers");
+
+    let drained = drain(&mut source, 7_003);
+
+    assert_eq!(drained, body(len));
+    assert!(final_path.exists(), "the retried fill still completed");
+    assert_eq!(
+        fs::read(&final_path).unwrap(),
+        body(len),
+        "the cached body holds every byte exactly once, the retried window included"
+    );
+    assert!(
+        part_files(&dir).is_empty(),
+        "no .part file survives the completion"
+    );
+}
+
+/// A failure followed by a seek asks the window the read now wants, never
+/// the abandoned one again: the retry belongs to one fetch, and a seek
+/// replaces the window it was for (S5, S3).
+#[test]
+fn a_failure_followed_by_a_seek_asks_the_new_window_not_the_old() {
+    let len = 100_000;
+    let fixture = Fixture::down_at(len, WINDOW_BYTES);
+    let mut source = RemoteSource::new(Arc::clone(&fixture), URL).expect("the probe answers");
+
+    // Reads into the dead window fail — its retry already spent.
+    let mut buf = [0_u8; 16];
+    loop {
+        if source.read(&mut buf).is_err() {
+            break;
+        }
+    }
+    // The seek moves on; the next read asks its own window.
+    source
+        .seek(std::io::SeekFrom::Start(70_000))
+        .expect("the seek resolves");
+    let n = source
+        .read(&mut buf)
+        .expect("the read after the seek answers");
+    assert_eq!(n, 16, "the new window holds the whole read");
+    assert_eq!(&buf, &body(len)[70_000..70_016]);
+
+    let requested = fixture.requested();
+    assert_eq!(
+        requested,
+        vec![
+            (0, Some(WINDOW_BYTES - 1)),
+            // Both attempts of the dead window clamp at the body's end.
+            (WINDOW_BYTES, Some(len as u64 - 1)),
+            (WINDOW_BYTES, Some(len as u64 - 1)),
+            (
+                70_000,
+                Some((70_000 + WINDOW_BYTES - 1).min(len as u64 - 1))
+            ),
+        ],
+        "the read after the seek asked the new window, never the abandoned one again: {requested:?}"
+    );
+}
+
+/// The wait sits between the failed fetch and its retry, and it is the
+/// module's named 500 ms — never slept in tests: the seam records the
+/// delay and how many requests had gone out when it fired (S5).
+#[test]
+fn the_retry_waits_500_ms_between_its_two_attempts() {
+    let len = 100_000;
+    let fixture = Fixture::dropping_once(len, WINDOW_BYTES);
+    let waits: Arc<Mutex<Vec<(usize, std::time::Duration)>>> = Arc::new(Mutex::new(Vec::new()));
+    let watcher = Arc::clone(&fixture);
+    let recorded = Arc::clone(&waits);
+    let wait = Arc::new(move |delay: std::time::Duration| {
+        let asked = watcher.requested().len();
+        recorded.lock().unwrap().push((asked, delay));
+    }) as Arc<dyn Fn(std::time::Duration) + Send + Sync>;
+    let mut source = RemoteSource::new(Arc::clone(&fixture), URL)
+        .expect("the probe answers")
+        .with_retry_wait(wait);
+
+    drain(&mut source, 7_003);
+
+    assert_eq!(
+        *waits.lock().unwrap(),
+        vec![(2, std::time::Duration::from_millis(500))],
+        "one 500 ms wait, after the failed attempt and before the retry"
+    );
 }
 
 // --------------------------------------------------------------------- seeks

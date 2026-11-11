@@ -15,6 +15,14 @@
 //!   first sound needs only the first window, not the whole body (S1).
 //! - **S3** — a seek to any position re-requests that range on the next
 //!   read; it never resolves to the end of the track.
+//! - **S5** — a fetch that fails mid-track is retried exactly once, for the
+//!   very same window, after the module's 500 ms `RETRY_WAIT` — the station
+//!   rule's shape (one attempt more, the wait between the attempts, the
+//!   last failure is the error). A second failure is the read's error, so
+//!   the track fails with the sentence a failed fetch already uses and the
+//!   queue never advances behind the user's back. A fetch that failed
+//!   answered no bytes, so a retry cannot append the same bytes to the
+//!   cache fill twice, and a seek replaces the window the retry was for.
 //! - **D1** (the author's decision) — while the source reads sequentially
 //!   from byte 0, the same bytes are appended to the cache's `.part` file
 //!   for that URL ([`Cache::begin_fill`]); delivering the whole body renames
@@ -34,6 +42,7 @@
 
 use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::Arc;
+use std::time::Duration;
 
 use symphonia::core::io::MediaSource;
 
@@ -43,6 +52,14 @@ use crate::subsonic::cache::{Cache, CacheFill};
 /// How many bytes one window fetch asks for: the chunked-read granularity of
 /// [`RemoteSource`] (see the module note for why this size).
 pub const WINDOW_BYTES: u64 = 64 * 1024;
+
+/// How long a failed fetch waits before its one retry (S5): 500 ms, short
+/// enough that a mid-track hiccup stays a hiccup the decoder's buffers
+/// absorb — the same one-wait-between-attempts shape the station's `Retry`
+/// gives an open, at a fraction of its 2 s because a stalled read holds the
+/// decoding thread. Production sleeps this; tests never do — they replace
+/// it through [`RemoteSource::with_retry_wait`].
+const RETRY_WAIT: Duration = Duration::from_millis(500);
 
 /// The answer to one range request of a URL.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,6 +107,10 @@ impl<T: RangeTransport + ?Sized> RangeTransport for Arc<T> {
 /// (S4). Not an error: a server without ranges is a way of playing, not a
 /// failure.
 #[derive(Debug)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "the source is the answer's whole point and the verdict\n    carries nothing; boxing it would only move the indirection onto every\n    caller the start path already has"
+)]
 pub enum RemoteOpen {
     /// The ranged source: opened, it sounds as its bytes arrive (S1) and —
     /// with the cache fill attached — leaves the body behind it (D1).
@@ -124,6 +145,7 @@ fn open_shared(transport: Arc<dyn RangeTransport>, url: &str) -> Result<RemoteOp
             window_from: 0,
             window: bytes,
             fill: None,
+            retry_wait: Arc::new(std::thread::sleep),
         })),
         RangeAnswer::NoRanges => Ok(RemoteOpen::NoRanges),
     }
@@ -206,6 +228,10 @@ pub struct RemoteSource {
     /// The cache fill running behind the reads, when one was asked for and
     /// has not completed or been abandoned yet.
     fill: Option<FillState>,
+    /// The wait between a failed fetch and its one retry (S5): production
+    /// sleeps `RETRY_WAIT` on the reading thread; tests replace it with a
+    /// recorder so no test waits on the wall clock.
+    retry_wait: Arc<dyn Fn(Duration) + Send + Sync>,
 }
 
 impl RemoteSource {
@@ -244,6 +270,15 @@ impl RemoteSource {
         }
     }
 
+    /// Replaces the wait between a failed fetch and its one retry (S5) —
+    /// the tests' seam: no test sleeps the wall clock. Production keeps the
+    /// module's own `RETRY_WAIT`.
+    #[must_use]
+    pub fn with_retry_wait(mut self, wait: Arc<dyn Fn(Duration) + Send + Sync>) -> Self {
+        self.retry_wait = wait;
+        self
+    }
+
     /// Appends to the fill the part of one fetched range that continues it.
     /// A range that starts beyond the fill's `next` would leave a gap in the
     /// cached file — a seek skipped ahead — and abandons the fill instead:
@@ -280,11 +315,25 @@ impl RemoteSource {
         self.fill = Some(state);
     }
 
-    /// Fetches the window starting at the read position.
+    /// Fetches the window starting at the read position. A failed fetch is
+    /// retried exactly once, for the very same window, after 500 ms
+    /// (`RETRY_WAIT`) — the station rule's shape: one attempt more, the
+    /// wait between the attempts and never before the first, and the
+    /// second failure is the error the read fails with, exactly as a single
+    /// failure is today (S5) — the interface's failure paths keep the
+    /// sentence and the queue. A fetch that failed answered no bytes, so
+    /// the retry cannot advance the fill's `next` twice for the same
+    /// bytes.
     fn fetch_window(&mut self) -> Result<(), Error> {
         let from = self.pos;
         let to = (from + WINDOW_BYTES - 1).min(self.total - 1);
-        let answer = self.transport.range(&self.url, from, Some(to))?;
+        let answer = match self.transport.range(&self.url, from, Some(to)) {
+            Ok(answer) => answer,
+            Err(_first) => {
+                (self.retry_wait)(RETRY_WAIT);
+                self.transport.range(&self.url, from, Some(to))?
+            }
+        };
         match answer {
             RangeAnswer::Partial { bytes, total } => {
                 self.total = total;
