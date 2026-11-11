@@ -95,7 +95,9 @@ velo --info song.flac            # format, frame count and length
 
 ## Keys
 
-The essentials. `?` opens the full, filterable list inside velo.
+The essentials. The footer names the keys of the screen you are on — the
+radio's rows, the queue and a level of the library each answer to a different
+handful — and `?` opens the full, filterable list inside velo.
 
 | Key | Action |
 |:--|:--|

@@ -577,12 +577,15 @@ h1 {
 
 .app-footer {
   display: flex;
+  /* The interface joins its hints with two spaces and drops one rather than
+     wrap, so the row is one line wide: the gaps here are those two spaces at
+     the size this strip is set in. */
   flex-wrap: wrap;
-  gap: 0.2rem 0.9rem;
+  gap: 0.2rem 2ch;
   padding-top: 0.7rem;
   border-top: 1px solid rgba(154, 163, 174, 0.2);
   color: var(--dim);
-  font-size: 0.7rem;
+  font-size: 0.66rem;
 }
 
 .app-footer b {
