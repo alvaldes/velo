@@ -1016,7 +1016,7 @@ fn the_sources_screen_marks_the_row_what_plays_came_from() {
 
 /// The play button and the volume's number are the row; everything else leaves
 /// as the width runs out, and in this order (author's report): the gauge first,
-/// then the ReplayGain mode, then shuffle and repeat, then the two skip arrows.
+/// then the `ReplayGain` mode, then shuffle and repeat, then the two skip arrows.
 /// RG used to outlive shuffle, which is what this pins.
 #[test]
 fn a_narrower_window_gives_the_transport_up_in_order() {
@@ -1080,7 +1080,7 @@ fn a_narrower_window_gives_the_transport_up_in_order() {
 
 /// A window short enough gives the block three rows, and that row has to hold
 /// the transport and the volume and nothing else: shuffle, repeat and the
-/// ReplayGain mode need room to read. Crammed in they printed as
+/// `ReplayGain` mode need room to read. Crammed in they printed as
 /// `shuffleRG track` against the slider. `z`, `r` and the settings card still
 /// reach all three, and the tall block still shows them.
 #[test]

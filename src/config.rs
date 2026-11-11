@@ -1054,6 +1054,10 @@ fn radio_table_from(config_path: Option<&Path>) -> Option<RadioFile> {
 /// so it is written commented out — "not in the file" — and the interface
 /// asks for it.
 #[must_use]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one template, read top to bottom; splitting it would hide the file it writes"
+)]
 pub fn default_config_text() -> String {
     let theme = ThemeColors::default();
     format!(

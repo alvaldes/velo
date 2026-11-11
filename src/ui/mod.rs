@@ -5976,7 +5976,7 @@ impl<'lib> App<'lib> {
 
     /// The buttons on the left, the volume on the right, and the ladder that
     /// decides what else fits. The play button and the volume's number are the
-    /// row; as the width runs out the gauge goes first, then the ReplayGain
+    /// row; as the width runs out the gauge goes first, then the `ReplayGain`
     /// mode, then shuffle and repeat, then the two skip arrows — RG outranks
     /// nothing here, which is what it used to do while shuffle left. `dense` is
     /// the short block, where RG, shuffle and repeat are not offered at all.
@@ -6042,7 +6042,7 @@ impl<'lib> App<'lib> {
                 + if with_extras { measure(&extras) } else { 0 };
             let right = measure(&volume_slider(volume, gauge, &self.theme))
                 + if with_gain { measure(&gain) } else { 0 };
-            if left + right + 1 <= width {
+            if width > left + right {
                 break;
             }
             if gauge > 0 {
