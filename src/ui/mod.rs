@@ -497,6 +497,10 @@ struct Crossfading {
     player: Player,
     /// Whether the fade-out has been armed.
     armed: bool,
+    /// The label of the entry the new stream is still to sound: what the
+    /// waiting line names while this handover waits (the first entry of a
+    /// fresh start, the entry a rebuild starts at).
+    waiting_for: String,
 }
 
 /// Where playback stands, for the header and the footer.
@@ -4506,14 +4510,20 @@ impl<'lib> App<'lib> {
             },
             Err(reason) => {
                 self.pending_resolve = None;
-                if self.player.is_some() {
-                    // A failed fetch under a start that kept the sounding
-                    // stream: it never stopped, so it plays on, and the line
-                    // says both facts (issue #65) — the same courtesy a
-                    // failed open gives.
-                    self.status = format!("velo: {reason} — the stream that was playing goes on");
-                } else {
-                    self.status = format!("velo: {reason}");
+                // The failed-fetch answer (issue #65): the sentence and
+                // whether the stream the start kept survive — the whole
+                // decision is [`Self::fetch_failure`], the three states a
+                // wait can sit over included.
+                let (line, keeps_stream) =
+                    Self::fetch_failure(self.player.is_some().then_some(self.state), &reason);
+                self.status = line;
+                if !keeps_stream {
+                    // The sounding stream survives a failed fetch
+                    // untouched; a paused one or none at all is the plain
+                    // stop a start that fails on this thread always was.
+                    if let Some(player) = self.player.take() {
+                        player.stop();
+                    }
                     self.playing = None;
                     self.state = PlayState::Stopped;
                 }
@@ -8458,6 +8468,97 @@ impl<'lib> App<'lib> {
         self.handover_wanted(first, waits)
     }
 
+    /// The status line the waiting half of a handover carries: it names the
+    /// entry the new stream is still to sound and says the stream that was
+    /// playing goes on (the author's ask, issue #65). Pure — a label in, a
+    /// sentence out — so the tests can hold the sentence: no test can hold
+    /// a `Player`.
+    const WAITING_LINE_PREFIX: &str = "⟳ waiting for ";
+
+    fn handover_waiting_line(label: Option<&str>) -> Option<String> {
+        label.map(|label| {
+            format!(
+                "{}{label} — the stream that was playing goes on",
+                Self::WAITING_LINE_PREFIX
+            )
+        })
+    }
+
+    /// Drives [`Self::handover_waiting_line`] for the tests: the sentence
+    /// is a pure function of the label, and this is how the suite reaches
+    /// it — the way [`Self::handover_wanted_for_tests`] reaches the
+    /// decision. Hidden from the docs.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn handover_waiting_line_for_tests(label: Option<&str>) -> Option<String> {
+        Self::handover_waiting_line(label)
+    }
+
+    /// The failed-fetch answer (issue #65): the sentence the status line
+    /// carries and whether the stream the start kept survives the failure.
+    /// `state` is what the wait sat over — `Playing` a stream sounding,
+    /// `Paused` one paused, `None` no stream — and only the sounding one
+    /// survives: it was never touched, so the line says both facts, the
+    /// same courtesy a failed open gives (issue #65). A paused stream holds
+    /// nothing audible, so it reads as no stream at all — the same answer
+    /// the pause guard at the open gives (L35) — and the failed start stops
+    /// it and reports the reason alone, the way a start that fails on this
+    /// thread always has.
+    fn fetch_failure(state: Option<PlayState>, reason: &str) -> (String, bool) {
+        match state {
+            Some(PlayState::Playing) => (
+                format!("velo: {reason} — the stream that was playing goes on"),
+                true,
+            ),
+            _ => (format!("velo: {reason}"), false),
+        }
+    }
+
+    /// Drives [`Self::fetch_failure`] for the tests: the answer is a pure
+    /// function of the state a wait sat over, and this is how the suite
+    /// reaches it. Hidden from the docs.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn fetch_failure_for_tests(state: Option<PlayState>, reason: &str) -> (String, bool) {
+        Self::fetch_failure(state, reason)
+    }
+
+    /// Whether a handover's open fades the old stream out or stops it
+    /// outright (issue #65, L35): under a pause nothing is sounding — a
+    /// paused stream holds its fade where it was, so a fade-out armed on it
+    /// would never advance and would strand the player in the handover's
+    /// slot — and it is stopped instead, exactly as a start over a paused
+    /// stream always switched.
+    fn handover_fades_under(state: PlayState) -> bool {
+        state != PlayState::Paused
+    }
+
+    /// Drives [`Self::handover_fades_under`] for the tests: the open's own
+    /// decision is below a `Player` no test can build, but the decision
+    /// itself is a pure function of the state. Hidden from the docs.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn handover_fades_under_for_tests(state: PlayState) -> bool {
+        Self::handover_fades_under(state)
+    }
+
+    /// Drives the carried handover answer for the tests (issue #65): the
+    /// decision is made once, at the start, and travels inside
+    /// [`PendingStart`] — this reads it back from the pending slot, which
+    /// no device is needed to hold. `None` when no fetch is pending.
+    /// Hidden from the docs.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn pending_start_handover_for_tests(&self) -> Option<bool> {
+        self.pending_resolve
+            .as_ref()
+            .map(|pending| match &pending.start {
+                PendingStart::Stream { handover, .. } | PendingStart::TrackAt { handover, .. } => {
+                    *handover
+                }
+            })
+    }
+
     /// Ends a handover in flight: the previous stream — already falling or
     /// fallen — is stopped outright, because a new start replaces it. Stopping
     /// a stream whose fade had not begun is the accepted cost of starting
@@ -8465,6 +8566,10 @@ impl<'lib> App<'lib> {
     fn drop_crossfade(&mut self) {
         if let Some(old) = self.crossfading.take() {
             old.player.stop();
+            // The waiting line, if it still stands, named this handover's
+            // wait — and the wait is over. Cleared only when the line is
+            // still ours; a newer message is never touched.
+            self.clear_handover_waiting_line();
         }
     }
 
@@ -8481,6 +8586,10 @@ impl<'lib> App<'lib> {
         {
             handover.player.begin_crossfade_out();
             handover.armed = true;
+            // The wait is over: the new stream sounds and the overlap has
+            // begun, so the waiting line gives way — but only if it is
+            // still the one standing.
+            self.clear_handover_waiting_line();
         }
         if self
             .crossfading
@@ -8489,6 +8598,54 @@ impl<'lib> App<'lib> {
         {
             let old = self.crossfading.take().expect("checked above").player;
             old.stop();
+            // The old stream, last thing the wait held sounding, is gone;
+            // a waiting line that somehow still stands goes with it.
+            self.clear_handover_waiting_line();
+        }
+        self.note_handover_waiting();
+    }
+
+    /// The waiting fact (the author's ask): while a handover holds a start
+    /// that has not sounded yet — the new player opened, its first samples
+    /// still owed — the status line names the entry and says the stream
+    /// that was playing goes on. No timeout is added, and on purpose: the
+    /// wait may be as long as a slow connection takes, the old stream
+    /// keeps sounding the whole time so nothing degrades, and every way
+    /// out — a new start, a skip, a pause, a quit, a device switch —
+    /// cancels the old player through [`Self::drop_crossfade`].
+    ///
+    /// The line is the status's lowest writer: it fills only an empty line
+    /// and never overwrites `⟳ fetching …`, an error or any newer message
+    /// the app sets — that precedence keeps the user informed without
+    /// flicker, because the line neither vanishes under a wait nor fights
+    /// a fact that arrived after it. One it wrote itself is removed the
+    /// moment the wait ends (the fade arms — the same tick the new stream
+    /// starts sounding) or the old player is cancelled.
+    fn note_handover_waiting(&mut self) {
+        if !self.status.is_empty() {
+            // Any newer message wins; this line never fights one.
+            return;
+        }
+        let Some(handover) = self.crossfading.as_ref().filter(|h| !h.armed) else {
+            return;
+        };
+        // `armed` follows `stream_started` (the same tick arms it), so the
+        // three conditions the wait asks for — a handover held, the fade
+        // not armed, the new stream not yet sounding — hold together.
+        if self.player.as_ref().is_some_and(Player::stream_started) {
+            return;
+        }
+        if let Some(line) = Self::handover_waiting_line(Some(&handover.waiting_for)) {
+            self.status = line;
+        }
+    }
+
+    /// Clears the status line when it is still the waiting line's own
+    /// words — [`Self::WAITING_LINE_PREFIX`] is what one starts with — so a
+    /// newer message is never removed by the wait that overlapped it.
+    fn clear_handover_waiting_line(&mut self) {
+        if self.status.starts_with(Self::WAITING_LINE_PREFIX) {
+            self.status.clear();
         }
     }
 
@@ -8590,14 +8747,17 @@ impl<'lib> App<'lib> {
                     // holds its fade where it was (L35) — so the wait's old
                     // player stops here instead of never finishing a fade
                     // no callback advances.
-                    if self.state == PlayState::Paused {
-                        old.stop();
-                    } else {
+                    if Self::handover_fades_under(self.state) {
                         player.begin_crossfade_in();
                         self.crossfading = Some(Crossfading {
                             player: old,
                             armed: false,
+                            waiting_for: paths
+                                .first()
+                                .map_or_else(String::new, |entry| entry.label().into_owned()),
                         });
+                    } else {
+                        old.stop();
                     }
                 }
                 self.queue = paths;
@@ -8861,14 +9021,17 @@ impl<'lib> App<'lib> {
                     // fully fallen ([`Self::poll_crossfade`]) — except under
                     // a pause, which nothing advances, so the wait's old
                     // player stops here (L35).
-                    if self.state == PlayState::Paused {
-                        old.stop();
-                    } else {
+                    if Self::handover_fades_under(self.state) {
                         player.begin_crossfade_in();
                         self.crossfading = Some(Crossfading {
                             player: old,
                             armed: false,
+                            waiting_for: fetching
+                                .as_ref()
+                                .map_or_else(String::new, |entry| entry.label().into_owned()),
                         });
+                    } else {
+                        old.stop();
                     }
                 }
                 self.player = Some(player);
@@ -8897,6 +9060,15 @@ impl<'lib> App<'lib> {
     }
 
     fn toggle_pause(&mut self) {
+        // A pause cancels a handover still waiting for its new stream to
+        // sound (issue #65, the author's ask): a paused stream never
+        // sounds, so its fade-out would be armed by no tick and the old
+        // player would sit in the crossfading slot forever, sounding while
+        // nothing plays. Mid-fade, stopping it outright is the accepted
+        // cost any new start also pays. A no-op when no handover is held.
+        if self.state == PlayState::Playing {
+            self.drop_crossfade();
+        }
         match (&self.player, self.state) {
             (Some(player), PlayState::Playing) => {
                 player.set_playing(false);

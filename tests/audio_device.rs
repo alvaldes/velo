@@ -6,17 +6,19 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Parser as _;
-use velo::audio::output::{DeviceList, Entry};
+use velo::audio::AudioError;
+use velo::audio::output::{DeviceList, Entry, PathResolver};
 use velo::config::Cli;
 use velo::ui::crossterm::event::{KeyCode, KeyEvent};
 use velo::ui::ratatui::Terminal;
 use velo::ui::ratatui::backend::TestBackend;
 use velo::ui::ratatui::buffer::{Buffer, Cell};
-use velo::ui::{App, PlayState};
+use velo::ui::{Action, App, PlayState};
 
 fn list(names: &[&str], default: Option<&str>) -> impl Fn() -> DeviceList {
     let names: Vec<String> = names.iter().map(|name| (*name).to_owned()).collect();
@@ -176,6 +178,133 @@ fn bit_perfect_keeps_the_plain_switch_a_fade_never_touches_its_samples() {
     assert!(
         !app.handover_wanted_for_tests(Some(&remote_entry()), true),
         "bit-perfect cannot keep a second stream alive at another rate"
+    );
+}
+
+/// A resolver for which every entry is a fetch the network still owes (the
+/// seam issue #60 decided on): `cached` answers no, so every remote start
+/// waits, and `resolve` answers the path itself, the way a cache hit lands.
+struct EveryFetchOwes;
+
+impl PathResolver for EveryFetchOwes {
+    fn resolve(&self, path: &Path) -> Result<PathBuf, AudioError> {
+        Ok(path.to_path_buf())
+    }
+
+    fn cached(&self, _path: &Path) -> bool {
+        false
+    }
+}
+
+/// The failed-fetch answer (`poll_pending_resolve`'s `Err` arm, issue #65):
+/// only a stream that is sounding survives the failure — it was never
+/// touched, so the line says both facts. A paused stream holds nothing
+/// audible and reads as no stream at all, the same answer the pause guard
+/// at the open gives (L35); the plain reason stands for it and for no
+/// stream, and the start is the plain stop it always was.
+#[test]
+fn a_failed_fetch_keeps_only_the_sounding_stream() {
+    let (line, keeps) = App::fetch_failure_for_tests(Some(PlayState::Playing), "the fetch failed");
+    assert!(
+        keeps,
+        "a stream that is sounding survives a failed fetch untouched"
+    );
+    assert!(
+        line.contains("the stream that was playing goes on"),
+        "the line says both facts, got: {line:?}"
+    );
+    assert!(
+        line.starts_with("velo: the fetch failed"),
+        "the line names the reason first, got: {line:?}"
+    );
+
+    let (line, keeps) = App::fetch_failure_for_tests(Some(PlayState::Paused), "the fetch failed");
+    assert!(
+        !keeps,
+        "a paused stream is not kept by a failed fetch — nothing audible survives"
+    );
+    assert_eq!(
+        line, "velo: the fetch failed",
+        "the plain reason stands when no stream goes on"
+    );
+
+    let (line, keeps) = App::fetch_failure_for_tests(None, "the fetch failed");
+    assert!(!keeps, "no stream at all is the plain stop");
+    assert_eq!(line, "velo: the fetch failed");
+}
+
+/// The waiting line of a handover whose new stream has not sounded yet:
+/// it names the entry being waited for and says the stream that was
+/// playing goes on — and carries no timer, no counter and no deadline,
+/// because the wait may be as long as a slow connection takes.
+#[test]
+fn the_waiting_line_names_the_entry_and_says_the_old_stream_goes_on() {
+    let line = App::handover_waiting_line_for_tests(Some("Example FM"))
+        .expect("a waiting handover has an entry to name");
+    assert!(
+        line.contains("Example FM"),
+        "the line names the entry being waited for, got: {line:?}"
+    );
+    assert!(
+        line.contains("the stream that was playing goes on"),
+        "the line says the old stream plays on, got: {line:?}"
+    );
+    assert!(
+        line.chars().all(|c| !c.is_ascii_digit()),
+        "the line carries no number — no countdown, no seconds left: got {line:?}"
+    );
+    assert!(
+        App::handover_waiting_line_for_tests(None).is_none(),
+        "no entry to name, no line"
+    );
+}
+
+/// The pause guard at the handover's open (issue #65, L35): a paused
+/// stream holds its fade where it was, so the old player is stopped
+/// outright instead of being faded out — a paused fade would never
+/// advance and would strand the player in the handover's slot.
+#[test]
+fn a_pause_at_the_open_stops_the_old_stream_instead_of_fading() {
+    assert!(
+        App::handover_fades_under_for_tests(PlayState::Playing),
+        "a sounding stream is faded out, the ordinary handover"
+    );
+    assert!(
+        !App::handover_fades_under_for_tests(PlayState::Paused),
+        "a paused stream is stopped outright — its fade would never advance"
+    );
+}
+
+/// The handover answer travels with the start across its fetch (issue
+/// #65): the decision is made once, before the old stream could have
+/// changed, and carried in the pending start — never re-derived at the
+/// open, where the wait's answer would be a different one.
+#[test]
+fn the_handover_answer_is_carried_across_a_fetch() {
+    let mut app = App::new(Vec::new());
+    app.set_play_state_for_tests(PlayState::Playing);
+    app.queue_song_for_tests("https://radio.example/song.mp3");
+    app.set_resolver(Some(Arc::new(EveryFetchOwes)));
+
+    app.apply(Action::PlayQueue { from: 0 });
+
+    assert_eq!(
+        app.pending_start_handover_for_tests(),
+        Some(true),
+        "a sounding stream's fetch carries the handover answer across the wait"
+    );
+
+    let mut paused = App::new(Vec::new());
+    paused.set_play_state_for_tests(PlayState::Paused);
+    paused.queue_song_for_tests("https://radio.example/song.mp3");
+    paused.set_resolver(Some(Arc::new(EveryFetchOwes)));
+
+    paused.apply(Action::PlayQueue { from: 0 });
+
+    assert_eq!(
+        paused.pending_start_handover_for_tests(),
+        Some(false),
+        "a paused stream's fetch carries the plain answer across the wait"
     );
 }
 
