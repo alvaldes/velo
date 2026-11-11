@@ -1469,7 +1469,12 @@ impl RadioView {
     /// The channels of the cliamp section (issue #48, S2): the channel's
     /// name as the label and its song count as the dim fact. The listeners
     /// moved to the channel's live row (issue #68); a failed or unloaded
-    /// `/statistics` takes nothing else away (S4).
+    /// `/statistics` takes nothing else away (S4). A channel the store
+    /// holds a mark for lists starred — [`starred`], `★ Name`, the shape
+    /// the live row and the favourites block wear — read straight from
+    /// the one station store, so a mark made on any row shows here on the
+    /// next redraw. A channel the service gave no stream for has nothing
+    /// to match the store against, so it never stars.
     fn cliamp_channel_rows(&self) -> Vec<Row> {
         self.cliamp_channels
             .iter()
@@ -1493,7 +1498,12 @@ impl RadioView {
                     let _ = write!(fact, " · {}", listeners(count));
                 }
                 Row {
-                    label: channel.name.clone(),
+                    label: if !channel.stream.is_empty() && self.store.is_favorite(&channel.stream)
+                    {
+                        starred(&channel.name)
+                    } else {
+                        channel.name.clone()
+                    },
                     fact,
                     kind: RowKind::CliampChannel {
                         channel: channel.clone(),
