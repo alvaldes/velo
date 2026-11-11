@@ -4480,12 +4480,13 @@ impl<'lib> App<'lib> {
     /// request named — the handover answer that start decided included — the
     /// resolver now finding a cache hit, exactly as the synchronous start
     /// always opened it; a failure is one line naming the reason, with the
-    /// stream a handover kept sounding untouched and playing (issue #65), and
-    /// no stream at all otherwise — the queue stands where it was, never
-    /// advanced behind the user's back, and the state goes stopped the way a
-    /// start failing on this thread always has. A worker that died before it
-    /// answered — a panic inside a resolver — is a failed fetch with its own
-    /// sentence, never an eternal wait.
+    /// stream a handover kept sounding untouched and playing (issue #65), a
+    /// paused one untouched and paused, and no stream at all otherwise — the
+    /// queue stands where it was, never advanced behind the user's back, and
+    /// only then does the state go stopped the way a start failing on this
+    /// thread always has. A worker that died before it answered — a panic
+    /// inside a resolver — is a failed fetch with its own sentence, never an
+    /// eternal wait.
     fn poll_pending_resolve(&mut self) {
         let Some(pending) = self.pending_resolve.as_ref() else {
             return;
@@ -4520,9 +4521,10 @@ impl<'lib> App<'lib> {
                     Self::fetch_failure(self.player.is_some().then_some(self.state), &reason);
                 self.status = line;
                 if !keeps_stream {
-                    // The sounding stream survives a failed fetch
-                    // untouched; a paused one or none at all is the plain
-                    // stop a start that fails on this thread always was.
+                    // A stream that exists survives a failed fetch
+                    // untouched, playing or paused; none at all is the
+                    // plain stop a start that fails on this thread always
+                    // was.
                     if let Some(player) = self.player.take() {
                         player.stop();
                     }
@@ -8502,19 +8504,26 @@ impl<'lib> App<'lib> {
     /// The failed-fetch answer (issue #65): the sentence the status line
     /// carries and whether the stream the start kept survives the failure.
     /// `state` is what the wait sat over — `Playing` a stream sounding,
-    /// `Paused` one paused, `None` no stream — and only the sounding one
+    /// `Paused` one paused, `None` no stream — and a stream that exists
     /// survives: it was never touched, so the line says both facts, the
-    /// same courtesy a failed open gives (issue #65). A paused stream holds
-    /// nothing audible, so it reads as no stream at all — the same answer
-    /// the pause guard at the open gives (L35) — and the failed start stops
-    /// it and reports the reason alone, the way a start that fails on this
-    /// thread always has.
+    /// same courtesy a failed open gives (issue #65). The paused one keeps
+    /// its pause and the line says so, with no counts and no deadlines;
+    /// only no stream at all is the plain stop a start that fails on this
+    /// thread always was.
     fn fetch_failure(state: Option<PlayState>, reason: &str) -> (String, bool) {
         match state {
             Some(PlayState::Playing) => (
                 format!("velo: {reason} — the stream that was playing goes on"),
                 true,
             ),
+            Some(PlayState::Paused) => (
+                format!(
+                    "velo: {reason} — the stream that was paused is still there and can be resumed"
+                ),
+                true,
+            ),
+            // `None` — no stream — and a stopped one are the plain stop a
+            // start that fails on this thread always was.
             _ => (format!("velo: {reason}"), false),
         }
     }
@@ -8773,10 +8782,18 @@ impl<'lib> App<'lib> {
                 self.player = Some(player);
                 self.playing = Some(playback);
                 self.state = PlayState::Playing;
-                // A fetching line outlives the start (issue #60): the wait it
-                // names is only beginning, and `fetch_status` clears it when
-                // the track sounds. Every other message has had its moment.
-                if !self.status.starts_with("⟳ fetching ") {
+                // A fetching line outlives a plain start (issue #60): the
+                // wait it names is only beginning, and `fetch_status` clears
+                // it when the track sounds. Every other message has had its
+                // moment. Under a handover the fetching line has done its
+                // job instead (issue #65): `fetch_status` keeps it exactly
+                // while the new stream has not sounded — the same window the
+                // handover waits through — so preserved there it would
+                // outtalk [`Self::note_handover_waiting`] forever, and it
+                // gives way here so the waiting line can speak on the next
+                // tick. (This clears under a `Player`, so no machine test
+                // reaches it.)
+                if handover || !self.status.starts_with("⟳ fetching ") {
                     self.status.clear();
                 }
             }
@@ -9047,9 +9064,15 @@ impl<'lib> App<'lib> {
                 }
                 self.player = Some(player);
                 self.state = PlayState::Playing;
-                // A fetching line outlives the rebuild (issue #60), the same
-                // rule a fresh start follows.
-                if !self.status.starts_with("⟳ fetching ") {
+                // A fetching line outlives a plain rebuild (issue #60), the
+                // same rule a plain fresh start follows. A handover's rebuild
+                // clears the line instead (issue #65), the same way a fresh
+                // start does: `fetch_status` keeps it exactly while the new
+                // stream has not sounded, which is the window the handover
+                // waits through, so the waiting line must speak on the next
+                // tick. (This clears under a `Player`, so no machine test
+                // reaches it.)
+                if handover || !self.status.starts_with("⟳ fetching ") {
                     self.status.clear();
                 }
             }
@@ -9071,13 +9094,20 @@ impl<'lib> App<'lib> {
     }
 
     fn toggle_pause(&mut self) {
-        // A pause cancels a handover still waiting for its new stream to
-        // sound (issue #65, the author's ask): a paused stream never
-        // sounds, so its fade-out would be armed by no tick and the old
-        // player would sit in the crossfading slot forever, sounding while
-        // nothing plays. Mid-fade, stopping it outright is the accepted
-        // cost any new start also pays. A no-op when no handover is held.
-        if self.state == PlayState::Playing {
+        // A pause cancels a handover whose fade is not armed yet (issue
+        // #65, the author's ask): a paused stream never sounds, so no tick
+        // would arm its fade-out and the old player would sit in the
+        // crossfading slot forever, sounding while nothing plays. A
+        // handover already mid-fade keeps its course: the fade was armed
+        // while the new stream still sounded, it falls on its own, and
+        // [`Self::poll_crossfade`] stops the old player when it has fully
+        // fallen. A no-op when no handover — or no unarmed one — is held.
+        if self.state == PlayState::Playing
+            && self
+                .crossfading
+                .as_ref()
+                .is_some_and(|handover| !handover.armed)
+        {
             self.drop_crossfade();
         }
         match (&self.player, self.state) {

@@ -198,13 +198,12 @@ impl PathResolver for EveryFetchOwes {
 }
 
 /// The failed-fetch answer (`poll_pending_resolve`'s `Err` arm, issue #65):
-/// only a stream that is sounding survives the failure — it was never
-/// touched, so the line says both facts. A paused stream holds nothing
-/// audible and reads as no stream at all, the same answer the pause guard
-/// at the open gives (L35); the plain reason stands for it and for no
-/// stream, and the start is the plain stop it always was.
+/// a stream that exists survives the failure — it was never touched, so
+/// the line says both facts. One that is sounding keeps playing; one that
+/// is paused keeps its pause and can be resumed. Only no stream at all is
+/// the plain stop a start that fails on this thread always was.
 #[test]
-fn a_failed_fetch_keeps_only_the_sounding_stream() {
+fn a_failed_fetch_spares_the_stream_that_exists() {
     let (line, keeps) = App::fetch_failure_for_tests(Some(PlayState::Playing), "the fetch failed");
     assert!(
         keeps,
@@ -221,12 +220,24 @@ fn a_failed_fetch_keeps_only_the_sounding_stream() {
 
     let (line, keeps) = App::fetch_failure_for_tests(Some(PlayState::Paused), "the fetch failed");
     assert!(
-        !keeps,
-        "a paused stream is not kept by a failed fetch — nothing audible survives"
+        keeps,
+        "a paused stream survives a failed fetch too — it can be resumed"
     );
-    assert_eq!(
-        line, "velo: the fetch failed",
-        "the plain reason stands when no stream goes on"
+    assert!(
+        line.starts_with("velo: the fetch failed"),
+        "the line names the reason first, got: {line:?}"
+    );
+    assert!(
+        line.contains("paused"),
+        "the line says the stream is still there, paused, got: {line:?}"
+    );
+    assert!(
+        line.contains("resumed"),
+        "the line says the paused stream can be resumed, got: {line:?}"
+    );
+    assert!(
+        line.chars().all(|c| !c.is_ascii_digit()),
+        "the line carries no number — no countdown, no deadline: got {line:?}"
     );
 
     let (line, keeps) = App::fetch_failure_for_tests(None, "the fetch failed");
