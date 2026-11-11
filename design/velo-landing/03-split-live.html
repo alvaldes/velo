@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>velo — your music, in the terminal you already have</title>
+<style>
+  :root{
+    --bg:#0b0f16; --panel:#111826; --line:#1d2635; --text:#eef1f4; --dim:#9aa3ae;
+    --accent:#f4baa3; --accent-ink:#241009; --cool:#8fb8d8;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html{background:var(--bg);color:var(--text);font-family:var(--sans);line-height:1.6}
+  body{margin:0}
+  a{color:var(--cool)}
+  a:focus-visible,button:focus-visible,label:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+  .wrap{max-width:1180px;margin:0 auto;padding:0 2rem}
+  header{display:flex;justify-content:space-between;align-items:center;padding:1.6rem 0;border-bottom:1px solid var(--line)}
+  .brand{font-family:var(--mono);letter-spacing:.42em;text-transform:uppercase;font-size:.95rem;color:var(--accent)}
+  header a.gh{font-size:.85rem;text-decoration:none;color:var(--dim)}
+  header a.gh:hover{color:var(--text)}
+  .hero{display:grid;grid-template-columns:1.05fr .95fr;gap:4rem;align-items:center;padding:4.5rem 0 4rem}
+  h1{font-size:clamp(2rem,3.6vw,3.3rem);line-height:1.1;margin:0 0 1.1rem;letter-spacing:-.02em;font-weight:650}
+  h1 span{color:var(--accent)}
+  .lede{color:var(--dim);font-size:1.06rem;margin:0 0 2rem;max-width:44ch}
+  .facts{display:flex;gap:1.5rem;flex-wrap:wrap;font-family:var(--mono);font-size:.76rem;color:var(--dim);margin:0 0 2.4rem;list-style:none;padding:0}
+  .facts li::before{content:"▪ ";color:var(--accent)}
+  fieldset{border:0;padding:0;margin:0 0 .7rem}
+  legend{font-family:var(--mono);font-size:.7rem;letter-spacing:.18em;text-transform:uppercase;color:var(--dim);margin-bottom:.5rem}
+  .picker{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  .picker label{font-family:var(--mono);font-size:.78rem;color:var(--dim);padding:.45rem .85rem;cursor:pointer;border-right:1px solid var(--line)}
+  .picker label:last-child{border-right:0}
+  .picker input{position:absolute;opacity:0;width:1px;height:1px}
+  .picker input:checked + span{color:var(--text)}
+  .picker label:has(input:checked){background:var(--panel)}
+  .cmd{margin:0;display:flex;align-items:center;gap:.8rem;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:.85rem 1rem;font-family:var(--mono);font-size:.83rem}
+  .cmd code{color:var(--accent);overflow-x:auto;white-space:nowrap}
+  .cmd button{font:inherit;font-family:var(--mono);font-size:.72rem;background:transparent;border:1px solid var(--line);color:var(--dim);border-radius:5px;padding:.28rem .55rem;cursor:pointer;flex:none}
+  .cmd button:hover{color:var(--text);border-color:var(--dim)}
+  .hint{font-size:.78rem;color:var(--dim);margin:.8rem 0 0}
+
+  .player{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:1.3rem 1.4rem 1.1rem;font-family:var(--mono);font-size:.8rem}
+  .player .row{display:flex;justify-content:space-between;color:var(--dim);margin-bottom:.8rem}
+  .player .row b{color:var(--text);font-weight:400}
+  .player .live{color:var(--accent)}
+  .spectrum{display:flex;align-items:flex-end;gap:3px;height:86px;margin:.2rem 0 1rem}
+  .spectrum i{flex:1;background:linear-gradient(180deg,var(--accent),#6c4a3e);border-radius:2px 2px 0 0;height:calc(var(--h) * 1%)}
+  .track{color:var(--text);font-size:.86rem;margin-bottom:.25rem}
+  .meta{color:var(--dim);font-size:.76rem;margin-bottom:.9rem}
+  .bar{height:3px;background:var(--line);border-radius:2px;overflow:hidden}
+  .bar span{display:block;height:100%;width:64%;background:var(--accent)}
+  .clock{display:flex;justify-content:space-between;margin-top:.5rem}
+  .keys{display:flex;justify-content:space-between;margin-top:1.1rem;padding-top:.9rem;border-top:1px solid var(--line);color:var(--dim);font-size:.72rem}
+  .keys b{color:var(--cool);font-weight:400}
+
+  section.rail{border-top:1px solid var(--line);padding:3.5rem 0 1rem}
+  section.rail h2{font-size:.74rem;letter-spacing:.22em;text-transform:uppercase;color:var(--dim);font-family:var(--mono);margin:0 0 2rem;font-weight:500}
+  .rail ol{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(3,1fr);gap:2.5rem}
+  .rail h3{margin:0 0 .45rem;font-size:1rem;font-weight:600;display:flex;gap:.6rem;align-items:baseline}
+  .rail h3 em{font-style:normal;font-family:var(--mono);font-size:.72rem;color:var(--accent)}
+  .rail p{margin:0;color:var(--dim);font-size:.9rem}
+  footer{border-top:1px solid var(--line);margin-top:3.5rem;padding:1.6rem 0 3rem;display:flex;justify-content:space-between;gap:1rem;flex-wrap:wrap;color:var(--dim);font-size:.78rem;font-family:var(--mono)}
+  @media (max-width:900px){
+    .hero{grid-template-columns:1fr;gap:2.5rem;padding:3rem 0}
+    .rail ol{grid-template-columns:1fr;gap:1.8rem}
+  }
+  @media (prefers-reduced-motion:no-preference){
+    .spectrum i{animation:pulse 2.4s ease-in-out infinite alternate;animation-delay:calc(var(--i) * -0.13s)}
+    @keyframes pulse{from{transform:scaleY(.55)}to{transform:scaleY(1)}}
+    .spectrum i{transform-origin:bottom}
+  }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header>
+    <span class="brand">velo</span>
+    <a class="gh" href="https://github.com/alvaldes/velo">github ↗</a>
+  </header>
+
+  <div class="hero">
+    <div>
+      <h1>Your music, in the terminal <span>you already have</span>.</h1>
+      <p class="lede">One Rust binary indexes your folder from its own tags, plays it
+      gaplessly in the window you are already in, and draws the cover art where the
+      terminal can show it.</p>
+      <ul class="facts">
+        <li>no daemon</li><li>no server</li><li>no account</li><li>no telemetry</li>
+      </ul>
+
+      <form id="install">
+        <fieldset>
+          <legend>Install — pick your platform</legend>
+          <div class="picker" role="radiogroup" aria-label="Platform">
+            <label><input type="radio" name="platform" value="macos-arm" checked><span>macOS arm64</span></label>
+            <label><input type="radio" name="platform" value="macos-x86"><span>macOS x86_64</span></label>
+            <label><input type="radio" name="platform" value="linux-x86"><span>Linux x86_64</span></label>
+            <label><input type="radio" name="platform" value="linux-arm"><span>Linux arm64</span></label>
+            <label><input type="radio" name="platform" value="source"><span>from source</span></label>
+          </div>
+        </fieldset>
+        <div class="cmd">
+          <code id="line">curl -L github.com/alvaldes/velo/releases/latest/download/velo-aarch64-apple-darwin.tar.gz | tar -xz -C ~/.local/bin</code>
+          <button type="button" id="copy">copy</button>
+        </div>
+        <p class="hint" id="hint">Puts <code>velo</code> in <code>~/.local/bin</code> — make sure it is on your
+        <code>PATH</code>. Every archive is built by CI and paired with a published checksum.</p>
+      </form>
+    </div>
+
+    <div class="player" role="img" aria-label="The player: a live radio station playing, a spectrum, the clock, and the transport keys.">
+      <div class="row"><span>radio · cliamp</span><span class="live">● live</span></div>
+      <div class="row"><span>channel</span><b>lofi</b></div>
+      <div class="spectrum" aria-hidden="true">
+        <i style="--h:38;--i:0"></i><i style="--h:62;--i:1"></i><i style="--h:80;--i:2"></i>
+        <i style="--h:54;--i:3"></i><i style="--h:92;--i:4"></i><i style="--h:70;--i:5"></i>
+        <i style="--h:46;--i:6"></i><i style="--h:84;--i:7"></i><i style="--h:58;--i:8"></i>
+        <i style="--h:74;--i:9"></i><i style="--h:42;--i:10"></i><i style="--h:66;--i:11"></i>
+        <i style="--h:88;--i:12"></i><i style="--h:50;--i:13"></i><i style="--h:72;--i:14"></i>
+        <i style="--h:34;--i:15"></i><i style="--h:60;--i:16"></i><i style="--h:78;--i:17"></i>
+      </div>
+      <div class="track">Nujabes — Feather</div>
+      <div class="meta">Modal Soul · 2005 · flac 16/44.1</div>
+      <div class="bar"><span></span></div>
+      <div class="clock"><span>2:38</span><span>4:11</span></div>
+      <div class="keys"><span><b>space</b> pause</span><span><b>←/→</b> seek</span><span><b>v</b> spectrum</span><span><b>?</b> keys</span></div>
+    </div>
+  </div>
+
+  <section class="rail" aria-labelledby="rail-h">
+    <h2 id="rail-h">What is in the box</h2>
+    <ol>
+      <li>
+        <h3><em>01</em>Gapless, and honest about it</h3>
+        <p>ReplayGain from the files' tags, a bit-perfect mode that reopens the device
+        at the file's own rate, and a mono downmix that refuses under bit-perfect
+        instead of quietly resampling.</p>
+      </li>
+      <li>
+        <h3><em>02</em>Four views over your own tags</h3>
+        <p>Artists, albums, tracks, genres — indexed from the files, refreshed in the
+        background at every launch, with fuzzy search across all of it and a queue you
+        edit with <b>tab</b>.</p>
+      </li>
+      <li>
+        <h3><em>03</em>Radio that reads like radio</h3>
+        <p>Favourites, pinned places and a <span style="color:var(--accent)">● live</span>
+        row with the ICY title; a station that cannot play says so at once rather than
+        waiting for a timeout.</p>
+      </li>
+    </ol>
+  </section>
+
+  <footer>
+    <span>velo — free software, MIT licensed</span>
+    <span><a href="https://github.com/alvaldes/velo/blob/main/README.md">README</a> · <a href="https://github.com/alvaldes/velo/blob/main/CHANGELOG.md">CHANGELOG</a> · <a href="https://github.com/alvaldes/velo/releases">Releases</a></span>
+  </footer>
+</div>
+
+<script>
+  const targets = {
+    'macos-arm':  ['velo-aarch64-apple-darwin.tar.gz',   'macOS on Apple silicon'],
+    'macos-x86':  ['velo-x86_64-apple-darwin.tar.gz',    'macOS on Intel'],
+    'linux-x86':  ['velo-x86_64-unknown-linux-gnu.tar.gz','Linux on x86_64'],
+    'linux-arm':  ['velo-aarch64-unknown-linux-gnu.tar.gz','Linux on arm64'],
+    'source':     [null, 'a clone and cargo, needs Rust 1.88 or newer']
+  };
+  const line = document.getElementById('line');
+  const hint = document.getElementById('hint');
+  for (const radio of document.querySelectorAll('input[name="platform"]'))
+    radio.addEventListener('change', () => {
+      const [asset, blurb] = targets[radio.value];
+      line.textContent = asset
+        ? 'curl -L github.com/alvaldes/velo/releases/latest/download/' + asset + ' | tar -xz -C ~/.local/bin'
+        : 'git clone https://github.com/alvaldes/velo && cd velo && cargo install --path .';
+      hint.textContent = asset
+        ? blurb + ' — puts velo in ~/.local/bin; make sure it is on your PATH.'
+        : blurb + '.';
+    });
+  document.getElementById('copy').addEventListener('click', async (event) => {
+    const button = event.currentTarget;
+    try { await navigator.clipboard.writeText(line.textContent); button.textContent = 'copied'; }
+    catch { button.textContent = 'select it'; }
+    setTimeout(() => { button.textContent = 'copy'; }, 1600);
+  });
+</script>
+</body>
+</html>

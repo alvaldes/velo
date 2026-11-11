@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>velo — a single-binary music player for your terminal</title>
+<style>
+  :root{
+    /* velo's own factory palette, the one the player draws with */
+    --bg:#141c28; --text:#f4f0e2; --dim:#8b8b8b; --accent:#f4baa3;
+    --secondary:#a6c8e2; --border:#252939; --ink:#141c28;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  }
+  *{box-sizing:border-box}
+  html{background:var(--bg);color:var(--text);font-family:var(--mono);line-height:1.55}
+  body{margin:0;max-width:1000px;margin-inline:auto;padding:3rem 1.5rem 5rem}
+  a{color:var(--secondary)}
+  a:focus-visible,button:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+  .skip{position:absolute;left:-999px}
+  .skip:focus{left:1rem;top:1rem;background:var(--accent);color:var(--ink);padding:.5rem .75rem}
+  header.top{display:flex;justify-content:space-between;align-items:baseline;gap:1rem;flex-wrap:wrap;border-bottom:1px solid var(--border);padding-bottom:1rem}
+  .wordmark{font-size:1.05rem;letter-spacing:.5em;color:var(--accent);text-transform:uppercase}
+  nav a{margin-left:1.25rem;color:var(--dim);text-decoration:none;font-size:.9rem}
+  nav a:hover{color:var(--secondary)}
+  h1{font-size:clamp(1.9rem,4.4vw,3.1rem);line-height:1.15;margin:3rem 0 1rem;font-weight:600}
+  h1 em{font-style:normal;color:var(--accent)}
+  .lede{color:var(--dim);max-width:62ch;margin:0 0 2rem}
+  .terminal{border:1px solid var(--border);border-radius:6px;background:#0f1621;overflow:hidden;margin:0 0 .75rem}
+  .terminal-bar{display:flex;gap:.4rem;padding:.6rem .8rem;border-bottom:1px solid var(--border)}
+  .terminal-bar i{width:9px;height:9px;border-radius:50%;background:var(--border);display:block}
+  .terminal pre{margin:0;padding:1rem 1.1rem;font-size:.82rem;line-height:1.5;overflow-x:auto;color:var(--text)}
+  .terminal .dim{color:var(--dim)}
+  .terminal .accent{color:var(--accent)}
+  .terminal .secondary{color:var(--secondary)}
+  .caption{color:var(--dim);font-size:.8rem;margin:0 0 3.5rem}
+  h2{font-size:1.05rem;letter-spacing:.18em;text-transform:uppercase;color:var(--secondary);margin:0 0 1.25rem;font-weight:500}
+  .install{border-top:1px solid var(--border);padding-top:2rem;margin-bottom:3.5rem}
+  .tabs{display:flex;gap:.25rem;flex-wrap:wrap;margin-bottom:0}
+  .tabs button{font:inherit;font-size:.8rem;background:transparent;border:1px solid var(--border);border-bottom-color:transparent;color:var(--dim);padding:.45rem .8rem;border-radius:5px 5px 0 0;cursor:pointer}
+  .tabs button[aria-selected="true"]{color:var(--text);background:#0f1621;border-color:var(--border);border-bottom-color:#0f1621}
+  .panel{background:#0f1621;border:1px solid var(--border);border-radius:0 6px 6px 6px;padding:1rem 1.1rem}
+  .panel[hidden]{display:none}
+  .cmd{display:flex;gap:.75rem;align-items:flex-start;justify-content:space-between;margin:0 0 .9rem}
+  .cmd:last-child{margin-bottom:0}
+  .cmd code{font-size:.82rem;white-space:pre-wrap;word-break:break-word;color:var(--accent)}
+  .cmd p{margin:.35rem 0 0;color:var(--dim);font-size:.78rem;max-width:46ch}
+  .copy{font:inherit;font-size:.72rem;background:transparent;border:1px solid var(--border);color:var(--dim);padding:.3rem .55rem;border-radius:4px;cursor:pointer;flex:none}
+  .copy:hover{color:var(--text);border-color:var(--dim)}
+  .grid{display:grid;gap:1px;background:var(--border);border:1px solid var(--border);border-radius:6px;grid-template-columns:repeat(auto-fit,minmax(240px,1fr))}
+  .grid article{background:var(--bg);padding:1.15rem 1.2rem}
+  .grid h3{margin:0 0 .4rem;font-size:.95rem;color:var(--accent);font-weight:600}
+  .grid h3 span{color:var(--dim);font-weight:400;margin-right:.4rem}
+  .grid p{margin:0;color:var(--dim);font-size:.85rem}
+  .closing{margin-top:3.5rem;border-top:1px solid var(--border);padding-top:2rem;display:flex;gap:1rem;flex-wrap:wrap;align-items:center;justify-content:space-between}
+  .cta{display:inline-block;background:var(--accent);color:var(--ink);text-decoration:none;padding:.7rem 1.1rem;border-radius:5px;font-size:.9rem}
+  .cta:hover{filter:brightness(1.06)}
+  footer{margin-top:3rem;color:var(--dim);font-size:.78rem}
+  @media (prefers-reduced-motion:no-preference){ .cta{transition:filter .15s ease} }
+</style>
+</head>
+<body>
+<a class="skip" href="#install">Skip to install</a>
+
+<header class="top">
+  <span class="wordmark">velo</span>
+  <nav aria-label="Sections">
+    <a href="#install">Install</a>
+    <a href="#inside">What's inside</a>
+    <a href="#radio">Radio</a>
+    <a href="https://github.com/alvaldes/velo">GitHub</a>
+  </nav>
+</header>
+
+<main>
+  <h1>A music player that lives in your <em>terminal</em>,<br>from one Rust binary.</h1>
+  <p class="lede">Point it at your music folder and velo indexes it from the files'
+  own tags — artists, albums, tracks, genres — then plays it gaplessly, draws the
+  cover art, and takes over the window with a keyboard-driven interface. No daemon,
+  no server, no account, no telemetry.</p>
+
+  <div class="terminal" role="img" aria-label="The velo interface: a now-playing block above a list of artists, with cover art on the right.">
+    <div class="terminal-bar" aria-hidden="true"><i></i><i></i><i></i></div>
+    <pre>
+<span class="dim">╭──────────────────────────────────────────────╮</span>
+<span class="dim">│</span> <span class="secondary">library</span>  queue                     <span class="accent">V E L O</span> <span class="dim">│</span>
+<span class="dim">│</span> ♫ Nujabes — Feather                          <span class="dim">│</span>
+<span class="dim">│</span> Nujabes · Modal Soul · 2005                  <span class="dim">│</span>
+<span class="dim">│</span> <span class="accent">0:42</span> ━━━━━━━━━━━━━━━━━━━────── <span class="dim">4:11</span>     <span class="dim">│</span>
+<span class="dim">│</span> <span class="secondary">◂◂   ▶ play   ▸▸</span>   <span class="dim">RG track   VOL ━━━━━● 82</span> <span class="dim">│</span>
+<span class="dim">│</span> ──────────────────────────────────────────── <span class="dim">│</span>
+<span class="dim">│</span> ▸─ <span class="accent">1</span> artists  <span class="accent">2</span> albums  <span class="accent">3</span> tracks  <span class="accent">4</span> genres  <span class="dim">[3 artists]</span>
+<span class="dim">│</span>   <span class="accent">▶</span> 1. Nujabes                        2 albums · 3 tracks <span class="dim">│</span>
+<span class="dim">│</span>     2. Poldoore                      1 album · 2 tracks  <span class="dim">│</span>
+<span class="dim">│</span>     3. Lo-Fi Scientists              2 albums · 3 tracks <span class="dim">│</span>
+<span class="dim">│</span> <span class="dim">j/k move  enter play  space pause  ←/→ seek  / search  ? help</span>
+<span class="dim">╰──────────────────────────────────────────────╯</span></pre>
+  </div>
+  <p class="caption">The whole interface, drawn in the terminal — the cover art included.</p>
+
+  <section class="install" id="install" aria-labelledby="install-h">
+    <h2 id="install-h">Install</h2>
+    <div class="tabs" role="tablist" aria-label="Install method">
+      <button role="tab" id="tab-bin" aria-controls="panel-bin" aria-selected="true">prebuilt binary</button>
+      <button role="tab" id="tab-cargo" aria-controls="panel-cargo" aria-selected="false" tabindex="-1">from source</button>
+    </div>
+
+    <div class="panel" role="tabpanel" id="panel-bin" aria-labelledby="tab-bin">
+      <div class="cmd">
+        <div>
+          <code>velo-&lt;tag&gt;-&lt;target&gt;.tar.gz</code>
+          <p>Download the archive for your platform from Releases, unpack it, and put
+          <code>velo</code> on your <code>PATH</code>. Built for
+          <code>x86_64</code>/<code>aarch64</code> Linux (gnu) and macOS (darwin).</p>
+        </div>
+        <button class="copy" data-copy="https://github.com/alvaldes/velo/releases">copy link</button>
+      </div>
+    </div>
+
+    <div class="panel" role="tabpanel" id="panel-cargo" aria-labelledby="tab-cargo" hidden>
+      <div class="cmd">
+        <div>
+          <code>git clone https://github.com/alvaldes/velo &amp;&amp; cd velo &amp;&amp; cargo install --path .</code>
+          <p>Needs Rust 1.88 or newer. Building the audio stack wants the ALSA headers
+          on Linux; everywhere else the toolchain is enough.</p>
+        </div>
+        <button class="copy" data-copy="git clone https://github.com/alvaldes/velo && cd velo && cargo install --path .">copy</button>
+      </div>
+      <div class="cmd">
+        <div>
+          <code>cargo install velo</code>
+          <p>Once it is on crates.io.</p>
+        </div>
+        <button class="copy" data-copy="cargo install velo">copy</button>
+      </div>
+    </div>
+  </section>
+
+  <section id="inside" aria-labelledby="inside-h">
+    <h2 id="inside-h">What's inside</h2>
+    <div class="grid">
+      <article><h3><span>01</span>Gapless, honest playback</h3>
+        <p>The next track is decoded before this one ends. ReplayGain by track or
+        album, a real bit-perfect mode that reopens the device at the file's own
+        rate, and a mono downmix that refuses to lie when it cannot.</p></article>
+      <article><h3><span>02</span>Your library, from its own tags</h3>
+        <p>An index built from the files themselves: browse by artist, album, track
+        or genre, with fuzzy search and an editable queue that reads like the list
+        you built.</p></article>
+      <article><h3><span>03</span>Cover art in the terminal</h3>
+        <p>The artwork of what plays, decoded and drawn where your terminal can show
+        images — and a spectrum in nine shapes where it cannot, or when you would
+        rather see the music.</p></article>
+      <article><h3><span>04</span>Radio, the way it should feel</h3>
+        <p>The Radio Browser directory plus the cliamp channels: favourites and
+        pinned places, live ICY titles, a <em>● live</em> row that reads as a stream
+        and refuses what cannot play instead of hanging.</p></article>
+      <article><h3><span>05</span>Themes as files</h3>
+        <p>velo wears the terminal's own palette if you want it to, ships a factory
+        palette of its own, and takes any TOML theme you drop beside your config —
+        hand it to another person, they get your colours.</p></article>
+      <article><h3><span>06</span>One binary, nothing behind it</h3>
+        <p>No daemon, no server, no account, no usage data leaving your machine. The
+        interface and the audio live in the same process you started.</p></article>
+    </div>
+  </section>
+
+  <section class="closing" id="radio">
+    <p style="margin:0;color:var(--dim);max-width:52ch">
+      <strong style="color:var(--text)">Navidrome and friends too.</strong> Point velo
+      at a Subsonic-compatible server to browse and search the remote library, with
+      media keys and scrobbling wired in.
+    </p>
+    <a class="cta" href="https://github.com/alvaldes/velo">Star on GitHub</a>
+  </section>
+</main>
+
+<footer>
+  velo is free software, MIT licensed. Draws with your terminal's colours; the palette
+  above is its own.
+</footer>
+
+<script>
+  const tabs = [...document.querySelectorAll('[role="tab"]')];
+  const panels = [...document.querySelectorAll('[role="tabpanel"]')];
+  function select(tab){
+    for (const t of tabs) t.setAttribute('aria-selected', String(t === tab));
+    for (const t of tabs) t.tabIndex = t === tab ? 0 : -1;
+    for (const p of panels) p.hidden = p.id !== tab.getAttribute('aria-controls');
+  }
+  for (const [i, tab] of tabs.entries()){
+    tab.addEventListener('click', () => select(tab));
+    tab.addEventListener('keydown', (event) => {
+      if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft') return;
+      event.preventDefault();
+      const next = tabs[(i + (event.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length];
+      next.focus(); select(next);
+    });
+  }
+  for (const button of document.querySelectorAll('.copy')){
+    button.addEventListener('click', async () => {
+      const text = button.dataset.copy;
+      try { await navigator.clipboard.writeText(text); button.textContent = 'copied'; }
+      catch { button.textContent = 'select it'; }
+      setTimeout(() => { button.textContent = 'copy'; }, 1600);
+    });
+  }
+</script>
+</body>
+</html>

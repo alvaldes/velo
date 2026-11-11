@@ -523,6 +523,100 @@ struct Progress {
     title: Option<String>,
 }
 
+/// Which side of a crossfade a stream carries (issue #65): the handover's
+/// new source rises, its old source falls.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FadeKind {
+    /// The new stream: from exact silence to unity across the window.
+    In,
+    /// The old stream: from unity to exact silence across the window.
+    Out,
+}
+
+/// The cross-thread arm of a crossfade (issue #65): the interface arms a
+/// fade on a player, and the device callback takes the request on its next
+/// turn, running the window on its own clock. The arm never touches the
+/// callback's samples directly and the callback never waits: the request is
+/// a one-shot mailbox, written once and consumed once.
+#[derive(Default)]
+struct CrossfadeCell {
+    /// Nothing armed is [`CrossfadeCell::NONE`]; a [`FadeKind`] otherwise.
+    request: AtomicU8,
+    /// The window's length in interleaved samples, derived from the
+    /// stream's rate when the fade was armed.
+    length: AtomicUsize,
+    /// Whether a fade-out has fully fallen — exact silence reached, so the
+    /// caller may stop the player instead of leaving a fader stuck
+    /// half-way.
+    out_done: AtomicBool,
+}
+
+impl CrossfadeCell {
+    const NONE: u8 = 0;
+
+    fn arm(&self, kind: FadeKind, length: usize) {
+        self.length.store(length, Ordering::Release);
+        self.request.store(
+            match kind {
+                FadeKind::In => 1,
+                FadeKind::Out => 2,
+            },
+            Ordering::Release,
+        );
+    }
+
+    /// Takes the armed request, if any, leaving the cell disarmed: one arm,
+    /// one consumer.
+    fn take(&self) -> Option<(FadeKind, usize)> {
+        let request = self.request.swap(Self::NONE, Ordering::Acquire);
+        let kind = match request {
+            1 => FadeKind::In,
+            2 => FadeKind::Out,
+            _ => return None,
+        };
+        Some((kind, self.length.load(Ordering::Acquire)))
+    }
+
+    fn finish_out(&self) {
+        self.out_done.store(true, Ordering::Release);
+    }
+
+    fn out_done(&self) -> bool {
+        self.out_done.load(Ordering::Acquire)
+    }
+}
+
+/// The callback's own side of an armed fade (issue #65): the window runs on
+/// the callback's clock, one sample at a time, advancing only while samples
+/// actually play — a paused stream holds its fade where it was.
+struct FadeEnvelope {
+    kind: FadeKind,
+    length: usize,
+    elapsed: usize,
+}
+
+impl FadeEnvelope {
+    /// The factor for one sample, and the step forward. Both sides come
+    /// from [`crossfade_pair`], so the two streams of a handover — armed on
+    /// the same window — sum to unity across it.
+    fn next(&mut self) -> f32 {
+        let (into, out_of) = crossfade_pair(self.elapsed, self.length);
+        self.elapsed += 1;
+        match self.kind {
+            FadeKind::In => into,
+            FadeKind::Out => out_of,
+        }
+    }
+
+    /// Whether the window has fully run: a fade-in leaves the samples
+    /// untouched from here on; a fade-out has reached exact silence, and
+    /// [`CrossfadeCell::finish_out`] follows, so the interface stops the
+    /// player instead of leaving a fader stuck half-way.
+    fn finished(&self) -> bool {
+        self.elapsed > self.length
+    }
+}
+
 /// The atomics the device callback reads and writes. Created once per player
 /// and shared with its closure.
 #[derive(Clone)]
@@ -532,6 +626,15 @@ struct CallbackWires {
     played: Arc<AtomicUsize>,
     underruns: Arc<AtomicUsize>,
     volume: Arc<AtomicU8>,
+    /// The crossfade arm (issue #65): the interface arms a fade on the
+    /// player, the callback takes it on its next turn and runs the window on
+    /// its own clock. A mailbox, never shared sample state.
+    fade: Arc<CrossfadeCell>,
+    /// Whether the device stream has started sounding: set when the
+    /// producer's preroll rule starts it, read by the handover so the old
+    /// stream's fade-out is armed only when there is something to overlap
+    /// with (issue #65).
+    started: Arc<AtomicBool>,
 }
 
 impl Player {
@@ -772,6 +875,8 @@ impl Player {
             played: Arc::new(AtomicUsize::new(0)),
             underruns: Arc::new(AtomicUsize::new(0)),
             volume: Arc::new(AtomicU8::new(100)),
+            fade: Arc::new(CrossfadeCell::default()),
+            started: Arc::new(AtomicBool::new(false)),
         };
 
         // The stream is built here, before a single sample exists, but not
@@ -1052,6 +1157,54 @@ impl Player {
         self.wires.playing.store(playing, Ordering::Relaxed);
     }
 
+    /// Arms this stream's fade-in as the handover's new source (issue #65):
+    /// the window runs over the first [`CROSSFADE_WINDOW`] of audio the
+    /// stream actually plays, rising from exact silence to unity. A
+    /// bit-perfect player refuses — a fade multiplies samples, which is
+    /// exactly what bit-perfect exists to prevent — and the interface keeps
+    /// it on the plain path.
+    pub fn begin_crossfade_in(&self) {
+        if self.bit_perfect {
+            return;
+        }
+        self.wires
+            .fade
+            .arm(FadeKind::In, crossfade_samples(self.cell.spec()));
+    }
+
+    /// Arms this stream's fade-out as the handover's old source (issue #65):
+    /// the window runs from the moment it is armed — which the interface
+    /// does only once the new stream has started sounding — falling to exact
+    /// silence across [`CROSSFADE_WINDOW`], then reporting through
+    /// [`Player::crossfade_out_finished`]. A bit-perfect player refuses, the
+    /// same rule [`Player::begin_crossfade_in`] follows.
+    pub fn begin_crossfade_out(&self) {
+        if self.bit_perfect {
+            return;
+        }
+        self.wires
+            .fade
+            .arm(FadeKind::Out, crossfade_samples(self.cell.spec()));
+    }
+
+    /// Whether the armed fade-out has fully fallen: exact silence reached,
+    /// never a fader stuck half-way (issue #65). The caller stops the player
+    /// when this answers yes; before the fade is armed, and for a
+    /// bit-perfect player whose fade is refused, this is always no.
+    #[must_use]
+    pub fn crossfade_out_finished(&self) -> bool {
+        self.wires.fade.out_done()
+    }
+
+    /// Whether the device stream has started sounding: the preroll rule
+    /// starts it once the ring holds its head start. The crossfade handover
+    /// arms the old stream's fade-out only then — the overlap must be two
+    /// sources sounding, never two fades of silence (issue #65).
+    #[must_use]
+    pub fn stream_started(&self) -> bool {
+        self.wires.started.load(Ordering::Acquire)
+    }
+
     /// Sets the target volume in percent, 0 to 100. The callback fades its
     /// gain there across one buffer; it never jumps.
     ///
@@ -1193,15 +1346,40 @@ fn build_stream(
         played,
         underruns,
         volume,
+        fade,
+        ..
     } = wires.clone();
     // The gain lives in the callback and is only ever moved by the ramp: no
     // jump at start-up, on pause, on resume or on volume.
     let mut gain = GainRamp::new(0.0);
+    // The crossfade's window is the callback's own (issue #65): taken from
+    // the arm cell once, advanced one sample at a time, and — for a fade-out
+    // — followed by exact silence and the finished flag, never a fader stuck
+    // half-way.
+    let mut window: Option<FadeEnvelope> = None;
+    let mut faded_out = false;
 
     device
         .build_output_stream(
             config,
             move |out: &mut [f32], _info: &cpal::OutputCallbackInfo| {
+                // An armed crossfade is taken once, on the callback's own
+                // thread (issue #65): from here the window runs on this
+                // stream's clock, over the samples it actually plays.
+                if let Some((kind, length)) = fade.take() {
+                    window = Some(FadeEnvelope {
+                        kind,
+                        length,
+                        elapsed: 0,
+                    });
+                }
+                // A fade-out that has fully fallen is this stream's end:
+                // exact silence until the interface stops the player (issue
+                // #65) — a dying stream makes no sound and counts no clock.
+                if faded_out {
+                    out.fill(0.0);
+                    return;
+                }
                 let target = if playing.load(Ordering::Relaxed) {
                     volume_amplitude(volume.load(Ordering::Relaxed))
                 } else {
@@ -1242,12 +1420,60 @@ fn build_stream(
                 // One linear fade per buffer carries the gain to the target:
                 // pause and volume changes cannot click.
                 gain.ramp_to(out, target);
+                // The handover's fade rides on top of the volume ramp (issue
+                // #65): the new stream rises from exact silence while the old
+                // one falls to it, across one window on each side.
+                if let Some(envelope) = window.as_mut() {
+                    for slot in out.iter_mut() {
+                        *slot *= envelope.next();
+                    }
+                    if envelope.finished() {
+                        if envelope.kind == FadeKind::Out {
+                            faded_out = true;
+                            fade.finish_out();
+                        }
+                        window = None;
+                    }
+                }
                 played.fetch_add(copied, Ordering::Release);
             },
             move |error| eprintln!("velo: audio device error: {error}"),
             None,
         )
         .map_err(|error| AudioError::Device(error.to_string()))
+}
+
+/// The crossfade window (issue #65): 200 ms, the handover the station switch
+/// runs on. Both sides of the handover run the same window, so the old
+/// source is still sounding while the new one rises — the device is never
+/// silent across the switch.
+pub const CROSSFADE_WINDOW: Duration = Duration::from_millis(200);
+
+/// The crossfade window's length for a stream at `spec`: [`CROSSFADE_WINDOW`]
+/// of interleaved samples, derived from the stream's own rate — never a
+/// hardcoded sample count, so a 44.1 kHz stereo stream and a 48 kHz mono one
+/// fade over equally long walls of time and different counts of samples.
+#[must_use]
+pub fn crossfade_samples(spec: TrackSpec) -> usize {
+    let millis = usize::try_from(CROSSFADE_WINDOW.as_millis()).unwrap_or(0);
+    spec.interleaved_rate().saturating_mul(millis) / 1000
+}
+
+/// The crossfade pair `position` samples into a `length`-sample window (issue
+/// #65): the new source's fade-in factor and the old source's fade-out
+/// factor, one linear pair that sums to unity at every sample of the window.
+/// The ends are exact — `position` 0 opens the handover on exact silence from
+/// the new source and full level from the old one, and `position` `length`
+/// completes it on unity and exact silence — and past the end the old source
+/// stays silent, never rising back.
+#[must_use]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "a fade window holds thousands of samples, exact in f32"
+)]
+pub fn crossfade_pair(position: usize, length: usize) -> (f32, f32) {
+    let t = position.min(length) as f32 / length.max(1) as f32;
+    (t, 1.0 - t)
 }
 
 /// Turns the volume percentage into the amplitude the samples are multiplied
@@ -1417,6 +1643,9 @@ impl StreamOut {
             eprintln!("velo: audio device error: {error}");
         }
         self.started = true;
+        // Published for the crossfade handover (issue #65): the old stream's
+        // fade-out is armed only once the new stream has begun sounding.
+        self.wires.started.store(true, Ordering::Release);
     }
 
     /// Closes the current stream and opens a new one at `new_spec`: a new

@@ -163,7 +163,8 @@ fn open_playlists_source(app: &mut App<'_>) {
 
 // ---- S2: the source and its lists -------------------------------------------
 
-/// `Sources` gains `Playlists`, LAST — after `Favourites`.
+/// `Sources` gains `Playlists`, LAST — after `Favourites`, with Radio leading the
+/// list and Local library second (the author's order).
 #[test]
 fn playlists_is_the_last_source_after_favourites() {
     let temp = TempLibrary::new("source");
@@ -173,8 +174,8 @@ fn playlists_is_the_last_source_after_favourites() {
     assert_eq!(
         app.sources_labels(),
         [
-            "Local library",
             "Radio",
+            "Local library",
             "Recently played",
             "Favourites",
             "Playlists"

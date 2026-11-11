@@ -1,6 +1,33 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.46.1] - 2026-11-11
+
+### Fixes
+- **install:** The installer answers at a shorter address
+
+### Documentation
+- **readme:** A logo, three screenshots and the site's address
+- **site:** A logo, the interface's own screens, cliamp radio and who made it
+## [0.46.0] - 2026-11-11
+
+### Features
+- **audio:** A station start crossfades instead of cutting to silence
+## [0.45.0] - 2026-11-11
+
+### Features
+- **install:** Install velo with one curl line
+
+### Fixes
+- **ui:** The round of small-screen and sources-list reports
+
+### Documentation
+- **readme:** Say what velo sends, and what it never sends
+- **site:** A landing page with a hearth, glass and a player that plays
+- **design:** The landing page's first three artboards
+
+### Tests
+- **ui:** The sources list leads with Radio
 ## [0.44.0] - 2026-11-11
 
 ### Features

@@ -1,0 +1,462 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>velo: a terminal music player for macOS and Linux</title>
+<meta name="description" content="velo is a fast terminal music player (TUI) written in Rust: gapless playback, ReplayGain, internet radio, fuzzy search and cover art, in one binary with no daemon, no account and no telemetry. Free and MIT licensed.">
+<meta name="author" content="Angel L. Valdés">
+<meta name="theme-color" content="#141c28">
+<link rel="canonical" href="https://alvaldes.github.io/velo/">
+
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="velo">
+<meta property="og:title" content="velo: a terminal music player for macOS and Linux">
+<meta property="og:description" content="Gapless playback, ReplayGain, internet radio, fuzzy search and cover art, in one Rust binary. No daemon, no account, no telemetry.">
+<meta property="og:url" content="https://alvaldes.github.io/velo/">
+<meta property="og:image" content="https://alvaldes.github.io/velo/media/og.jpg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="The velo interface playing a track, drawn as glass over a room lit by a fireplace">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="velo: a terminal music player for macOS and Linux">
+<meta name="twitter:description" content="Gapless playback, ReplayGain, internet radio, fuzzy search and cover art, in one Rust binary. No daemon, no account, no telemetry.">
+<meta name="twitter:image" content="https://alvaldes.github.io/velo/media/og.jpg">
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "velo",
+  "description": "A terminal music player in one Rust binary: gapless playback, ReplayGain, internet radio, fuzzy search and cover art, with no daemon, no account and no telemetry.",
+  "url": "https://alvaldes.github.io/velo/",
+  "image": "https://alvaldes.github.io/velo/media/og.jpg",
+  "applicationCategory": "MultimediaApplication",
+  "operatingSystem": "macOS, Linux",
+  "license": "https://opensource.org/licenses/MIT",
+  "downloadUrl": "https://github.com/alvaldes/velo/releases/latest",
+  "codeRepository": "https://github.com/alvaldes/velo",
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+  "author": { "@type": "Person", "name": "Angel L. Valdés", "url": "https://alvaldes.dev" }
+}
+</script>
+
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="icon" href="favicon.ico" sizes="32x32">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="stylesheet" href="style.css?v=22">
+</head>
+<body>
+
+<!-- The backdrop of the whole page: a fixed canvas where fog.js draws the fog,
+     over a CSS fog that is all there is when WebGL is not. The hearth video in
+     the hero sits on top of it and fades out at its lower edge, so the room
+     dissolves into the same air the rest of the page is read through. -->
+<div class="fog" aria-hidden="true"><canvas id="fog-canvas"></canvas></div>
+
+<header class="top">
+  <div class="wrap top-inner">
+    <nav class="top-links" aria-label="Project">
+      <a href="#features">features</a>
+      <a href="#keys">keys</a>
+      <a href="https://github.com/alvaldes/velo">github ↗</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <section class="hero" aria-labelledby="hero-h">
+    <div class="hero-media" aria-hidden="true">
+      <video id="hearth" autoplay muted loop playsinline preload="auto" poster="media/hearth.jpg">
+        <source src="media/hearth.mp4" type="video/mp4">
+      </video>
+    </div>
+
+    <div class="wrap hero-grid">
+      <div class="pitch">
+        <p class="lockup"><img src="media/mark.svg" alt="" width="52" height="52"><span>velo</span></p>
+        <h1 id="hero-h">Your music, in the terminal.</h1>
+        <p class="lede">velo reads your files' own tags, plays them gaplessly and
+        draws the cover art. It is one Rust binary: no daemon, no server, no
+        account, no telemetry.</p>
+
+        <div class="install" id="install">
+          <fieldset class="picker-field">
+            <legend>Install</legend>
+            <div class="picker" role="radiogroup" aria-label="How to install">
+              <label><input type="radio" name="platform" value="brew" checked><span>Homebrew</span></label>
+              <label><input type="radio" name="platform" value="script"><span>curl</span></label>
+              <label><input type="radio" name="platform" value="source"><span>from source</span></label>
+            </div>
+          </fieldset>
+
+          <div class="cmd">
+            <span class="prompt" aria-hidden="true">$</span>
+            <code id="line">brew install alvaldes/velo/velo</code>
+            <button type="button" class="copy" data-copy-from="line">copy</button>
+          </div>
+
+          <p class="hint" id="hint">macOS and Linux. The tap follows each release
+          within the hour, and brew upgrade velo moves you to the next one.</p>
+
+          <p class="more-install"><a href="https://github.com/alvaldes/velo#install">All install options in the README</a></p>
+        </div>
+      </div>
+
+      <!-- The player, drawn the way it draws itself, and working: the track is a
+           CC0 file that ships with the page, so play, pause, seek and volume are
+           real and the spectrum is the music's own. Everything else the
+           interface does answers with the card at the bottom of this block.
+           The panel is glass: the room behind it shows through, blurred, which
+           is what `transparent_background = true` looks like in a terminal that
+           blurs its window. -->
+      <div class="app" id="player" role="group" tabindex="0" aria-label="A working demo of the velo interface. Space plays and pauses, the arrows seek, plus and minus change the volume.">
+        <audio id="track" preload="none" src="media/wave-maker.mp3"></audio>
+
+        <div class="app-nav">
+          <span class="app-tabs"><button type="button" class="on" data-more>sources</button><button type="button" data-more>queue</button></span>
+          <span class="app-mark" aria-hidden="true">V E L O</span>
+        </div>
+
+        <div class="app-title">♫ HoliznaCC0 – Wave Maker ( Lofi , Dreamy , Retro )</div>
+
+        <div class="app-clock">
+          <span><span id="clock">0:00</span> / <span id="length">3:05</span><span class="app-state" id="state">■ stopped</span></span>
+          <span class="app-of">track 80 of 120</span>
+        </div>
+
+        <div class="app-spectrum" id="spectrum" aria-hidden="true">
+          <i style="--h:58"></i><i style="--h:72"></i><i style="--h:66"></i><i style="--h:61"></i>
+          <i style="--h:55"></i><i style="--h:52"></i><i style="--h:54"></i><i style="--h:58"></i>
+          <i style="--h:62"></i><i style="--h:41"></i><i style="--h:68"></i><i style="--h:76"></i>
+          <i style="--h:70"></i><i style="--h:57"></i><i style="--h:49"></i><i style="--h:37"></i>
+          <i style="--h:44"></i><i style="--h:51"></i><i style="--h:29"></i><i style="--h:33"></i>
+          <i style="--h:26"></i><i style="--h:22"></i><i style="--h:17"></i><i style="--h:12"></i>
+        </div>
+
+        <input class="app-seek" id="seek" type="range" min="0" max="185" step="1" value="0" aria-label="Position in the track">
+
+        <div class="app-transport">
+          <span class="app-buttons">
+            <button type="button" class="dim" data-more aria-label="Previous track">◂◂</button>
+            <button type="button" class="app-primary" id="toggle">▶ play</button>
+            <button type="button" class="dim" data-more aria-label="Next track">▸▸</button>
+          </span>
+          <label class="app-volume">VOL
+            <input id="volume" type="range" min="0" max="100" step="1" value="95" aria-label="Volume">
+            <output id="volume-value" for="volume">95</output>
+          </label>
+        </div>
+
+        <div class="app-header">Radio › Lofi <span class="dim">[120 songs]</span></div>
+
+        <ol class="app-rows">
+          <li><button type="button" class="app-row" data-more><span class="app-num">76.</span><span class="app-name">Tranquil Mindscape ( Lofi , Happy , Reflection )</span><span class="app-fact">HoliznaCC0 · Public Domain Lofi</span></button></li>
+          <li><button type="button" class="app-row" data-more><span class="app-num">77.</span><span class="app-name">Waiting Around ( LoFi , Calm )</span><span class="app-fact">HoliznaCC0 · Public Domain Lofi</span></button></li>
+          <li><button type="button" class="app-row" data-more><span class="app-num">78.</span><span class="app-name">Walking Away ( Lofi , Peaceful , Motivating )</span><span class="app-fact">HoliznaCC0 · Public Domain Lofi</span></button></li>
+          <li><button type="button" class="app-row" data-more><span class="app-num">79.</span><span class="app-name">Warm Fuzz ( LoFi , Retro )</span><span class="app-fact">HoliznaCC0 · Public Domain Lofi</span></button></li>
+          <li><button type="button" class="app-row selected" id="row"><span class="app-num"><span id="marker" aria-hidden="true"></span>80.</span><span class="app-name">Wave Maker ( Lofi , Dreamy , Retro )</span><span class="app-fact">HoliznaCC0 · Public Domain Lofi</span></button></li>
+          <li><button type="button" class="app-row" data-more><span class="app-num">81.</span><span class="app-name">Waves</span><span class="app-fact">HoliznaCC0 · Lazy Summer Lofi</span></button></li>
+          <li><button type="button" class="app-row" data-more><span class="app-num">82.</span><span class="app-name">Wetlands ( Lofi , Calm , Relaxed )</span><span class="app-fact">HoliznaCC0 · Public Domain Lofi</span></button></li>
+          <li><button type="button" class="app-row" data-more><span class="app-num">83.</span><span class="app-name">When I Was Human ( LoFi , Chill )</span><span class="app-fact">HoliznaCC0 · Public Domain Lofi</span></button></li>
+          <li><button type="button" class="app-row" data-more><span class="app-num">84.</span><span class="app-name">When Time Called Me Darling ( Lofi, Relaxing, Chill)</span><span class="app-fact">HoliznaCC0 · Public Domain Lofi</span></button></li>
+          <li><button type="button" class="app-row" data-more><span class="app-num">85.</span><span class="app-name">Windows Down</span><span class="app-fact">HoliznaCC0 · Lazy Summer Lofi</span></button></li>
+          <li><button type="button" class="app-row" data-more><span class="app-num">86.</span><span class="app-name">Winter Blues</span><span class="app-fact">HoliznaCC0 · Winter Lofi</span></button></li>
+        </ol>
+
+        <div class="app-footer" aria-hidden="true">
+          <span><b>j/k</b> move</span><span><b>enter</b> play</span><span><b>space</b> pause</span>
+          <span><b>←/→</b> seek</span><span><b>+/-</b> volume</span><span><b>?</b> help</span>
+        </div>
+
+        <div class="app-card" id="more" role="dialog" aria-labelledby="more-h" hidden>
+          <p class="app-card-title" id="more-h">That one needs the real velo</p>
+          <p>Here you can play, pause, seek and change the volume. Browsing,
+          the queue, search, radio and the nine visualizers come with the
+          install.</p>
+          <p class="app-card-actions">
+            <a class="cta" href="#install">Install velo</a>
+            <a href="#features">See the other features</a>
+          </p>
+          <p class="app-card-close"><button type="button" id="more-close"><b>esc</b> closes</button></p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="wrap page" id="features">
+
+    <section class="band" aria-labelledby="sound-h">
+      <div class="band-copy">
+        <h2 id="sound-h">It plays the file, not an approximation of it</h2>
+        <dl class="points">
+          <div>
+            <dt>Gapless</dt>
+            <dd>A join trims what the encoder inserted, so the seam carries music
+            only: the LAME delay and padding for MP3, the edit list for M4A.</dd>
+          </div>
+          <div>
+            <dt>ReplayGain</dt>
+            <dd>Read from the files' own tags and applied with clipping
+            protection: a track that declares its own peak is never pushed past
+            full scale. The transport says which mode is on, <code>RG track</code>
+            or <code>RG album</code>.</dd>
+          </div>
+          <div>
+            <dt>Bit-perfect</dt>
+            <dd><code>bit_perfect = true</code> reopens the device at each track's
+            own rate. ReplayGain and the volume step aside, and one status line
+            says so.</dd>
+          </div>
+          <div>
+            <dt>Formats</dt>
+            <dd>MP3, FLAC, M4A/AAC, OGG Vorbis, OGG Opus and WAV, with no dynamic
+            dependency.</dd>
+          </div>
+        </dl>
+      </div>
+      <figure class="scene-fig">
+        <div class="app scene" role="img" aria-label="velo playing Wave Maker from the tracks view: the clock against the length, a spectrum of bars, the transport with pause and RG track, and seven tracks with the playing row marked"><div class="app-nav"><span class="app-tabs"><span class="on">sources</span><span>queue</span></span><span class="app-mark">V E L O</span></div><div class="s-title">♫ Wave Maker ( Lofi , Dreamy , Retro )</div><div class="s-sub">HoliznaCC0 · Public Domain Lofi</div><div class="app-clock"><span>00:06 / 03:05<span class="app-state">▶ playing</span></span><span class="app-of">track 1 of 4</span></div><div class="app-spectrum"><i style="--h:0"></i><i style="--h:0"></i><i style="--h:0"></i><i style="--h:0"></i><i style="--h:0"></i><i style="--h:0"></i><i style="--h:0"></i><i style="--h:0"></i><i style="--h:0"></i><i style="--h:8"></i><i style="--h:8"></i><i style="--h:14"></i><i style="--h:22"></i><i style="--h:22"></i><i style="--h:22"></i><i style="--h:22"></i><i style="--h:8"></i><i style="--h:8"></i><i style="--h:14"></i><i style="--h:14"></i><i style="--h:18"></i><i style="--h:26"></i><i style="--h:26"></i><i style="--h:22"></i><i style="--h:22"></i><i style="--h:8"></i><i style="--h:18"></i><i style="--h:18"></i><i style="--h:8"></i><i style="--h:6"></i><i style="--h:24"></i><i style="--h:24"></i><i style="--h:18"></i><i style="--h:8"></i><i style="--h:18"></i><i style="--h:22"></i><i style="--h:14"></i><i style="--h:14"></i><i style="--h:8"></i></div><div class="s-progress"><span style="width:4%"></span></div><div class="s-transport"><span><span class="dim">◂◂</span><b class="s-primary">❚❚ pause</b><span class="dim">▸▸</span><span class="dim s-gap">shuffle</span><span class="dim">repeat off</span></span><span><span class="dim">RG</span> <span class="s-cool">track</span><span class="dim s-gap">VOL</span><span class="s-gauge"><span style="left:10%"></span></span>10</span></div><div class="s-head"><span class="dim">1 artists</span><span class="dim">2 albums</span><b>3 tracks</b><span class="dim">4 genres</span><span class="dim">[7 tracks]</span></div><div class="s-rows"><div class="s-row"><span></span><span class="app-num">1.</span><span class="app-name">Blue Skies<span class="s-meta">HoliznaCC0 · Lazy Summer Lofi</span></span><span class="app-fact">2:55</span></div><div class="s-row"><span></span><span class="app-num">2.</span><span class="app-name">Before Everything ( LoFi , Nostalgic )<span class="s-meta">HoliznaCC0 · Public Domain Lofi</span></span><span class="app-fact">2:51</span></div><div class="s-row"><span></span><span class="app-num">3.</span><span class="app-name">Birds ( LoFi , Chill )<span class="s-meta">HoliznaCC0 · Public Domain Lofi</span></span><span class="app-fact">2:49</span></div><div class="s-row selected"><span>▶</span><span class="app-num">4.</span><span class="app-name">Wave Maker ( Lofi , Dreamy , Retro )<span class="s-meta">HoliznaCC0 · Public Domain Lofi</span></span><span class="app-fact">3:05</span></div><div class="s-row"><span></span><span class="app-num">5.</span><span class="app-name">2 Hour Delay<span class="s-meta">HoliznaCC0 · Winter Lofi</span></span><span class="app-fact">2:11</span></div><div class="s-row"><span></span><span class="app-num">6.</span><span class="app-name">Fire Place<span class="s-meta">HoliznaCC0 · Winter Lofi</span></span><span class="app-fact">2:50</span></div><div class="s-row"><span></span><span class="app-num">7.</span><span class="app-name">First Snow<span class="s-meta">HoliznaCC0 · Winter Lofi</span></span><span class="app-fact">2:54</span></div></div><div class="app-footer"><span><b>j/k</b> move</span><span><b>enter</b> play</span><span><b>space</b> pause</span><span><b>←/→</b> seek</span><span><b>/</b> search</span><span><b>?</b> help</span><span><b>q</b> quit</span></div></div>
+        <figcaption>A track playing, with the list it came from underneath</figcaption>
+      </figure>
+    </section>
+
+    <section class="band flip" aria-labelledby="library-h">
+      <div class="band-copy">
+        <h2 id="library-h">Your folder is the library</h2>
+        <dl class="points">
+          <div>
+            <dt>Four views</dt>
+            <dd>Artists, albums, tracks and genres, indexed from the tags and
+            refreshed in the background at every launch.</dd>
+          </div>
+          <div>
+            <dt>Fuzzy search</dt>
+            <dd><kbd>/</kbd> searches the whole library: <code>lofi</code> finds
+            <code>Lo-Fi Scientists</code>.</dd>
+          </div>
+          <div>
+            <dt>A queue you edit</dt>
+            <dd><kbd>a</kbd> appends without stopping playback, <kbd>tab</kbd>
+            goes to the queue and back, <kbd>z</kbd> shuffles what is left.</dd>
+          </div>
+          <div>
+            <dt>Favourites and playlists</dt>
+            <dd><kbd>f</kbd> marks a favourite and <kbd>S</kbd> saves the queue
+            as a playlist. <kbd>e</kbd> renames it, <kbd>J</kbd> and
+            <kbd>K</kbd> reorder its tracks.</dd>
+          </div>
+          <div>
+            <dt>Recently played</dt>
+            <dd>A source of its own on the first screen: what you played,
+            newest first, stations included.</dd>
+          </div>
+        </dl>
+      </div>
+      <figure class="scene-fig">
+        <div class="app scene" role="img" aria-label="The search view after typing wave: one match, Wave Maker, selected and playing"><div class="app-nav"><span class="app-tabs"><span class="on">sources</span><span>queue</span></span><span class="app-mark">V E L O</span></div><div class="s-title">♫ Wave Maker ( Lofi , Dreamy , Retro )</div><div class="s-sub">HoliznaCC0 · Public Domain Lofi</div><div class="app-clock"><span>00:12 / 03:05<span class="app-state">▶ playing</span></span><span class="app-of">track 1 of 4</span></div><div class="app-spectrum"><i style="--h:0"></i><i style="--h:0"></i><i style="--h:0"></i><i style="--h:0"></i><i style="--h:8"></i><i style="--h:8"></i><i style="--h:14"></i><i style="--h:22"></i><i style="--h:22"></i><i style="--h:22"></i><i style="--h:22"></i><i style="--h:8"></i><i style="--h:8"></i><i style="--h:14"></i><i style="--h:14"></i><i style="--h:18"></i><i style="--h:26"></i><i style="--h:26"></i><i style="--h:22"></i><i style="--h:22"></i><i style="--h:8"></i><i style="--h:18"></i><i style="--h:18"></i><i style="--h:8"></i><i style="--h:6"></i><i style="--h:24"></i><i style="--h:24"></i><i style="--h:18"></i><i style="--h:8"></i><i style="--h:18"></i><i style="--h:22"></i><i style="--h:14"></i><i style="--h:14"></i><i style="--h:8"></i><i style="--h:0"></i><i style="--h:0"></i><i style="--h:0"></i><i style="--h:0"></i><i style="--h:0"></i></div><div class="s-progress"><span style="width:7%"></span></div><div class="s-transport"><span><span class="dim">◂◂</span><b class="s-primary">❚❚ pause</b><span class="dim">▸▸</span><span class="dim s-gap">shuffle</span><span class="dim">repeat off</span></span><span><span class="dim">RG</span> <span class="s-cool">track</span><span class="dim s-gap">VOL</span><span class="s-gauge"><span style="left:10%"></span></span>10</span></div><div class="s-head"><b>Search /wave</b><span class="dim">[1 match]</span></div><div class="s-rows"><div class="s-row selected"><span>▶</span><span class="app-num">1.</span><span class="app-name">Wave Maker ( Lofi , Dreamy , Retro )<span class="s-meta">HoliznaCC0 · Public Domain Lofi</span></span><span class="app-fact">3:05</span></div></div><div class="s-space"></div><div class="s-status">/wave</div><div class="app-footer"><span><b>type</b> to search</span><span><b>j/k</b> move</span><span><b>enter</b> play</span><span><b>backspace</b> delete</span><span><b>esc</b> cancel</span></div></div>
+        <figcaption><kbd>/</kbd> and four letters</figcaption>
+      </figure>
+    </section>
+
+    <section class="band" aria-labelledby="radio-h">
+      <div class="band-copy">
+        <h2 id="radio-h">Radio that reads like radio</h2>
+        <div class="stats">
+          <p class="stat"><b>58,000</b> stations in the Radio Browser directory</p>
+          <p class="stat"><b>241</b> countries, with yours listed first</p>
+        </div>
+        <ul class="plain">
+          <li>The stations come from <a href="https://www.radio-browser.info/">Radio
+          Browser</a>, a directory its community keeps, asked through its
+          public mirrors.</li>
+          <li>Browse by country, region or tag. <kbd>f</kbd> favourites a station
+          or pins a place.</li>
+          <li>A live row carries <span class="live">● live</span> and the
+          listener count when the service reports one.</li>
+          <li><kbd>u</kbd> plays any stream URL without saving it.</li>
+          <li>A station that cannot play is marked <code>✗</code> and says why at
+          once, and <kbd>i</kbd> drafts the bug report for you to send.</li>
+        </ul>
+      </div>
+      <figure class="scene-fig">
+        <div class="app scene" role="img" aria-label="The radio view listing countries, each with its number of stations, while Wave Maker keeps playing above"><div class="app-nav"><span class="app-tabs"><span class="on">sources</span><span>queue</span></span><span class="app-mark">V E L O</span></div><div class="s-title">♫ Wave Maker ( Lofi , Dreamy , Retro )</div><div class="s-sub">HoliznaCC0 · Public Domain Lofi</div><div class="app-clock"><span>00:34 / 03:05<span class="app-state">▶ playing</span></span><span class="app-of">track 1 of 4</span></div><div class="app-spectrum"><i style="--h:20"></i><i style="--h:20"></i><i style="--h:22"></i><i style="--h:40"></i><i style="--h:40"></i><i style="--h:40"></i><i style="--h:38"></i><i style="--h:40"></i><i style="--h:40"></i><i style="--h:38"></i><i style="--h:36"></i><i style="--h:40"></i><i style="--h:40"></i><i style="--h:40"></i><i style="--h:40"></i><i style="--h:40"></i><i style="--h:40"></i><i style="--h:40"></i><i style="--h:22"></i><i style="--h:22"></i><i style="--h:22"></i><i style="--h:22"></i><i style="--h:22"></i><i style="--h:22"></i><i style="--h:40"></i><i style="--h:40"></i><i style="--h:22"></i><i style="--h:22"></i><i style="--h:22"></i><i style="--h:22"></i><i style="--h:22"></i><i style="--h:10"></i><i style="--h:22"></i><i style="--h:22"></i><i style="--h:8"></i><i style="--h:22"></i><i style="--h:22"></i><i style="--h:22"></i></div><div class="s-progress"><span style="width:18%"></span></div><div class="s-transport"><span><span class="dim">◂◂</span><b class="s-primary">❚❚ pause</b><span class="dim">▸▸</span><span class="dim s-gap">shuffle</span><span class="dim">repeat off</span></span><span><span class="dim">RG</span> <span class="s-cool">track</span><span class="dim s-gap">VOL</span><span class="s-gauge"><span style="left:10%"></span></span>10</span></div><div class="s-head"><b>Radio › countries</b><span class="dim">[227 countries]</span></div><div class="s-rows"><div class="s-row selected"><span></span><span class="app-num">1.</span><span class="app-name">Andorra</span><span class="app-fact">5 stations</span></div><div class="s-row"><span></span><span class="app-num">2.</span><span class="app-name">The United Arab Emirates</span><span class="app-fact">634 stations</span></div><div class="s-row"><span></span><span class="app-num">3.</span><span class="app-name">Afghanistan</span><span class="app-fact">79 stations</span></div><div class="s-row"><span></span><span class="app-num">4.</span><span class="app-name">Antigua And Barbuda</span><span class="app-fact">5 stations</span></div><div class="s-row"><span></span><span class="app-num">5.</span><span class="app-name">Anguilla</span><span class="app-fact">5 stations</span></div><div class="s-row"><span></span><span class="app-num">6.</span><span class="app-name">Albania</span><span class="app-fact">100 stations</span></div><div class="s-row"><span></span><span class="app-num">7.</span><span class="app-name">Armenia</span><span class="app-fact">11 stations</span></div><div class="s-row"><span></span><span class="app-num">8.</span><span class="app-name">Angola</span><span class="app-fact">64 stations</span></div><div class="s-row"><span></span><span class="app-num">9.</span><span class="app-name">Antarctica</span><span class="app-fact">9 stations</span></div><div class="s-row"><span></span><span class="app-num">10.</span><span class="app-name">Argentina</span><span class="app-fact">1045 stations</span></div><div class="s-row"><span></span><span class="app-num">11.</span><span class="app-name">American Samoa</span><span class="app-fact">10 stations</span></div><div class="s-row"><span></span><span class="app-num">12.</span><span class="app-name">Austria</span><span class="app-fact">320 stations</span></div></div><div class="app-footer"><span><b>j/k</b> move</span><span><b>enter</b> play</span><span><b>space</b> pause</span><span><b>←/→</b> seek</span><span><b>/</b> search</span><span><b>?</b> help</span><span><b>q</b> quit</span></div></div>
+        <figcaption>Every country with its station count, while the music keeps playing</figcaption>
+      </figure>
+    </section>
+
+    <section class="cliamp" aria-labelledby="cliamp-h">
+      <div class="cliamp-head">
+        <div>
+          <h2 id="cliamp-h">cliamp radio is the first row</h2>
+          <p class="section-lede">Fifteen channels that the
+          <a href="https://cliamp.stream">cliamp</a> project runs itself, always
+          on and with no account. In velo they lead the radio view: a channel
+          opens on its live row, with the listeners it has right now, and then
+          its songs, each one a track you can play, seek and queue.</p>
+        </div>
+        <blockquote class="thanks">
+          <p>I listen to these channels a lot. Thank you to the people behind
+          cliamp for building the service and keeping it free and always on.</p>
+          <footer><a href="#maker">Angel</a></footer>
+        </blockquote>
+      </div>
+      <div class="channels">
+        <p class="channels-head"><b>Radio › cliamp radio</b> <span>[15 channels]</span></p>
+        <ul>
+          <li><span class="ch-name">Lofi</span><span class="ch-songs">120 songs</span><span class="ch-what">Lofi 24/7 with StreamBeats</span></li>
+          <li><span class="ch-name">Meditative</span><span class="ch-songs">25 songs</span><span class="ch-what">Calm ambient instrumentals for focus and rest</span></li>
+          <li><span class="ch-name">Synthwave</span><span class="ch-songs">100 songs</span><span class="ch-what">Synthwave 24/7 with StreamBeats</span></li>
+          <li><span class="ch-name">EDM</span><span class="ch-songs">100 songs</span><span class="ch-what">EDM 24/7 with StreamBeats</span></li>
+          <li><span class="ch-name">Omarchy</span><span class="ch-songs">33 songs</span><span class="ch-what">Songs about Omarchy by Ryan R. Hughes</span></li>
+          <li><span class="ch-name">Chiptunes</span><span class="ch-songs">108 songs</span><span class="ch-what">8-bit and tracker music, all Creative Commons</span></li>
+          <li><span class="ch-name">Amiga</span><span class="ch-songs">68 songs</span><span class="ch-what">Amiga tracker modules from the demoscene</span></li>
+          <li><span class="ch-name">NCS</span><span class="ch-songs">48 songs</span><span class="ch-what">NoCopyrightSounds, top tracks 24/7</span></li>
+          <li><span class="ch-name">NCS House</span><span class="ch-songs">99 songs</span><span class="ch-what">NoCopyrightSounds, House 24/7</span></li>
+          <li><span class="ch-name">NCS Dubstep</span><span class="ch-songs">80 songs</span><span class="ch-what">NoCopyrightSounds, Dubstep 24/7</span></li>
+          <li><span class="ch-name">NCS Drum &amp; Bass</span><span class="ch-songs">100 songs</span><span class="ch-what">NoCopyrightSounds, Drum &amp; Bass 24/7</span></li>
+          <li><span class="ch-name">NCS Trap</span><span class="ch-songs">100 songs</span><span class="ch-what">NoCopyrightSounds, Trap 24/7</span></li>
+          <li><span class="ch-name">NCS Phonk</span><span class="ch-songs">60 songs</span><span class="ch-what">NoCopyrightSounds, Phonk 24/7</span></li>
+          <li><span class="ch-name">NCS Pop</span><span class="ch-songs">56 songs</span><span class="ch-what">NoCopyrightSounds, Pop 24/7</span></li>
+          <li><span class="ch-name">NCS Chill</span><span class="ch-songs">37 songs</span><span class="ch-what">NoCopyrightSounds, Chill 24/7</span></li>
+        </ul>
+      </div>
+      <p class="cliamp-note">The service is theirs, not velo's, at
+      <a href="https://radio.cliamp.stream">radio.cliamp.stream</a>. If you would
+      rather not see it, <code>cliamp = false</code> under <code>[radio]</code>
+      hides the section.</p>
+    </section>
+
+    <section class="band flip" aria-labelledby="look-h">
+      <div class="band-copy">
+        <h2 id="look-h">It looks like your terminal</h2>
+        <dl class="points">
+          <div>
+            <dt>Your colours</dt>
+            <dd><kbd>ctrl+p</kbd> opens the settings card. The theme has its own
+            picker that previews as the cursor moves, and transparent
+            background is one switch: whatever is behind the window shows
+            through, which is what this page is doing.</dd>
+          </div>
+          <div>
+            <dt>Nine visualizers</dt>
+            <dd>bars, bars-outline, wave, scatter, flame, matrix, scope, mirror
+            and none. <kbd>v</kbd> cycles them, <kbd>ctrl+v</kbd> picks one
+            with a live preview, and <kbd>V</kbd> gives it the whole screen.</dd>
+          </div>
+          <div>
+            <dt>Cover art</dt>
+            <dd>Drawn where the terminal speaks the kitty, sixel or iTerm2
+            protocol. Elsewhere the status line says why it is hidden.</dd>
+          </div>
+          <div>
+            <dt>Low power</dt>
+            <dd><kbd>P</kbd> redraws the screen at a quarter of the rate and
+            leaves the spectrum out. Playback does not change.</dd>
+          </div>
+        </dl>
+      </div>
+      <figure class="scene-fig">
+        <div class="app scene" role="img" aria-label="The visualizer picker open over the tracks view: none, bars, bars-outline, wave, scatter, flame, matrix, scope and mirror, one per row, with bars focused"><div class="app-nav"><span class="app-tabs"><span class="on">sources</span><span>queue</span></span><span class="app-mark">V E L O</span></div><div class="s-title">♫ Wave Maker ( Lofi , Dreamy , Retro )</div><div class="s-sub">HoliznaCC0 · Public Domain Lofi</div><div class="app-clock"><span>00:17 / 03:05<span class="app-state">▶ playing</span></span><span class="app-of">track 1 of 4</span></div><div class="app-spectrum"><i style="--h:8"></i><i style="--h:8"></i><i style="--h:14"></i><i style="--h:22"></i><i style="--h:22"></i><i style="--h:22"></i><i style="--h:22"></i><i style="--h:8"></i><i style="--h:8"></i><i style="--h:14"></i><i style="--h:14"></i><i style="--h:18"></i><i style="--h:26"></i><i style="--h:26"></i><i style="--h:22"></i><i style="--h:22"></i><i style="--h:8"></i><i style="--h:18"></i><i style="--h:18"></i><i style="--h:8"></i><i style="--h:6"></i><i style="--h:24"></i><i style="--h:24"></i><i style="--h:18"></i><i style="--h:8"></i><i style="--h:18"></i><i style="--h:22"></i><i style="--h:14"></i><i style="--h:14"></i><i style="--h:8"></i><i style="--h:0"></i><i style="--h:0"></i><i style="--h:0"></i><i style="--h:0"></i><i style="--h:0"></i><i style="--h:0"></i><i style="--h:0"></i><i style="--h:0"></i><i style="--h:0"></i></div><div class="s-progress"><span style="width:9%"></span></div><div class="s-transport"><span><span class="dim">◂◂</span><b class="s-primary">❚❚ pause</b><span class="dim">▸▸</span><span class="dim s-gap">shuffle</span><span class="dim">repeat off</span></span><span><span class="dim">RG</span> <span class="s-cool">track</span><span class="dim s-gap">VOL</span><span class="s-gauge"><span style="left:10%"></span></span>10</span></div><div class="s-head"><span class="dim">1 artists</span><span class="dim">2 albums</span><b>3 tracks</b><span class="dim">4 genres</span><span class="dim">[7 tracks]</span></div><div class="s-rows"><div class="s-row"><span></span><span class="app-num">1.</span><span class="app-name">Blue Skies<span class="s-meta">HoliznaCC0 · Lazy Summer Lofi</span></span><span class="app-fact">2:55</span></div><div class="s-row"><span></span><span class="app-num">2.</span><span class="app-name">Before Everything ( LoFi , Nostalgic )<span class="s-meta">HoliznaCC0 · Public Domain Lofi</span></span><span class="app-fact">2:51</span></div><div class="s-row"><span></span><span class="app-num">3.</span><span class="app-name">Birds ( LoFi , Chill )<span class="s-meta">HoliznaCC0 · Public Domain Lofi</span></span><span class="app-fact">2:49</span></div><div class="s-row selected"><span>▶</span><span class="app-num">4.</span><span class="app-name">Wave Maker ( Lofi , Dreamy , Retro )<span class="s-meta">HoliznaCC0 · Public Domain Lofi</span></span><span class="app-fact">3:05</span></div><div class="s-row"><span></span><span class="app-num">5.</span><span class="app-name">2 Hour Delay<span class="s-meta">HoliznaCC0 · Winter Lofi</span></span><span class="app-fact">2:11</span></div><div class="s-row"><span></span><span class="app-num">6.</span><span class="app-name">Fire Place<span class="s-meta">HoliznaCC0 · Winter Lofi</span></span><span class="app-fact">2:50</span></div><div class="s-row"><span></span><span class="app-num">7.</span><span class="app-name">First Snow<span class="s-meta">HoliznaCC0 · Winter Lofi</span></span><span class="app-fact">2:54</span></div></div><div class="s-card s-card-list"><b class="s-card-title">visualizer</b><span>none</span><span class="on">bars</span><span>bars-outline</span><span>wave</span><span>scatter</span><span>flame</span><span>matrix</span><span>scope</span><span>mirror</span></div><div class="app-footer"><span><b>j/k</b> move</span><span><b>enter</b> play</span><span><b>space</b> pause</span><span><b>←/→</b> seek</span><span><b>/</b> search</span><span><b>?</b> help</span><span><b>q</b> quit</span></div></div>
+        <figcaption><kbd>ctrl+v</kbd>: nine shapes, and the one under the cursor is already on screen</figcaption>
+      </figure>
+    </section>
+
+    <section class="keys" id="keys" aria-labelledby="keys-h">
+      <h2 id="keys-h">Driven from the keyboard</h2>
+      <p class="section-lede">Sixteen of the keys. <kbd>?</kbd> opens the rest
+      inside velo, and the system's media keys reach play, next and previous on
+      macOS and on a Linux desktop with MPRIS.</p>
+      <dl class="keymap">
+        <div><dt><kbd>j</kbd> <kbd>k</kbd></dt><dd>move down and up</dd></div>
+        <div><dt><kbd>enter</kbd></dt><dd>open, or play from here</dd></div>
+        <div><dt><kbd>space</kbd></dt><dd>pause and resume</dd></div>
+        <div><dt><kbd>←</kbd> <kbd>→</kbd></dt><dd>seek 5 s, 30 s with shift</dd></div>
+        <div><dt><kbd>:</kbd></dt><dd>jump to 70%, 1:20 or 90 s</dd></div>
+        <div><dt><kbd>/</kbd></dt><dd>fuzzy search</dd></div>
+        <div><dt><kbd>1</kbd>–<kbd>4</kbd></dt><dd>artists, albums, tracks, genres</dd></div>
+        <div><dt><kbd>tab</kbd></dt><dd>to the queue and back</dd></div>
+        <div><dt><kbd>a</kbd></dt><dd>append to the queue</dd></div>
+        <div><dt><kbd>z</kbd></dt><dd>shuffle what is left</dd></div>
+        <div><dt><kbd>r</kbd></dt><dd>repeat: off, all, one</dd></div>
+        <div><dt><kbd>+</kbd> <kbd>-</kbd></dt><dd>volume, 5% at a time</dd></div>
+        <div><dt><kbd>f</kbd></dt><dd>favourite</dd></div>
+        <div><dt><kbd>R</kbd></dt><dd>radio</dd></div>
+        <div><dt><kbd>v</kbd></dt><dd>next visualizer</dd></div>
+        <div><dt><kbd>d</kbd></dt><dd>choose the output device</dd></div>
+      </dl>
+    </section>
+
+    <section class="notes" aria-label="Servers, privacy and what is missing">
+      <div>
+        <h2>Your own server</h2>
+        <p>Early access: velo talks to servers that expose the Subsonic API,
+        Navidrome, Airsonic and Gonic among them. <code>velo --sync</code> brings
+        the server's library into the index, and a remote track plays through a
+        cache.</p>
+      </div>
+      <div>
+        <h2>What velo sends</h2>
+        <p>No usage data: no analytics endpoint, no install id, no first-run
+        question. One request is its own, the update check to
+        <code>api.github.com</code>, once a day with no identifier, and
+        <code>check = "never"</code> turns it off.</p>
+      </div>
+      <div>
+        <h2>Not yet</h2>
+        <p>Windows is untested. Subsonic cannot stream a track before the whole
+        file is cached. Playlists are saved, renamed and reordered, and have no
+        editor beyond that.</p>
+      </div>
+    </section>
+
+    <section class="band start" aria-labelledby="start-h">
+      <div class="band-copy">
+        <h2 id="start-h">Install it, open it, point it at your music</h2>
+        <figure class="term">
+<pre><span class="p">$</span> <span id="start-line">brew install alvaldes/velo/velo</span>
+<span class="p">$</span> velo</pre>
+          <button type="button" class="copy" data-copy-from="start-line">copy the first</button>
+        </figure>
+        <p class="section-lede">Inside velo, <kbd>o</kbd> asks where your music is
+        and <kbd>tab</kbd> completes the folder as you type. velo indexes it,
+        remembers it, and refreshes the index in the background at every
+        launch. Linux or macOS.</p>
+      </div>
+      <figure class="scene-fig">
+        <div class="app scene" role="img" aria-label="The library prompt over the first screen: Where is your music? with ~/Music/ typed and completed"><div class="app-nav"><span class="app-tabs"><span class="on">sources</span><span>queue</span></span><span class="app-mark">V E L O</span></div><div class="s-title">♫ nothing playing</div><div class="s-sub">enter plays the selection</div><div class="app-clock"><span class="dim">--:--<span class="s-stopped">■ stopped</span></span></div><div class="app-spectrum"></div><div class="s-progress"></div><div class="s-transport"><span><span class="dim">◂◂</span><b class="s-primary">▶ play</b><span class="dim">▸▸</span><span class="dim s-gap">shuffle</span><span class="dim">repeat off</span></span><span><span class="dim">RG</span> <span class="s-cool">track</span><span class="dim s-gap">VOL</span><span class="s-gauge"><span style="left:100%"></span></span>100</span></div><div class="s-head"><b>Sources</b><span class="dim">[5 sources]</span></div><div class="s-rows"><div class="s-row selected"><span></span><span class="app-num">1.</span><span class="app-name">Radio</span><span class="app-fact"></span></div><div class="s-row"><span></span><span class="app-num">2.</span><span class="app-name">Local library</span><span class="app-fact"></span></div><div class="s-row"><span></span><span class="app-num">3.</span><span class="app-name">Recently played</span><span class="app-fact"></span></div><div class="s-row"><span></span><span class="app-num">4.</span><span class="app-name">Favourites</span><span class="app-fact"></span></div><div class="s-row"><span></span><span class="app-num">5.</span><span class="app-name">Playlists</span><span class="app-fact"></span></div></div><div class="s-space"></div><div class="s-card s-card-prompt"><b class="s-card-title">library</b><span>Where is your music?</span><span class="dim">a folder in your home — tab completes it</span><span>~/Music/<i class="s-caret"></i></span><span class="dim s-card-keys">enter save · esc skip</span></div><div class="s-status">velo: no library and no server configured</div><div class="app-footer"><span><b>j/k</b> move</span><span><b>enter</b> play</span><span><b>space</b> pause</span><span><b>←/→</b> seek</span><span><b>/</b> search</span><span><b>?</b> help</span><span><b>q</b> quit</span></div></div>
+        <figcaption><kbd>o</kbd>, two letters and <kbd>tab</kbd></figcaption>
+      </figure>
+    </section>
+
+    <section class="maker" id="maker" aria-labelledby="maker-h">
+      <img src="media/alvaldes.jpg" alt="" width="112" height="112">
+      <div class="maker-copy">
+        <h2 id="maker-h">Made by Angel L. Valdés</h2>
+        <p>A software engineer in Mexico. velo is free software under the MIT
+        license, written in the open: the issues, the changelog and every
+        release are on GitHub, and reports and pull requests are welcome.</p>
+      </div>
+      <ul class="maker-links">
+        <li><a href="https://alvaldes.dev"><b>web</b> alvaldes.dev</a></li>
+        <li><a href="https://github.com/alvaldes"><b>code</b> github.com/alvaldes</a></li>
+        <li><a href="https://www.linkedin.com/in/alvaldes"><b>work</b> linkedin.com/in/alvaldes</a></li>
+      </ul>
+    </section>
+  </div>
+</main>
+
+<div class="wrap">
+  <footer class="bottom">
+    <span>velo is free software, MIT licensed. The demo track is Wave Maker by HoliznaCC0, CC0.</span>
+    <span class="footer-links">
+      <a href="https://github.com/alvaldes/velo/blob/main/README.md">README</a>
+      <a href="https://github.com/alvaldes/velo/blob/main/CHANGELOG.md">CHANGELOG</a>
+      <a href="https://github.com/alvaldes/velo/releases">Releases</a>
+    </span>
+  </footer>
+</div>
+<script src="app.js?v=23"></script>
+<script type="module" src="fog.js?v=8"></script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "chosen": "03-split-live.html",
+  "handoffs": {
+    "03-split-live.html": {
+      "status": "implemented",
+      "queued": false,
+      "sentAt": "2026-11-10T23:28:56.897Z",
+      "startedAt": "2026-11-10T23:29:27.112Z",
+      "implementedAt": "2026-11-10T23:31:30.701Z",
+      "note": "Implemented as a dependency-free static site under docs/ (GitHub Pages from the branch): docs/index.html + docs/style.css + docs/app.js, with velo's own factory palette as the token source and --dim lifted to #9aa3ae to pass AA for body text. One deliberate deviation from the artboard: the archives CI publishes are named velo-<tag>-<target>.tar.gz, so there is no tag-free /releases/latest/download/ URL; the platform picker now shows the exact file name to look for, Releases is the way in, and the copyable one-liner is the source build. Verified: 200/200/200 from a local server, no remote asset loads, local references resolve, the four targets match .github/workflows/release.yml, node --check clean, reduced-motion honoured.",
+      "previewUrl": "http://127.0.0.1:8080/"
+    }
+  }
+}
