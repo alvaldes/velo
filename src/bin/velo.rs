@@ -55,13 +55,13 @@ fn main() -> ExitCode {
         if let Err(error) = velo::saved::write_default_library(&library_file) {
             eprintln!("velo: cannot write {}: {error}", library_file.display());
         }
-        // The themes folder ships the palette velo already draws with, so the
+        // The themes folder ships one file per theme the picker offers, so the
         // format of a theme file is one `ls` away instead of a guess.
         let themes = config::themes_dir(config_file);
         if let Err(error) = config::write_default_theme(&themes) {
             eprintln!(
-                "velo: cannot write {}: {error}",
-                themes.join("velo.toml").display()
+                "velo: cannot write the shipped themes in {}: {error}",
+                themes.display()
             );
         }
     }

@@ -2323,10 +2323,10 @@ fn default_terminal_is_still_all_reset() {
     assert_eq!(selection.applied, TERMINAL_THEME_NAME);
 }
 
-// --------------------------------------- the theme a fresh install finds
+// ------------------------------- the themes a fresh install finds
 
 #[test]
-fn a_fresh_install_finds_the_factory_themes_as_files() {
+fn a_fresh_install_finds_one_file_per_theme() {
     let dir = temp_dir("theme-template");
     let themes = themes_dir(&dir.join("config.toml"));
 
@@ -2334,29 +2334,90 @@ fn a_fresh_install_finds_the_factory_themes_as_files() {
         write_default_theme(&themes).unwrap(),
         "the templates are written when the folder has nothing"
     );
-    let velo_file = themes.join(format!("{DEFAULT_THEME_NAME}.toml"));
+
+    // Every row the picker offers without the folder — the factory theme
+    // `velo` first, then the built-in catalogue (S1, S3) — ships as a file
+    // named after it, so the format is one `ls` away.
+    let catalogue = select_theme(None, &ThemeKeys::default()).themes;
     assert_eq!(DEFAULT_THEME_NAME, "velo", "the factory theme is velo (S1)");
-    assert!(velo_file.is_file(), "it is velo.toml");
-    let terminal_file = themes.join("default terminal.toml");
     assert!(
-        terminal_file.is_file(),
+        themes.join("tokyo-night.toml").is_file(),
+        "the catalogue's tokyo-night ships"
+    );
+    assert!(
+        themes.join("default terminal.toml").is_file(),
         "the terminal's own theme ships beside it (S3)"
     );
+    for theme in &catalogue {
+        let path = themes.join(format!("{}.toml", theme.name));
+        assert!(path.is_file(), "{} ships as a file", path.display());
+    }
 
-    // It has to be velo's own palette, not a copy that drifted: the file is
-    // documentation of the format, and the format's first reader is velo.
+    // Each file documents the format: comments, then exactly the seven keys
+    // a theme file may carry — nothing a launch would refuse.
+    for theme in &catalogue {
+        let path = themes.join(format!("{}.toml", theme.name));
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(
+            text.starts_with(&format!("# {}:", theme.name)),
+            "{} is headed by its own name: {text}",
+            theme.name
+        );
+        let keys: Vec<&str> = text
+            .lines()
+            .filter(|line| !line.trim().is_empty() && !line.trim_start().starts_with('#'))
+            .map(|line| line.split(" = ").next().unwrap_or_default())
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "background",
+                "text",
+                "dim",
+                "accent",
+                "secondary",
+                "border",
+                "ink"
+            ],
+            "{} writes the seven keys",
+            theme.name
+        );
+    }
+
+    // The files are the catalogue and nothing else: the same rows in the
+    // same order with the same colours, and no notice — which is why a
+    // launch with them looks exactly like one without.
     let selection = select_theme(Some(&themes), &ThemeKeys::default());
-    assert_eq!(selection.themes[0].name, DEFAULT_THEME_NAME);
+    assert!(selection.notices.is_empty(), "{:?}", selection.notices);
+    assert_eq!(
+        selection.themes, catalogue,
+        "the shipped files restate the built-ins"
+    );
     assert_eq!(
         selection.themes[0].colors,
         ThemeColors::default(),
-        "the shipped theme is exactly the built-in one"
+        "the shipped velo.toml is exactly the built-in one"
     );
     assert_eq!(
         selection.palette,
         ThemeColors::default(),
         "and a launch with it looks the same as one without it"
     );
+
+    // A built-in is selectable by its own file now: `tokyo-night`
+    // resolves to the palette the catalogue carries.
+    let tokyo = catalogue
+        .iter()
+        .find(|theme| theme.name == "tokyo-night")
+        .expect("tokyo-night is in the catalogue")
+        .colors;
+    let keys = ThemeKeys {
+        name: Some("tokyo-night".to_owned()),
+        ..ThemeKeys::default()
+    };
+    let selection = select_theme(Some(&themes), &keys);
+    assert_eq!(selection.applied, "tokyo-night");
+    assert_eq!(selection.palette, tokyo, "the file is the built-in palette");
 
     // The terminal theme parses to the terminal's own palette in every slot.
     let keys = ThemeKeys {
@@ -2384,10 +2445,15 @@ fn the_shipped_themes_never_touch_ones_you_edited() {
     let terminal_file = themes.join("default terminal.toml");
     fs::write(&terminal_file, "accent = \"#00afff\"\n").unwrap();
     let before_terminal = fs::read_to_string(&terminal_file).unwrap();
+    // A built-in is a theme file like any other once it ships: an edit to it
+    // is the user's, not the factory's.
+    let tokyo_file = themes.join("tokyo-night.toml");
+    fs::write(&tokyo_file, "accent = \"#00afff\"\n").unwrap();
+    let before_tokyo = fs::read_to_string(&tokyo_file).unwrap();
 
     assert!(
-        !write_default_theme(&themes).unwrap(),
-        "nothing is written over an edited theme"
+        write_default_theme(&themes).unwrap(),
+        "the themes that are missing are written, the edited ones are not"
     );
     assert_eq!(
         fs::read_to_string(&velo_file).unwrap(),
@@ -2397,12 +2463,36 @@ fn the_shipped_themes_never_touch_ones_you_edited() {
     assert_eq!(
         fs::read_to_string(&terminal_file).unwrap(),
         before_terminal,
-        "byte for byte, both factory themes"
+        "byte for byte"
+    );
+    assert_eq!(
+        fs::read_to_string(&tokyo_file).unwrap(),
+        before_tokyo,
+        "byte for byte, an edited built-in too"
+    );
+    assert!(
+        themes.join("dracula.toml").is_file(),
+        "the rest of the catalogue still ships"
     );
     assert_ne!(
         select_theme(Some(&themes), &ThemeKeys::default()).themes[0].colors,
         ThemeColors::default(),
         "an edited velo.toml is the user's, and it wins"
+    );
+    let selection = select_theme(Some(&themes), &ThemeKeys::default());
+    let tokyo = selection
+        .themes
+        .iter()
+        .find(|theme| theme.name == "tokyo-night")
+        .expect("the catalogue row is still offered");
+    assert_eq!(
+        tokyo.colors.accent,
+        ThemeColor::Rgb {
+            red: 0x00,
+            green: 0xaf,
+            blue: 0xff
+        },
+        "the edited file wins over the built-in it replaced"
     );
 
     let _ = fs::remove_dir_all(&dir);
