@@ -1,6 +1,11 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.49.1] - 2026-11-11
+
+### Fixes
+- **ui:** A handover that waits says so, and a pause can cancel it
+- **audio:** A device error never splices into the drawn frame
 ## [0.49.0] - 2026-11-11
 
 ### Features
