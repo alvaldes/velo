@@ -45,7 +45,7 @@ Site, with a player you can press play on: <https://alvaldes.github.io/velo/>
 **Homebrew** (macOS, Linux):
 
 ```sh
-brew install alvaldes/velo/velo
+brew install alvaldes/tap/velo
 ```
 
 **Install script** (macOS, Linux) — verifies the release checksum and installs

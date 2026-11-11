@@ -22,6 +22,7 @@ use md5::{Digest as _, Md5};
 use miniserde::Deserialize;
 
 use super::Error;
+use crate::audio::remote::{RangeAnswer, RangeTransport};
 
 /// The Subsonic REST API version velo speaks.
 pub const API_VERSION: &str = "1.16.1";
@@ -203,16 +204,7 @@ impl HttpTransport {
 
 impl Transport for HttpTransport {
     fn get(&self, url: &str) -> Result<Vec<u8>, Error> {
-        let mut response = self
-            .agent
-            .get(url)
-            .call()
-            .map_err(|error| Error::Unreachable {
-                detail: match error {
-                    ureq::Error::StatusCode(status) => format!("the server answered HTTP {status}"),
-                    other => other.to_string(),
-                },
-            })?;
+        let mut response = self.agent.get(url).call().map_err(unreachable_from_ureq)?;
         let status = response.status();
         if status != 200 {
             return Err(Error::Unreachable {
@@ -224,10 +216,85 @@ impl Transport for HttpTransport {
             .body_mut()
             .as_reader()
             .read_to_end(&mut body)
-            .map_err(|error| Error::Unreachable {
-                detail: error.to_string(),
-            })?;
+            .map_err(|error| unreachable_from_io(&error))?;
         Ok(body)
+    }
+}
+
+/// Maps a `ureq` failure onto the transport's own unreachable error.
+fn unreachable_from_ureq(error: ureq::Error) -> Error {
+    Error::Unreachable {
+        detail: match error {
+            ureq::Error::StatusCode(status) => format!("the server answered HTTP {status}"),
+            other => other.to_string(),
+        },
+    }
+}
+
+/// Maps a body-read failure (I/O trouble mid-download) onto the same
+/// unreachable error.
+fn unreachable_from_io(error: &std::io::Error) -> Error {
+    Error::Unreachable {
+        detail: error.to_string(),
+    }
+}
+
+/// Parses one `Content-Range` header value: `bytes a-b/total`, the shape of
+/// a `206 Partial Content` answer, into its inclusive span and the body's
+/// total length. `None` for anything that does not name both — an
+/// unsatisfied range (`bytes */total`), a total the server declined to give
+/// (`bytes a-b/*`), or a different header entirely.
+#[must_use]
+pub fn parse_content_range(value: &str) -> Option<(u64, u64, u64)> {
+    let rest = value.trim().strip_prefix("bytes")?;
+    let (span, total) = rest.trim_start().split_once('/')?;
+    let total = total.trim().parse().ok()?;
+    let (from, to) = span.trim().split_once('-')?;
+    Some((from.trim().parse().ok()?, to.trim().parse().ok()?, total))
+}
+
+/// The same transport answering byte ranges of a URL (remote-streaming T1):
+/// one GET with a `Range` header, the `206` answer's bytes plus the total
+/// its `Content-Range` states. A server that answers `200` — ignoring the
+/// header — or a `206` without a parsable total answers the typed
+/// [`RangeAnswer::NoRanges`], never a silent whole-body read; the
+/// cache-on-play fallback for it is T3's.
+impl RangeTransport for HttpTransport {
+    fn range(&self, url: &str, from: u64, to: Option<u64>) -> Result<RangeAnswer, Error> {
+        let header = match to {
+            Some(to) => format!("bytes={from}-{to}"),
+            None => format!("bytes={from}-"),
+        };
+        let mut response = self
+            .agent
+            .get(url)
+            .header("Range", &header)
+            .call()
+            .map_err(unreachable_from_ureq)?;
+        if response.status() == 200 {
+            return Ok(RangeAnswer::NoRanges);
+        }
+        if response.status() != 206 {
+            return Err(Error::Unreachable {
+                detail: format!("the server answered HTTP {}", response.status()),
+            });
+        }
+        let Some(total) = response
+            .headers()
+            .get("Content-Range")
+            .and_then(|value| value.to_str().ok())
+            .and_then(parse_content_range)
+            .map(|(_, _, total)| total)
+        else {
+            return Ok(RangeAnswer::NoRanges);
+        };
+        let mut body = Vec::new();
+        response
+            .body_mut()
+            .as_reader()
+            .read_to_end(&mut body)
+            .map_err(|error| unreachable_from_io(&error))?;
+        Ok(RangeAnswer::Partial { bytes: body, total })
     }
 }
 

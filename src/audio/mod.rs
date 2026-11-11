@@ -14,6 +14,7 @@ pub mod loudness;
 pub mod mp4;
 pub mod opus;
 pub mod output;
+pub mod remote;
 pub mod replay_gain;
 pub mod resample;
 pub mod spectrum;
@@ -269,6 +270,30 @@ impl TrackSource {
     pub fn open_stream(source: Box<dyn MediaSource>) -> Result<Self, AudioError> {
         let stream = MediaSourceStream::new(source, MediaSourceStreamOptions::default());
         Self::build(stream, &Hint::new(), false, None, true)
+    }
+
+    /// Opens a remote track as it streams (remote-streaming T2): the source
+    /// is an owned [`MediaSource`] whose bytes arrive as they are read — a
+    /// [`RemoteSource`][crate::audio::remote::RemoteSource] in production —
+    /// and unlike a station's stream ([`TrackSource::open_stream`]) this
+    /// track is a file's equal: the decoder trims what the container declares
+    /// (gapless decode), the duration is what the decoder reports (S2), and a
+    /// seek re-requests the range the seek point asks for (S3).
+    ///
+    /// There is no path behind the source, so the two file-only seams read
+    /// nothing: a container whose priming is read from the file itself
+    /// (isomp4, T16) is not re-opened for its priming here, and a track's
+    /// `ReplayGain` tags cannot be read from a URL — a streamed track plays at
+    /// its no-tag gain until the cache holds it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AudioError::Unsupported`] when the container or codec is not
+    /// recognised from the bytes read so far, and [`AudioError::Decode`] when
+    /// the first packet fails to decode.
+    pub fn open_remote(source: Box<dyn MediaSource>) -> Result<Self, AudioError> {
+        let stream = MediaSourceStream::new(source, MediaSourceStreamOptions::default());
+        Self::build(stream, &Hint::new(), true, None, false)
     }
 
     /// Probes, builds the decoder and resolves the sample format, shared by

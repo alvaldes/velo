@@ -4,7 +4,12 @@
 //! `stream?id=<id>&format=raw` — no transcoding, so what lands on disk is
 //! what the server holds — and then played from that file. Seek, gapless,
 //! bit-perfect and `ReplayGain`-from-tags keep working with no change to the
-//! audio path, because the producer opens a file either way.
+//! audio path, because the producer opens a file either way. The remote-song
+//! resolver ([`RemoteResolver`], cliamp S2) goes further when the server
+//! answers HTTP ranges: its entries stream through
+//! [`crate::audio::remote::RemoteSource`] and fill this same cache behind
+//! the reads (remote-streaming T2, D1), falling back to the cache-on-play
+//! download below when the server refuses ranges (T3).
 //!
 //! Three things live here:
 //!
@@ -43,6 +48,7 @@
 
 use std::ffi::OsStr;
 use std::fs;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -52,6 +58,9 @@ use md5::{Digest as _, Md5};
 
 use crate::audio::AudioError;
 use crate::audio::output::PathResolver;
+use crate::audio::remote;
+use crate::audio::remote::{RangeTransport, RemoteOpen};
+use symphonia::core::io::MediaSource;
 
 use super::Error;
 use super::client::{Client, Transport};
@@ -292,6 +301,96 @@ impl Cache {
             cap: Some(Self::COVERS_CACHE_CAP),
         }
     }
+
+    /// Begins an incremental fill of the cached file for `url` (remote-
+    /// streaming T1, D1): where [`Cache::ensure`] stores a whole body at
+    /// once, a streaming source appends its bytes as they arrive. The fill
+    /// lands through a `.part-…` file named the way [`Cache::store`]'s does,
+    /// so the prune rules keep counting it like any other file; finishing
+    /// renames it over [`Cache::path_for`]'s final name exactly as
+    /// [`Cache::store`] does, prune included. Dropping a [`CacheFill`]
+    /// without finishing leaves the `.part` file behind — the half file
+    /// never gets the final name.
+    ///
+    /// # Errors
+    ///
+    /// When the cache directory or the `.part` file cannot be created.
+    pub fn begin_fill(&self, url: &str) -> Result<CacheFill, Error> {
+        fs::create_dir_all(&self.dir).map_err(|error| {
+            Error::Config(format!(
+                "cannot create the cache directory {}: {error}",
+                self.dir.display()
+            ))
+        })?;
+        let part = self
+            .dir
+            .join(format!(".part-{}-{}", std::process::id(), temp_counter()));
+        let file = fs::File::create(&part).map_err(|error| {
+            Error::Config(format!(
+                "cannot write the cached file {}: {error}",
+                part.display()
+            ))
+        })?;
+        Ok(CacheFill {
+            cache: self.clone(),
+            part,
+            final_path: self.path_for(url),
+            file: Some(file),
+        })
+    }
+}
+
+/// One incremental fill of a cached file, the streaming path's counterpart
+/// of [`Cache::store`] (remote-streaming T1, D1): [`CacheFill::append`] as
+/// the bytes arrive, [`CacheFill::finish`] when the whole body has been
+/// delivered. Abandoned — dropped without finishing — it leaves the `.part`
+/// file in place for the prune rules to keep counting.
+#[derive(Debug)]
+pub struct CacheFill {
+    cache: Cache,
+    part: PathBuf,
+    final_path: PathBuf,
+    /// `None` once the handle was closed for the rename, or after an
+    /// unrecoverable write error.
+    file: Option<fs::File>,
+}
+
+impl CacheFill {
+    /// Appends bytes to the `.part` file.
+    ///
+    /// # Errors
+    ///
+    /// When the bytes cannot be written; the fill's owner then stops the
+    /// fill, and the half file never gets the final name.
+    pub fn append(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        let Some(file) = self.file.as_mut() else {
+            return Ok(());
+        };
+        file.write_all(bytes).map_err(|error| {
+            Error::Config(format!(
+                "cannot write the cached file {}: {error}",
+                self.part.display()
+            ))
+        })
+    }
+
+    /// Renames the filled file over its final cache name and prunes, the
+    /// way [`Cache::store`] does after a whole-body store.
+    ///
+    /// # Errors
+    ///
+    /// When the rename fails; the `.part` file stays behind.
+    pub fn finish(mut self) -> Result<(), Error> {
+        drop(self.file.take());
+        fs::rename(&self.part, &self.final_path).map_err(|error| {
+            Error::Config(format!(
+                "cannot write the cached file {}: {error}",
+                self.final_path.display()
+            ))
+        })?;
+        self.cache.prune(&self.final_path);
+        Ok(())
+    }
 }
 
 /// Removes every file directly inside `dir` — the engine behind
@@ -456,6 +555,11 @@ pub struct RemoteResolver<T> {
     /// Where every non-remote path goes: the server's own resolver when one
     /// is configured, or a plain pass-through.
     fallback: Option<Arc<dyn PathResolver>>,
+    /// The range transport the streaming ask
+    /// ([`PathResolver::open_streaming`], remote-streaming T2) runs through,
+    /// when one was injected. Without one the ask builds the production
+    /// transport itself — see [`RemoteResolver::open_streaming`]'s note.
+    streams: Option<Arc<dyn RangeTransport>>,
 }
 
 impl<T: Transport> RemoteResolver<T> {
@@ -466,7 +570,21 @@ impl<T: Transport> RemoteResolver<T> {
             transport,
             cache,
             fallback,
+            // Production builds its own range transport when a stream is
+            // asked for; the tests inject one and never touch the network.
+            streams: None,
         }
+    }
+
+    /// Injects the range transport the streaming ask
+    /// ([`PathResolver::open_streaming`], remote-streaming T2) runs through.
+    /// Tests only: production builds the transport the ask needs, because
+    /// the binary hands this resolver its own transport erased to
+    /// `Transport`, which cannot carry a `Range` header.
+    #[must_use]
+    pub fn with_stream_transport(mut self, transport: Arc<dyn RangeTransport>) -> Self {
+        self.streams = Some(transport);
+        self
     }
 
     /// The cached file of `path` when it is a remote URL, `None` for any
@@ -515,6 +633,50 @@ impl<T: Transport + Send + Sync> PathResolver for RemoteResolver<T> {
         self.cache
             .path_for(path.to_str().unwrap_or_default())
             .is_file()
+    }
+
+    /// How a remote URL plays (remote-streaming T2): the streaming ask runs
+    /// one probe — on the thread the caller chose, never the event loop —
+    /// and a ranged server answers with the open source, whose bytes fill
+    /// this same cache behind the reads (D1). A server that cannot answer
+    /// ranges answers `None`: the start falls back to cache-on-play
+    /// ([`RemoteResolver::resolve`], the whole body, `.part` + rename, then
+    /// the open — S4), and so does every entry that is not a radio channel's
+    /// song URL: `subsonic://` rows stay on cache-on-play for this slice.
+    ///
+    /// # Errors
+    ///
+    /// When the probe's request failed — a failing request is a failure,
+    /// never a fallback in disguise.
+    fn open_streaming(&self, path: &Path) -> Result<Option<Box<dyn MediaSource>>, AudioError> {
+        // `subsonic://` rows stay on cache-on-play for this slice: only a
+        // radio channel's song URL streams here, and a local file is not a
+        // remote ask at all.
+        if !is_remote_url(path) {
+            return Ok(None);
+        }
+        // `is_remote_url` saw the text, so it is there and it is a URL.
+        let url = path.to_str().unwrap_or_default();
+        let transport = if let Some(transport) = &self.streams {
+            Arc::clone(transport)
+        } else {
+            // The production range transport (remote-streaming T1),
+            // built here because the binary hands this resolver its own
+            // transport erased to `Transport`, which cannot carry a
+            // `Range` header. `HttpTransport::new` never fails today; the
+            // sentence keeps the seam free to grow, and the agent is
+            // cheap to build (no request has gone out yet).
+            let transport =
+                super::client::HttpTransport::new(false).map_err(|error| as_audio_error(&error))?;
+            Arc::new(transport)
+        };
+        match remote::open_with_fill(transport, url, &self.cache) {
+            Ok(RemoteOpen::Streams(source)) => Ok(Some(Box::new(source))),
+            // The server cannot answer ranges (S4): the start plays the
+            // entry the way it always has.
+            Ok(RemoteOpen::NoRanges) => Ok(None),
+            Err(error) => Err(as_audio_error(&error)),
+        }
     }
 }
 

@@ -22,6 +22,7 @@ use super::resample::{ChannelMap, RateConverter};
 use super::{AudioError, TrackSource, TrackSpec};
 use crate::config::ReplayGainMode;
 use crate::radio::stream::{LiveOpener, StreamError};
+use symphonia::core::io::MediaSource;
 
 /// Two seconds of audio in flight: long enough to survive a slow decode, short
 /// enough to keep pause and stop responsive.
@@ -466,6 +467,28 @@ pub trait PathResolver: Send + Sync {
     fn cached(&self, _path: &Path) -> bool {
         true
     }
+
+    /// How `path` plays when the implementation can stream it (remote-
+    /// streaming T2): `Some` is the already-opened source the player opens
+    /// instead of a file — the first sound does not wait for the whole body
+    /// (S1) — and its bytes fill the cache behind the reads where the
+    /// implementation says so (D1). `None` says cache-on-play: the entry falls
+    /// back to [`PathResolver::resolve`] the way it always has — an entry
+    /// that is not the implementation's own, or a server that cannot answer
+    /// ranges (S4). The ask embeds the probe, so the caller chooses the
+    /// thread: the start runs it on its resolve worker, never on the event
+    /// loop, and carries the answer to the player's open.
+    ///
+    /// The default answers `None`: a resolver that never streams has nothing
+    /// to offer, and every entry goes through [`PathResolver::resolve`].
+    ///
+    /// # Errors
+    ///
+    /// When the entry's own reaching failed — the caller announces the
+    /// failure; a failing request is never a fallback in disguise.
+    fn open_streaming(&self, _path: &Path) -> Result<Option<Box<dyn MediaSource>>, AudioError> {
+        Ok(None)
+    }
 }
 
 /// One opened live station, as the producer reads it: the same surface a
@@ -775,10 +798,6 @@ impl Player {
         clippy::too_many_arguments,
         reason = "the call is one flat list of what a session starts with —\n    the queue, its position, gain, repeat, mono, bit-perfect and the\n    resolver — and every caller names every part it wants; bundling them\n    would hide which knob a call site turns"
     )]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "the construction is one story: open the first track, open\n    the device on it, wire the cells and hand the rest to the producer\n    thread; splitting it would scatter that story"
-    )]
     pub fn play_gapless_at_full(
         queue: SharedQueue,
         track_index: usize,
@@ -790,6 +809,58 @@ impl Player {
         device: Option<&str>,
         resolver: Option<Arc<dyn PathResolver>>,
         screen: Screen,
+    ) -> Result<Self, AudioError> {
+        Self::play_gapless_at_preopened(
+            queue,
+            track_index,
+            offset,
+            gain_mode,
+            repeat,
+            mono,
+            bit_perfect,
+            device,
+            resolver,
+            screen,
+            // Every caller that opens its own first entry does; only a
+            // start whose worker already opened a streamed first entry
+            // carries one here (remote-streaming T2).
+            None,
+        )
+    }
+
+    /// [`Player::play_gapless_at_full`] with a pre-opened first source
+    /// (remote-streaming T2): the start's worker asked the resolver how the
+    /// remote first entry plays and — when it streams — opened the ranged
+    /// source on the worker. The answer is carried here, never re-derived:
+    /// the source is the first entry's track, its bytes still arriving; its
+    /// spec opens the device, and the producer's first turn consumes it (a
+    /// seek's offset applied to it the way [`TrackSource::open_at`] positions
+    /// a file). `None` is every other start — [`Player::play_gapless_at_full`].
+    ///
+    /// # Errors
+    ///
+    /// The same errors, with the first entry's open replacing its resolution
+    /// failure when a source was carried.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the call is one flat list of what a session starts with —\n    the queue, its position, gain, repeat, mono, bit-perfect, the resolver\n    and — only for a start whose worker opened its first entry — the\n    carried source; every caller names every part it wants"
+    )]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the construction is one story: open the first track, open\n    the device on it, wire the cells and hand the rest to the producer\n    thread; splitting it would scatter that story"
+    )]
+    pub fn play_gapless_at_preopened(
+        queue: SharedQueue,
+        track_index: usize,
+        offset: Duration,
+        gain_mode: ReplayGainMode,
+        repeat: Repeat,
+        mono: bool,
+        bit_perfect: bool,
+        device: Option<&str>,
+        resolver: Option<Arc<dyn PathResolver>>,
+        screen: Screen,
+        first_source: Option<Box<dyn MediaSource>>,
     ) -> Result<Self, AudioError> {
         let (is_empty, len, first) = {
             let queue = match queue.lock() {
@@ -814,26 +885,36 @@ impl Player {
 
         // The first entry is decided here, at selection time, so a bad first
         // entry fails before a device is opened, and the format is known for
-        // the device to be built on (T12c). A file resolves through the
-        // resolver and opens; a station opens through the station opener —
-        // never the resolver, never a path — and the opened stream is handed
-        // to the producer, so a station is fetched once at most — twice only
-        // under the one-retry policy (T5c2b). The
-        // producer decides every entry again when it reaches it — a cache hit
-        // costs no network. The dispatch, not a comment, is what keeps the
-        // two seams apart.
-        let (track_spec, preopened) = match &first {
-            Entry::File(path) => {
+        // the device to be built on (T12c). A carried source is the start's
+        // answer already made — the worker opened the remote first entry as it
+        // streams (T2), and the player opens that source, never a new probe.
+        // Otherwise a file resolves through the resolver and opens; a station
+        // opens through the station opener — never the resolver, never a path
+        // — and the opened stream is handed to the producer, so a station is
+        // fetched once at most — twice only under the one-retry policy
+        // (T5c2b). The producer decides every entry again when it reaches it —
+        // a cache hit costs no network. The dispatch, not a comment, is what
+        // keeps the three seams apart.
+        let (track_spec, preopened, preopened_file) = match (&first, first_source) {
+            (_, Some(source)) => {
+                let opened = TrackSource::open_remote(source)?;
+                // The source is the first entry's own; the key is what the
+                // producer matches the queue's entry against when it reaches
+                // the first turn.
+                let key = first.as_path().map(Path::to_path_buf).unwrap_or_default();
+                (opened.spec(), None, Some((key, opened)))
+            }
+            (Entry::File(path), None) => {
                 let first_path = match resolver.as_ref() {
                     Some(resolver) => resolver.resolve(path)?,
                     None => path.clone(),
                 };
-                (TrackSource::open(&first_path)?.spec(), None)
+                (TrackSource::open(&first_path)?.spec(), None, None)
             }
-            Entry::Station { url, .. } => {
+            (Entry::Station { url, .. }, None) => {
                 let source = open_station_retrying(&LiveOpener, url, Retry::ONCE)
                     .map_err(|error| AudioError::Unsupported(error.to_string()))?;
-                (source.spec(), Some((url.clone(), source)))
+                (source.spec(), Some((url.clone(), source)), None)
             }
         };
         let offset_frames = duration_to_frames(offset, track_spec.sample_rate);
@@ -947,6 +1028,7 @@ impl Player {
                         opener: None,
                         retry: Retry::ONCE,
                         preopen: preopened,
+                        preopened_file,
                     };
                     let shared = Shared {
                         stop: &stop,
@@ -1320,6 +1402,12 @@ struct Sequence {
     /// fetched once. The producer uses it only while the entry it reaches
     /// still carries the same URL.
     preopen: Option<(String, Box<dyn StationSource>)>,
+    /// The first entry's pre-opened streaming source (remote-streaming T2),
+    /// keyed by the path it was opened for: the producer uses it while the
+    /// entry it reaches still is that one — the queue may have moved under
+    /// it — and opens no file, resolving nothing: the ask already happened
+    /// on the worker.
+    preopened_file: Option<(PathBuf, TrackSource)>,
 }
 
 /// What a sequence writes into: the ring of a running stream, or a headless
@@ -1883,6 +1971,10 @@ fn track_failure(label: &str, message: String) -> TrackFailure {
 /// every track it had to skip with it. The ring, the counters and the failure
 /// slot all live behind the sink and the shared handles, which is what lets
 /// the headless drains run the same loop without a device.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the sequence is the queue's whole story: the entry decided\n    when the producer reaches it — file, streamed first turn or station —\n    and each turn's end is the next pick; splitting it would scatter that\n    decision table"
+)]
 fn run_sequence(
     job: Sequence,
     expected: TrackSpec,
@@ -1899,6 +1991,7 @@ fn run_sequence(
         opener,
         retry,
         mut preopen,
+        mut preopened_file,
     } = job;
     let mut expected = expected;
     let mut turn = TurnJob {
@@ -1935,24 +2028,48 @@ fn run_sequence(
         let label = entry.label().into_owned();
         let outcome = match &entry {
             Entry::File(path) => {
-                // The resolution is the wait (issue #60): the cell says
-                // which entry is being fetched, from the moment the queue
-                // reaches it until it opens or fails. A pass-through and a
-                // cache hit clear it again within the same step; a miss
-                // keeps it up for the download's whole length.
-                shared.fetching.store(
-                    u64::try_from(turn.index).unwrap_or(u64::MAX) + 1,
-                    Ordering::Release,
-                );
-                let resolved = resolve_entry(resolver.as_ref(), path);
-                shared.fetching.store(0, Ordering::Release);
-                match resolved {
-                    Ok(resolved) => {
-                        play_turn(&label, &resolved, &turn, &mut expected, shared, sink)?
-                    }
-                    Err(error) => {
-                        sink.failure(track_failure(&label, error.to_string()));
-                        Turn::Failed
+                // A streaming first turn (remote-streaming T2): the selection-
+                // time worker opened this entry as a ranged source and the
+                // carried answer brought the source here. The entry still
+                // standing is the one it was opened for, so the turn opens no
+                // file and resolves nothing — the probe already happened, off
+                // the event loop — and the fetching cell says nothing, because
+                // nothing is being fetched.
+                let streamed = if turn.first {
+                    preopened_file.take_if(|(opened_path, _)| opened_path.as_path() == path)
+                } else {
+                    None
+                };
+                if let Some((_, source)) = streamed {
+                    play_turn(
+                        &label,
+                        path,
+                        &turn,
+                        &mut expected,
+                        shared,
+                        sink,
+                        Some(source),
+                    )?
+                } else {
+                    // The resolution is the wait (issue #60): the cell says
+                    // which entry is being fetched, from the moment the queue
+                    // reaches it until it opens or fails. A pass-through and a
+                    // cache hit clear it again within the same step; a miss
+                    // keeps it up for the download's whole length.
+                    shared.fetching.store(
+                        u64::try_from(turn.index).unwrap_or(u64::MAX) + 1,
+                        Ordering::Release,
+                    );
+                    let resolved = resolve_entry(resolver.as_ref(), path);
+                    shared.fetching.store(0, Ordering::Release);
+                    match resolved {
+                        Ok(resolved) => {
+                            play_turn(&label, &resolved, &turn, &mut expected, shared, sink, None)?
+                        }
+                        Err(error) => {
+                            sink.failure(track_failure(&label, error.to_string()));
+                            Turn::Failed
+                        }
                     }
                 }
             }
@@ -2120,11 +2237,24 @@ fn play_turn(
     expected: &mut TrackSpec,
     shared: &Shared<'_>,
     sink: &mut dyn SequenceSink,
+    opened: Option<TrackSource>,
 ) -> Result<Turn, AudioError> {
-    let opened = if turn.first && turn.offset_frames > 0 {
-        TrackSource::open_at(path, turn.offset_frames)
-    } else {
-        TrackSource::open(path)
+    // A carried source (remote-streaming T2) is the track already: the
+    // rebuild's offset is applied to it the way `open_at` positions a file —
+    // the seek is the reader's own, which for a streaming source is the range
+    // the seek point asks for (S3), never the end of the track and never a
+    // re-download of the prefix.
+    let opened = match opened {
+        Some(mut source) => {
+            if turn.first && turn.offset_frames > 0 {
+                source.seek_to_frames(turn.offset_frames);
+            }
+            Ok(source)
+        }
+        None if turn.first && turn.offset_frames > 0 => {
+            TrackSource::open_at(path, turn.offset_frames)
+        }
+        None => TrackSource::open(path),
     };
     let mut source = match opened {
         Ok(source) => source,
@@ -2489,6 +2619,7 @@ pub fn drain_headless_with_gain(
         opener: None,
         retry: Retry::NONE,
         preopen: None,
+        preopened_file: None,
     };
     let fetching_cell = AtomicU64::new(0);
     let mut refuse = |_: TrackSpec| -> Result<TrackSpec, AudioError> {
@@ -2548,6 +2679,7 @@ pub fn drain_headless_resolving(
         opener: None,
         retry: Retry::NONE,
         preopen: None,
+        preopened_file: None,
     };
     let mut refuse = |_: TrackSpec| -> Result<TrackSpec, AudioError> {
         unreachable!("only bit-perfect sequences reopen the stream")
@@ -2609,6 +2741,7 @@ pub fn drain_headless_with_opener(
         opener,
         retry,
         preopen: None,
+        preopened_file: None,
     };
     let fetching_cell = AtomicU64::new(0);
     let mut refuse = |_: TrackSpec| -> Result<TrackSpec, AudioError> {
@@ -2625,6 +2758,74 @@ pub fn drain_headless_with_opener(
             failure: on_failure,
             reopen: &mut refuse,
             progress: on_progress,
+        },
+    )
+}
+
+/// [`drain_headless_with_gain`] with a pre-opened first source (remote-
+/// streaming T2): the sequence's first turn opens no file and resolves
+/// nothing — the carried source is the track already, the way a streamed
+/// start runs — so a test can prove the streaming turn decodes, seeks and
+/// ends exactly as the same bytes as a local file would, without a device.
+/// The carried source is used only while the entry it reaches still is the
+/// path it was opened for; anything else opens as before.
+///
+/// # Errors
+///
+/// The same errors as [`drain_headless`].
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the job, the mode, the carried source and the two sinks are\n    the whole contract of the drain; bundling them would only hide what is\n    shared"
+)]
+pub fn drain_headless_with_preopen(
+    queue: SharedQueue,
+    start_track: usize,
+    offset_frames: u64,
+    expected: TrackSpec,
+    gain_mode: ReplayGainMode,
+    preopened: TrackSource,
+    stop: &AtomicBool,
+    on_block: &mut dyn FnMut(&[f32]),
+    on_failure: &mut dyn FnMut(TrackFailure),
+) -> Result<(), AudioError> {
+    // The queue entry at `start_track` is the one the source was opened for;
+    // the producer's own match against the entry would drop a mismatch, and
+    // the tests hand the same path back.
+    let opened_for = match queue.lock() {
+        Ok(queue) => queue,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+    .get(start_track)
+    .and_then(Entry::as_path)
+    .map(Path::to_path_buf)
+    .unwrap_or_default();
+    let job = Sequence {
+        queue,
+        start_track,
+        offset_frames,
+        gain_mode,
+        bit_perfect: false,
+        resolver: None,
+        opener: None,
+        retry: Retry::NONE,
+        preopen: None,
+        preopened_file: Some((opened_for, preopened)),
+    };
+    let fetching_cell = AtomicU64::new(0);
+    let mut refuse = |_: TrackSpec| -> Result<TrackSpec, AudioError> {
+        unreachable!("only bit-perfect sequences reopen the stream")
+    };
+    drain(
+        job,
+        expected,
+        &RepeatCell::default(),
+        stop,
+        &fetching_cell,
+        &mut FnSink {
+            block: on_block,
+            failure: on_failure,
+            reopen: &mut refuse,
+            progress: &mut |_: Option<Duration>, _: Option<&str>| {},
         },
     )
 }
@@ -2662,6 +2863,7 @@ pub fn drain_headless_with_mono(
         opener: None,
         retry: Retry::NONE,
         preopen: None,
+        preopened_file: None,
     };
     let fetching_cell = AtomicU64::new(0);
     let mut refuse = |_: TrackSpec| -> Result<TrackSpec, AudioError> {
@@ -2715,6 +2917,7 @@ pub fn drain_headless_repeating(
         opener: None,
         retry: Retry::NONE,
         preopen: None,
+        preopened_file: None,
     };
     let fetching_cell = AtomicU64::new(0);
     let mut refuse = |_: TrackSpec| -> Result<TrackSpec, AudioError> {
@@ -2768,6 +2971,7 @@ pub fn drain_headless_bit_perfect(
         opener: None,
         retry: Retry::NONE,
         preopen: None,
+        preopened_file: None,
     };
     let channels = expected.channels;
     let fetching_cell = AtomicU64::new(0);

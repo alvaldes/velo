@@ -9,7 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clap::Parser as _;
 use velo::audio::AudioError;
@@ -195,6 +195,156 @@ impl PathResolver for EveryFetchOwes {
     fn cached(&self, _path: &Path) -> bool {
         false
     }
+}
+
+// ------------------------------------------------------- remote-streaming T2/T3
+
+/// Turns the loop until the status line says a settled fact — anything but
+/// the fetching line the wait carries — bounded, so a broken handoff fails
+/// its test instead of hanging it.
+fn ticks_until_settled(app: &mut App<'_>) {
+    for _ in 0..100 {
+        app.tick();
+        if !app.status().starts_with("⟳ fetching") {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("the worker's answer never reached the loop's ticks");
+}
+
+/// A resolver whose every remote URL streams: the ask answers at once —
+/// with a body no container can be read from, so the open that follows
+/// fails before any audio device is touched, and only the carried source
+/// could have produced its sentence.
+struct StreamsEveryUrl;
+
+impl PathResolver for StreamsEveryUrl {
+    fn open_streaming(
+        &self,
+        _path: &Path,
+    ) -> Result<Option<Box<dyn symphonia::core::io::MediaSource>>, AudioError> {
+        Ok(Some(Box::new(std::io::Cursor::new(vec![0_u8; 64]))))
+    }
+
+    fn resolve(&self, _path: &Path) -> Result<PathBuf, AudioError> {
+        Err(AudioError::Unsupported(String::from(
+            "the fetch path was re-run",
+        )))
+    }
+
+    fn cached(&self, _path: &Path) -> bool {
+        false
+    }
+}
+
+/// A start whose streaming ask succeeded runs the carried source (T2): the
+/// probe ran on the worker, the answer rode to the player's open, and the
+/// resolver's own fetch path was never consulted again — never re-derived.
+#[test]
+fn the_carried_streaming_answer_runs_the_open() {
+    let mut app = App::new(Vec::new());
+    app.queue_song_for_tests("https://radio.example/song.mp3");
+    app.set_resolver(Some(Arc::new(StreamsEveryUrl)));
+
+    app.apply(Action::PlayQueue { from: 0 });
+    assert_eq!(
+        app.status(),
+        "⟳ fetching song.mp3…",
+        "the probe is the wait, and the line says so in the asking turn"
+    );
+
+    ticks_until_settled(&mut app);
+    assert!(
+        app.status().starts_with("velo: "),
+        "the carried source's open answered for itself: {:?}",
+        app.status()
+    );
+    assert!(
+        !app.status().contains("the fetch path was re-run"),
+        "the decision was carried, never re-derived through the fetch: {:?}",
+        app.status()
+    );
+}
+
+/// A resolver that records which way the row went: the streaming ask first,
+/// then — when the ask answers `None` — the cache-on-play resolve.
+struct RecordingRow {
+    streaming_asked: AtomicUsize,
+    resolved: AtomicUsize,
+}
+
+impl PathResolver for RecordingRow {
+    fn open_streaming(
+        &self,
+        _path: &Path,
+    ) -> Result<Option<Box<dyn symphonia::core::io::MediaSource>>, AudioError> {
+        self.streaming_asked.fetch_add(1, Ordering::SeqCst);
+        Ok(None)
+    }
+
+    fn resolve(&self, _path: &Path) -> Result<PathBuf, AudioError> {
+        self.resolved.fetch_add(1, Ordering::SeqCst);
+        Err(AudioError::Unsupported(String::from(
+            "the row fell back the old way",
+        )))
+    }
+
+    fn cached(&self, _path: &Path) -> bool {
+        false
+    }
+}
+
+/// A `subsonic://` row stays on cache-on-play for this slice (T3): the
+/// streaming ask is made and answers `None`, and the row goes the resolve
+/// way — the whole-body download, `.part` + rename, then open — as before.
+#[test]
+fn a_subsonic_row_stays_on_cache_on_play() {
+    let row = Arc::new(RecordingRow {
+        streaming_asked: AtomicUsize::new(0),
+        resolved: AtomicUsize::new(0),
+    });
+    let mut app = App::new(Vec::new());
+    app.queue_song_for_tests("subsonic://home.server/42");
+    app.set_resolver(Some(Arc::clone(&row) as Arc<dyn PathResolver>));
+
+    app.apply(Action::PlayQueue { from: 0 });
+    ticks_until_settled(&mut app);
+
+    assert_eq!(
+        row.streaming_asked.load(Ordering::SeqCst),
+        1,
+        "the streaming ask was made — the seam decides, not a re-derivation"
+    );
+    assert!(
+        row.resolved.load(Ordering::SeqCst) >= 1,
+        "the row resolved the cache-on-play way"
+    );
+    assert!(
+        app.status().contains("the row fell back the old way"),
+        "the fallback's own report stands: {:?}",
+        app.status()
+    );
+}
+
+/// The streaming line (S1, S4): it names the entry and says the way — the
+/// track streams, it is not being fetched — and carries no number, the way
+/// no wait line on this status line carries a deadline.
+#[test]
+fn the_streaming_line_names_the_entry_and_the_way() {
+    let line = App::streaming_line_for_tests("lofi");
+    assert!(
+        line.contains("lofi"),
+        "the line names the entry, got: {line:?}"
+    );
+    assert!(
+        line.contains("streaming"),
+        "the line says the way, got: {line:?}"
+    );
+    assert!(
+        line.chars().all(|c| !c.is_ascii_digit()),
+        "the line carries no number — no countdown, no deadline: got {line:?}"
+    );
 }
 
 /// The failed-fetch answer (`poll_pending_resolve`'s `Err` arm, issue #65):
