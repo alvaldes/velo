@@ -476,6 +476,16 @@ pub enum View {
     Sources,
 }
 
+/// A player handed over mid-crossfade (issue #65): the previous source keeps
+/// sounding while the new one rises. Its fade-out is armed only once the new
+/// stream has started sounding — two fades of silence are not an overlap —
+/// and the player stops once the fade has fully fallen.
+struct Crossfading {
+    player: Player,
+    /// Whether the fade-out has been armed.
+    armed: bool,
+}
+
 /// Where playback stands, for the header and the footer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlayState {
@@ -979,6 +989,11 @@ pub struct App<'lib> {
     volume: u8,
     state: PlayState,
     player: Option<Player>,
+    /// The stream handed over mid-crossfade (issue #65): it keeps sounding
+    /// while the new one rises, its fade-out armed once the new stream has
+    /// started, and it stops when the fade has fully fallen. `None` outside
+    /// a handover.
+    crossfading: Option<Crossfading>,
     status: String,
     /// The analyzer the spectrum draws (T5): fed from the player's tap on
     /// every tick, shown or not, so the tap never holds stale audio.
@@ -1034,6 +1049,10 @@ pub struct App<'lib> {
 impl<'lib> App<'lib> {
     /// An interface over the given files, selection at the top.
     #[must_use]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the constructor is one flat list of every field a session\n    starts with; splitting it would scatter that story"
+    )]
     pub fn new(tracks: Vec<PathBuf>) -> App<'static> {
         App {
             position: Position::Files,
@@ -1130,6 +1149,7 @@ impl<'lib> App<'lib> {
             volume: 100,
             state: PlayState::Stopped,
             player: None,
+            crossfading: None,
             status: String::new(),
             spectrum: Spectrum::new(),
             heard: Vec::new(),
@@ -1140,6 +1160,10 @@ impl<'lib> App<'lib> {
     /// An interface browsing the library index. The artists snapshot is read
     /// here, once; deeper levels are read when the position changes.
     #[must_use]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the constructor is one flat list of every field a session\n    starts with; splitting it would scatter that story"
+    )]
     pub fn browse(library: Option<&'lib Library>) -> Self {
         let mut app = Self {
             position: Position::Artists,
@@ -1236,6 +1260,7 @@ impl<'lib> App<'lib> {
             volume: 100,
             state: PlayState::Stopped,
             player: None,
+            crossfading: None,
             status: String::new(),
             spectrum: Spectrum::new(),
             heard: Vec::new(),
@@ -2901,6 +2926,9 @@ impl<'lib> App<'lib> {
         // before the line is decided for this turn.
         self.poll_pending_resolve();
         self.fetch_status();
+        // The handover's clock (issue #65): the old stream's fade-out armed
+        // once the new one sounds, and stopped once it has fully fallen.
+        self.poll_crossfade();
         self.poll_cover();
         // The saving copy's worker (issue #45): its progress and its last
         // word land without a key press, the way a finished cover and a
@@ -5410,6 +5438,9 @@ impl<'lib> App<'lib> {
             return;
         }
         let queue = Arc::new(Mutex::new(self.queue.clone()));
+        // A handover still falling dies with the switch: the new player is
+        // the only stream this start keeps (issue #65).
+        self.drop_crossfade();
         // The probe: the new player is opened while the old one still
         // plays, so a failure here costs a status line, never the music (S4).
         match Player::play_gapless_at_full(
@@ -8179,6 +8210,65 @@ impl<'lib> App<'lib> {
         self.start_stream(paths, Playback::Queue);
     }
 
+    /// Whether starting `first` over the running stream is a crossfade
+    /// handover (issue #65): the seam is a station — its open (connect,
+    /// headers, first bytes) is the wait that used to be a cut plus a second
+    /// of silence — taken over a stream that is sounding. A file start keeps
+    /// the plain switch (it opens in milliseconds, and the gapless
+    /// track-to-track advance inside one player is a different seam
+    /// entirely), a stream that is not sounding has nothing to hand over
+    /// from, and bit-perfect refuses the fade: a fade multiplies samples,
+    /// and bit-perfect means the decoder's samples reach the device
+    /// unmodified.
+    fn crossfade_wanted(&self, first: Option<&Entry>) -> bool {
+        matches!(first, Some(Entry::Station { .. }))
+            && !self.bit_perfect
+            && self.state == PlayState::Playing
+    }
+
+    /// Drives [`Self::crossfade_wanted`] for the tests: no test can hold a
+    /// `Player` — building one opens an audio device — so the decision's own
+    /// shape is reached through this hook; production reaches it through the
+    /// starts. Hidden from the docs.
+    #[doc(hidden)]
+    pub fn crossfade_wanted_for_tests(&self, first: Option<&Entry>) -> bool {
+        self.crossfade_wanted(first)
+    }
+
+    /// Ends a handover in flight: the previous stream — already falling or
+    /// fallen — is stopped outright, because a new start replaces it. Stopping
+    /// a stream whose fade had not begun is the accepted cost of starting
+    /// something else over an unfinished handover.
+    fn drop_crossfade(&mut self) {
+        if let Some(old) = self.crossfading.take() {
+            old.player.stop();
+        }
+    }
+
+    /// The handover's clock (issue #65), run once per tick: the old stream's
+    /// fade-out is armed when the new one has started sounding — the overlap
+    /// must be two sources sounding, never two fades of silence — and the
+    /// old player stops once its fade has fully fallen, exact silence
+    /// reached, never a fader stuck half-way.
+    fn poll_crossfade(&mut self) {
+        let started = self.player.as_ref().is_some_and(Player::stream_started);
+        if let Some(handover) = self.crossfading.as_mut()
+            && !handover.armed
+            && started
+        {
+            handover.player.begin_crossfade_out();
+            handover.armed = true;
+        }
+        if self
+            .crossfading
+            .as_ref()
+            .is_some_and(|handover| handover.armed && handover.player.crossfade_out_finished())
+        {
+            let old = self.crossfading.take().expect("checked above").player;
+            old.stop();
+        }
+    }
+
     /// Opens a device for these entries and makes them the queue. The first
     /// entry decides where the turn waits: an uncached remote one is a
     /// download the event loop must never sit in (issue #60), so its resolve
@@ -8186,8 +8276,15 @@ impl<'lib> App<'lib> {
     /// on disk; everything else opens here, on this thread, as it always
     /// has.
     fn start_stream(&mut self, paths: Vec<Entry>, playback: Playback) {
-        // Dropping through `stop` also releases the producer thread.
-        if let Some(old) = self.player.take() {
+        // A handover still falling is replaced outright: the new start is
+        // what the user asked for.
+        self.drop_crossfade();
+        // The old stream dies here — before the new one exists — only when
+        // this start is not a station handover (issue #65): a handover keeps
+        // it sounding while the new source opens, which is the point.
+        if !self.crossfade_wanted(paths.first())
+            && let Some(old) = self.player.take()
+        {
             old.stop();
         }
         // Under shuffle the first track is the one asked for and the rest
@@ -8221,6 +8318,11 @@ impl<'lib> App<'lib> {
         // outlived the last one — but a start of any kind retires the slot
         // all the same, so a stale wait can never start behind it.
         self.pending_resolve = None;
+        // The handover decision is remade here, at the open: a start that
+        // arrives through a finished fetch is always a file start, which is
+        // never a handover, and asking the same question once more is
+        // cheaper than threading the answer through (issue #65).
+        let crossfade = self.crossfade_wanted(paths.first());
         // The player reads the queue it is given, so the interface keeps the
         // handle and edits it in place (T18).
         let queue = Arc::new(Mutex::new(paths.clone()));
@@ -8243,6 +8345,19 @@ impl<'lib> App<'lib> {
         ) {
             Ok(player) => {
                 player.set_volume(self.volume);
+                if crossfade && let Some(old) = self.player.take() {
+                    // The handover (issue #65): the new stream rises from
+                    // exact silence over its window while the old one keeps
+                    // sounding — it was never stopped. Its fade-out is armed
+                    // once the new stream has started (the tick's
+                    // [`Self::poll_crossfade`]), and the old player stops
+                    // when the fade has fully fallen.
+                    player.begin_crossfade_in();
+                    self.crossfading = Some(Crossfading {
+                        player: old,
+                        armed: false,
+                    });
+                }
                 self.queue = paths;
                 self.shared = Some(queue);
                 self.player = Some(player);
@@ -8256,12 +8371,20 @@ impl<'lib> App<'lib> {
                 }
             }
             Err(error) => {
-                self.queue.clear();
-                self.shared = None;
-                self.player = None;
-                self.playing = None;
-                self.state = PlayState::Stopped;
-                self.status = format!("velo: {error}");
+                if self.player.is_some() {
+                    // A failed open under a handover never touched the old
+                    // stream: it keeps playing, and the status line says both
+                    // facts (issue #65) — never a fader stuck mid-fade with
+                    // silence behind it.
+                    self.status = format!("velo: {error} — the stream that was playing goes on");
+                } else {
+                    self.queue.clear();
+                    self.shared = None;
+                    self.player = None;
+                    self.playing = None;
+                    self.state = PlayState::Stopped;
+                    self.status = format!("velo: {error}");
+                }
             }
         }
     }
@@ -8399,17 +8522,27 @@ impl<'lib> App<'lib> {
     /// it: the one rebuild behind a seek and a skip, so both keep the volume
     /// and the `ReplayGain` mode.
     fn start_track_at(&mut self, track: usize, offset: Duration) {
-        // Whatever ran before is closed first, whatever this rebuild goes on
-        // to do. Both callers — skip and seek — hold a player, so this sees
-        // `None` only under the tests' hook.
-        if let Some(player) = self.player.take() {
-            player.stop();
-        }
+        // A handover still falling is replaced outright: the new start is
+        // what the user asked for.
+        self.drop_crossfade();
 
+        // Whatever ran before is closed here — whatever this rebuild goes on
+        // to do — unless this start is a station handover (issue #65), which
+        // keeps the old stream sounding until the new source can take over.
+        // Both callers — skip and seek — hold a player, so this sees `None`
+        // only under the tests' hook.
         if self.queue.is_empty() || track >= self.queue.len() {
+            if let Some(player) = self.player.take() {
+                player.stop();
+            }
             self.playing = None;
             self.state = PlayState::Stopped;
             return;
+        }
+        if !self.crossfade_wanted(self.queue.get(track))
+            && let Some(player) = self.player.take()
+        {
+            player.stop();
         }
         // Same rule as a fresh start (issue #60): the entry the rebuild
         // would open first, being remote and uncached, is a download the
@@ -8440,6 +8573,10 @@ impl<'lib> App<'lib> {
         // outlived the last one — but a rebuild of any kind retires the slot
         // all the same, so a stale wait can never start behind it.
         self.pending_resolve = None;
+        // The handover decision, remade at the open (issue #65) — a rebuild
+        // that arrives through a finished fetch is a file start, which is
+        // never a handover.
+        let crossfade = self.crossfade_wanted(self.queue.get(track));
         let queue = Arc::new(Mutex::new(self.queue.clone()));
         self.shared = Some(Arc::clone(&queue));
         // A skip or a seek reaches its entry at selection time too (T12c):
@@ -8465,6 +8602,18 @@ impl<'lib> App<'lib> {
                 // A rebuilt player starts at its own default level; without this
                 // a seek would silently jump the volume back to it.
                 player.set_volume(self.volume);
+                if crossfade && let Some(old) = self.player.take() {
+                    // The handover (issue #65), the same one a fresh start
+                    // makes: the new stream rises from exact silence while
+                    // the old one keeps sounding, its fade-out armed once the
+                    // new stream has started, and it stops when the fade has
+                    // fully fallen ([`Self::poll_crossfade`]).
+                    player.begin_crossfade_in();
+                    self.crossfading = Some(Crossfading {
+                        player: old,
+                        armed: false,
+                    });
+                }
                 self.player = Some(player);
                 self.state = PlayState::Playing;
                 // A fetching line outlives the rebuild (issue #60), the same
@@ -8474,10 +8623,18 @@ impl<'lib> App<'lib> {
                 }
             }
             Err(error) => {
-                self.player = None;
-                self.playing = None;
-                self.state = PlayState::Stopped;
-                self.status = format!("velo: {error}");
+                if self.player.is_some() {
+                    // A failed open under a handover never touched the old
+                    // stream: it keeps playing, and the status line says both
+                    // facts (issue #65) — never a fader stuck mid-fade with
+                    // silence behind it.
+                    self.status = format!("velo: {error} — the stream that was playing goes on");
+                } else {
+                    self.player = None;
+                    self.playing = None;
+                    self.state = PlayState::Stopped;
+                    self.status = format!("velo: {error}");
+                }
             }
         }
     }
@@ -8516,6 +8673,8 @@ impl<'lib> App<'lib> {
         if let Some(player) = self.player.take() {
             player.stop();
         }
+        // A handover still falling dies with the session too (issue #65).
+        self.drop_crossfade();
         // A fetch still running answers into a slot nobody polls (issue
         // #60); its worker — a download it may still hold — dies with the
         // session, and its bytes land in the cache whenever the thread gets

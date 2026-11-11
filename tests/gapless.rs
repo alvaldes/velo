@@ -6,6 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
+use velo::audio::output::{crossfade_pair, crossfade_samples};
 use velo::audio::{self, AudioError, TrackSpec};
 
 /// Writes a minimal PCM16 WAV file so the tests need no external tooling.
@@ -142,6 +143,89 @@ fn a_single_track_drains_without_padding() {
         "one track keeps its frame count"
     );
     assert!(samples.iter().all(|sample| *sample > 0.0));
+}
+
+/// The crossfade window (issue #65) is derived from the stream's own rate —
+/// 200 ms of interleaved samples, a fifth of a second — never a hardcoded
+/// sample count: a 44.1 kHz stereo stream and a 48 kHz mono one must not
+/// share a number.
+#[test]
+fn the_crossfade_window_is_two_hundred_milliseconds_at_the_stream_s_rate() {
+    let stereo = TrackSpec {
+        sample_rate: 44_100,
+        channels: 2,
+    };
+    assert_eq!(
+        crossfade_samples(stereo),
+        17_640,
+        "200 ms of interleaved stereo at 44.1 kHz: 88 200 samples a second, a fifth of it"
+    );
+    let mono = TrackSpec {
+        sample_rate: 48_000,
+        channels: 1,
+    };
+    assert_eq!(
+        crossfade_samples(mono),
+        9_600,
+        "200 ms of interleaved mono at 48 kHz"
+    );
+}
+
+/// The two fade curves of a handover (issue #65): exact at the ends — the new
+/// source starts at exact silence and the old one at full level, and at the
+/// window's end their roles have swapped exactly — and unity at every sample
+/// between, so the mix never dips below either source.
+#[test]
+fn the_crossfade_curves_reach_their_ends_exactly_and_sum_to_unity() {
+    let length = 1_000;
+    assert_eq!(
+        crossfade_pair(0, length),
+        (0.0, 1.0),
+        "the handover opens on exact silence from the new source, full level from the old"
+    );
+    assert_eq!(
+        crossfade_pair(length, length),
+        (1.0, 0.0),
+        "at the window's end the new source is at unity and the old at exact silence"
+    );
+    assert_eq!(
+        crossfade_pair(length * 2, length),
+        (1.0, 0.0),
+        "past the window the old source stays silent — never rises back"
+    );
+    for position in 0..=length {
+        let (into, out_of) = crossfade_pair(position, length);
+        assert!(
+            (into + out_of - 1.0).abs() < 1e-6,
+            "the pair sums to unity at every sample of the window, got {into} + {out_of} at {position}"
+        );
+    }
+}
+
+/// The overlap the handover exists for (issue #65): strictly inside the
+/// window both sources contribute — the old one is still sounding and the
+/// new one is already rising — and the new one only reaches unity when the
+/// old one has reached exact silence, never before.
+#[test]
+fn both_sources_sound_inside_the_window_and_the_old_falls_silent_at_its_end() {
+    let length = 1_000;
+    for position in 1..length {
+        let (into, out_of) = crossfade_pair(position, length);
+        assert!(
+            into > 0.0,
+            "the new source is already rising at sample {position}"
+        );
+        assert!(
+            out_of > 0.0,
+            "the old source is still sounding at sample {position}"
+        );
+    }
+    let (into, out_of) = crossfade_pair(length, length);
+    assert_eq!(
+        (into, out_of),
+        (1.0, 0.0),
+        "the handover completes: unity and exact silence, together"
+    );
 }
 
 #[test]

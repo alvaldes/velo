@@ -786,3 +786,52 @@ background of its own — with `background = "reset"` there is no colour to
 paint, and the fix belongs where the wrong thing was drawn. The queue keeps
 its own rule (issue #23): when the queue is on screen, the queue is the body
 and the radio draws nothing.
+
+**L32** — **issue #65: switching to a station is a crossfade, not a cut.** The
+defect: starting an uncached station while something played cut the old stream
+first and then spent the station's open (connect, headers, first bytes, about
+a second) in silence, because the old player was stopped *before* the new one
+was built. The fix keeps the old player running through the open and hands
+over with a 200 ms crossfade: the old source recedes to zero across the window
+while the new one rises from zero, and the device is never silent. The two
+players run as two device streams the OS mixes; each stream's fade runs in its
+own audio callback, on its own clock, armed through a one-shot mailbox
+(`CrossfadeCell`) the interface writes and the callback consumes — the arm
+never touches the callback's samples and the callback never waits.
+
+- **The window is derived, never hardcoded**: `crossfade_samples(spec)` is
+  200 ms of interleaved samples at the stream's own rate
+  (`CROSSFADE_WINDOW`), so a 44.1 kHz stereo stream and a 48 kHz mono one
+  fade over equally long walls of time and different counts of samples.
+- **The overlap must be two sources, never two fades of silence**: the old
+  stream's fade-out is armed only once the new stream has started sounding
+  (`Player::stream_started`, published by the preroll rule), and the old
+  player stops only when its fade has fully fallen (`crossfade_out_finished`
+  polled by the tick) — exact silence reached, never a fader stuck half-way.
+- **Gapless track→track advance is untouched**: the crossfade is a source
+  switch at the interface, and its decision (`crossfade_wanted`) names a
+  station as the first entry — a file start, a seek, a skip to a file, and
+  the producer's own track boundary all keep today's plain path.
+- **Bit-perfect refuses the fade, twice**: the interface decision answers no
+  under bit-perfect (the plain switch, pinned by test), and the player's own
+  `begin_crossfade_in/out` refuse too — a fade multiplies samples, which is
+  exactly what bit-perfect exists to prevent, so the guard is true by
+  construction, not by convention.
+- **A failed open costs a status line, never the music**: the old player is
+  only taken over on success; an open failure leaves it untouched and playing,
+  and the line says both facts — `velo: <error> — the stream that was playing
+  goes on`. A new source that opens but never sounds (a dead station behind a
+  live connection) never arms the fade-out, so the old stream plays on until
+  the user starts something else.
+- **A handover still falling is replaced outright** by a new start, a device
+  switch or quit (`drop_crossfade`), and a station reached by `skip` hands
+  over exactly as a fresh start does.
+
+The tests pin the math and the decision: the window derived from the rate,
+the curves' exact ends and unity sum, both sources sounding strictly inside
+the window with the old at exact silence exactly when the new reaches unity,
+and the handover decision (station over a sounding stream yes; file, paused,
+stopped, bit-perfect no). What no machine test can reach is the handover
+itself — two real streams overlapping on one device needs the device — so
+that stays ears-pending like the rest of T5d: start a track, press enter on a
+station, and hear the old one recede instead of cut.

@@ -10,13 +10,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Parser as _;
-use velo::audio::output::DeviceList;
+use velo::audio::output::{DeviceList, Entry};
 use velo::config::Cli;
-use velo::ui::App;
 use velo::ui::crossterm::event::{KeyCode, KeyEvent};
 use velo::ui::ratatui::Terminal;
 use velo::ui::ratatui::backend::TestBackend;
 use velo::ui::ratatui::buffer::{Buffer, Cell};
+use velo::ui::{App, PlayState};
 
 fn list(names: &[&str], default: Option<&str>) -> impl Fn() -> DeviceList {
     let names: Vec<String> = names.iter().map(|name| (*name).to_owned()).collect();
@@ -70,6 +70,79 @@ fn config_file(dir: &Path) -> PathBuf {
     )
     .expect("the config writes");
     path
+}
+
+/// A queue entry that is a live station: the one kind of start whose open
+/// (connect, headers, first bytes) used to be a cut plus silence (issue
+/// #65), and the one kind the crossfade handover exists for.
+fn station() -> Entry {
+    Entry::Station {
+        url: "https://example.org/stream".to_owned(),
+        name: "Example FM".to_owned(),
+    }
+}
+
+/// A queue entry that is a file on disk: a start that opens in milliseconds
+/// and keeps the plain switch.
+fn file_entry() -> Entry {
+    Entry::File(std::path::PathBuf::from("/music/track.flac"))
+}
+
+/// The handover decision (issue #65): a station start over a sounding
+/// stream is a crossfade, not a cut — and every other start keeps the plain
+/// switch. The old source keeps producing until the new one can take over;
+/// a file opens in milliseconds and gains nothing from a fade.
+#[test]
+fn a_station_start_over_a_sounding_stream_is_a_crossfade_not_a_cut() {
+    let mut app = App::new(Vec::new());
+    app.set_play_state_for_tests(PlayState::Playing);
+
+    assert!(
+        app.crossfade_wanted_for_tests(Some(&station())),
+        "a station start over a sounding stream crossfades"
+    );
+    assert!(
+        !app.crossfade_wanted_for_tests(Some(&file_entry())),
+        "a file start keeps the plain switch — the gapless rule is untouched"
+    );
+    assert!(
+        !app.crossfade_wanted_for_tests(None),
+        "a start with no first entry is not a handover"
+    );
+}
+
+/// A stream that is not sounding has nothing to hand over from: paused and
+/// stopped starts keep today's plain switch, silence and all (issue #65).
+#[test]
+fn a_stream_that_is_not_sounding_switches_plainly() {
+    let mut paused = App::new(Vec::new());
+    paused.set_play_state_for_tests(PlayState::Paused);
+    assert!(
+        !paused.crossfade_wanted_for_tests(Some(&station())),
+        "a paused stream is not handed over from"
+    );
+
+    let stopped = App::new(Vec::new());
+    assert!(
+        !stopped.crossfade_wanted_for_tests(Some(&station())),
+        "a fresh start with no stream to hand over from never fades"
+    );
+}
+
+/// Bit-perfect refuses the crossfade (issue #65): a fade multiplies
+/// samples, and bit-perfect means the decoder's samples reach the device
+/// unmodified — so it keeps the plain switch, exactly as it refuses the
+/// volume curve and `ReplayGain`.
+#[test]
+fn bit_perfect_keeps_the_plain_switch_a_fade_never_touches_its_samples() {
+    let mut app = App::new(Vec::new());
+    app.set_play_state_for_tests(PlayState::Playing);
+    app.set_bit_perfect(true);
+
+    assert!(
+        !app.crossfade_wanted_for_tests(Some(&station())),
+        "bit-perfect takes the plain path, never the fade"
+    );
 }
 
 #[test]
