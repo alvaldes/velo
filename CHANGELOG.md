@@ -1,6 +1,10 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.49.3] - 2026-11-11
+
+### Fixes
+- **ui:** The pause guard has its own seam, and a paused open keeps its line
 ## [0.49.2] - 2026-11-11
 
 ### Fixes
