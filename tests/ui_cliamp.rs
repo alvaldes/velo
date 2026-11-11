@@ -2139,3 +2139,105 @@ fn the_two_rows_toggle_one_and_the_same_mark() {
         "marking from the channel row restores the one mark"
     );
 }
+
+// ---- the channel list wears the mark ---------------------------------------
+
+/// The channel list — the cliamp browse rows a person scans to pick a
+/// channel — reads a marked channel `★ Name`, the same [`starred`] shape
+/// the favourites block and the live row already wear. The mark came from
+/// the channel row itself; the list shows it on the next redraw, no
+/// restart, no second source of truth.
+#[test]
+fn a_marked_channel_reads_starred_in_the_channel_list() {
+    use velo::ui::rowtext::starred;
+
+    let mut view = view();
+    view.open_place(Place::Cliamp);
+    press(&mut view, KeyCode::Char('f')); // the channel row marks
+
+    assert_eq!(
+        view.labels(),
+        [starred("LoFi Beats"), String::from("Jazz Cafe")],
+        "the marked channel lists starred, in the shape every other marked \
+         row wears, got: {:?}",
+        view.labels()
+    );
+}
+
+/// A channel the store holds no mark for reads exactly as it did before:
+/// the bare `Name`, no star, nothing else moved.
+#[test]
+fn an_unmarked_channel_reads_bare_in_the_channel_list() {
+    let mut view = view();
+    view.open_place(Place::Cliamp);
+
+    assert_eq!(
+        view.labels(),
+        [String::from("LoFi Beats"), String::from("Jazz Cafe")],
+        "no mark in the store, no star in the list, got: {:?}",
+        view.labels()
+    );
+}
+
+/// The list follows the live row's mark too: `f` on the live row puts the
+/// star on the channel's list row, a second `f` takes it off — one store,
+/// every view of it agreeing.
+#[test]
+fn the_channel_list_follows_the_live_row_s_mark() {
+    use velo::ui::rowtext::starred;
+
+    let mut view = view();
+    view.open_place(channel_place());
+    press(&mut view, KeyCode::Char('f')); // the live row marks
+
+    view.open_place(Place::Cliamp);
+    assert_eq!(
+        view.labels()[0],
+        starred("LoFi Beats"),
+        "the list shows what the live row wrote, got: {:?}",
+        view.labels()
+    );
+
+    view.open_place(channel_place());
+    press(&mut view, KeyCode::Char('f')); // the live row unmarks
+    view.open_place(Place::Cliamp);
+    assert_eq!(
+        view.labels()[0],
+        "LoFi Beats",
+        "the list drops the star with the store, got: {:?}",
+        view.labels()
+    );
+}
+
+/// A channel whose stream the service did not give has nothing to star:
+/// even with the store still holding the mark (a service that stopped
+/// publishing the stream, say), the list row stays bare — no mark is
+/// possible, and that is not a refusal.
+#[test]
+fn a_streamless_channel_never_stars_in_the_channel_list() {
+    use velo::ui::rowtext::starred;
+
+    let mut view = view();
+    view.open_place(Place::Cliamp);
+    press(&mut view, KeyCode::Char('f')); // the store takes the mark
+    assert_eq!(
+        view.labels()[0],
+        starred("LoFi Beats"),
+        "the marked channel lists starred before the stream goes"
+    );
+
+    let mut without = channels();
+    without[0].stream = String::new();
+    view.set_cliamp_channels(without);
+    assert_eq!(
+        view.labels()[0],
+        "LoFi Beats",
+        "no stream, nothing to star — the list row stays bare, got: {:?}",
+        view.labels()
+    );
+    assert!(
+        view.store()
+            .is_favorite("https://radio.cliamp.stream/lofi/stream"),
+        "the store keeps its mark; only the view holds back"
+    );
+}
