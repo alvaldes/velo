@@ -5746,7 +5746,7 @@ impl<'lib> App<'lib> {
                 ));
                 split_row(frame, top, title, Line::from(self.state_pill()));
                 self.draw_clock_and_progress(frame, middle);
-                self.draw_transport(frame, bottom, volume);
+                self.draw_transport(frame, bottom, volume, true);
             }
             _ => {
                 // The spectrum sits between the clock and the progress bar
@@ -5805,7 +5805,7 @@ impl<'lib> App<'lib> {
                     ))),
                     progress_row,
                 );
-                self.draw_transport(frame, transport_row, volume);
+                self.draw_transport(frame, transport_row, volume, false);
             }
         }
     }
@@ -5824,8 +5824,13 @@ impl<'lib> App<'lib> {
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 
-    /// The buttons on the left, the volume slider on the right.
-    fn draw_transport(&self, frame: &mut Frame, area: Rect, volume: u8) {
+    /// The buttons on the left, the volume slider on the right. `dense` is the
+    /// short block's row: the transport and the volume with its number, and
+    /// nothing between them. Shuffle, repeat and the ReplayGain mode need a row
+    /// of their own to read, so on a three-row block they step out (`z`, `r` and
+    /// the settings card still reach them); crammed in they printed as
+    /// `shuffleRG track`.
+    fn draw_transport(&self, frame: &mut Frame, area: Rect, volume: u8, dense: bool) {
         let button = Style::new().fg(self.theme.secondary);
         let lit = |on: bool| {
             if on {
@@ -5839,7 +5844,7 @@ impl<'lib> App<'lib> {
         } else {
             " ▶ play "
         };
-        let buttons = Line::from(vec![
+        let mut buttons = vec![
             Span::styled(" ◂◂ ", button),
             Span::raw(" "),
             Span::styled(
@@ -5848,37 +5853,46 @@ impl<'lib> App<'lib> {
             ),
             Span::raw(" "),
             Span::styled(" ▸▸ ", button),
-            // Shuffle and repeat: dim while off, the accent while on.
-            Span::raw("   "),
-            Span::styled("shuffle", Style::new().fg(lit(self.shuffle))),
-            Span::styled("  repeat ", Style::new().fg(self.theme.dim)),
-            Span::styled(
-                self.repeat.label(),
-                Style::new().fg(lit(self.repeat != Repeat::Off)),
-            ),
-        ]);
-        // The ReplayGain mode in the config's own words, padded to the
-        // longest so the slider never moves with it (ui-redesign T10).
-        let mode = match self.replay_gain {
-            ReplayGainMode::Track => "track",
-            ReplayGainMode::Album => "album",
-            ReplayGainMode::Off => "off",
-        };
-        let mut right = vec![
-            Span::styled("RG ", Style::new().fg(self.theme.dim)),
-            Span::styled(format!("{mode:<5}"), Style::new().fg(self.theme.secondary)),
-            Span::raw("   "),
         ];
+        if !dense {
+            // Shuffle and repeat: dim while off, the accent while on.
+            buttons.extend([
+                Span::raw("   "),
+                Span::styled("shuffle", Style::new().fg(lit(self.shuffle))),
+                Span::styled("  repeat ", Style::new().fg(self.theme.dim)),
+                Span::styled(
+                    self.repeat.label(),
+                    Style::new().fg(lit(self.repeat != Repeat::Off)),
+                ),
+            ]);
+        }
+        let mut right = if dense {
+            Vec::new()
+        } else {
+            // The ReplayGain mode in the config's own words, padded to the
+            // longest so the slider never moves with it (ui-redesign T10).
+            let mode = match self.replay_gain {
+                ReplayGainMode::Track => "track",
+                ReplayGainMode::Album => "album",
+                ReplayGainMode::Off => "off",
+            };
+            vec![
+                Span::styled("RG ", Style::new().fg(self.theme.dim)),
+                Span::styled(format!("{mode:<5}"), Style::new().fg(self.theme.secondary)),
+                Span::raw("   "),
+            ]
+        };
         right.extend(volume_slider(volume, VOLUME_CELLS, &self.theme));
-        split_row(frame, area, buttons, Line::from(right));
+        split_row(frame, area, Line::from(buttons), Line::from(right));
     }
 
     /// The position, and the length when it is known; a dim placeholder
-    /// when nothing plays. A live station has neither (S3): the transport
-    /// says so where a position and total would be.
+    /// when nothing plays. A live station has neither — and the transport
+    /// pill on the same row already says `● live` (issue #53) — so this slot
+    /// stays empty instead of saying it twice.
     fn clock_spans(&self) -> Vec<Span<'static>> {
         if matches!(self.playing_entry(), Some(Entry::Station { .. })) {
-            return vec![Span::styled("● live", Style::new().fg(self.theme.accent))];
+            return Vec::new();
         }
         let (position, total) = self.transport_time();
         let Some(position) = position else {

@@ -972,6 +972,67 @@ fn a_station_row_in_the_queue_reads_as_live() {
     );
 }
 
+// ---- the short block keeps the row readable --------------------------------
+
+/// A window short enough gives the block three rows, and that row has to hold
+/// the transport and the volume and nothing else: shuffle, repeat and the
+/// ReplayGain mode need room to read. Crammed in they printed as
+/// `shuffleRG track` against the slider. `z`, `r` and the settings card still
+/// reach all three, and the tall block still shows them.
+#[test]
+fn the_short_block_keeps_only_the_transport_and_the_volume() {
+    let app = App::new(tracks(&["one.flac"]));
+    let screen = screen_at(&app, 100, 12);
+    let row = screen
+        .lines()
+        .find(|line| line.contains("VOL"))
+        .expect("the transport row carries the volume slider");
+    assert!(row.contains("play"), "the transport is there, got: {row:?}");
+    assert!(
+        !row.contains("shuffle") && !row.contains("repeat") && !row.contains("RG"),
+        "the middle elements step out of a short row, got: {row:?}"
+    );
+    // The tall block still carries them: the rule is the height, not a removal.
+    let tall = screen_at(&app, 100, 30);
+    let tall_row = tall
+        .lines()
+        .find(|line| line.contains("shuffle") && line.contains("VOL"))
+        .expect("the tall block keeps shuffle beside the volume");
+    assert!(
+        tall_row.contains("RG"),
+        "and the ReplayGain mode, got: {tall_row:?}"
+    );
+}
+
+// ---- a live station says it once -------------------------------------------
+
+/// The clock slot holds a position and a length, and a stream has neither. It
+/// used to paint `● live` there as a stand-in while the transport pill on the
+/// same row painted the same words, so a playing station read `● live   ● live`.
+/// One marker per row: the pill's, which is the transport's own state.
+#[test]
+fn a_live_station_says_live_once_on_the_clock_row() {
+    let mut app = App::new(tracks(&["one.flac"]));
+    app.show_playing_for_tests(
+        Entry::Station {
+            url: String::from("https://stream.example/nova.mp3"),
+            name: String::from("Radio Nova"),
+        },
+        std::time::Duration::ZERO,
+        None,
+        None,
+    );
+
+    // The tall block: the clock and the pill share one row, and the station is
+    // not in the list on screen, so the whole screen carries the marker once.
+    let screen = screen_at(&app, 100, 24);
+    assert_eq!(
+        screen.matches("● live").count(),
+        1,
+        "the live marker appears once on screen, got:\n{screen}"
+    );
+}
+
 // ---- the states a row can carry (issue #53) --------------------------------
 // A live stream cannot pause: the state next to the clock and the row marker
 // tell a stopped station from a paused track. The shell computes the mark per
