@@ -725,6 +725,11 @@ impl Player {
             /* bit_perfect = */ false,
             /* device = */ None,
             /* resolver = */ None,
+            // Every interface start names its own [`Screen::Interface`] at
+            // [`Player::play_gapless_at_full`] — the full call is what the
+            // session uses. This wrapper is the headless convenience path,
+            // so its default is the no-screen one.
+            Screen::Headless,
         )
     }
 
@@ -754,6 +759,13 @@ impl Player {
     /// is today's behaviour. A remote entry's fetch failure past the first
     /// track is a skip, not a death; the first track failing here is the
     /// selection-time error the caller reports.
+    /// `screen` says who owns the screen this player would report across:
+    /// [`Screen::Interface`] when the interface is drawing, so a device
+    /// error reaches the status line instead of stderr — a stderr write
+    /// from the device callback splices into the frame being painted;
+    /// [`Screen::Headless`] for `--play` and every other run behind no
+    /// interface, where stderr stays the device error's channel, exactly as
+    /// it printed before the interface existed to own a frame.
     ///
     /// # Errors
     ///
@@ -777,6 +789,7 @@ impl Player {
         bit_perfect: bool,
         device: Option<&str>,
         resolver: Option<Arc<dyn PathResolver>>,
+        screen: Screen,
     ) -> Result<Self, AudioError> {
         let (is_empty, len, first) = {
             let queue = match queue.lock() {
@@ -828,8 +841,15 @@ impl Player {
         let requested_bit_perfect = bit_perfect;
         // The notices live from the first open on (issue #44, S3): a device
         // that was configured and has vanished is announced here, before a
-        // single sample exists.
+        // single sample exists. Device errors route by `screen`: to stderr
+        // when nobody owns one, into these same notices when the interface
+        // does — its tick takes them onto the status line, where a stderr
+        // write would splice into the frame it is painting.
         let notices = Arc::new(Mutex::new(VecDeque::new()));
+        let errors = match screen {
+            Screen::Interface => DeviceErrors::Status(Arc::clone(&notices)),
+            Screen::Headless => DeviceErrors::Stderr,
+        };
         let (device_handle, config, spec, opened_bit_perfect, device_name) =
             open_output(device, track_spec, bit_perfect, &notices)?;
         // Bit-perfect survives only when the device took the track's rate; a
@@ -887,7 +907,14 @@ impl Player {
         let (tap, tap_reader) = RingBuffer::<f32>::new(
             usize::try_from(spec.sample_rate).unwrap_or(48_000) / TAP_DIVISOR,
         );
-        let stream = build_stream(&device_handle, config, consumer, tap, &wires)?;
+        let stream = build_stream(
+            &device_handle,
+            config,
+            consumer,
+            tap,
+            &wires,
+            errors.clone(),
+        )?;
         let cell = Arc::new(StreamCell {
             stream: Mutex::new(Some(stream)),
             spec: Mutex::new(spec),
@@ -939,6 +966,7 @@ impl Player {
                         stop: Arc::clone(&stop),
                         failures,
                         notices,
+                        errors,
                         preroll_at: spec.interleaved_rate() / 10,
                         started: false,
                     };
@@ -1077,15 +1105,15 @@ impl Player {
 
     /// Takes the next one-line notice the player published, if any: the
     /// bit-perfect fallback (T17) — a mode the device refused, so velo
-    /// switched to the converted path and says so once. Taking — not reading —
-    /// is the point, the same rule as [`Player::take_failure`].
+    /// switched to the converted path and says so once — and, when the
+    /// interface owns the screen, the device errors the callback reported,
+    /// in [`device_error_notice`]'s words. Taking — not reading — is the
+    /// point, the same rule as [`Player::take_failure`], and the take is
+    /// [`take_oldest`]'s: an empty queue answers nothing, a message is
+    /// answered once and then gone.
     #[must_use]
     pub fn take_notice(&self) -> Option<String> {
-        let mut notices = match self.notices.lock() {
-            Ok(notices) => notices,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        notices.pop_front()
+        take_oldest(&self.notices)
     }
 
     /// Takes every notice published so far, in the order they happened.
@@ -1338,6 +1366,7 @@ fn build_stream(
     mut consumer: rtrb::Consumer<f32>,
     mut tap: Producer<f32>,
     wires: &CallbackWires,
+    errors: DeviceErrors,
 ) -> Result<cpal::Stream, AudioError> {
     let channels = usize::from(config.channels);
     let CallbackWires {
@@ -1437,7 +1466,7 @@ fn build_stream(
                 }
                 played.fetch_add(copied, Ordering::Release);
             },
-            move |error| eprintln!("velo: audio device error: {error}"),
+            move |error| errors.report_device(&error.to_string()),
             None,
         )
         .map_err(|error| AudioError::Device(error.to_string()))
@@ -1574,6 +1603,11 @@ struct StreamOut {
     stop: Arc<AtomicBool>,
     failures: Arc<Mutex<VecDeque<TrackFailure>>>,
     notices: Arc<Mutex<VecDeque<String>>>,
+    /// Where this player's device errors go ([`Screen`], decided at
+    /// construction): stderr when nobody owns a screen, the notices above
+    /// when the interface does. The producer reports through it too — the
+    /// `stream.play()` of a bit-perfect reopen is producer-side work.
+    errors: DeviceErrors,
     /// The delivered count the stream waits for before it starts: the same
     /// head-start rule the first stream follows, re-armed at every reopen.
     preroll_at: usize,
@@ -1640,7 +1674,7 @@ impl StreamOut {
         if let Some(stream) = slot.as_ref()
             && let Err(error) = stream.play()
         {
-            eprintln!("velo: audio device error: {error}");
+            self.errors.report_producer(&error.to_string());
         }
         self.started = true;
         // Published for the crossfade handover (issue #65): the old stream's
@@ -1665,7 +1699,14 @@ impl StreamOut {
             sample_rate: new_spec.sample_rate,
             buffer_size: cpal::BufferSize::Default,
         };
-        let stream = build_stream(&self.device, config, consumer, tap, &self.wires)?;
+        let stream = build_stream(
+            &self.device,
+            config,
+            consumer,
+            tap,
+            &self.wires,
+            self.errors.clone(),
+        )?;
         {
             let mut slot = match self.cell.stream.lock() {
                 Ok(slot) => slot,
@@ -1699,11 +1740,91 @@ impl StreamOut {
     }
 }
 
-/// Publishes a one-line user notice, once.
+/// Pushes a one-line user notice, once.
 fn push_notice(notices: &Mutex<VecDeque<String>>, message: String) {
     match notices.lock() {
         Ok(mut queue) => queue.push_back(message),
         Err(poisoned) => poisoned.into_inner().push_back(message),
+    }
+}
+
+/// Takes the oldest notice from `notices`, if any: taking — not reading — is
+/// the point, the same rule as a failure. An empty queue answers `None` and
+/// stays empty — taking never invents a message — and a message that was
+/// answered is gone, so the same fact is never said twice.
+#[must_use]
+pub fn take_oldest(notices: &Mutex<VecDeque<String>>) -> Option<String> {
+    match notices.lock() {
+        Ok(mut queue) => queue.pop_front(),
+        Err(poisoned) => poisoned.into_inner().pop_front(),
+    }
+}
+
+/// A device error in the app's own words (issue: the interface owns the
+/// screen a device error used to be spliced into): the same family of fact
+/// as "audio device \"X\" is not present — using the default output", set
+/// down by the interface on its status line instead of stderr, whose
+/// writes land in whatever row the frame it draws happens to be painting.
+#[must_use]
+pub fn device_error_notice(error: &str) -> String {
+    format!("audio device error: {error}")
+}
+
+/// Who owns the screen a device error would have to cross: the plain split
+/// the player is built with, a constructor argument — never a global. The
+/// interface draws its own frame (in the alternate buffer), so a stderr
+/// write from inside the player splices into whatever row is being painted;
+/// headless runs (`--play`, the drains, the scans) own no screen, so stderr
+/// stays theirs, exactly as it always printed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Screen {
+    /// An interface owns the screen: device errors join the player's own
+    /// notices, said once on the status line — never stderr.
+    Interface,
+    /// No screen is owned: device errors print to stderr as always.
+    Headless,
+}
+
+/// Where a player's device errors go, decided once at construction from the
+/// [`Screen`] its caller named.
+#[derive(Clone)]
+enum DeviceErrors {
+    /// The interface's status line: the sentence joins the player's notice
+    /// queue, which the interface drains on its tick.
+    Status(Arc<Mutex<VecDeque<String>>>),
+    /// Headless: stderr, the way device errors have always printed.
+    Stderr,
+}
+
+impl DeviceErrors {
+    /// Reports a device error from the device's callback thread. It must
+    /// never wait there: the callback runs on the device's thread and owes
+    /// it samples, so the queue is taken with `try_lock` and a message that
+    /// arrives while the queue is held elsewhere is dropped — rare, on an
+    /// exceptional path, and a device condition that persists will say it
+    /// again. (`try_lock` and drop on contention, chosen over an atomic swap
+    /// — which cannot carry a sentence — and over a second non-blocking ring,
+    /// which would be a whole extra queue to feed for an error that may
+    /// never happen.)
+    fn report_device(&self, error: &str) {
+        match self {
+            Self::Stderr => eprintln!("velo: audio device error: {error}"),
+            // `try_lock`: never a block on the device's thread.
+            Self::Status(notices) => {
+                if let Ok(mut notices) = notices.try_lock() {
+                    notices.push_back(device_error_notice(error));
+                }
+            }
+        }
+    }
+
+    /// Reports a device error from the producer thread, where a lock is
+    /// honest — the producer never owes the device samples.
+    fn report_producer(&self, error: &str) {
+        match self {
+            Self::Stderr => eprintln!("velo: audio device error: {error}"),
+            Self::Status(notices) => push_notice(notices, device_error_notice(error)),
+        }
     }
 }
 
@@ -3012,7 +3133,12 @@ const fn elapsed_samples(
 
 #[cfg(test)]
 mod tests {
-    use super::{DeviceList, Retry, elapsed_samples, open_target};
+    use super::{
+        DeviceErrors, DeviceList, Retry, device_error_notice, elapsed_samples, open_target,
+        take_oldest,
+    };
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     fn two_devices() -> DeviceList {
@@ -3132,5 +3258,56 @@ mod tests {
     #[test]
     fn a_negative_clock_is_clamped_to_zero() {
         assert_eq!(elapsed_samples(0, 500, false, 220_500), 0);
+    }
+
+    fn status_slot() -> (Arc<Mutex<VecDeque<String>>>, DeviceErrors) {
+        let slot = Arc::new(Mutex::new(VecDeque::new()));
+        (Arc::clone(&slot), DeviceErrors::Status(slot))
+    }
+
+    /// A device error that arrives with the interface owning the screen
+    /// joins the queue the status line drains — the same sentence the
+    /// stderr line used to carry, minus the prefix the status line itself
+    /// adds.
+    #[test]
+    fn an_interface_player_s_device_error_lands_on_its_notice_queue() {
+        let (slot, errors) = status_slot();
+        errors.report_device("Device sample rate changed");
+        assert_eq!(
+            take_oldest(&slot).as_deref(),
+            Some(device_error_notice("Device sample rate changed").as_str()),
+            "the sentence reaches the queue the interface takens"
+        );
+        assert_eq!(take_oldest(&slot), None, "said once");
+    }
+
+    /// The callback's own rule: the queue is taken with `try_lock`, and a
+    /// message that arrives while the lock is held elsewhere is dropped —
+    /// the device thread owes it samples, never a wait. `try_lock` never
+    /// blocks, so a queue already held by this very guard proves the call
+    /// returns at all.
+    #[test]
+    fn a_callback_error_a_contended_queue_would_wait_for_is_dropped_instead() {
+        let (slot, errors) = status_slot();
+        let held = slot.lock().expect("the test lock is held");
+        errors.report_device("Device was lost");
+        drop(held);
+        assert!(
+            slot.lock().expect("the queue reads").is_empty(),
+            "the contended message was dropped, never waited on"
+        );
+    }
+
+    /// Headless runs own no screen: their device errors print to stderr, and
+    /// nothing may pretend they were said to an interface. The queue — the
+    /// interface's own channel — stays empty.
+    #[test]
+    fn a_headless_player_s_device_error_never_touches_a_notice_queue() {
+        let (slot, _unused_interface_only_sink) = status_slot();
+        DeviceErrors::Stderr.report_device("Device sample rate changed");
+        assert!(
+            slot.lock().expect("the queue reads").is_empty(),
+            "stderr is the headless error's own channel"
+        );
     }
 }

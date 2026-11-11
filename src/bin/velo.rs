@@ -1498,6 +1498,9 @@ fn play(
         // played from there, exactly as the interface does it (T12c). Without
         // a configured server it stays a file, which is what it always was.
         resolver,
+        // No interface is drawing: the device error's stderr line stays, the
+        // way it printed before the interface existed to own a frame.
+        velo::audio::output::Screen::Headless,
     ) {
         Ok(player) => player,
         Err(error) => {

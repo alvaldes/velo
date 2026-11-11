@@ -44,7 +44,9 @@ use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, ListState, Paragraph};
 
-use crate::audio::output::{DeviceList, Entry, PathResolver, Repeat, SharedQueue, TrackFailure};
+use crate::audio::output::{
+    DeviceList, Entry, PathResolver, Repeat, Screen, SharedQueue, TrackFailure,
+};
 use crate::audio::replay_gain::{Loudness, parse_db, parse_peak};
 use crate::audio::spectrum::Spectrum;
 use crate::audio::{Player, TrackSource, seek_target, skip_target};
@@ -5592,6 +5594,9 @@ impl<'lib> App<'lib> {
             self.bit_perfect,
             Some(name),
             self.resolver.clone(),
+            // The interface owns the screen: a device error says itself on
+            // the status line, never on stderr mid-frame.
+            Screen::Interface,
         ) {
             Ok(player) => {
                 if let Some(old) = self.player.take() {
@@ -8732,6 +8737,9 @@ impl<'lib> App<'lib> {
             // launch, the picker's after a switch.
             self.audio_device.as_deref(),
             self.resolver.clone(),
+            // The interface owns the screen: a device error says itself on
+            // the status line, never on stderr mid-frame.
+            Screen::Interface,
         ) {
             Ok(player) => {
                 player.set_volume(self.volume);
@@ -9008,6 +9016,9 @@ impl<'lib> App<'lib> {
             // volume and the gain mode.
             self.audio_device.as_deref(),
             self.resolver.clone(),
+            // The interface owns the screen: a device error says itself on
+            // the status line, never on stderr mid-frame.
+            Screen::Interface,
         ) {
             Ok(player) => {
                 // A rebuilt player starts at its own default level; without this

@@ -4,15 +4,16 @@
 //! sound actually comes out of the chosen output is the author's ears'
 //! evidence; the logbook records it as pending.
 
+use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Parser as _;
 use velo::audio::AudioError;
-use velo::audio::output::{DeviceList, Entry, PathResolver};
+use velo::audio::output::{DeviceList, Entry, PathResolver, device_error_notice, take_oldest};
 use velo::config::Cli;
 use velo::ui::crossterm::event::{KeyCode, KeyEvent};
 use velo::ui::ratatui::Terminal;
@@ -306,6 +307,44 @@ fn the_handover_answer_is_carried_across_a_fetch() {
         Some(false),
         "a paused stream's fetch carries the plain answer across the wait"
     );
+}
+
+/// A device error is said in the app's own words — the same family of fact
+/// as "audio device \"X\" is not present — using the default output", the
+/// sentence the interface puts on its status line instead of the stderr
+/// write that used to splice into the frame it was drawing.
+#[test]
+fn a_device_error_is_said_in_the_app_s_own_words() {
+    assert_eq!(
+        device_error_notice("Device sample rate changed"),
+        "audio device error: Device sample rate changed",
+        "the sentence names the device problem, cpal's own fact inside it"
+    );
+}
+
+/// The take is the once: an empty notice queue answers nothing twice over —
+/// taking never invents a message — and a message that was taken is gone,
+/// so the same fact is never said twice on the status line.
+#[test]
+fn an_empty_notice_queue_stays_empty_and_a_notice_is_taken_once() {
+    let notices = Mutex::new(VecDeque::new());
+    assert_eq!(take_oldest(&notices), None, "empty stays empty");
+    assert_eq!(
+        take_oldest(&notices),
+        None,
+        "still empty: nothing was invented"
+    );
+
+    notices
+        .lock()
+        .expect("the test queue locks")
+        .push_back("bit-perfect unavailable — the device has no 44100 Hz output".to_owned());
+    assert_eq!(
+        take_oldest(&notices).as_deref(),
+        Some("bit-perfect unavailable — the device has no 44100 Hz output"),
+        "the notice is answered"
+    );
+    assert_eq!(take_oldest(&notices), None, "taken once: it is gone");
 }
 
 #[test]
