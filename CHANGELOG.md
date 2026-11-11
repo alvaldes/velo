@@ -1,6 +1,14 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [0.47.0] - 2026-11-11
+
+### Features
+- **terminal:** Ctrl+z suspends velo instead of toggling shuffle
+
+### Documentation
+- **readme:** Install with Homebrew
+- **site:** Homebrew leads the install, and the page describes itself to search and to links
 ## [0.46.1] - 2026-11-11
 
 ### Fixes
