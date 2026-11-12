@@ -25,8 +25,12 @@ published (`gh workflow run update.yml` on `alvaldes/homebrew-tap`), so
 `brew upgrade velo` offers the new version immediately instead of waiting for
 the tap's ten-minute cron. The call reaches another repository, so it needs the
 repository secret `TAP_TOKEN`: a fine-grained token scoped to
-`alvaldes/homebrew-tap` with `Actions: write`. Without it the step warns and the
-tap's cron catches up — a missing token never fails a release.
+`alvaldes/homebrew-tap` with `Actions: Read and write` (plus `Metadata: read`,
+which fine-grained tokens always carry). The step dispatches with `--ref main`
+on purpose: without it `gh` first asks GraphQL for the default branch, which the
+same token would need `Contents: read` for. Without the secret the step warns
+and the tap's cron catches up — a missing token never fails a release, and
+neither does a tap that refuses one.
 
 ## Before pushing
 

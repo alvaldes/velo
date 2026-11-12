@@ -135,21 +135,52 @@ jobs:
           GH_TOKEN: ${{ secrets.TAP_TOKEN }}
         run: |
           if [ -z "${GH_TOKEN:-}" ]; then
-            echo "::warning title=Tap not updated::TAP_TOKEN is missing — add a fine-grained token with Actions: write on alvaldes/homebrew-tap; its cron will catch up meanwhile."
+            echo "::warning title=Tap not updated::TAP_TOKEN is missing — add a fine-grained token with Actions: Read and write on alvaldes/homebrew-tap; its cron will catch up meanwhile."
             exit 0
           fi
+          tap=alvaldes/homebrew-tap
+          # The tap's run ids, oldest first. `--ref main` keeps the dispatch from
+          # asking GraphQL for the default branch, which a fine-grained token
+          # would need `Contents: read` for.
+          ids() { gh run list --repo "$tap" --workflow update.yml --limit 20 --json databaseId --jq '.[].databaseId' | sort -n; }
+          # `gh workflow run` prints nothing when stdout is a pipe, which is
+          # exactly how a runner calls it, so the dispatched run is found by its
+          # id being NEW — never by parsing that output, and never by taking the
+          # newest run, which may be the cron's own run for an older tag.
+          ids > "$RUNNER_TEMP/tap-before"
           for attempt in 1 2 3; do
-            # `gh workflow run` answers the run's URL: the id is the last
-            # segment, so the run watched is the one this dispatch started,
-            # never a neighbour's.
-            url=$(gh workflow run update.yml --repo alvaldes/homebrew-tap -f tag="$TAG")
-            id=${url##*/}
-            sleep 10
-            if gh run watch "$id" --repo alvaldes/homebrew-tap --exit-status --interval 10; then
+            gh workflow run update.yml --repo "$tap" -r main -f tag="$TAG"
+            id=""
+            for _ in $(seq 1 12); do
+              sleep 5
+              ids > "$RUNNER_TEMP/tap-now"
+              id=$(comm -13 "$RUNNER_TEMP/tap-before" "$RUNNER_TEMP/tap-now" | tail -1)
+              if [ -n "$id" ]; then break; fi
+            done
+            if [ -z "$id" ]; then
+              echo "attempt $attempt: the dispatch started no run this step can see"
+              ids > "$RUNNER_TEMP/tap-before"
+              continue
+            fi
+            # A bounded poll of this run's own answer: `gh run watch` never
+            # times out, and this job must.
+            state=""
+            for _ in $(seq 1 24); do
+              sleep 5
+              state=$(gh run view "$id" --repo "$tap" --json status,conclusion --jq '.status + "/" + (.conclusion // "none")')
+              case "$state" in
+                completed/*) break ;;
+              esac
+            done
+            if [ "$state" = "completed/success" ]; then
               echo "the tap points at $TAG"
               exit 0
             fi
-            echo "attempt $attempt: the tap's update did not accept $TAG, asking again"
+            echo "attempt $attempt: the tap's run $id answered $state"
+            ids > "$RUNNER_TEMP/tap-before"
           done
-          echo "::error title=Tap not updated::alvaldes/homebrew-tap did not accept $TAG — see its Actions"
-          exit 1
+          # A tap that did not take this release must not turn a release whose
+          # archives are already public red: the cron still catches up, and the
+          # annotation is where the drift is seen.
+          echo "::warning title=Tap not updated::$tap did not accept $TAG; its ten-minute cron will catch up"
+          exit 0
