@@ -44,6 +44,23 @@ fn temp_dir(name: &str) -> PathBuf {
     dir
 }
 
+/// A temporary directory no other call shares: `local_samples` is called by
+/// several tests at once, and [`temp_dir`]'s name-plus-pid would have them
+/// writing — and deleting, since it starts with a `remove_dir_all` — the same
+/// reference file. The reader then probes a half-written file and symphonia
+/// answers "no suitable format reader found": that is the flake that failed CI
+/// on `main` while the very same commit passed on the tag's own run.
+fn unshared_dir(name: &str) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static CALLS: AtomicU64 = AtomicU64::new(0);
+    let nth = CALLS.fetch_add(1, Ordering::Relaxed);
+    let dir = Path::new(&std::env::temp_dir())
+        .join(format!("velo-remote-{name}-{}-{nth}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
 /// The `.part-…` files currently in a cache directory: what the prune rules
 /// keep counting while a fill is under way or abandoned.
 fn part_files(dir: &Path) -> Vec<PathBuf> {
@@ -909,8 +926,10 @@ fn wav_fixture() -> PathBuf {
 
 /// The samples a local open of the WAV's own bytes answers, drained block by
 /// block from `offset_frames` in — the reference the streaming turn is held to.
+/// Each call writes its own directory (see [`unshared_dir`]): tests run in
+/// parallel and the reference file must never be shared.
 fn local_samples(wav: &[u8], offset_frames: u64) -> Vec<f32> {
-    let dir = temp_dir("local-reference");
+    let dir = unshared_dir("local-reference");
     let path = dir.join("reference.wav");
     fs::write(&path, wav).expect("the reference writes");
     let mut source = if offset_frames == 0 {
@@ -922,5 +941,39 @@ fn local_samples(wav: &[u8], offset_frames: u64) -> Vec<f32> {
     while let Some(block) = source.read_block().expect("the reference decodes") {
         samples.extend_from_slice(&block);
     }
+    let _ = fs::remove_dir_all(&dir);
     samples
+}
+
+/// Two references never share a path (the CI flake above): the second call's
+/// directory is a different one, so no call can delete or half-write another's
+/// file.
+#[test]
+fn each_reference_gets_its_own_directory() {
+    let first = unshared_dir("local-reference");
+    let second = unshared_dir("local-reference");
+    assert_ne!(
+        first, second,
+        "a shared reference path is what failed CI: one test deletes and half-writes what another is opening"
+    );
+    let _ = fs::remove_dir_all(&first);
+    let _ = fs::remove_dir_all(&second);
+}
+
+/// And two references decoded at once both come out right: the exclusive path
+/// is the whole point, so the concurrency the flake came from is exercised.
+#[test]
+fn two_references_at_once_both_decode() {
+    let wav = fs::read(wav_fixture()).expect("the fixture reads");
+    let first = {
+        let wav = wav.clone();
+        std::thread::spawn(move || local_samples(&wav, 1_000))
+    };
+    let second = std::thread::spawn(move || local_samples(&wav, 1_000));
+    let first = first.join().expect("the first reference decodes");
+    let second = second.join().expect("the second reference decodes");
+    assert_eq!(
+        first, second,
+        "two references decode the same frames, each from its own file"
+    );
 }
