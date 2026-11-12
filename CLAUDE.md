@@ -20,6 +20,13 @@ commit: one release per delivery. A delivery with only `docs`, `test`,
 `refactor` or `chore` commits releases nothing, and the script says so.
 
 Pushing the tag (`git push --follow-tags`) runs `.github/workflows/release.yml`.
+That workflow also points the Homebrew tap's formula at the release it just
+published (`gh workflow run update.yml` on `alvaldes/homebrew-tap`), so
+`brew upgrade velo` offers the new version immediately instead of waiting for
+the tap's ten-minute cron. The call reaches another repository, so it needs the
+repository secret `TAP_TOKEN`: a fine-grained token scoped to
+`alvaldes/homebrew-tap` with `Actions: write`. Without it the step warns and the
+tap's cron catches up — a missing token never fails a release.
 
 ## Before pushing
 

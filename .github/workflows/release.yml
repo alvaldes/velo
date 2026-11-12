@@ -118,3 +118,38 @@ jobs:
           tag_name: ${{ env.TAG }}
           files: dist/*
           generate_release_notes: true
+
+      # The tap's formula is written from this release's checksums, so the
+      # release that publishes them is the one that must point the formula at
+      # them. The tap used to rely on its own ten-minute cron, which ran before
+      # v1.0.0's archives existed (and then refused, correctly) and was still
+      # fifteen minutes behind in the other direction.
+      #
+      # The tap is another repository, which this workflow's own token cannot
+      # touch: `TAP_TOKEN` is a fine-grained token scoped to
+      # alvaldes/homebrew-tap with Actions: write. Without it the step warns and
+      # stops — the tap's cron still catches up, and a missing token never
+      # fails a release that already published its archives.
+      - name: Point the tap's formula at this release
+        env:
+          GH_TOKEN: ${{ secrets.TAP_TOKEN }}
+        run: |
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::warning title=Tap not updated::TAP_TOKEN is missing — add a fine-grained token with Actions: write on alvaldes/homebrew-tap; its cron will catch up meanwhile."
+            exit 0
+          fi
+          for attempt in 1 2 3; do
+            # `gh workflow run` answers the run's URL: the id is the last
+            # segment, so the run watched is the one this dispatch started,
+            # never a neighbour's.
+            url=$(gh workflow run update.yml --repo alvaldes/homebrew-tap -f tag="$TAG")
+            id=${url##*/}
+            sleep 10
+            if gh run watch "$id" --repo alvaldes/homebrew-tap --exit-status --interval 10; then
+              echo "the tap points at $TAG"
+              exit 0
+            fi
+            echo "attempt $attempt: the tap's update did not accept $TAG, asking again"
+          done
+          echo "::error title=Tap not updated::alvaldes/homebrew-tap did not accept $TAG — see its Actions"
+          exit 1
