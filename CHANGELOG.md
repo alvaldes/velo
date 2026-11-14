@@ -1,6 +1,20 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [1.1.0] - 2026-11-14
+
+### Features
+- **update:** Velo update names the command for this install
+
+### Documentation
+- **site:** The link preview shows the tap's install command
+
+### Tests
+- **remote_stream:** Each reference gets its own directory
+
+### Maintenance
+- **release:** The release points the tap at itself
+- **release:** The tap step finds its own run, and never reddens a release
 ## [1.0.0] - 2026-11-11
 
 ### Fixes
