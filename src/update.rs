@@ -22,6 +22,7 @@
 //! automatic check is silent, the one you asked for says why it failed, in
 //! one line.
 
+use std::ffi::OsStr;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -144,61 +145,75 @@ struct Release {
 }
 
 /// How the running velo was installed, as far as the path of its own
-/// executable can say (issue #69): the answer decides what "how to get
-/// it" says when a newer version exists.
+/// executable can say (issue #69): the answer decides what "how to
+/// update" says when a newer version exists. The install script is the
+/// default because it is the install most people have: re-running its
+/// one line *is* the update — it fetches the newest release and installs
+/// it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstallRoute {
     /// Installed by Homebrew: the binary lives under a Homebrew prefix
     /// (`/opt/homebrew/…` or `/usr/local/Cellar/…`), so brew owns it, and
     /// `brew upgrade velo` is the way.
     Homebrew,
-    /// Nothing managed: the release archive from the releases page is the
-    /// way — velo never downloads or replaces itself.
-    ReleaseArchive,
+    /// Installed by the one-line installer (or by hand): re-running the
+    /// installer's own line fetches the newest release and installs it.
+    InstallScript,
+    /// A cargo build from a clone: the crate is not on crates.io yet, so
+    /// neither brew nor the installer owns it — the clone's own
+    /// `cargo install --path .` is the way, as the README's source
+    /// instructions say.
+    Cargo,
 }
 
 impl InstallRoute {
-    /// The way to get the newer version, as the manual check's report says
-    /// it: the command that belongs to the install, or the honest
-    /// download-and-replace route.
+    /// The way to update, as the manual check's report says it: one line
+    /// a person pastes, the command copied exactly as it would be typed.
     #[must_use]
     pub const fn advice(self) -> &'static str {
         match self {
             Self::Homebrew => "brew upgrade velo",
-            Self::ReleaseArchive => {
-                "install the release archive from github.com/alvaldes/velo/releases"
-            }
+            Self::InstallScript => "curl -fsSL https://alvaldes.github.io/velo/install.sh | sh",
+            Self::Cargo => "cargo install --path .",
         }
     }
 }
 
-/// Whether the binary at `executable`'s path was installed by Homebrew,
-/// from the path alone — a pure function, so it is decided without
-/// touching the filesystem (issue #69): a Homebrew prefix means Homebrew;
-/// anything else — cargo, a hand copy, a symlink of unknown origin — means
-/// the release archive.
+/// Which of the three update routes belongs to the binary at
+/// `executable`'s path, from the path alone — a pure function, so it is
+/// decided without touching the filesystem (issue #69). A Homebrew prefix
+/// means Homebrew; a `~/.cargo/…` path means a cargo build from a clone;
+/// anything else — the installer's `~/.local/bin`, a hand copy, a symlink
+/// of unknown origin — means the install script, whose re-run updates
+/// everything it owns and is harmless where it does not.
 #[must_use]
 pub fn install_route(executable: &Path) -> InstallRoute {
+    if executable
+        .ancestors()
+        .any(|dir| dir.file_name() == Some(OsStr::new(".cargo")))
+    {
+        return InstallRoute::Cargo;
+    }
     let Some(path) = executable.to_str() else {
-        return InstallRoute::ReleaseArchive;
+        return InstallRoute::InstallScript;
     };
     if path.starts_with("/opt/homebrew/") || path.starts_with("/usr/local/Cellar/") {
         InstallRoute::Homebrew
     } else {
-        InstallRoute::ReleaseArchive
+        InstallRoute::InstallScript
     }
 }
 
 /// What `velo update` prints (issue #69): the running version, the newest
 /// tag, and one of two verdicts. A strictly newer fetched version says so
-/// and how to get it; equal or older — the running build ahead of the
+/// and how to update; equal or older — the running build ahead of the
 /// releases page, say — says up to date, naming the newest release anyway,
 /// and never claims an update.
 #[must_use]
 pub fn manual_report(running: &str, fetched: &str, route: InstallRoute) -> String {
     if newer_version(running, fetched) {
         format!(
-            "velo {} is available — you have {}\nhow to get it: {}",
+            "velo {} is available — you have {}\nhow to update: {}",
             display_version(fetched),
             running,
             route.advice()

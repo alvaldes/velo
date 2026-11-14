@@ -348,13 +348,14 @@ fn one_shot(
 /// The `velo update` subcommand (issue #69): one check now, whatever
 /// `[update] check` and `last_check` say, printed to stdout — exit 0 for
 /// either verdict, 1 with one line on stderr when the request or the
-/// answer failed. "How to get it" is read from the running executable's
-/// own path, so it names the command that belongs to this install. Nothing
-/// is ever downloaded, verified or replaced (slice 2's work, out of
-/// scope).
+/// answer failed. "How to update" is read from the running executable's
+/// own path, so it names the command that belongs to this install — brew,
+/// the one-line installer re-run, or the clone's own cargo build. Nothing
+/// is ever downloaded, verified or replaced by velo itself (slice 2's
+/// work, out of scope).
 fn update_command() -> ExitCode {
     let route = std::env::current_exe().ok().as_deref().map_or(
-        velo::update::InstallRoute::ReleaseArchive,
+        velo::update::InstallRoute::InstallScript,
         velo::update::install_route,
     );
     let transport = match velo::radio::client::HttpTransport::new() {
