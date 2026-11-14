@@ -49,6 +49,10 @@ impl Transport for Canned {
 
 // ------------------------------------------- the install route, from the path
 
+/// The installer's own line, verbatim — the update for the install most
+/// people have is running it again.
+const INSTALLER_LINE: &str = "curl -fsSL https://alvaldes.github.io/velo/install.sh | sh";
+
 #[test]
 fn a_homebrew_prefix_says_brew() {
     for path in [
@@ -65,50 +69,66 @@ fn a_homebrew_prefix_says_brew() {
 }
 
 #[test]
-fn any_other_path_says_the_release_archive() {
-    for path in [
-        "/usr/local/bin/velo",
-        "/usr/bin/velo",
-        "/home/alice/.cargo/bin/velo",
-        "velo",
-    ] {
+fn an_unmanaged_path_says_the_install_script() {
+    for path in ["/usr/local/bin/velo", "/usr/bin/velo", "velo"] {
         assert_eq!(
             install_route(Path::new(path)),
-            InstallRoute::ReleaseArchive,
+            InstallRoute::InstallScript,
             "{path}"
         );
     }
 }
 
 #[test]
-fn each_route_names_its_own_way_to_get_it() {
+fn a_cargo_bin_path_says_the_clone_build() {
+    for path in [
+        "/home/alice/.cargo/bin/velo",
+        "/Users/alice/.cargo/bin/velo",
+        "/root/.cargo/bin/velo",
+    ] {
+        assert_eq!(
+            install_route(Path::new(path)),
+            InstallRoute::Cargo,
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn each_route_names_its_own_way_to_update() {
     assert_eq!(InstallRoute::Homebrew.advice(), "brew upgrade velo");
-    assert!(
-        InstallRoute::ReleaseArchive
-            .advice()
-            .contains("github.com/alvaldes/velo/releases"),
-        "the archive route names the releases page: {}",
-        InstallRoute::ReleaseArchive.advice()
+    assert_eq!(
+        InstallRoute::InstallScript.advice(),
+        "curl -fsSL https://alvaldes.github.io/velo/install.sh | sh",
+        "the installer's own line, byte for byte"
+    );
+    assert_eq!(
+        InstallRoute::Cargo.advice(),
+        "cargo install --path .",
+        "the README's source instructions, as a line a person pastes"
     );
 }
 
 // ---------------------------------------------------------- the verdict text
 
 #[test]
-fn a_newer_version_says_so_and_how_to_get_it() {
+fn a_newer_version_says_so_and_how_to_update() {
     let report = manual_report("0.47.1", "v0.48.0", InstallRoute::Homebrew);
     assert!(report.contains("0.48.0 is available"), "{report}");
     assert!(report.contains("you have 0.47.1"), "{report}");
-    assert!(report.contains("brew upgrade velo"), "{report}");
+    assert!(
+        report.contains("how to update: brew upgrade velo"),
+        "the advice is a command a person pastes: {report}"
+    );
 }
 
 #[test]
-fn the_release_archive_route_names_the_page() {
-    let report = manual_report("0.47.1", "v0.48.0", InstallRoute::ReleaseArchive);
+fn the_install_script_route_prints_the_installers_own_line() {
+    let report = manual_report("0.47.1", "v0.48.0", InstallRoute::InstallScript);
     assert!(report.contains("0.48.0 is available"), "{report}");
     assert!(
-        report.contains("github.com/alvaldes/velo/releases"),
-        "{report}"
+        report.contains(&format!("how to update: {INSTALLER_LINE}")),
+        "the line pastes as it is typed, no quotes, no prose around it: {report}"
     );
 }
 
@@ -131,7 +151,7 @@ fn an_equal_version_is_up_to_date_and_claims_no_update() {
 
 #[test]
 fn a_running_build_ahead_of_the_releases_claims_no_update() {
-    let report = manual_report("0.48.0", "v0.47.1", InstallRoute::ReleaseArchive);
+    let report = manual_report("0.48.0", "v0.47.1", InstallRoute::InstallScript);
     assert!(report.contains("up to date"), "{report}");
     assert!(
         report.contains("0.47.1"),
@@ -169,7 +189,7 @@ fn a_failed_transport_is_one_line_of_reason_and_no_report() {
 #[test]
 fn a_body_that_is_not_the_json_is_one_line_of_reason() {
     let transport = Canned::with("not json at all");
-    let error = manual_check(&transport, InstallRoute::ReleaseArchive)
+    let error = manual_check(&transport, InstallRoute::InstallScript)
         .expect_err("a bad body is an error, said in one line");
     assert!(!error.contains('\n'), "one line: {error:?}");
     assert!(

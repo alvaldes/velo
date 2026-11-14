@@ -141,3 +141,51 @@ clippy -D warnings, the whole test suite). Not testable without a network:
 the real `velo update` binary end to end — its transport is built inside
 the process, and tests must not reach the network — so the failure path is
 proven one level down, over the injected transport seam.
+
+## The route the installer built gets the installer's line (issue #69, follow-up)
+
+The author's question found the gap: velo installed by the repository's own
+one-line installer answered "install the release archive from the releases
+page" — sending a person who already has an installer to hunt for a
+`.tar.gz` by hand. `install_route` now answers three ways, still a pure
+function of the executable's path: a Homebrew prefix says
+`brew upgrade velo`; a `~/.cargo/…` path (a clone build — the crate is not
+on crates.io yet, so neither brew nor the installer owns it) says the
+clone's own `cargo install --path .`, the README's source instructions;
+everything else — the installer's `~/.local/bin` above all — says the
+installer's own line, byte for byte:
+`curl -fsSL https://alvaldes.github.io/velo/install.sh | sh`. Re-running it
+is the update. The verdict line is reworded to what it is — a command a
+person pastes: `how to update: <the command>`, no quotes, no markdown.
+
+All three advices are one pasteable line, the cargo one included: it first
+read "a clone build — from the clone: cargo install --path .", prose inside
+the command slot, and the decision was to keep the slot homogeneous, so the
+clone's route is its command alone and the sentence explaining it lives in
+the README ("the source command from Install above").
+
+Tests changed in `tests/update.rs` (renamed, not weakened):
+`any_other_path_says_the_release_archive` →
+`an_unmanaged_path_says_the_install_script` (the cargo path moved out);
+`each_route_names_its_own_way_to_get_it` →
+`each_route_names_its_own_way_to_update` (the install script line and the
+cargo command both asserted byte for byte, the way the Homebrew one
+already was);
+`a_newer_version_says_so_and_how_to_get_it` → `…_and_how_to_update`;
+`the_release_archive_route_names_the_page` →
+`the_install_script_route_prints_the_installers_own_line`. Added
+`a_cargo_bin_path_says_the_clone_build` (home-relative cargo paths, Linux
+and macOS). The two release-route callers elsewhere
+(`src/bin/velo.rs`'s fallback, one failing-transport test) renamed to
+`InstallScript`; README's `[update]` section names all three routes.
+
+The work was recovered from a stash left on `feat/update-command` after that
+branch merged: the five source and test patches applied cleanly on today's
+`main`, the README hunk did not — that section was rewritten since — so the
+`[update]` paragraph was written again instead of merged.
+
+Verification, all exit 0: `cargo fmt`; `./scripts/check.sh` (fmt, clippy -D
+warnings, the whole suite), and the RED first: with the cargo assertion
+tightened to `assert_eq!` the test failed on the prose advice before the
+source changed. Still not testable without a network: the real `velo update`
+binary end to end.
