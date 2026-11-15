@@ -482,3 +482,45 @@ fn dropping_the_stream_kills_both_children_and_the_grandchild() {
 fn the_prebuffer_floor_is_256_kib() {
     assert_eq!(PREBUFFER, 256 * 1024);
 }
+
+/// A slow start that keeps flowing is not a stall: a stream slower than the
+/// pre-buffer hands over what it has when its bound passes, so a link slower
+/// than the fill still plays.
+///
+/// Not covered here, and named so nobody assumes it: a stream that produces a
+/// few bytes and then blocks is still refused, because the reader thread is
+/// blocked in `read` and cannot check the bound. Bounding that needs a
+/// non-blocking pipe; it is a follow-up, not a claim of this test.
+#[test]
+fn a_stream_that_flows_slower_than_the_prebuffer_is_handed_over_with_what_it_has() {
+    let dir = scratch("slow-start");
+    // A byte every 100 ms: flowing, and nowhere near 256 KiB in 400 ms.
+    let yt = fake(
+        &dir,
+        "#!/bin/sh
+while :; do printf 'a'; sleep 0.1; done
+",
+    );
+    let ff = fake_ffmpeg(
+        &dir,
+        "#!/bin/sh
+cat
+",
+    );
+
+    let mut running = spawn_chain(&yt, &ff, Deadline::new(Duration::from_millis(400)))
+        .expect("a slow start that flows is not a refusal");
+
+    let mut seen = 0_usize;
+    let until = Instant::now() + Duration::from_secs(2);
+    let mut byte = [0u8; 1];
+    while seen < 2 && Instant::now() < until {
+        if let Ok(1) = running.read(&mut byte) {
+            seen += 1;
+        }
+    }
+    assert!(seen >= 2, "the slow stream's bytes are the ones that play");
+
+    drop(running);
+    let _ = std::fs::remove_dir_all(&dir);
+}

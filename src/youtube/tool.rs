@@ -318,7 +318,7 @@ pub fn spawn(
     // the fill — and hands the pipe straight back. A stream shorter than the
     // fill hands over everything it had when it ends; the bytes read before
     // the handover are none lost, they ride in [`Running`].
-    let receiver = fill_watch(ff.stdout.take());
+    let receiver = fill_watch(ff.stdout.take(), deadline.after());
     let until = Instant::now() + deadline.after();
 
     loop {
@@ -375,6 +375,19 @@ pub fn spawn(
             ));
         }
         if Instant::now() >= until {
+            // The reader was bounded too, so a message here carries whatever
+            // it read: a slow start plays from the bytes it has. Silence is
+            // the only stall.
+            if let Ok((Ok(prefix), stdout)) = receiver.recv_timeout(Duration::from_secs(1))
+                && !prefix.is_empty()
+            {
+                return Ok(Running {
+                    yt_dlp: yt,
+                    ffmpeg: ff,
+                    stdout,
+                    prefix,
+                });
+            }
             end_all(&mut [&mut yt, &mut ff]);
             return Err(ToolError::Stalled {
                 program: ff_name,
@@ -390,6 +403,7 @@ pub fn spawn(
 /// for the caller to keep streaming — back once.
 fn fill_watch(
     pipe: Option<ChildStdout>,
+    bound: Duration,
 ) -> Receiver<(std::io::Result<Vec<u8>>, Option<ChildStdout>)> {
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
@@ -399,6 +413,7 @@ fn fill_watch(
         };
         let mut fill = Vec::new();
         let mut chunk = [0u8; 8192];
+        let until = Instant::now() + bound;
         let result = loop {
             match pipe.read(&mut chunk) {
                 Ok(0) => break Ok(fill), // the stream ended: hand over what it had
@@ -409,6 +424,13 @@ fn fill_watch(
                     }
                 }
                 Err(error) => break Err(error),
+            }
+            // The bound is the reader's too, and it hands over what it has
+            // rather than nothing: a link slower than the fill is a slow
+            // start, not a stall. Only a stream that produced *no* byte by
+            // the bound is refused, further down.
+            if Instant::now() >= until {
+                break Ok(fill);
             }
         };
         let _ = sender.send((result, Some(pipe))); // the pipe comes back for the caller
