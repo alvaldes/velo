@@ -5,13 +5,20 @@
 //! the same way the producer thread reads a track.
 
 use std::collections::VecDeque;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use velo::audio::output::{Entry, SharedQueue, TrackFailure, drain_headless};
+use symphonia::core::io::MediaSource;
+use velo::audio::AudioError;
+use velo::audio::output::{
+    Entry, PathResolver, SharedQueue, TrackFailure, drain_headless,
+    drain_headless_with_carried_source,
+};
 use velo::audio::{GainRamp, TrackSource, TrackSpec, seek_target};
+use velo::config::ReplayGainMode;
 
 /// Writes a minimal PCM16 WAV file so the tests need no external tooling.
 fn write_wav(path: &Path, spec: TrackSpec, frames: &[i16]) {
@@ -230,6 +237,196 @@ fn the_seek_target_clamps_at_both_ends() {
     assert_eq!(
         seek_target(Duration::from_secs(10), -5, None),
         Duration::from_secs(5)
+    );
+}
+
+/// The offset a seek lands on is whole seconds (issue #70, R3-001): the
+/// seek's chain starts at `--download-sections "*<sec>-"`, which takes
+/// integer seconds, so the fraction is dropped once — here, where the offset
+/// is taken — and the clock carries the same number the chain was asked for,
+/// never a second the audio does not play.
+#[test]
+fn the_seek_target_is_whole_seconds_the_fraction_is_dropped_where_it_is_taken() {
+    // A position carrying a fraction moves by whole seconds to a whole
+    // second: 10.4 s + 5 lands at 15 s, the second the chain can start at.
+    assert_eq!(
+        seek_target(Duration::from_millis(10_400), 5, None),
+        Duration::from_secs(15)
+    );
+    // Backwards the same: 10.4 s − 5 lands at 5 s.
+    assert_eq!(
+        seek_target(Duration::from_millis(10_400), -5, None),
+        Duration::from_secs(5)
+    );
+    // Clamping to a duration with a fraction still lands on a whole second.
+    assert_eq!(
+        seek_target(
+            Duration::from_secs(25),
+            60,
+            Some(Duration::from_millis(30_500))
+        ),
+        Duration::from_secs(30)
+    );
+}
+
+/// A `MediaSource` over in-memory bytes: `seekable` says which, so one
+/// fixture serves both halves of the carried-source rule — the ranged stream
+/// a seek's carried ask hands over, with a position or without one.
+struct InMemory {
+    bytes: std::io::Cursor<Vec<u8>>,
+    seekable: bool,
+}
+
+impl Read for InMemory {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.bytes.read(buf)
+    }
+}
+
+impl Seek for InMemory {
+    fn seek(&mut self, whence: SeekFrom) -> std::io::Result<u64> {
+        if self.seekable {
+            self.bytes.seek(whence)
+        } else {
+            Err(std::io::Error::other("a stream without a position"))
+        }
+    }
+}
+
+impl MediaSource for InMemory {
+    fn is_seekable(&self) -> bool {
+        self.seekable
+    }
+
+    fn byte_len(&self) -> Option<u64> {
+        self.seekable
+            .then(|| u64::try_from(self.bytes.get_ref().len()).expect("test bytes fit in a u64"))
+    }
+}
+
+/// A resolver that streams the same in-memory bytes for every path: the
+/// stand-in for a remote source whose opener did not position it — its
+/// [`PathResolver::open_streaming_at`] is the trait's default, the shape a
+/// future source without an override runs.
+struct Streaming {
+    bytes: Vec<u8>,
+    seekable: bool,
+}
+
+impl PathResolver for Streaming {
+    fn resolve(&self, path: &Path) -> Result<PathBuf, AudioError> {
+        Ok(path.to_path_buf())
+    }
+
+    fn open_streaming(&self, _path: &Path) -> Result<Option<Box<dyn MediaSource>>, AudioError> {
+        Ok(Some(Box::new(InMemory {
+            bytes: std::io::Cursor::new(self.bytes.clone()),
+            seekable: self.seekable,
+        })))
+    }
+}
+
+/// A seek over a stream the opener did not position and cannot seek is
+/// refused with a sentence (issue #70, R3-002): the default
+/// [`PathResolver::open_streaming_at`] opens, sees a source with no
+/// position, and refuses instead of handing over a stream that would play
+/// from its start while the clock said the offset. Offset zero is the plain
+/// open, unchanged, and a source with a position takes the seek inside its
+/// own bytes — the delegation that was always honest.
+#[test]
+fn the_default_open_streaming_at_refuses_the_seek_a_stream_without_a_position_cannot_honour() {
+    let url = Path::new("https://wrap.example/live/song.mp3");
+    let pipe = Streaming {
+        bytes: b"not audio".to_vec(),
+        seekable: false,
+    };
+
+    let error = pipe
+        .open_streaming_at(url, Duration::from_secs(2))
+        .err()
+        .expect("a seek a source without a position cannot honour is refused");
+    assert!(
+        error.to_string().contains("cannot be seeked"),
+        "the sentence names the reason: {error}"
+    );
+
+    // Offset zero asks nothing of the source: the plain open, unchanged.
+    assert!(
+        pipe.open_streaming_at(url, Duration::ZERO)
+            .expect("zero is the plain open")
+            .is_some(),
+        "the open the default always answered"
+    );
+
+    // A source with a position takes the offset inside its own bytes:
+    // the delegation that was always honest stays.
+    let ranged = Streaming {
+        bytes: b"not audio".to_vec(),
+        seekable: true,
+    };
+    assert!(
+        ranged
+            .open_streaming_at(url, Duration::from_secs(2))
+            .expect("a seekable source takes the offset")
+            .is_some(),
+        "the reader positions it inside its own bytes"
+    );
+}
+
+/// The Subsonic-with-carried-source case (issue #70, R3-002): a carried
+/// stream that can be seeked — the ranged answer a server's streaming open
+/// hands over — takes the rebuild's offset inside its own bytes, so what
+/// plays and what the clock says are the same second. Its non-seekable
+/// counterpart never reaches the player: the default refuses it (the test
+/// above), so the producer's zero-offset rule is left to the one source the
+/// opener positioned — the seek's own chain.
+#[test]
+fn a_seekable_carried_source_takes_the_seek_offset_inside_its_own_bytes() {
+    let spec = TrackSpec {
+        sample_rate: 44_100,
+        channels: 1,
+    };
+    let path = scratch_path("carried-seekable");
+    let written = write_indexed_wav(&path, 3 * 44_100, spec);
+    let bytes = std::fs::read(&path).expect("the wav bytes are read");
+    let _ = std::fs::remove_file(&path);
+
+    let source: Box<dyn MediaSource> = Box::new(InMemory {
+        bytes: std::io::Cursor::new(bytes),
+        seekable: true,
+    });
+
+    // The rebuild at one second in, the way a seek's handover arrives: the
+    // carried source, the offset riding with it.
+    let stop = AtomicBool::new(false);
+    let mut samples = Vec::new();
+    drain_headless_with_carried_source(
+        Arc::new(Mutex::new(vec![Entry::File(PathBuf::from(
+            "subsonic://server.example/42",
+        ))])),
+        0,
+        44_100,
+        spec,
+        ReplayGainMode::default(),
+        source,
+        &stop,
+        &mut |block: &[f32]| samples.extend_from_slice(block),
+        &mut |_failure: TrackFailure| {},
+    )
+    .expect("the sequence runs");
+
+    let expected = as_f32(&written[44_100..]);
+    assert_eq!(
+        samples.len(),
+        expected.len(),
+        "one second was not replayed behind the seek"
+    );
+    assert!(
+        samples
+            .iter()
+            .zip(&expected)
+            .all(|(got, want)| (got - want).abs() < PCM16_TOLERANCE),
+        "the carried seekable stream is sample-exact from the offset on"
     );
 }
 

@@ -616,17 +616,35 @@ fn an_offset_of_zero_adds_no_download_sections_at_all() {
 }
 
 /// The trait's default is what a composed resolver without an override
-/// runs: it ignores the offset and delegates to [`PathResolver::open_streaming`]
-/// — no flag, one chain, the delegate's own stream from its start. The
-/// resolver that honours the offset says so by overriding.
+/// runs: it delegates to [`PathResolver::open_streaming`] — and that is
+/// honest only when the source it answers has a position to put the offset
+/// in. The chain's pipe has none: asked to start at an offset, the default
+/// refuses with a sentence instead of handing over a stream that would play
+/// from its start while the clock said the offset (issue #70, R3-002). At
+/// offset zero the ask is the plain open, unchanged — no flag, one chain,
+/// the delegate's own stream from its start. The resolver that honours the
+/// offset says so by overriding, as [`Resolver`] does.
 #[test]
-fn the_default_open_streaming_at_ignores_the_offset_and_delegates() {
+fn the_default_open_streaming_at_refuses_the_seek_the_pipe_cannot_honour() {
     let dir = scratch("default-open-at");
     let (yt, ff, pipes, argv) = recording_chain(&dir);
     let composed = Delegating(Resolver::new(yt, ff));
 
-    let source = composed
+    let error = composed
         .open_streaming_at(&pseudo_path("abc"), Duration::from_secs(90))
+        .err()
+        .expect("a seek the pipe cannot honour is refused");
+    assert!(
+        error.to_string().contains("cannot be seeked"),
+        "the sentence names the reason: {error}"
+    );
+    // The ask opened the pipe it then refused: one chain, ended by the drop.
+    assert_eq!(pipe_runs(&pipes), 1, "the ask opened, saw, and refused");
+
+    // Offset zero is the ordinary play through the same default: the
+    // delegate ran, no flag, argv as open_streaming's.
+    let source = composed
+        .open_streaming_at(&pseudo_path("abc"), Duration::ZERO)
         .expect("the default answers")
         .expect("a source, exactly as open_streaming answers");
 
@@ -635,9 +653,9 @@ fn the_default_open_streaming_at_ignores_the_offset_and_delegates() {
         !downloader_argv
             .iter()
             .any(|argument| argument == "--download-sections"),
-        "the default ignores the offset: no flag, argv as open_streaming's, got {downloader_argv:?}"
+        "the default at zero is the plain open: no flag, argv as open_streaming's, got {downloader_argv:?}"
     );
-    assert_eq!(pipe_runs(&pipes), 1, "the delegate ran: the chain spawned");
+    assert_eq!(pipe_runs(&pipes), 2, "the delegate ran: the chain spawned");
 
     let mut track = TrackSource::open_remote(source).expect("the chain decodes");
     let mut streamed = Vec::new();

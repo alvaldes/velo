@@ -147,8 +147,13 @@ impl GainRamp {
 }
 
 /// The offset a seek lands on: `position` moved by `delta_secs`, clamped into
-/// `0..=duration`. A `None` duration only clamps the lower end; the player
-/// clamps an offset past the end of the track when it opens it.
+/// `0..=duration`, **whole seconds**: the seek's chain starts at
+/// `--download-sections "*<sec>-"` (issue #70), which takes integer seconds,
+/// so a fraction cannot be honoured — it is dropped here, where the offset
+/// is taken, and the clock carries the same number the chain was asked for,
+/// never a second the audio does not play. A `None` duration only clamps the
+/// lower end; the player clamps an offset past the end of the track when it
+/// opens it.
 #[must_use]
 pub fn seek_target(position: Duration, delta_secs: i64, duration: Option<Duration>) -> Duration {
     let moved = if delta_secs >= 0 {
@@ -156,7 +161,8 @@ pub fn seek_target(position: Duration, delta_secs: i64, duration: Option<Duratio
     } else {
         position.saturating_sub(Duration::from_secs(delta_secs.unsigned_abs()))
     };
-    duration.map_or(moved, |duration| moved.min(duration))
+    let landed = duration.map_or(moved, |duration| moved.min(duration));
+    Duration::from_secs(landed.as_secs())
 }
 
 /// What follows the end of a track.
@@ -519,21 +525,37 @@ pub trait PathResolver: Send + Sync {
     /// started at the offset — a seek on the tool's own pipe is a new open
     /// at the offset, never a position inside a body. An implementation
     /// whose source can be seeked needs nothing here — the offset is the
-    /// decoder's inside its own bytes — so the default ignores the offset
-    /// and delegates to [`PathResolver::open_streaming`]: the default's
-    /// answer is "opening at an offset is not my job", and an
-    /// implementation that honours the offset says so by overriding this.
+    /// decoder's inside its own bytes — so the default delegates to
+    /// [`PathResolver::open_streaming`], and an implementation that honours
+    /// the offset itself says so by overriding this. Delegating is honest
+    /// only when the source has a position to put the offset in: a
+    /// non-seekable one plays from wherever its opener left it, so a
+    /// nonzero offset over it would say one position and play another —
+    /// refused with a sentence, never handed over (issue #70, R3-002). A
+    /// source the opener did position — the seek's own chain (L13) — takes
+    /// the offset in its own argv, and overrides this.
     ///
     /// # Errors
     ///
-    /// The same errors as [`PathResolver::open_streaming`].
+    /// The same errors as [`PathResolver::open_streaming`], plus the
+    /// refusal: a nonzero offset over a source without a position cannot
+    /// be honoured.
     fn open_streaming_at(
         &self,
         path: &Path,
         offset: Duration,
     ) -> Result<Option<Box<dyn MediaSource>>, AudioError> {
-        let _ = offset;
-        self.open_streaming(path)
+        let source = self.open_streaming(path)?;
+        if !offset.is_zero()
+            && source
+                .as_deref()
+                .is_some_and(|source| !source.is_seekable())
+        {
+            return Err(AudioError::Unsupported(String::from(
+                "this stream cannot be seeked — it cannot start at the position asked for",
+            )));
+        }
+        Ok(source)
     }
 }
 
@@ -2365,8 +2387,12 @@ fn resolve_entry(
 /// opener already positioned (issue #70: the seek's chain starts at the
 /// offset, and the tool's pipe has no position to seek to) is played as it
 /// was handed over — applying the offset again would only mark the stream
-/// finished, a seek that lands in silence. The clock keeps the full offset
-/// either way: it reads the constructor's own, never this.
+/// finished, a seek that lands in silence. That is the only non-seekable
+/// carried source a nonzero offset can ride with: the default
+/// [`PathResolver::open_streaming_at`] refuses the ones the opener did not
+/// position (R3-002), so what plays and what the clock says agree here by
+/// construction. The clock keeps the full offset either way: it reads the
+/// constructor's own, never this.
 #[must_use]
 const fn producer_offset_frames(offset_frames: u64, carried_seekable: bool) -> u64 {
     if carried_seekable { offset_frames } else { 0 }

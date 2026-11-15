@@ -74,8 +74,11 @@ pub fn arguments(id: &str) -> Vec<OsString> {
 /// A zero offset adds nothing at all — the ordinary play's argv stays
 /// byte-identical — and any other one adds `--download-sections
 /// "*<seconds>-"`, whole seconds: the tool streams from that second, and
-/// the chain's MP3 starts there. That is the mechanism, measured: a seek
-/// is not a position inside a body, it is a new invocation.
+/// the chain's MP3 starts there. The offset arrives in whole seconds — the
+/// seek's target is truncated where it is taken ([`seek_target`], the one
+/// place a fraction could enter) — so nothing here drops anything
+/// silently. That is the mechanism, measured: a seek is not a position
+/// inside a body, it is a new invocation.
 #[must_use]
 pub fn arguments_at(id: &str, offset: Duration) -> Vec<OsString> {
     let seek = offset.as_secs() > 0;
