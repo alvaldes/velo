@@ -405,6 +405,27 @@ mod tests {
         }
     }
 
+    /// A reader that never sends at all — a panic, or a pipe dropped under it
+    /// — is a lost answer, not an empty one.
+    #[test]
+    fn a_reader_that_never_answered_is_a_failure_not_an_empty_answer() {
+        // `drain` always sends exactly one result, so a channel that closes
+        // without one is a reader that died: the tool's answer was lost, and
+        // reporting it as empty would turn a lost read into a success.
+        let (sender, receiver) = mpsc::channel();
+        drop(sender);
+
+        match collect(&receiver, Instant::now() + Duration::from_secs(1)) {
+            Collected::ReadFailed(message) => {
+                assert!(
+                    message.contains("stopped before it could answer"),
+                    "the failure names the lost reader: {message}"
+                );
+            }
+            other => panic!("expected a read failure, got {other:?}"),
+        }
+    }
+
     /// A pipe that closes with no bytes at all stays an empty success — the
     /// closed pipe is not a failure, and the caller keeps its behaviour for
     /// it (R4-3).
@@ -480,6 +501,11 @@ fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> Receiver<std::io::Result<
 /// What one pipe's wait ended as: the bytes it delivered — possibly none, a
 /// pipe that closed empty is an empty answer, not a failure — why the read
 /// itself failed, naming the IO error, or that the bound ran out first.
+///
+/// "Closed empty" is a reader that finished and sent nothing back; a reader
+/// that never sent at all is a *lost* reader, and that is a failure, not an
+/// empty answer: `drain` always sends exactly one result, so silence means the
+/// thread died before it could.
 #[derive(Debug)]
 enum Collected {
     Bytes(Vec<u8>),
@@ -492,7 +518,12 @@ fn collect(pipe: &Receiver<std::io::Result<Vec<u8>>>, until: Instant) -> Collect
     match pipe.recv_timeout(left) {
         Ok(Ok(bytes)) => Collected::Bytes(bytes),
         Ok(Err(error)) => Collected::ReadFailed(error.to_string()),
-        Err(RecvTimeoutError::Disconnected) => Collected::Bytes(Vec::new()),
+        // The reader is gone without a word — a panic, or a pipe the runtime
+        // dropped under it. Presenting that as the tool's empty answer would
+        // turn a lost read into a successful one.
+        Err(RecvTimeoutError::Disconnected) => {
+            Collected::ReadFailed(String::from("the reader stopped before it could answer"))
+        }
         Err(RecvTimeoutError::Timeout) => Collected::TimedOut,
     }
 }
