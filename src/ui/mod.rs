@@ -3138,6 +3138,21 @@ impl<'lib> App<'lib> {
                     duration: self.current_track_duration(),
                 }
             }
+            Entry::Youtube {
+                title,
+                uploader,
+                duration,
+                ..
+            } => {
+                // What the search said is the body: the title, the channel
+                // where an artist would be, and the entry's own declared
+                // length — never an invented one (issue #70, S3).
+                crate::media_keys::NowPlaying {
+                    title: title.clone(),
+                    artist: uploader.clone(),
+                    duration: duration.map(Duration::from_secs),
+                }
+            }
             Entry::Station { name, .. } => crate::media_keys::NowPlaying {
                 title: self.station_title(name),
                 artist: None,
@@ -3211,6 +3226,26 @@ impl<'lib> App<'lib> {
                     artist,
                     album,
                     title,
+                }
+            }
+            Entry::Youtube {
+                path,
+                title,
+                uploader,
+                ..
+            } => {
+                // The identity the queue carries — `youtube://<id>` — rides
+                // into the history untouched, the way a `subsonic://` row
+                // does; the body the search said is what the history shows.
+                // A result is finite (issue #70, S3), so it is a file-kind
+                // row, never a station.
+                crate::history::Entry {
+                    path: path.to_string_lossy().into_owned(),
+                    kind: crate::history::Kind::File,
+                    played_at: crate::history::now_unix(),
+                    artist: uploader.clone(),
+                    album: None,
+                    title: Some(title.clone()),
                 }
             }
             Entry::Station { url, name } => {
@@ -4345,7 +4380,9 @@ impl<'lib> App<'lib> {
         // every radio key, so no key can leave the marker stale.
         let playing = self.standing_entry().map(|entry| match entry {
             Entry::Station { url, .. } => url.clone(),
-            Entry::File(path) => path.to_string_lossy().into_owned(),
+            // The pseudo path is the entry's identity; it matches no radio
+            // row, so it marks none (issue #70).
+            Entry::File(path) | Entry::Youtube { path, .. } => path.to_string_lossy().into_owned(),
         });
         if let Some(view) = self.radio.as_mut() {
             view.set_playing(playing.map(|identity| (identity, self.state)));
@@ -4470,7 +4507,10 @@ impl<'lib> App<'lib> {
     /// where a first entry is resolved: on this thread, or on a worker the
     /// tick polls.
     fn is_uncached_remote(&self, path: &Path) -> bool {
-        if !is_pseudo_path(path) && !is_remote_url(path) {
+        // A `youtube://` row waits like a `subsonic://` one does (issue
+        // #70): its resolve is the tool's own bounded call, and its
+        // `cached` seam is the one answer that matters here.
+        if !is_pseudo_path(path) && !crate::youtube::is_pseudo_path(path) && !is_remote_url(path) {
             return false;
         }
         self.resolver
@@ -4483,6 +4523,20 @@ impl<'lib> App<'lib> {
     /// the file's own name — exactly what a failure report names.
     fn fetching_name(&self, path: &Path) -> String {
         if let Some(title) = self.song_titles.get(path.to_string_lossy().as_ref()) {
+            return title.clone();
+        }
+        // A YouTube entry's honest name is the body the search said (issue
+        // #70): the queue carries the title beside the identity, and a
+        // fetching line that named the bare id would name nothing the user
+        // can play.
+        if crate::youtube::is_pseudo_path(path)
+            && let Some(title) = self.queue.iter().find_map(|entry| match entry {
+                Entry::Youtube {
+                    path: own, title, ..
+                } if own == path => Some(title),
+                _ => None,
+            })
+        {
             return title.clone();
         }
         path.file_name().map_or_else(
@@ -4992,6 +5046,13 @@ impl<'lib> App<'lib> {
                     "velo: {} is a live stream, and a stream does not end — there is nothing \
                      to save",
                     entry.label()
+                );
+                return;
+            }
+            Entry::Youtube { title, .. } => {
+                self.status = format!(
+                    "velo: {title} is a resolved YouTube stream — velo saves what it can copy \
+                     to a file, and a resolved stream is not one"
                 );
                 return;
             }
@@ -6092,6 +6153,12 @@ impl<'lib> App<'lib> {
         let current = self.playing_entry();
         let (title, subtitle) = match current {
             Some(Entry::File(path)) => describe(path, self.known_tracks(), &self.song_titles),
+            // What the search said is the body, the same rule the queue row
+            // and the media keys follow (issue #70): the title, and the
+            // channel where an artist would be — nothing invented.
+            Some(Entry::Youtube {
+                title, uploader, ..
+            }) => (title.clone(), uploader.clone().unwrap_or_default()),
             Some(Entry::Station { name, .. }) => (self.station_title(name), String::new()),
             None => (
                 "nothing playing".to_owned(),
@@ -6570,6 +6637,9 @@ impl<'lib> App<'lib> {
     fn playing_source(&self) -> Option<sources::Source> {
         match self.playing_entry()? {
             Entry::Station { .. } => Some(sources::Source::Radio),
+            // The row that names this source lands with the screen (T5);
+            // until then a YouTube entry marks no row.
+            Entry::Youtube { .. } => None,
             Entry::File(path) => {
                 let path = path.to_string_lossy();
                 // A remote file plays through the radio's side (the
@@ -6808,6 +6878,11 @@ impl<'lib> App<'lib> {
                 // its own name is what the row shows.
                 let (name, note) = match entry {
                     Entry::File(path) => describe(path, self.known_tracks(), &self.song_titles),
+                    // What the search said is the body (issue #70): the
+                    // title, and the channel where an artist would be.
+                    Entry::Youtube {
+                        title, uploader, ..
+                    } => (title.clone(), uploader.clone().unwrap_or_default()),
                     Entry::Station { name, .. } => (name.clone(), String::new()),
                 };
                 let row = ListRow {
@@ -6826,7 +6901,10 @@ impl<'lib> App<'lib> {
                 // the transport shows for a live stream.
                 ListItem::new(match entry {
                     Entry::Station { .. } => live_row(row, width, &self.theme),
-                    Entry::File(_) => list_row(row, width, &self.theme),
+                    // A YouTube result is a finite video (issue #70, S3):
+                    // its row shows its position and total like a track's,
+                    // never `● live`.
+                    Entry::File(_) | Entry::Youtube { .. } => list_row(row, width, &self.theme),
                 })
             })
             .collect()
@@ -10336,7 +10414,7 @@ fn info_rows(
     let mut rows = vec![(
         "path",
         match what {
-            Entry::File(path) => path.to_string_lossy().into_owned(),
+            Entry::File(path) | Entry::Youtube { path, .. } => path.to_string_lossy().into_owned(),
             Entry::Station { url, .. } => url.clone(),
         },
     )];
@@ -10629,7 +10707,9 @@ mod tests {
         app.queue
             .iter()
             .map(|entry| match entry {
-                Entry::File(path) => path.to_string_lossy().into_owned(),
+                Entry::File(path) | Entry::Youtube { path, .. } => {
+                    path.to_string_lossy().into_owned()
+                }
                 Entry::Station { .. } => {
                     panic!("a song opens as a track, never as a station row: {entry:?}")
                 }

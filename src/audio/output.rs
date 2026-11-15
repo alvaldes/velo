@@ -397,6 +397,22 @@ pub enum Entry {
         /// and what a failure message prints — never the URL.
         name: String,
     },
+    /// A `YouTube` search result: a stream resolved when it plays (issue #70,
+    /// S4), never when it was queued. Its identity is `youtube://<video-id>`
+    /// and never the URL, because the URL a resolve extracts expires; its body
+    /// is what the search already said, so a queue row, the OS and the history
+    /// can name it without asking the tool again.
+    Youtube {
+        /// `youtube://<video-id>`: the identity, and never a path on disk.
+        path: PathBuf,
+        /// The video's own title.
+        title: String,
+        /// The channel, shown where an artist would be: the issue's guess, made
+        /// once by the search rather than re-derived here.
+        uploader: Option<String>,
+        /// Length in whole seconds, `None` for a broadcast that never ends.
+        duration: Option<u64>,
+    },
 }
 
 impl Entry {
@@ -406,7 +422,7 @@ impl Entry {
     #[must_use]
     pub fn as_path(&self) -> Option<&Path> {
         match self {
-            Self::File(path) => Some(path),
+            Self::File(path) | Self::Youtube { path, .. } => Some(path),
             Self::Station { .. } => None,
         }
     }
@@ -420,6 +436,7 @@ impl Entry {
                 .file_name()
                 .map_or_else(|| path.to_string_lossy(), std::ffi::OsStr::to_string_lossy),
             Self::Station { name, .. } => Cow::Borrowed(name),
+            Self::Youtube { title, .. } => Cow::Borrowed(title),
         }
     }
 }
@@ -895,28 +912,8 @@ impl Player {
         // (T5c2b). The producer decides every entry again when it reaches it —
         // a cache hit costs no network. The dispatch, not a comment, is what
         // keeps the three seams apart.
-        let (track_spec, preopened, preopened_file) = match (&first, first_source) {
-            (_, Some(source)) => {
-                let opened = TrackSource::open_remote(source)?;
-                // The source is the first entry's own; the key is what the
-                // producer matches the queue's entry against when it reaches
-                // the first turn.
-                let key = first.as_path().map(Path::to_path_buf).unwrap_or_default();
-                (opened.spec(), None, Some((key, opened)))
-            }
-            (Entry::File(path), None) => {
-                let first_path = match resolver.as_ref() {
-                    Some(resolver) => resolver.resolve(path)?,
-                    None => path.clone(),
-                };
-                (TrackSource::open(&first_path)?.spec(), None, None)
-            }
-            (Entry::Station { url, .. }, None) => {
-                let source = open_station_retrying(&LiveOpener, url, Retry::ONCE)
-                    .map_err(|error| AudioError::Unsupported(error.to_string()))?;
-                (source.spec(), Some((url.clone(), source)), None)
-            }
-        };
+        let (track_spec, preopened, preopened_file) =
+            open_first_entry(&first, first_source, resolver.as_ref())?;
         let offset_frames = duration_to_frames(offset, track_spec.sample_rate);
 
         let requested_bit_perfect = bit_perfect;
@@ -1443,6 +1440,11 @@ trait SequenceSink {
     /// writes the same record where the player reads it; this is the
     /// headless mirror a drain observes.
     fn progress(&mut self, _duration: Option<Duration>, _title: Option<&str>) {}
+
+    /// One one-line notice for the user, said once — the bit-perfect
+    /// fallback's vocabulary (T17). Default: nothing; a headless drain
+    /// records no notices.
+    fn notice(&mut self, _message: String) {}
 }
 
 /// Builds the device stream: the callback that drains the ring. Its whole job
@@ -1741,6 +1743,10 @@ impl SequenceSink for StreamOut {
 
     fn after_turn(&mut self) {
         self.ensure_started(true);
+    }
+
+    fn notice(&mut self, message: String) {
+        push_notice(&self.notices, message);
     }
 }
 
@@ -2050,6 +2056,23 @@ fn run_sequence(
                         sink,
                         Some(source),
                     )?
+                } else if crate::youtube::is_pseudo_path(path) {
+                    // A `youtube://` row that arrived as a file entry — from
+                    // the history, a favourite, a playlist or `--play` — is
+                    // never a file (issue #70): it plays exactly the way its
+                    // own entry kind does, the streaming question answered
+                    // first, `resolve`'s refusal for the row never reached.
+                    // Its label is the id the queue stored, which is what the
+                    // history kept.
+                    play_resolved(
+                        &label,
+                        path,
+                        &turn,
+                        &mut expected,
+                        shared,
+                        sink,
+                        resolver.as_ref(),
+                    )?
                 } else {
                     // The resolution is the wait (issue #60): the cell says
                     // which entry is being fetched, from the moment the queue
@@ -2071,6 +2094,43 @@ fn run_sequence(
                             Turn::Failed
                         }
                     }
+                }
+            }
+            Entry::Youtube { path, .. } => {
+                // A resolved entry plays from a ranged stream opened when it
+                // plays (issue #70, S4): the first turn takes the source the
+                // start carried — the ask already happened off the event
+                // loop — and every later turn resolves again here, on the
+                // producer thread, because the URL the tool extracted has
+                // expired by now. The fetching cell says the entry is being
+                // resolved for as long as that takes (S5), the way a remote
+                // file's download does; a failure is announced and skipped,
+                // never a hang and never a silent skip (S5).
+                let streamed = if turn.first {
+                    preopened_file.take_if(|(opened_path, _)| opened_path.as_path() == path)
+                } else {
+                    None
+                };
+                if let Some((_, source)) = streamed {
+                    play_turn(
+                        &label,
+                        path,
+                        &turn,
+                        &mut expected,
+                        shared,
+                        sink,
+                        Some(source),
+                    )?
+                } else {
+                    play_resolved(
+                        &label,
+                        path,
+                        &turn,
+                        &mut expected,
+                        shared,
+                        sink,
+                        resolver.as_ref(),
+                    )?
                 }
             }
             Entry::Station { url, .. } => {
@@ -2169,6 +2229,141 @@ fn resolve_entry(
     }
 }
 
+/// Opens a `youtube://` entry as a ranged stream through the resolver (issue
+/// #70): the resolve and the probe embed in the ask, so the caller chooses
+/// the thread. A missing resolver is a sentence, never a panic, and a `None`
+/// — the trait's fallback answer — is one too: a resolved stream that cannot
+/// be ranged has no cache-on-play to fall back to, because a `YouTube` entry
+/// is never a file (S4).
+fn open_resolved(
+    resolver: Option<&Arc<dyn PathResolver>>,
+    path: &Path,
+) -> Result<TrackSource, AudioError> {
+    let source = match resolver {
+        Some(resolver) => resolver.open_streaming(path)?.ok_or_else(|| {
+            AudioError::Unsupported(String::from(
+                "this YouTube entry cannot be played as a ranged stream — there is no file \
+                     to fall back to",
+            ))
+        })?,
+        None => {
+            return Err(AudioError::Unsupported(String::from(
+                "no resolver is configured — a YouTube entry cannot be resolved",
+            )));
+        }
+    };
+    TrackSource::open_remote(source)
+}
+
+/// Plays one turn of a `youtube://` path — whether the queue carried it as
+/// its own entry kind or as a file entry (issue #70) — by opening the
+/// resolved ranged stream on this thread: the fetching cell says the entry
+/// is being resolved for as long as the ask takes (S5), and a failure is
+/// announced and skipped, never a hang and never a silent skip.
+fn play_resolved(
+    label: &str,
+    path: &Path,
+    turn: &TurnJob,
+    expected: &mut TrackSpec,
+    shared: &Shared<'_>,
+    sink: &mut dyn SequenceSink,
+    resolver: Option<&Arc<dyn PathResolver>>,
+) -> Result<Turn, AudioError> {
+    shared.fetching.store(
+        u64::try_from(turn.index).unwrap_or(u64::MAX) + 1,
+        Ordering::Release,
+    );
+    let opened = open_resolved(resolver, path);
+    shared.fetching.store(0, Ordering::Release);
+    match opened {
+        Ok(source) => play_turn(label, path, turn, expected, shared, sink, Some(source)),
+        Err(error) => {
+            sink.failure(track_failure(label, error.to_string()));
+            Ok(Turn::Failed)
+        }
+    }
+}
+
+/// The first entry's open, at selection time (T12c): every start —
+/// [`Player::play_gapless_at_full`], a rebuild, `--play` — opens or carries
+/// its first track here, and the answer decides the device's format, the
+/// preopen and the source the producer's first turn consumes. A carried
+/// source is the start's worker answer already made and is used as it is;
+/// a file resolves through the resolver and opens; a `youtube://` row —
+/// whether the queue carries it as its own entry kind or as a file entry
+/// from the history, a favourite, a playlist or `--play` (issue #70) — is
+/// never a file, so it asks the streaming question first and the opened
+/// ranged source is carried to the first turn, exactly as the worker's
+/// answer would be; a station opens through the opener, never the resolver
+/// and never a path. `PathResolver::resolve`'s refusal for a `youtube://`
+/// row is what keeps the two seams honest; the refusal is simply never
+/// reached for a row that asks the streaming question first.
+///
+/// # Errors
+///
+/// The first entry's own: a carried source's open, a file's resolve and
+/// open, a resolved stream's ask, or a station's open, each as its kind
+/// answers it.
+#[expect(
+    clippy::type_complexity,
+    reason = "the answer is the open's three parts — the spec the device\n    builds on, the station preopen and the carried first-turn source —\n    and its own named type would only restate the tuple"
+)]
+pub fn open_first_entry(
+    first: &Entry,
+    first_source: Option<Box<dyn MediaSource>>,
+    resolver: Option<&Arc<dyn PathResolver>>,
+) -> Result<
+    (
+        TrackSpec,
+        Option<(String, Box<dyn StationSource>)>,
+        Option<(PathBuf, TrackSource)>,
+    ),
+    AudioError,
+> {
+    match (first, first_source) {
+        (_, Some(source)) => {
+            let opened = TrackSource::open_remote(source)?;
+            // The source is the first entry's own; the key is what the
+            // producer matches the queue's entry against when it reaches
+            // the first turn.
+            let key = first.as_path().map(Path::to_path_buf).unwrap_or_default();
+            Ok((opened.spec(), None, Some((key, opened))))
+        }
+        (Entry::File(path), None) => {
+            // A `youtube://` row that arrived as a file entry — from the
+            // history, a favourite, a playlist or `--play` — is never a file
+            // (issue #70): it opens as its resolved ranged stream exactly the
+            // way its own entry kind does, and the opened source is carried
+            // to the first turn. Its label stays the id the store kept; no
+            // title is invented here.
+            if crate::youtube::is_pseudo_path(path) {
+                let opened = open_resolved(resolver, path)?;
+                return Ok((opened.spec(), None, Some((path.clone(), opened))));
+            }
+            let first_path = match resolver {
+                Some(resolver) => resolver.resolve(path)?,
+                None => path.clone(),
+            };
+            Ok((TrackSource::open(&first_path)?.spec(), None, None))
+        }
+        (Entry::Youtube { path, .. }, None) => {
+            // A YouTube entry (issue #70, S4) is never a file: the resolver
+            // opens its ranged stream here, at selection time, and the
+            // opened source is carried to the first turn the way a start's
+            // carried answer is — one resolve, one probe, and a first turn
+            // that already has a duration and a seek. A missing resolver is
+            // a sentence, never a panic.
+            let opened = open_resolved(resolver, path)?;
+            Ok((opened.spec(), None, Some((path.clone(), opened))))
+        }
+        (Entry::Station { url, .. }, None) => {
+            let source = open_station_retrying(&LiveOpener, url, Retry::ONCE)
+                .map_err(|error| AudioError::Unsupported(error.to_string()))?;
+            Ok((source.spec(), Some((url.clone(), source)), None))
+        }
+    }
+}
+
 /// The opener a sequence uses: the injected one, or the production opener —
 /// one GET with the default per-operation timeouts.
 fn station_opener(opener: Option<&Arc<dyn StationOpener>>) -> &dyn StationOpener {
@@ -2230,6 +2425,10 @@ fn open_station_retrying(
 /// remote row and never the hash-named cached file (T12c); a station is
 /// named for itself, the URL never shown (T5c2a). The samples, however,
 /// come from the resolved file — the cache — whose tags are the originals'.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the turn is one story — how the track opens (carried, seeked\n    or plain), how its format joins the stream's, and the loudness paths\n    each kind of track takes — and splitting it would scatter the\n    decisions a track boundary makes"
+)]
 fn play_turn(
     label: &str,
     path: &Path,
@@ -2282,11 +2481,27 @@ fn play_turn(
     publish_progress(shared, sink, &record);
 
     let spec = source.spec();
+    // A resolved YouTube stream (issue #70, S9) is out of scope for the
+    // loudness paths: there is no file to read tags from, so no tag is read
+    // and no gain is applied, bit-perfect claims it not, and one sentence on
+    // the first play says so instead of any of them pretending.
+    let resolved_stream = crate::youtube::is_pseudo_path(path);
+    if turn.first && resolved_stream {
+        sink.notice(String::from(
+            "ReplayGain, bit-perfect and the loudness path do not apply to a resolved \
+             YouTube stream",
+        ));
+    }
     // Bit-perfect (T17): when the track's rate differs from the stream's, the
     // stream closes and reopens at the track's own rate — the sink swaps it,
     // or falls back to the current stream when the device has no such output.
-    // A layout difference never reopens: the mapping below still applies.
-    if turn.bit_perfect && needs_stream_reopen(*expected, spec, turn.bit_perfect) {
+    // A layout difference never reopens: the mapping below still applies. A
+    // resolved stream (S9) takes none of it: its rate is converted like any
+    // other track's, because bit-perfect does not apply to it.
+    if turn.bit_perfect
+        && !resolved_stream
+        && needs_stream_reopen(*expected, spec, turn.bit_perfect)
+    {
         *expected = sink.reopen_stream(spec)?;
     }
     // A rate difference is converted away, and a layout difference is mapped:
@@ -2310,8 +2525,10 @@ fn play_turn(
     // ReplayGain belongs to the track: recomputed once per track change, never
     // per queue (T11, T18); multiplied below, before the ring, so the user's
     // volume ramp stays exactly what it was. Bit-perfect skips it entirely
-    // (T17): scaling samples is what the mode refuses, even from a tag.
-    let gain = if turn.bit_perfect {
+    // (T17): scaling samples is what the mode refuses, even from a tag. A
+    // resolved stream (S9) skips it too — there is no file to read tags from,
+    // so none is read, and the samples keep their own loudness.
+    let gain = if turn.bit_perfect || resolved_stream {
         Gain::identity()
     } else {
         Gain::read_from(path, turn.gain_mode)
