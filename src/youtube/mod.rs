@@ -8,6 +8,7 @@
 //! never a stream URL: the URL a resolve extracts expires, so it is fetched
 //! when the entry plays, not when it was queued (S4).
 
+pub mod resolve;
 pub mod search;
 pub mod tool;
 
