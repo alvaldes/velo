@@ -691,8 +691,15 @@ fn removing_a_played_entry_shifts_the_producer_onto_the_entry_that_followed() {
             samples.extend_from_slice(block);
             if !removed {
                 removed = true;
-                queue.lock().expect("the queue locks").remove(0);
+                // The edit and its record go out together, in the order the
+                // UI publishes them (queue, then removals): two separate
+                // acquisitions let the producer cross a turn boundary in
+                // between and read a shrunk queue against a stale index, which
+                // makes this test flaky instead of proving the shift.
+                let mut queued = queue.lock().expect("the queue locks");
+                queued.remove(0);
                 removals.lock().expect("the removals lock").push_back(0);
+                drop(queued);
             }
         },
         &mut |failure: TrackFailure| failures.push(failure),

@@ -159,7 +159,7 @@ fn a_child_that_outlives_its_deadline_is_killed() {
     );
 
     let started = Instant::now();
-    let result = run(&program, &[], Deadline::new(Duration::from_secs(2)));
+    let result = run(&program, &[], Deadline::new(Duration::from_secs(1)));
     let elapsed = started.elapsed();
 
     assert!(
@@ -187,7 +187,7 @@ fn a_grandchild_holding_the_pipe_cannot_hold_the_call() {
     let program = fake(&dir, "#!/bin/sh\nsh -c 'sleep 60' &\nexit 0\n");
 
     let started = Instant::now();
-    let result = run(&program, &[], Deadline::new(Duration::from_secs(2)));
+    let result = run(&program, &[], Deadline::new(Duration::from_secs(1)));
     let elapsed = started.elapsed();
 
     assert!(
@@ -404,7 +404,7 @@ fn a_chain_that_stalls_names_the_stall_and_ends_the_children() {
     let ff = fake_ffmpeg(&dir, "#!/bin/sh\ncat\n");
 
     let started = Instant::now();
-    let result = spawn_chain(&yt, &ff, Deadline::new(Duration::from_secs(2)));
+    let result = spawn_chain(&yt, &ff, Deadline::new(Duration::from_secs(1)));
     let elapsed = started.elapsed();
 
     match &result {
@@ -508,7 +508,7 @@ cat
 ",
     );
 
-    let mut running = spawn_chain(&yt, &ff, Deadline::new(Duration::from_secs(2)))
+    let mut running = spawn_chain(&yt, &ff, Deadline::new(Duration::from_secs(1)))
         .expect("a slow start that flows is not a refusal");
 
     let mut seen = 0_usize;
