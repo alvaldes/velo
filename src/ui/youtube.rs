@@ -46,6 +46,11 @@ pub enum Outcome {
     /// `enter` on the query row: the query the screen holds is to be
     /// searched. The shell carries it to the tool off the event loop.
     Search(String),
+    /// `a` on a result, or `A` on the list: the highlighted result — or every
+    /// result, in order — joins the queue without being played. The app's own
+    /// `a` has no row of its own to reach while this screen is open, so the
+    /// screen owns the two keys while it is browsing; typing still types them.
+    Append(Vec<Found>),
     /// `enter` on a result: it is queued as one [`Entry::Youtube`] and
     /// played from its own row, the way `enter` on a queue row plays from
     /// that row — unless the result is a live broadcast, which is refused
@@ -309,6 +314,23 @@ impl Search {
             // `enter`: the query row searches in typing mode; in browsing
             // mode a result row queues and plays it (S3), the shell
             // carries it out, the screen holds no queue of its own.
+            // Browsing `a` and `A` are the list's own: append the highlighted
+            // result, or the whole answer, without playing it.
+            KeyCode::Char('a') if !self.typing => {
+                // Cursor 0 is the query row; a result is at `cursor - 1`, the
+                // same way `enter` reads it.
+                match self
+                    .cursor
+                    .checked_sub(1)
+                    .and_then(|row| self.results.get(row))
+                {
+                    Some(found) => Outcome::Append(vec![found.clone()]),
+                    None => Outcome::Handled,
+                }
+            }
+            KeyCode::Char('A') if !self.typing && !self.results.is_empty() => {
+                Outcome::Append(self.results.clone())
+            }
             KeyCode::Enter => match (self.typing, self.cursor) {
                 (true, _) => Outcome::Search(self.query.clone()),
                 (false, 0) => Outcome::Handled,

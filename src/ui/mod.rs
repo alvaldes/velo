@@ -4406,6 +4406,10 @@ impl<'lib> App<'lib> {
                 Some(Action::None)
             }
             youtube::Outcome::Play(found) => Some(self.play_youtube(found)),
+            youtube::Outcome::Append(found) => {
+                self.append_youtube(found);
+                Some(Action::None)
+            }
         }
     }
 
@@ -4477,6 +4481,43 @@ impl<'lib> App<'lib> {
     /// its body what the search already said — and the play action goes to
     /// the shell, which starts it the way `enter` on a queue row plays
     /// from that row. Never a second start, never a second entry.
+    fn append_youtube(&mut self, found: Vec<crate::youtube::search::Found>) {
+        // A live broadcast is refused here exactly as it is when chosen: its
+        // stream is HLS, and an entry that cannot open is not a queue entry.
+        let live = found
+            .iter()
+            .find(|found| found.live)
+            .map(|f| f.title.clone());
+        let playable: Vec<_> = found.into_iter().filter(|found| !found.live).collect();
+        let live_refused = live.is_some();
+        if let Some(title) = live {
+            self.status = format!(
+                "velo: {title} is live, and {}",
+                crate::youtube::resolve::LIVE_SENTENCE
+            );
+            if playable.is_empty() {
+                return;
+            }
+        }
+        let count = playable.len();
+        self.edit_queue(|queue| {
+            queue.extend(playable.iter().map(|found| Entry::Youtube {
+                path: crate::youtube::pseudo_path(&found.id),
+                title: found.title.clone(),
+                uploader: found.uploader.clone(),
+                duration: found.duration,
+            }));
+        });
+        self.status = if live_refused {
+            format!(
+                "velo: added {} · skipped 1 live broadcast",
+                plural(count, "result", "results")
+            )
+        } else {
+            format!("velo: added {}", plural(count, "result", "results"))
+        };
+    }
+
     fn play_youtube(&mut self, found: crate::youtube::search::Found) -> Action {
         // A live result is known before it is chosen — the search says so —
         // and is refused here, before anything is queued: its stream is HLS,

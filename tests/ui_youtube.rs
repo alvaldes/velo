@@ -1148,3 +1148,75 @@ fn a_query_that_parses_as_an_id_but_is_not_one_falls_back_to_searching() {
     let _ = std::fs::remove_dir_all(&dir);
     let _ = program;
 }
+
+/// `a` on a result appends it to the queue without playing it, and `A` appends
+/// the whole answer — the live one refused, the rest in order. Typing still
+/// types them: `/` brings the keyboard back to the query.
+#[test]
+fn a_appends_a_result_and_upper_a_appends_the_answer() {
+    let dir = scratch("append");
+    // The helper already answers with SEARCH_ANSWER: one recorded result and
+    // one live one.
+    let (mut app, program) = search_from_the_row(&dir, "", "dawn");
+
+    assert!(
+        until(&mut app, |app| screen_of(app).contains("Dawn")),
+        "the answer lands before anything is appended: {}",
+        app.status()
+    );
+    assert_eq!(app.queue(), [] as [Entry; 0], "a search queues nothing");
+
+    // `a` on the first result: queued, not played.
+    press(&mut app, KeyCode::Char('j')); // off the query row, onto the first result
+    assert_eq!(app.on_key(KeyCode::Char('a').into()), Action::None);
+    assert_eq!(
+        app.queue().len(),
+        1,
+        "one entry appended, got: {}",
+        app.status()
+    );
+    match &app.queue()[0] {
+        Entry::Youtube { path, title, .. } => {
+            assert_eq!(path, &PathBuf::from("youtube://abc123"));
+            assert_eq!(title, "Dawn");
+        }
+        other => panic!("a result appends as a YouTube entry, got {other:?}"),
+    }
+    assert!(
+        app.status().contains("added 1 result"),
+        "the append says what it did: {}",
+        app.status()
+    );
+
+    // `A`: the whole answer, the live one refused in its own sentence.
+    assert_eq!(app.on_key(KeyCode::Char('A').into()), Action::None);
+    assert_eq!(
+        app.queue().len(),
+        2,
+        "only the recorded result joins, got: {}",
+        app.status()
+    );
+    assert_eq!(
+        app.status().matches("added").count(),
+        1,
+        "the append counted the recorded result: {}",
+        app.status()
+    );
+    assert!(
+        app.status().contains("skipped 1 live broadcast"),
+        "the live one is named, not silently dropped: {}",
+        app.status()
+    );
+
+    // And typing still types: `/` comes back to the query and `a` is a letter.
+    press(&mut app, KeyCode::Char('/'));
+    press(&mut app, KeyCode::Char('a'));
+    assert_eq!(
+        app.youtube_query(),
+        Some("dawna"),
+        "the letter went back into the query instead of appending"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = program;
+}
