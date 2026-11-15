@@ -10,3 +10,4 @@ pub mod saved;
 pub mod subsonic;
 pub mod ui;
 pub mod update;
+pub mod youtube;
