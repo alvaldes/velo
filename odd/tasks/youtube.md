@@ -295,6 +295,9 @@ land in one commit: an integration test referencing a type that does not exist
 yet would leave the tree uncompilable between slices. D and E are separate
 commits, and D is the only one that changes a screen.
 
+Landed on `feat/youtube`, in this order: `997751e` this document, `77f8e90`
+slices A–C, `0400db9` slice D, `d105b4d` slice E.
+
 ## Tasks
 
 | # | Task | Spec | Route |
@@ -326,3 +329,23 @@ JSON crate by an existing decision (`Cargo.toml`); identity rides the
 `subsonic://` pseudo-path precedent so `history.rs` and `saved.rs` keep their
 formats; and `#46` closed as *none* with a rule that names a downloader, which is
 why L2 exists.
+
+**L4 — what each task landed, and where.** T1–T4 in `77f8e90`: the bounded
+runner (`tool.rs`, six tests including the process-group kill and a grandchild
+holding the pipe), the capability and the degraded resolver (`mod.rs`), the
+miniserde search (`search.rs`), and `Entry::Youtube` with the resolver that
+opens the ranged stream at play time (`resolve.rs`, `output.rs`, the twelve
+`Entry` matches, S9's refusal). T5 in `0400db9`: the row, the screen
+(`src/ui/youtube.rs`), and the resolver the binary composes now that two
+sources own pseudo-paths. T6 in `d105b4d`. `scripts/check.sh` — fmt, clippy
+`-D warnings`, test — green before each commit, 1279 tests.
+
+**L5 — the defect slice D found, recorded because it was mine.** Slice C left
+`is_uncached_remote` recognizing only `subsonic://` and remote URLs, so a
+`youtube://` first entry never looked like it would wait: the start gates never
+fired and the first resolve would have run on the event loop, breaking S6
+without any test noticing. The pinning test
+(`a_queued_youtube_entry_resolves_on_the_worker_never_the_event_loop`) is what
+caught it. The lesson for a next source that owns a pseudo-path: the wait
+question is a separate seam from the resolve one, and adding a scheme without
+teaching it is a silent S6 regression.
