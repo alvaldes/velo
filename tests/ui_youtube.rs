@@ -672,3 +672,416 @@ fn ctrl_s_on_a_youtube_row_says_what_it_is() {
         );
     }
 }
+
+// ---- the two modes ----------------------------------------------------------
+
+/// One video description as `--dump-single-json` answers it: what the
+/// worker's answer turns into one queue entry.
+const VIDEO_OBJECT: &str = r#"{"id":"abc123def45","title":"Dawn","uploader":"Chill Channel","duration":212.0,"live_status":null}"#;
+
+/// A broadcast description: no length, and `live_status` naming it live.
+const LIVE_OBJECT: &str = r#"{"id":"live1234567","title":"Streaming now","channel":"Evening","duration":null,"live_status":"is_live"}"#;
+
+/// Types one query and starts its search, leaving the screen in the
+/// browsing mode a started search enters.
+fn search_from_the_row(dir: &Path, body: &str, query: &str) -> (App<'static>, PathBuf) {
+    let (mut app, program) = app_on_the_row(
+        dir,
+        &format!("#!/bin/sh\ncat <<'JSON'\n{SEARCH_ANSWER}\nJSON\n{body}"),
+    );
+    press(&mut app, KeyCode::Enter); // the screen opens
+    for character in query.chars() {
+        press(&mut app, KeyCode::Char(character));
+    }
+    press(&mut app, KeyCode::Enter); // the search starts: browsing
+    (app, program)
+}
+
+/// Typing is the mode the screen opens in, and every printable — `a`, `?`,
+/// `u` and `j` among them — lands in the query, because typing owns the
+/// keyboard until something refocuses away from the query.
+#[test]
+fn typing_mode_takes_every_printable_into_the_query() {
+    let dir = scratch("typing");
+    let (mut app, program) = app_on_the_row(&dir, "#!/bin/sh\ntrue\n");
+    press(&mut app, KeyCode::Enter); // the screen opens
+
+    assert!(app.youtube_typing(), "the screen opens typing");
+    for character in ['a', '?', 'u', 'j'] {
+        press(&mut app, KeyCode::Char(character));
+    }
+
+    assert_eq!(app.youtube_query(), Some("a?uj"), "every key typed");
+    assert!(app.youtube_typing());
+    assert!(!app.help_open(), "`?` typed, not the help");
+    assert!(!app.url_prompt_open(), "`u` typed, not the URL prompt");
+
+    // `enter` in typing mode searches what is typed: not a YouTube thing,
+    // so it is a query, never a load.
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.status(), "⟳ searching a?uj…");
+
+    press(&mut app, KeyCode::Esc);
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = program;
+}
+
+/// A started search enters browsing: `?` opens the help, `a` does what `a`
+/// does on the sources screen it sits over, `u` opens the URL prompt, `j`
+/// moves the results and `enter` plays the selected one — and nothing of it
+/// lands in the query.
+#[test]
+fn after_the_search_starts_the_app_s_own_keys_fall_through() {
+    let dir = scratch("browsing");
+    let (mut app, program) = search_from_the_row(&dir, "", "dawn");
+
+    assert!(!app.youtube_typing(), "a started search leaves the query");
+    assert_eq!(app.youtube_query(), Some("dawn"));
+
+    // `?` opens the help, the way it does everywhere else.
+    press(&mut app, KeyCode::Char('?'));
+    assert!(app.help_open(), "help opens from browsing");
+    assert_eq!(app.youtube_query(), Some("dawn"), "the query is untouched");
+    press(&mut app, KeyCode::Esc); // the help closes
+
+    // `a` does what `a` does on the sources screen underneath — which
+    // swallows it — and never types into the query.
+    let status = app.status().to_owned();
+    press(&mut app, KeyCode::Char('a'));
+    assert_eq!(app.youtube_query(), Some("dawn"));
+    assert_eq!(app.status(), status);
+    assert_eq!(app.queue().len(), 0);
+
+    // `u` opens the URL prompt, the global key it is.
+    press(&mut app, KeyCode::Char('u'));
+    assert!(app.url_prompt_open());
+    press(&mut app, KeyCode::Esc);
+
+    // `j` moves onto the first result and `enter` plays it — once the
+    // results have landed, the way the worker hands them over.
+    assert!(
+        until(&mut app, |app| screen_of(app).contains("Dawn")),
+        "the search answered"
+    );
+    press(&mut app, KeyCode::Char('j'));
+    let action = app.on_key(key(KeyCode::Enter));
+    match &action {
+        Action::PlayQueue { from } => {
+            assert_eq!(*from, 0, "the selected result is the one that plays");
+        }
+        other => panic!("enter in browsing plays the result, got {other:?}"),
+    }
+    assert_eq!(app.queue().len(), 1, "one result, one entry");
+
+    press(&mut app, KeyCode::Esc);
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = program;
+}
+
+/// `/` returns to typing with the current query, and what is typed then
+/// appends — `j` typing again among them.
+#[test]
+fn slash_returns_to_typing_and_typing_appends() {
+    let dir = scratch("refocus");
+    let (mut app, program) = search_from_the_row(&dir, "", "dawn");
+    assert!(until(&mut app, |app| screen_of(app).contains("Dawn")));
+
+    press(&mut app, KeyCode::Char('/'));
+    assert!(app.youtube_typing(), "`/` refocuses the query");
+    assert_eq!(app.youtube_query(), Some("dawn"));
+
+    press(&mut app, KeyCode::Char('j'));
+    assert_eq!(app.youtube_query(), Some("dawnj"), "typing appends");
+
+    press(&mut app, KeyCode::Esc);
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = program;
+}
+
+// ---- the load: a URL or an id, from both doors ------------------------------
+
+/// The `u` prompt with a `YouTube` URL opens the screen and loads the one
+/// video it names: one `Entry::Youtube` queued, played from its row, the
+/// user landed on the screen.
+#[test]
+fn the_url_prompt_loads_a_youtube_url_through_the_screen() {
+    let dir = scratch("url-load");
+    let (mut app, program) = app_on_the_row(
+        &dir,
+        &format!("#!/bin/sh\ncat <<'JSON'\n{VIDEO_OBJECT}\nJSON\n"),
+    );
+    // The session's resolver is the YouTube side over a program that is
+    // not there: the resolve waits on its worker and the queue stands,
+    // which is what makes the queued entry observable (no audio device
+    // opens in a test).
+    app.set_resolver(Some(std::sync::Arc::new(
+        velo::youtube::resolve::Resolver::new(PathBuf::from("/velo-test/does-not-exist/yt-dlp")),
+    )));
+    press(&mut app, KeyCode::Char('u'));
+    assert!(app.url_prompt_open());
+    for character in "https://youtu.be/abc123def45".chars() {
+        press(&mut app, KeyCode::Char(character));
+    }
+    press(&mut app, KeyCode::Enter);
+
+    assert!(
+        !app.url_prompt_open(),
+        "an accepted answer closes the prompt"
+    );
+    assert!(app.youtube_open(), "the screen opens for the load");
+    assert!(
+        until(&mut app, |app| !app.queue().is_empty()),
+        "the described video queues, got: {}",
+        app.status()
+    );
+    assert_eq!(app.view(), View::Sources, "the user lands on the screen");
+    assert_eq!(
+        app.queue(),
+        vec![Entry::Youtube {
+            path: PathBuf::from("youtube://abc123def45"),
+            title: String::from("Dawn"),
+            uploader: Some(String::from("Chill Channel")),
+            duration: Some(212),
+        }],
+        "one entry, the identity and the body the description said"
+    );
+
+    press(&mut app, KeyCode::Esc);
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = program;
+}
+
+/// An `http` URL keeps the prompt's own path byte for byte: no `YouTube`
+/// screen, the ordinary station machinery — here a refusal, the machine
+/// having no server to answer.
+#[test]
+fn the_url_prompt_keeps_its_own_path_for_an_http_url() {
+    let dir = scratch("url-http");
+    let (mut app, program) = app_on_the_row(&dir, "#!/bin/sh\ntrue\n");
+    press(&mut app, KeyCode::Char('u'));
+    for character in "http://127.0.0.1:1/stream".chars() {
+        press(&mut app, KeyCode::Char(character));
+    }
+    press(&mut app, KeyCode::Enter);
+
+    assert!(
+        !app.youtube_open(),
+        "an http URL never opens the YouTube screen"
+    );
+    assert_eq!(
+        app.queue(),
+        [] as [Entry; 0],
+        "a refused URL queues nothing"
+    );
+    assert!(
+        app.status().contains("velo:"),
+        "the ordinary path's refusal stands, got: {}",
+        app.status()
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = program;
+}
+
+/// The search field with a `YouTube` URL loads that video instead of
+/// searching for the text; a normal query still searches.
+#[test]
+fn a_youtube_url_in_the_query_loads_and_a_query_still_searches() {
+    let dir = scratch("query-load");
+    let (mut app, program) = app_on_the_row(
+        &dir,
+        &format!("#!/bin/sh\ncat <<'JSON'\n{VIDEO_OBJECT}\nJSON\n"),
+    );
+    app.set_resolver(Some(std::sync::Arc::new(
+        velo::youtube::resolve::Resolver::new(PathBuf::from("/velo-test/does-not-exist/yt-dlp")),
+    )));
+    press(&mut app, KeyCode::Enter); // the screen opens
+    for character in "youtube.com/watch?v=abc123def45".chars() {
+        press(&mut app, KeyCode::Char(character));
+    }
+    press(&mut app, KeyCode::Enter);
+
+    assert!(
+        until(&mut app, |app| !app.queue().is_empty()),
+        "the URL loads, got: {}",
+        app.status()
+    );
+    assert_eq!(
+        app.queue(),
+        vec![Entry::Youtube {
+            path: PathBuf::from("youtube://abc123def45"),
+            title: String::from("Dawn"),
+            uploader: Some(String::from("Chill Channel")),
+            duration: Some(212),
+        }],
+        "the load queued one entry, the search never ran"
+    );
+
+    press(&mut app, KeyCode::Esc);
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = program;
+}
+
+/// A live description pasted into the `u` prompt is refused with the
+/// existing live sentence, queues nothing, and opens nothing: the screen it
+/// needed as a worker closes, the user stays where they were.
+#[test]
+fn a_live_url_in_the_prompt_is_refused_and_queues_nothing() {
+    let dir = scratch("url-live");
+    let (mut app, program) = app_on_the_row(
+        &dir,
+        &format!("#!/bin/sh\ncat <<'JSON'\n{LIVE_OBJECT}\nJSON\n"),
+    );
+    press(&mut app, KeyCode::Char('u'));
+    for character in "https://youtu.be/live1234567".chars() {
+        press(&mut app, KeyCode::Char(character));
+    }
+    press(&mut app, KeyCode::Enter);
+
+    assert!(
+        until(&mut app, |app| app.status().contains("is live")),
+        "the live sentence stands, got: {}",
+        app.status()
+    );
+    assert_eq!(
+        app.queue(),
+        [] as [Entry; 0],
+        "a refused live queues nothing"
+    );
+    assert!(
+        !app.youtube_open(),
+        "a refused load opens nothing over the sources"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = program;
+}
+
+/// A live id typed into the query is refused the same way: one sentence,
+/// nothing queued, the screen stays where it was.
+#[test]
+fn a_live_id_in_the_query_is_refused_and_queues_nothing() {
+    let dir = scratch("query-live");
+    let (mut app, program) = app_on_the_row(
+        &dir,
+        &format!("#!/bin/sh\ncat <<'JSON'\n{LIVE_OBJECT}\nJSON\n"),
+    );
+    press(&mut app, KeyCode::Enter); // the screen opens
+    for character in "youtube.com/watch?v=live1234567".chars() {
+        press(&mut app, KeyCode::Char(character));
+    }
+    press(&mut app, KeyCode::Enter);
+
+    assert!(
+        until(&mut app, |app| app.status().contains("is live")),
+        "the live sentence stands, got: {}",
+        app.status()
+    );
+    assert_eq!(
+        app.queue(),
+        [] as [Entry; 0],
+        "a refused live queues nothing"
+    );
+    assert!(app.youtube_open(), "the screen the query lives on stays");
+
+    press(&mut app, KeyCode::Esc);
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = program;
+}
+
+// ---- what is playing is visible ---------------------------------------------
+
+/// The screen names what is playing when the playing entry is a `YouTube`
+/// one, and says nothing when it is not — the shell reads the entry, the
+/// screen draws the line, and the screen holds no queue.
+#[test]
+fn the_screen_names_what_is_playing_when_it_is_a_youtube_entry() {
+    let dir = scratch("now-playing");
+    let (mut app, program) = app_on_the_row(&dir, "#!/bin/sh\ntrue\n");
+
+    // Nothing playing: no line.
+    press(&mut app, KeyCode::Enter); // the screen opens
+    let screen = screen_of(&app);
+    assert!(
+        !screen.contains("Streaming now"),
+        "nothing playing, nothing named, got:\n{screen}"
+    );
+    press(&mut app, KeyCode::Esc);
+
+    // A YouTube entry standing: its title is on the screen, beside the
+    // source rows it was queued from.
+    app.show_playing_for_tests(
+        Entry::Youtube {
+            path: PathBuf::from("youtube://live1234567"),
+            title: String::from("Streaming now"),
+            uploader: Some(String::from("Evening")),
+            duration: None,
+        },
+        Duration::ZERO,
+        None,
+        None,
+    );
+    press(&mut app, KeyCode::Enter);
+    let screen = screen_of(&app);
+    assert!(
+        screen.contains("▶ Streaming now"),
+        "the line names what is playing, got:\n{screen}"
+    );
+
+    // A file standing: the line is silent — the file is the app's
+    // now-playing block's to name, never the screen's line, and no
+    // invented name appears in its place.
+    app.show_playing_for_tests(
+        Entry::File(PathBuf::from("/music/somewhere/a-flac.flac")),
+        Duration::ZERO,
+        None,
+        None,
+    );
+    let screen = screen_of(&app);
+    assert!(
+        !screen.contains("▶ Streaming now") && !screen.contains("▶ a-flac"),
+        "a non-YouTube entry is not the screen's to name, got:\n{screen}"
+    );
+
+    press(&mut app, KeyCode::Esc);
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = program;
+}
+
+/// An eleven-character query that parses as a video id but is not one falls
+/// back to the search the user meant: `dawn-chorus` is eleven characters of
+/// `[A-Za-z0-9_-]`, so the describe is attempted — and when the tool refuses
+/// it, the search runs instead of the refusal standing.
+#[test]
+fn a_query_that_parses_as_an_id_but_is_not_one_falls_back_to_searching() {
+    let dir = scratch("fallback");
+    // The describe refuses in the tool's own words; the search answers.
+    let body = format!(
+        "#!/bin/sh\ncase \"$*\" in\n  *--flat-playlist*) cat <<'JSON'\n{SEARCH_ANSWER}\nJSON\n    ;;\n  *) printf 'ERROR: [youtube] dawn-chor: Video unavailable\\n' >&2; exit 1 ;;\nesac\n"
+    );
+    let (mut app, program) = app_on_the_row(&dir, &body);
+    press(&mut app, KeyCode::Enter); // the screen opens
+    for character in "dawn-chorus".chars() {
+        press(&mut app, KeyCode::Char(character));
+    }
+    assert_eq!(
+        velo::youtube::input_video_id("dawn-chorus").as_deref(),
+        Some("dawn-chorus"),
+        "the phrase does parse as an id: that is why it needs the fallback"
+    );
+    press(&mut app, KeyCode::Enter);
+
+    assert!(
+        until(&mut app, |app| screen_of(app).contains("Nightfall")),
+        "the search ran after the describe refused, got: {}",
+        app.status()
+    );
+    assert_eq!(
+        app.queue(),
+        [] as [Entry; 0],
+        "a failed describe queues nothing on its own"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = program;
+}

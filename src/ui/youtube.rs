@@ -54,7 +54,7 @@ pub enum Outcome {
     Play(Found),
 }
 
-/// What one finished background search hands back.
+/// What one finished background job hands back.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Answer {
     /// The tool failed: its own sentence, one line.
@@ -63,16 +63,36 @@ pub enum Answer {
     Empty,
     /// The tool answered results, now held by the screen's list.
     Filled,
+    /// The one video a URL or a bare id described: the shell queues exactly
+    /// one [`Entry::Youtube`] and plays it the way a chosen result plays;
+    /// the screen holds no queue and never touches one.
+    Described(Found),
 }
 
-/// The search of one query, in flight until its answer is polled.
-struct Pending {
-    /// The query the running search was asked for: what the status line
-    /// names, and nothing else — the line is rewritten if the query on
-    /// screen has moved on, never silently stale.
-    query: String,
-    /// The answer the worker hands back, polled once per tick.
-    answer: Receiver<Result<Vec<Found>, ToolError>>,
+/// One background job in flight until its answer is polled: a search, or
+/// the description of the one video a URL or bare id names. One at a time.
+enum Pending {
+    /// A search: the query it was asked for, and its answer.
+    Search {
+        query: String,
+        answer: Receiver<Result<Vec<Found>, ToolError>>,
+    },
+    /// A description: the text it was asked about, and its answer.
+    Describe {
+        input: String,
+        answer: Receiver<Result<Found, ToolError>>,
+    },
+}
+
+impl Pending {
+    /// What the status line names while this job runs: the query or the
+    /// input it was asked for, and nothing else.
+    fn subject(&self) -> &str {
+        match self {
+            Self::Search { query, .. } => query,
+            Self::Describe { input, .. } => input,
+        }
+    }
 }
 
 /// The screen's own state: the query being typed, the cursor — the query row
@@ -89,9 +109,14 @@ pub struct Search {
     query: String,
     /// The row the cursor is on: the query row is row 0, the results follow.
     cursor: usize,
+    /// Whether the query is what is being typed into. The screen opens
+    /// typing, `/` (or `i`) returns to it, and anything that moves the
+    /// focus away from the query row — a started search, the arrow keys —
+    /// leaves it: one mode at a time, so the keyboard has one meaning.
+    typing: bool,
     /// The last search's answers, in the order the tool answered them.
     results: Vec<Found>,
-    /// The search in flight, its answer still to be polled. One at a time:
+    /// The job in flight, its answer still to be polled. One at a time:
     /// `enter` while one runs is spent on the running one.
     pending: Option<Pending>,
 }
@@ -104,6 +129,7 @@ impl Search {
             program,
             query: String::new(),
             cursor: 0,
+            typing: true,
             results: Vec::new(),
             pending: None,
         }
@@ -115,16 +141,24 @@ impl Search {
         &self.query
     }
 
+    /// Whether the query is what is being typed into: the shell reads it
+    /// for the footer's keys, the tests read it to pin the mode model.
+    #[must_use]
+    pub fn typing(&self) -> bool {
+        self.typing
+    }
+
     /// The answers on the list, in the order the tool answered them.
     #[must_use]
     pub fn results(&self) -> &[Found] {
         &self.results
     }
 
-    /// The query a running search was asked for, while one runs.
+    /// The query a running job was asked for, while one runs: what the
+    /// status line names, never a stale one.
     #[must_use]
     pub fn searching_query(&self) -> Option<&str> {
-        self.pending.as_ref().map(|pending| pending.query.as_str())
+        self.pending.as_ref().map(Pending::subject)
     }
 
     /// Starts one search on its own thread (S6): the tool runs off the event
@@ -132,7 +166,8 @@ impl Search {
     /// answering keys, and the answer lands through the tick. Refused while
     /// one is already in flight — one request at a time, the rule every
     /// other wired view keeps; the running one's deadline is its end.
-    /// Answers `false` when the ask was refused.
+    /// Answers `false` when the ask was refused. A started search is what
+    /// enters the browsing mode: the keys stop typing and start moving.
     pub fn search(&mut self, query: String) -> bool {
         if self.pending.is_some() {
             return false;
@@ -145,38 +180,85 @@ impl Search {
             // nothing and is gone; the deadline ended the child already.
             let _ = sender.send(search::run(&program, &query));
         });
-        self.pending = Some(Pending {
+        self.pending = Some(Pending::Search {
             query: asked,
             answer,
         });
+        self.typing = false;
         true
     }
 
-    /// Collects a finished search, once per tick: still running is no news,
-    /// an answer lands as [`Answer::Filled`] with the results held here, a
-    /// query with nothing behind it as [`Answer::Empty`], a failure as
-    /// [`Answer::Failed`] with the tool's own sentence, and a worker that
-    /// died before it answered is one sentence too, never an eternal wait.
+    /// Describes the one video a URL or a bare id names, on the same worker
+    /// and under the same rules as [`Self::search`]: off the event loop,
+    /// bounded by the resolve deadline, one job at a time, the answer
+    /// landing through the tick. Answers `false` when refused.
+    pub fn describe(&mut self, input: String) -> bool {
+        if self.pending.is_some() {
+            return false;
+        }
+        let program = self.program.clone();
+        let (sender, answer) = mpsc::channel();
+        let asked = input.clone();
+        thread::spawn(move || {
+            let _ = sender.send(search::describe(&program, &input));
+        });
+        self.pending = Some(Pending::Describe {
+            input: asked,
+            answer,
+        });
+        self.typing = false;
+        true
+    }
+
+    /// Collects a finished job, once per tick: still running is no news, a
+    /// search's answer lands as [`Answer::Filled`] with the results held
+    /// here, a query with nothing behind it as [`Answer::Empty`], a
+    /// description's as [`Answer::Described`] with the one video the shell
+    /// queues and plays, and a failure as [`Answer::Failed`] with the
+    /// tool's own sentence. A worker that died before it answered is one
+    /// sentence too, never an eternal wait.
     pub fn poll(&mut self) -> Option<Answer> {
-        let pending = self.pending.as_ref()?;
-        let answer = match pending.answer.try_recv() {
-            Ok(answer) => answer,
-            Err(TryRecvError::Empty) => return None,
-            Err(TryRecvError::Disconnected) => {
-                self.pending = None;
-                return Some(Answer::Failed(String::from(
-                    "the search stopped without an answer",
-                )));
-            }
+        /// What one tick's try at the in-flight job found.
+        enum Polled {
+            StillRunning,
+            Search(Result<Vec<Found>, ToolError>),
+            Describe(Result<Found, ToolError>),
+            Lost,
+        }
+
+        let pending = self.pending.take()?;
+        let polled = match pending {
+            Pending::Search { query, answer } => match answer.try_recv() {
+                Ok(answer) => Polled::Search(answer),
+                Err(TryRecvError::Empty) => {
+                    self.pending = Some(Pending::Search { query, answer });
+                    Polled::StillRunning
+                }
+                Err(TryRecvError::Disconnected) => Polled::Lost,
+            },
+            Pending::Describe { input, answer } => match answer.try_recv() {
+                Ok(answer) => Polled::Describe(answer),
+                Err(TryRecvError::Empty) => {
+                    self.pending = Some(Pending::Describe { input, answer });
+                    Polled::StillRunning
+                }
+                Err(TryRecvError::Disconnected) => Polled::Lost,
+            },
         };
-        self.pending = None;
-        match answer {
-            Err(error) => Some(Answer::Failed(error.to_string())),
-            Ok(results) if results.is_empty() => Some(Answer::Empty),
-            Ok(results) => {
+        match polled {
+            Polled::StillRunning => None,
+            Polled::Lost => Some(Answer::Failed(String::from(
+                "the search stopped without an answer",
+            ))),
+            Polled::Search(Err(error)) | Polled::Describe(Err(error)) => {
+                Some(Answer::Failed(error.to_string()))
+            }
+            Polled::Search(Ok(results)) if results.is_empty() => Some(Answer::Empty),
+            Polled::Search(Ok(results)) => {
                 self.results = results;
                 Some(Answer::Filled)
             }
+            Polled::Describe(Ok(found)) => Some(Answer::Described(found)),
         }
     }
 
@@ -185,81 +267,131 @@ impl Search {
         1 + self.results.len()
     }
 
-    /// The keys the screen owns (T5); typing goes to the query, `enter`
-    /// searches on the query row and plays on a result, `esc` goes back, and
-    /// `j`/`k`/arrows move with the wrapping every other list has.
+    /// The keys the screen owns (T5), by the mode it is in — one meaning at
+    /// a time:
+    ///
+    /// **Typing** (the mode it opens in, `/` or `i` returning to it): every
+    /// printable goes to the query, `enter` searches, `esc` closes — and
+    /// the arrow keys still move the results list, because they are not
+    /// text; moving off the query row is also what leaves typing.
+    ///
+    /// **Browsing** (entered when a search starts, or the focus moves away
+    /// from the query): `j`/`k`/`g`/`G` and the arrows move, `enter` plays
+    /// the selected result, `esc` closes — and every other key falls
+    /// through ([`Outcome::Unhandled`]) so the app's own keys work: `a`,
+    /// `?`, `u`, the transport, everything a user already knows.
     pub fn key(&mut self, event: KeyEvent) -> Outcome {
         let rows = self.rows();
         match event.code {
-            // Typing goes to the query (S7's only place it exists), and a
-            // change brings the cursor home to the query row. The movement
-            // keys are not typing, the way the library search's are not:
-            // they move the list even while a query is open.
+            // Typing owns every printable, `j` and `k` included: the
+            // movement keys are the browsing mode's keys, not text's.
             KeyCode::Char(character)
-                if !event.modifiers.contains(KeyModifiers::CONTROL)
-                    && !matches!(character, 'j' | 'k') =>
+                if self.typing && !event.modifiers.contains(KeyModifiers::CONTROL) =>
             {
                 self.query.push(character);
                 self.cursor = 0;
                 Outcome::Handled
             }
-            KeyCode::Backspace => {
+            KeyCode::Backspace if self.typing => {
                 self.query.pop();
                 self.cursor = 0;
                 Outcome::Handled
             }
-            // The movement, with the wrapping the other lists have (issue
-            // #36): down from the last row lands on the first, up from the
-            // first on the last.
-            KeyCode::Char('j') | KeyCode::Down => {
-                self.cursor = (self.cursor + 1) % rows;
-                Outcome::Handled
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                self.cursor = (self.cursor + rows - 1) % rows;
-                Outcome::Handled
-            }
-            KeyCode::Char('g') | KeyCode::Home | KeyCode::PageUp => {
-                self.cursor = 0;
-                Outcome::Handled
-            }
-            KeyCode::Char('G') | KeyCode::End | KeyCode::PageDown => {
-                self.cursor = rows - 1;
-                Outcome::Handled
-            }
-            KeyCode::Enter => match self.cursor {
-                // The query row searches what is typed, whatever it holds.
-                0 => Outcome::Search(self.query.clone()),
-                // A result row queues and plays it (S3): the shell carries
-                // it out, the screen holds no queue of its own.
-                index => match self.results.get(index - 1).cloned() {
+            // `enter`: the query row searches in typing mode; in browsing
+            // mode a result row queues and plays it (S3), the shell
+            // carries it out, the screen holds no queue of its own.
+            KeyCode::Enter => match (self.typing, self.cursor) {
+                (true, _) => Outcome::Search(self.query.clone()),
+                (false, 0) => Outcome::Handled,
+                (_, index) => match self.results.get(index - 1).cloned() {
                     Some(found) => Outcome::Play(found),
                     None => Outcome::Handled,
                 },
             },
             KeyCode::Esc => Outcome::Close,
+            // `/` (and `i`, the tree's insert instinct) return to typing
+            // with the current query and the cursor at its end.
+            KeyCode::Char('/' | 'i') if !self.typing => {
+                self.typing = true;
+                self.cursor = 0;
+                Outcome::Handled
+            }
+            // The movement, with the wrapping the other lists have (issue
+            // #36): down from the last row lands on the first, up from the
+            // first on the last. In browsing mode `j`/`k` move with the
+            // arrows; in typing mode the arrows still move — they are not
+            // text — and moving off the query row is the refocus that
+            // enters browsing.
+            KeyCode::Char('j') | KeyCode::Down if !self.typing => {
+                self.cursor = (self.cursor + 1) % rows;
+                Outcome::Handled
+            }
+            KeyCode::Char('k') | KeyCode::Up if !self.typing => {
+                self.cursor = (self.cursor + rows - 1) % rows;
+                Outcome::Handled
+            }
+            KeyCode::Char('g') | KeyCode::Home | KeyCode::PageUp if !self.typing => {
+                self.cursor = 0;
+                Outcome::Handled
+            }
+            KeyCode::Char('G') | KeyCode::End | KeyCode::PageDown if !self.typing => {
+                self.cursor = rows - 1;
+                Outcome::Handled
+            }
+            KeyCode::Down => {
+                self.cursor = (self.cursor + 1) % rows;
+                self.leave_typing_off_the_query_row();
+                Outcome::Handled
+            }
+            KeyCode::Up => {
+                self.cursor = (self.cursor + rows - 1) % rows;
+                self.leave_typing_off_the_query_row();
+                Outcome::Handled
+            }
+            KeyCode::Home | KeyCode::PageUp => {
+                self.cursor = 0;
+                self.leave_typing_off_the_query_row();
+                Outcome::Handled
+            }
+            KeyCode::End | KeyCode::PageDown => {
+                self.cursor = rows - 1;
+                self.leave_typing_off_the_query_row();
+                Outcome::Handled
+            }
+            // Browsing hands every other key to the app; typing hands the
+            // ones it cannot type — the ctrl pairs above all, and the
+            // keys no screen owns — to it too.
             _ => Outcome::Unhandled,
+        }
+    }
+
+    /// The focus is off the query row: typing stops, browsing begins —
+    /// unless the movement landed back on the query row itself, which is
+    /// where typing still lives.
+    fn leave_typing_off_the_query_row(&mut self) {
+        if self.cursor != 0 {
+            self.typing = false;
         }
     }
 
     /// Draws the screen over the whole area the sources screen lent it —
     /// its own header line, the query, the results. `playing` names the
     /// entry standing when the shell asked, so the row it plays is the one
-    /// marked, the way every list marks it (issue #53).
+    /// marked, the way every list marks it (issue #53). `now_playing` names
+    /// the one now-playing line: what the shell's own playing entry is
+    /// when it is a `YouTube` one, nothing when it is not — the shell reads
+    /// the queue, the screen only draws it and holds none of it.
     pub fn render(
         &self,
         frame: &mut ratatui::Frame<'_>,
         area: Rect,
         theme: &Theme,
         playing: Option<(&std::path::Path, PlayState)>,
+        now_playing: Option<&str>,
     ) {
         frame.render_widget(Block::new().style(Style::new().bg(theme.background)), area);
-        let [header_area, query_area, list_area] = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Min(0),
-        ])
-        .areas(area);
+        let [header_area, rest_area] =
+            Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
 
         let count = if self.results.is_empty() {
             String::new()
@@ -275,23 +407,36 @@ impl Search {
             header_area,
         );
 
-        // The query row, with the caret showing while the cursor rests on
-        // it: the row `enter` searches from.
-        let caret = if self.cursor == 0 { "▏" } else { "" };
+        // The query row, the one line naming what is playing when there is
+        // one, and the list. The mode shows on the query row: typing is the
+        // row being typed into, with the caret showing; browsing dims it,
+        // and the selected result carries the list's own highlight instead.
+        let (query_area, playing_area, list_area) =
+            Self::list_layout(rest_area, now_playing.is_some());
+        let caret = if self.typing { "▏" } else { "" };
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled("search: ", Style::new().fg(theme.dim)),
                 Span::styled(
                     format!("{}{caret}", self.query),
-                    if self.cursor == 0 {
+                    if self.typing {
                         Style::new().fg(theme.accent)
                     } else {
-                        Style::new().fg(theme.text)
+                        Style::new().fg(theme.dim)
                     },
                 ),
             ])),
             query_area,
         );
+        if let Some((title, playing_area)) = now_playing.zip(playing_area) {
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled("▶ ", Style::new().fg(theme.accent)),
+                    Span::styled(title.to_owned(), Style::new().fg(theme.text)),
+                ])),
+                playing_area,
+            );
+        }
 
         if self.results.is_empty() {
             let message = if self.pending.is_some() {
@@ -303,6 +448,39 @@ impl Search {
             return;
         }
 
+        self.draw_results(frame, list_area, theme, playing);
+    }
+
+    /// The three areas the body splits into: the query row, the one line
+    /// naming what is playing when there is one, and the list.
+    fn list_layout(area: Rect, now_playing: bool) -> (Rect, Option<Rect>, Rect) {
+        if now_playing {
+            let [query_area, playing_area, list_area] = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(0),
+            ])
+            .areas(area);
+            (query_area, Some(playing_area), list_area)
+        } else {
+            let [query_area, list_area] =
+                Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+            (query_area, None, list_area)
+        }
+    }
+
+    /// The results list: one row per answer, the standing one marked, a
+    /// live broadcast marked the way the radio marks a station velo cannot
+    /// play — the `✗` of [`station_label`], and no length, because the row
+    /// has none to give and would be refused if chosen (`duration` is
+    /// already `None` for it).
+    fn draw_results(
+        &self,
+        frame: &mut ratatui::Frame<'_>,
+        list_area: Rect,
+        theme: &Theme,
+        playing: Option<(&std::path::Path, PlayState)>,
+    ) {
         let digits = digits(self.results.len());
         let rows: Vec<ListItem<'static>> = self
             .results
@@ -317,10 +495,8 @@ impl Search {
                     Some((entry, PlayState::Paused)) if entry == path.as_path() => RowMark::Paused,
                     _ => RowMark::None,
                 };
-                // A live broadcast is marked the way the radio marks a station
-                // velo cannot play — the `✗` of [`station_label`], and no
-                // length, because the row has none to give and would be
-                // refused if chosen (`duration` is already `None` for it).
+                // The `✗` and no length are [`draw_results`]'s to explain;
+                // the row itself is every result row's shape.
                 let name = if found.live {
                     station_label(false, true, &found.title, "")
                 } else {

@@ -902,6 +902,17 @@ pub struct App<'lib> {
     /// search in flight whose answer the tick polls. Closing the screen
     /// drops all of it (S7): nothing about a search outlives the screen.
     youtube: Option<youtube::Search>,
+    /// Whether the open screen was opened only as the load's worker: the
+    /// `u` prompt's `YouTube` path opens it to describe the pasted URL, and
+    /// a refused answer (a live broadcast) closes it again — a refused load
+    /// opens nothing over the sources screen. Never set by the search
+    /// field's door: that screen was already the user's.
+    youtube_opened_for_load: bool,
+    /// The text a describe came from when it came from the search field, kept
+    /// so a describe that fails can answer with the search the user meant: an
+    /// eleven-character phrase like `dawn-chorus` parses as a video id and is
+    /// not one, and refusing it would hide a plausible query.
+    youtube_search_fallback: Option<String>,
     /// The `yt-dlp` the launch found on `PATH`, or `None` when there is
     /// none. The sources row's fact and the screen's very existence read
     /// it; no process is ever spawned to learn it — the scan ran once at
@@ -1135,6 +1146,8 @@ impl<'lib> App<'lib> {
             position: Position::Files,
             sources: sources::Sources::default(),
             youtube: None,
+            youtube_opened_for_load: false,
+            youtube_search_fallback: None,
             youtube_program: None,
             radio_from: View::Library,
             url_opener: open_url,
@@ -1249,6 +1262,8 @@ impl<'lib> App<'lib> {
             position: Position::Artists,
             sources: sources::Sources::default(),
             youtube: None,
+            youtube_opened_for_load: false,
+            youtube_search_fallback: None,
             youtube_program: None,
             radio_from: View::Library,
             url_opener: open_url,
@@ -4339,6 +4354,19 @@ impl<'lib> App<'lib> {
         self.youtube.is_some()
     }
 
+    /// What is typed on the open screen, for the tests.
+    #[must_use]
+    pub fn youtube_query(&self) -> Option<&str> {
+        self.youtube.as_ref().map(youtube::Search::query)
+    }
+
+    /// Whether the open screen is typing into its query — the footer's
+    /// keys and the tests read it, the screen decides it.
+    #[must_use]
+    pub fn youtube_typing(&self) -> bool {
+        self.youtube.as_ref().is_some_and(youtube::Search::typing)
+    }
+
     /// Installs the launch-time detection's answer (the shells' hook): the
     /// program path the `PATH` scan found, or `None` for a machine without
     /// the tool. Production calls this once, at launch, before any frame is
@@ -4366,7 +4394,15 @@ impl<'lib> App<'lib> {
                 Some(Action::None)
             }
             youtube::Outcome::Search(query) => {
-                self.start_youtube_search(&query);
+                // Both doors (issue #70): a query that is a YouTube URL or
+                // a bare id loads that one video instead of searching for
+                // the text. A query that merely mentions YouTube stays a
+                // query.
+                if crate::youtube::input_video_id(&query).is_some() {
+                    self.start_youtube_describe(&query, Some(query.clone()));
+                } else {
+                    self.start_youtube_search(&query);
+                }
                 Some(Action::None)
             }
             youtube::Outcome::Play(found) => Some(self.play_youtube(found)),
@@ -4386,6 +4422,47 @@ impl<'lib> App<'lib> {
         if started {
             self.status = format!("{SEARCHING_LINE_PREFIX}{query}…");
         }
+    }
+
+    /// Describes the one video a URL or bare id names (issue #70): the tool
+    /// runs on the search screen's worker, bounded like a search and off
+    /// the event loop, and the answer lands through the tick as one queue
+    /// entry that plays and takes the user to the screen. Refused while a
+    /// job is in flight — one at a time — and the running job's line stays
+    /// standing. The screen is opened here when there is none: it is the
+    /// worker, and a load that arrives needs it; if the answer is refused
+    /// (a live broadcast), [`Self::youtube_poll`] closes it again.
+    fn start_youtube_describe(&mut self, input: &str, fallback: Option<String>) {
+        self.youtube_search_fallback = fallback;
+        let started = self
+            .youtube
+            .as_mut()
+            .is_some_and(|screen| screen.describe(input.to_owned()));
+        if started {
+            self.status = format!("{SEARCHING_LINE_PREFIX}{input}…");
+        } else {
+            // No describe is in flight to answer: the screen, if it was
+            // opened as its vehicle, was opened for nothing, and a fallback
+            // with no answer behind it has nothing to answer for.
+            self.youtube_opened_for_load = false;
+            self.youtube_search_fallback = None;
+        }
+    }
+
+    /// The `u` prompt's `YouTube` door (issue #70): a pasted `YouTube` URL or
+    /// bare id loads that video through the screen's worker — queued once,
+    /// played, the user landed on the screen with what is playing visible.
+    /// Anything else keeps the prompt's own path, byte for byte; with no
+    /// tool on the machine, the install sentence stands and nothing opens.
+    fn load_youtube_input(&mut self, typed: &str) {
+        if self.youtube.is_none() {
+            self.open_youtube();
+            if self.youtube.is_none() {
+                return; // no tool: the install sentence is standing
+            }
+            self.youtube_opened_for_load = true;
+        }
+        self.start_youtube_describe(typed, None);
     }
 
     /// Queues one search result and plays it (S3): exactly one
@@ -4453,9 +4530,40 @@ impl<'lib> App<'lib> {
                 }
             }
             None => {}
-            Some(youtube::Answer::Failed(message)) => self.status = message,
+            Some(youtube::Answer::Failed(message)) => {
+                // A describe asked for by the search field falls back to
+                // searching the same text; the prompt's own door keeps the
+                // sentence, because there the user named one video.
+                match self.youtube_search_fallback.take() {
+                    Some(query) => self.start_youtube_search(&query),
+                    None => self.status = message,
+                }
+            }
             Some(youtube::Answer::Empty) => {
                 self.status = String::from("no results for that query");
+            }
+            // The one video a URL or bare id described (issue #70): a live
+            // answer is refused by name (S3) and opens nothing — a screen
+            // opened only as the load's worker closes again; a video queues
+            // exactly one entry, plays it the way a chosen result plays,
+            // and the user lands on the screen with what is playing
+            // visible.
+            Some(youtube::Answer::Described(found)) => {
+                self.youtube_search_fallback = None;
+                if self.status.starts_with(SEARCHING_LINE_PREFIX) {
+                    self.status.clear();
+                }
+                let opened_for_load = std::mem::take(&mut self.youtube_opened_for_load);
+                if found.live {
+                    self.play_youtube(found); // the refusal sentence, nothing queued
+                    if opened_for_load {
+                        self.youtube = None;
+                    }
+                    return;
+                }
+                self.view = View::Sources;
+                let action = self.play_youtube(found);
+                self.apply(action);
             }
         }
     }
@@ -5127,6 +5235,14 @@ impl<'lib> App<'lib> {
         else {
             return Action::None;
         };
+        // A YouTube URL or bare id (issue #70) loads through the YouTube
+        // screen's worker and lands on that screen; anything else keeps
+        // the prompt's own path below, byte for byte.
+        if crate::youtube::input_video_id(&typed).is_some() {
+            self.url_prompt = None;
+            self.load_youtube_input(&typed);
+            return Action::None;
+        }
         if !typed.starts_with("http://") && !typed.starts_with("https://") {
             if let Some(prompt) = self.url_prompt.as_mut() {
                 prompt.error = Some(String::from("the URL must start with http:// or https://"));
@@ -6297,7 +6413,21 @@ impl<'lib> App<'lib> {
             Entry::Youtube { path, .. } => Some((path.as_path(), self.state)),
             _ => None,
         });
-        screen.render(frame, union(header, body), &self.theme, playing);
+        // What is playing, for the screen's one now-playing line (§3): the
+        // shell reads its own playing entry — the queue is the shell's,
+        // never the screen's — and hands the title over only when that
+        // entry is a YouTube one.
+        let now_playing = self.playing_entry().and_then(|entry| match entry {
+            Entry::Youtube { title, .. } => Some(title.as_str()),
+            _ => None,
+        });
+        screen.render(
+            frame,
+            union(header, body),
+            &self.theme,
+            playing,
+            now_playing,
+        );
     }
 
     /// Renders the cover at the left of the now-playing block, fitting the source image into the
@@ -7235,16 +7365,10 @@ impl<'lib> App<'lib> {
         }
         // The search screen replaces the body wherever it was opened over
         // (issue #70), so its keys are the footer's on the sources screen
-        // it sits over.
+        // it sits over — and they are the mode's keys: typing owns the
+        // keyboard, browsing falls through to the app's own.
         if self.youtube_on_screen() {
-            return &[
-                ("type", "query"),
-                ("enter", "search / play"),
-                ("j/k", "move"),
-                ("esc", "back"),
-                ("?", "help"),
-                ("q", "quit"),
-            ];
+            return Self::youtube_hints(self.youtube_typing());
         }
         match self.view {
             // The working list: its own editing keys, and `tab` is the way
@@ -7316,6 +7440,31 @@ impl<'lib> App<'lib> {
                     ("q", "quit"),
                 ],
             },
+        }
+    }
+
+    /// The search screen's footer keys, by the mode it is in: typing names
+    /// what typing does, browsing names the movement and the refocus — the
+    /// fall-through keys the app itself owns are every other screen's
+    /// footer to name.
+    fn youtube_hints(typing: bool) -> &'static [(&'static str, &'static str)] {
+        if typing {
+            &[
+                ("type", "query"),
+                ("enter", "search"),
+                ("↓/↑", "results"),
+                ("esc", "back"),
+                ("q", "quit"),
+            ]
+        } else {
+            &[
+                ("j/k", "move"),
+                ("enter", "play"),
+                ("/", "query"),
+                ("esc", "back"),
+                ("?", "help"),
+                ("q", "quit"),
+            ]
         }
     }
 

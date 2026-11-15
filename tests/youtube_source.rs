@@ -11,7 +11,9 @@
 use std::path::{Path, PathBuf};
 
 use velo::audio::output::PathResolver;
-use velo::youtube::{Unconfigured, detect_in, is_pseudo_path, pseudo_path, video_id};
+use velo::youtube::{
+    Unconfigured, detect_in, input_video_id, is_pseudo_path, pseudo_path, video_id,
+};
 
 /// This case's scratch directory, recreated empty so a failed earlier run can
 /// never satisfy a later assertion.
@@ -136,4 +138,48 @@ fn a_youtube_row_says_how_to_get_the_tool() {
         "the install sentence survives the wrapper: {error}"
     );
     assert_ne!(resolver.message(), "");
+}
+
+/// The id a pasted `YouTube` URL, the app's own identity, or a bare id names:
+/// every shape a person actually pastes answers the same eleven characters,
+/// and a URL carrying extra query parameters (`&list=`, `&t=`) keeps only
+/// the video it names.
+#[test]
+fn a_pasted_youtube_thing_names_its_video_id() {
+    for (text, id) in [
+        ("https://www.youtube.com/watch?v=dQw4w9WgXcQ", "dQw4w9WgXcQ"),
+        (
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PL123&t=42s",
+            "dQw4w9WgXcQ",
+        ),
+        ("https://youtu.be/dQw4w9WgXcQ", "dQw4w9WgXcQ"),
+        ("https://youtu.be/dQw4w9WgXcQ?t=30", "dQw4w9WgXcQ"),
+        ("https://www.youtube.com/shorts/dQw4w9WgXcQ", "dQw4w9WgXcQ"),
+        ("https://www.youtube.com/embed/dQw4w9WgXcQ", "dQw4w9WgXcQ"),
+        ("https://www.youtube.com/live/dQw4w9WgXcQ", "dQw4w9WgXcQ"),
+        ("youtube://dQw4w9WgXcQ", "dQw4w9WgXcQ"),
+        ("dQw4w9WgXcQ", "dQw4w9WgXcQ"),
+        ("youtube.com/watch?v=dQw4w9WgXcQ", "dQw4w9WgXcQ"),
+        ("  https://youtu.be/dQw4w9WgXcQ  ", "dQw4w9WgXcQ"),
+    ] {
+        assert_eq!(input_video_id(text).as_deref(), Some(id), "{text}");
+    }
+}
+
+/// Anything else is `None` — never a guess: another site, a search phrase,
+/// a playlist, and an id of the wrong length all stay queries.
+#[test]
+fn anything_else_is_not_a_video_id() {
+    for text in [
+        "https://example.com/watch?v=dQw4w9WgXcQ",
+        "dQw4w9WgXc",
+        "dQw4w9WgXcQdQw4w9WgXcQ",
+        "https://www.youtube.com/playlist?list=PL123",
+        "youtube.com/watch?vi=dQw4w9WgXcQ",
+        "https://youtu.be/",
+        "a search phrase",
+        "",
+    ] {
+        assert_eq!(input_video_id(text), None, "{text}");
+    }
 }

@@ -75,6 +75,62 @@ pub fn parse(out: &str) -> Vec<Found> {
         .collect()
 }
 
+/// Describes the one video a URL or a bare id names ([`crate::youtube::
+/// input_video_id`]): one bounded extraction under [`tool::RESOLVE`], one
+/// JSON object, and the same members the search reads — so a pasted link
+/// queues the same [`Found`] a search result would, and the doors that take
+/// a URL change nothing about what a row carries. A worker call, never the
+/// event loop, exactly like [`run`].
+///
+/// # Errors
+///
+/// Whatever [`tool::run`] fails with: the tool is missing, missed its
+/// deadline, or refused in its own words. Text that is not a `YouTube` thing,
+/// and an answer nobody can read, are failures too — never a guessed row.
+pub fn describe(program: &Path, input: &str) -> Result<Found, tool::ToolError> {
+    let unusable = || tool::ToolError::Failed {
+        program: String::from(crate::youtube::PROGRAM),
+        status: None,
+        line: String::from("the tool answered nothing velo could read"),
+    };
+    let Some(id) = crate::youtube::input_video_id(input) else {
+        return Err(tool::ToolError::Failed {
+            program: String::from(crate::youtube::PROGRAM),
+            status: None,
+            line: String::from("the text is not a YouTube URL or video id"),
+        });
+    };
+    let out = tool::run(program, &describe_arguments(&id), tool::RESOLVE)?;
+    let line: Line = miniserde::json::from_str(out.trim()).map_err(|_| unusable())?;
+    line.into_found().ok_or_else(unusable)
+}
+
+/// The arguments one description runs with: a full extraction of the one
+/// video as JSON, and the canonical watch URL of its id as one argument
+/// after the `--` that stops the tool reading it as an option.
+#[must_use]
+pub fn describe_arguments(id: &str) -> Vec<OsString> {
+    let mut args: Vec<OsString> = [
+        "--dump-single-json",
+        "--no-playlist",
+        "--no-warnings",
+        "--no-progress",
+        "--",
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect();
+    args.push(OsString::from(watch_url(id)));
+    args
+}
+
+/// The canonical watch URL of one video id: the shape the tool resolves
+/// whatever shape the id was pasted in.
+#[must_use]
+fn watch_url(id: &str) -> String {
+    format!("https://www.youtube.com/watch?v={id}")
+}
+
 /// The members velo reads out of a search line. Everything else in the object
 /// the tool writes — descriptions, urls, thumbnails — is ignored.
 #[derive(miniserde::Deserialize)]

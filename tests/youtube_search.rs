@@ -171,3 +171,81 @@ fn the_search_runs_the_tool_and_reads_its_lines() {
     assert_eq!(found[1].title, "Second");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---- describe: the one video a URL or a bare id names -----------------------
+
+/// One video description as `--dump-single-json` answers it: the same
+/// members the search reads, and several it must ignore.
+const VIDEO: &str = concat!(
+    r#"{"id":"abc123def45","title":"Dawn","uploader":"Chill Channel","duration":212.0,"#,
+    r#""live_status":null,"webpage_url":"https://example.invalid/watch","thumbnails":[1,2,3]}"#
+);
+
+/// A broadcast: no length, and `live_status` naming it live.
+const LIVE: &str = concat!(
+    r#"{"id":"live1234567","title":"Streaming now","channel":"Evening","duration":null,"#,
+    r#""live_status":"is_live"}"#
+);
+
+#[test]
+fn describe_runs_one_extraction_and_reads_the_fields_a_row_shows() {
+    let dir = scratch("describe");
+    let program = fake(&dir, &format!("#!/bin/sh\ncat <<'JSON'\n{VIDEO}\nJSON\n"));
+
+    let found =
+        search::describe(&program, "https://youtu.be/abc123def45").expect("the URL describes");
+
+    assert_eq!(found.id, "abc123def45");
+    assert_eq!(found.title, "Dawn");
+    assert_eq!(found.uploader.as_deref(), Some("Chill Channel"));
+    assert_eq!(found.duration, Some(212), "a float duration rounds down");
+    assert!(!found.live);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn describe_names_the_channel_when_there_is_no_uploader_and_marks_live() {
+    let dir = scratch("describe-live");
+    let program = fake(&dir, &format!("#!/bin/sh\ncat <<'JSON'\n{LIVE}\nJSON\n"));
+
+    let found = search::describe(&program, "live1234567").expect("the bare id describes");
+
+    assert_eq!(found.id, "live1234567");
+    assert_eq!(found.uploader.as_deref(), Some("Evening"));
+    assert_eq!(found.duration, None, "a live row never carries a length");
+    assert!(found.live, "`is_live` in the description means live");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn describe_passes_the_canonical_watch_url_as_one_argument() {
+    let args: Vec<String> = search::describe_arguments("abc123def45")
+        .into_iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+
+    let terminator = args.iter().position(|arg| arg == "--").expect("a `--`");
+    assert_eq!(
+        &args[terminator + 1..],
+        ["https://www.youtube.com/watch?v=abc123def45"],
+        "the id rides one watch URL the tool cannot read as an option"
+    );
+    assert!(args.contains(&"--dump-single-json".to_owned()));
+    assert!(args.contains(&"--no-playlist".to_owned()));
+}
+
+#[test]
+fn describe_refuses_an_answer_it_cannot_read_and_text_that_is_not_a_thing() {
+    let dir = scratch("describe-bad");
+    let program = fake(&dir, "#!/bin/sh\nprintf 'not json at all'\n");
+
+    assert!(
+        search::describe(&program, "https://youtu.be/abc123def45").is_err(),
+        "an unusable answer is a failure, never a guessed row"
+    );
+    assert!(
+        search::describe(&program, "a search phrase").is_err(),
+        "text that is no YouTube thing never reaches the tool"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

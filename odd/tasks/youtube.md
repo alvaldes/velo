@@ -416,6 +416,14 @@ the bytes itself (`-o -` on stdout), which is reliable but makes a seek a fresh
 spawn with `--download-sections` and retires the "resolved URL with a lifetime"
 premise of S4.
 
+**L10 — the future the author named: live broadcasts are a wanted feature.**
+A live YouTube broadcast is refused today only because this tree has no HLS
+demuxer — the refusal is a boundary, not a verdict. When HLS lands, the live
+refusal (`LIVE_SENTENCE`, and `play_youtube`'s arm) comes out and the `✗` mark
+in the results becomes the live vocabulary the station rows already teach;
+nothing else in the design has to move: the entry, the identity, the queue and
+the worker are already shaped for it.
+
 **L9 — the architecture changed, because the measurement did.** Five
 consecutive extractions of one video gave the same answer every time: the only
 audio format whose URL answers a ranged GET is 139, which is HE-AAC and which

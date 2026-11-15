@@ -28,6 +28,10 @@ pub const SCHEME: &str = "youtube://";
 /// row that carries more is refused rather than handed to the tool.
 const LONGEST_ID: usize = 64;
 
+/// The exact length of a video id: `YouTube`'s own are eleven characters, and
+/// an input of another length is not one — never a guess.
+const ID_LENGTH: usize = 11;
+
 /// The `yt-dlp` on this machine's `PATH`, if there is one.
 #[must_use]
 pub fn detect() -> Option<PathBuf> {
@@ -91,6 +95,63 @@ pub fn video_id(path: &Path) -> Result<Option<&str>, AudioError> {
 #[must_use]
 pub fn pseudo_path(id: &str) -> PathBuf {
     PathBuf::from(format!("{SCHEME}{id}"))
+}
+
+/// The video id a pasted `YouTube` URL, the app's own identity, or a bare id
+/// names: `None` for anything else — never a guess.
+///
+/// What a person actually pastes is accepted:
+/// `https://www.youtube.com/watch?v=<id>` (with any extra query parameters,
+/// `&list=` and `&t=` among them), `https://youtu.be/<id>`,
+/// `https://www.youtube.com/shorts/<id>`, `/embed/<id>`, `/live/<id>`,
+/// `youtube://<id>` (the app's own identity, pasted back), a scheme-less
+/// `youtube.com/…` paste, and a bare eleven-character video id. Anything
+/// else — a search phrase, another site, a playlist link, an id of another
+/// length — is `None`.
+#[must_use]
+pub fn input_video_id(text: &str) -> Option<String> {
+    let text = text.trim();
+    // The app's own identity pasted back, or a bare id.
+    if let Some(id) = text.strip_prefix(SCHEME) {
+        return is_video_id(id).then(|| id.to_owned());
+    }
+    if is_video_id(text) {
+        return Some(String::from(text));
+    }
+    // A pasted URL: scheme (optional — a search-field paste drops it),
+    // host, path segments, query.
+    let rest = match text.split_once("://") {
+        Some(("https" | "http", rest)) => rest,
+        Some(_) => return None,
+        None => text,
+    };
+    let (authority, tail) = rest.split_once('/')?;
+    let (path, query) = tail.split_once('?').unwrap_or((tail, ""));
+    let host = authority.strip_prefix("www.").unwrap_or(authority);
+    let mut segments = path.split('/');
+    let id = match (host, segments.next(), segments.next()) {
+        ("youtu.be", Some(id), None) => id,
+        ("youtube.com", Some("watch"), None) => query
+            .split('&')
+            .filter_map(|pair| pair.split_once('='))
+            .find_map(|(name, value)| (name == "v").then_some(value))?,
+        ("youtube.com", Some("shorts" | "embed" | "live"), Some(id))
+            if segments.next().is_none() =>
+        {
+            id
+        }
+        _ => return None,
+    };
+    is_video_id(id).then(|| id.to_owned())
+}
+
+/// Whether `text` is exactly one video id: eleven characters, the letters,
+/// digits, `-` and `_` a video id holds, and nothing more.
+fn is_video_id(text: &str) -> bool {
+    text.len() == ID_LENGTH
+        && text
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
 }
 
 fn broken(text: &str, why: &str) -> AudioError {
