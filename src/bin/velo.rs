@@ -115,17 +115,17 @@ fn main() -> ExitCode {
             std::env::var_os("XDG_CACHE_HOME").as_deref(),
             home.as_deref(),
         );
-        // The tool is looked for once, here (issue #70, S1): the scan is a
+        // The tools are looked for once, here (issue #70, S1): the scan is a
         // file read and never a spawn, and its answer feeds the sources row
         // and the resolver the session plays through.
-        let youtube_program = velo::youtube::detect();
+        let chain = detect_chain();
         return browse_interface(
             library.as_deref(),
             config_file,
             &settings,
             SessionResolver {
-                resolver: Some(composed_resolver(seams.resolver, youtube_program.clone())),
-                youtube_program,
+                resolver: Some(composed_resolver(seams.resolver, chain.clone())),
+                youtube_program: chain.0,
             },
             seams.covers,
             seams.scrobbler,
@@ -144,10 +144,10 @@ fn main() -> ExitCode {
             std::env::var_os("XDG_CACHE_HOME").as_deref(),
             home.as_deref(),
         );
-        // A `youtube://` argument resolves through the tool the same way the
-        // interface would (issue #70): with the tool it plays, without it it
-        // fails with the install sentence.
-        let resolver = Some(composed_resolver(seams.resolver, velo::youtube::detect()));
+        // A `youtube://` argument resolves through the chain the same way the
+        // interface would (issue #70): with the tools it plays, without them
+        // it fails with the install sentence.
+        let resolver = Some(composed_resolver(seams.resolver, detect_chain()));
         return play(&cli.files, &settings, resolver);
     }
     run_interface(cli.files, &settings, config_file)
@@ -1602,21 +1602,38 @@ impl PathResolver for ComposedResolver {
     }
 }
 
+/// The two tools the chain needs, found once (issue #70, S1): the downloader
+/// and the transcoder, each `None` when it is not on `PATH`. The scan is a
+/// file read and never a spawn.
+fn detect_chain() -> (Option<PathBuf>, Option<PathBuf>) {
+    (velo::youtube::detect(), velo::youtube::detect_ffmpeg())
+}
+
 /// Composes one session's resolver (issue #70): the Subsonic seams' resolver
-/// under it, the `YouTube` half over everything the tool owns. That half is
-/// the detected program in a `resolve::Resolver`, or the degraded one
-/// ([`velo::youtube::Unconfigured`]) on a machine without the tool — the
-/// shape that keeps S10 true, since the config and the queue survive and
-/// only `YouTube` is refused.
+/// under it, the `YouTube` half over everything the chain owns. That half is
+/// both detected programs in a `resolve::Resolver`, or the degraded one
+/// ([`velo::youtube::Unconfigured`]) when a tool is missing — the shape that
+/// keeps S10 true, since the config and the queue survive and only `YouTube`
+/// is refused. The sentence names whichever tool is missing: a machine with
+/// neither needs `yt-dlp` first — the chain starts with it — and one with
+/// `yt-dlp` but no `ffmpeg` needs `ffmpeg`.
 fn composed_resolver(
     subsonic: Option<Arc<dyn PathResolver>>,
-    youtube_program: Option<PathBuf>,
+    chain: (Option<PathBuf>, Option<PathBuf>),
 ) -> Arc<dyn PathResolver> {
-    let youtube: Arc<dyn PathResolver> = match youtube_program {
-        Some(program) => Arc::new(velo::youtube::resolve::Resolver::new(program)),
-        None => Arc::new(velo::youtube::Unconfigured::new(Path::new(
-            velo::youtube::PROGRAM,
-        ))),
+    let (youtube_program, ffmpeg_program) = chain;
+    let youtube: Arc<dyn PathResolver> = match (youtube_program, ffmpeg_program) {
+        (Some(yt_dlp), Some(ffmpeg)) => {
+            Arc::new(velo::youtube::resolve::Resolver::new(yt_dlp, ffmpeg))
+        }
+        (youtube_program, _) => {
+            let missing = youtube_program
+                .as_ref()
+                .map_or(Path::new(velo::youtube::PROGRAM), |_| {
+                    Path::new(velo::youtube::FFMPEG)
+                });
+            Arc::new(velo::youtube::Unconfigured::new(missing))
+        }
     };
     Arc::new(ComposedResolver { youtube, subsonic })
 }
@@ -1706,7 +1723,7 @@ mod tests {
     /// opened as a file.
     #[test]
     fn with_no_server_and_no_tool_everything_but_youtube_is_untouched() {
-        let resolver = composed_resolver(None, None);
+        let resolver = composed_resolver(None, (None, None));
 
         let local = Path::new("/music/one.flac");
         assert_eq!(
@@ -1757,6 +1774,43 @@ mod tests {
         );
     }
 
+    /// The missing tool is the one the sentence names: a machine with
+    /// `yt-dlp` but no `ffmpeg` is told how to install `ffmpeg` — the
+    /// transcoder, not the downloader it already has — and one with neither
+    /// is told about `yt-dlp`, the tool the chain starts with.
+    #[test]
+    fn the_missing_tool_is_the_one_the_sentence_names() {
+        let resolver = composed_resolver(
+            None,
+            (
+                Some(PathBuf::from("/velo-test/does-not-exist/yt-dlp")),
+                None,
+            ),
+        );
+        let error = resolver
+            .resolve(Path::new("youtube://abc123xyz_-_-_-_-_"))
+            .expect_err("nothing to play without the transcoder");
+        assert!(
+            error.to_string().contains("ffmpeg is not installed"),
+            "the missing tool is named: {error}"
+        );
+
+        let resolver = composed_resolver(
+            None,
+            (
+                None,
+                Some(PathBuf::from("/velo-test/does-not-exist/ffmpeg")),
+            ),
+        );
+        let error = resolver
+            .resolve(Path::new("youtube://abc123xyz_-_-_-_-_"))
+            .expect_err("nothing to play without the downloader");
+        assert!(
+            error.to_string().contains("yt-dlp is not installed"),
+            "the first thing the machine needs is named: {error}"
+        );
+    }
+
     /// S10, a machine with a server and the tool: every answer that is not
     /// a `youtube://` row's is the Subsonic side's own, and a `youtube://`
     /// row is the `YouTube` side's — resolved when it plays (its `cached`
@@ -1765,7 +1819,10 @@ mod tests {
     fn with_both_sides_every_answer_goes_to_the_side_that_owns_the_row() {
         let resolver = composed_resolver(
             Some(subsonic_side()),
-            Some(PathBuf::from("/velo-test/does-not-exist/yt-dlp")),
+            (
+                Some(PathBuf::from("/velo-test/does-not-exist/yt-dlp")),
+                Some(PathBuf::from("/velo-test/does-not-exist/ffmpeg")),
+            ),
         );
 
         let local = Path::new("/music/one.flac");

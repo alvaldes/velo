@@ -902,12 +902,6 @@ pub struct App<'lib> {
     /// search in flight whose answer the tick polls. Closing the screen
     /// drops all of it (S7): nothing about a search outlives the screen.
     youtube: Option<youtube::Search>,
-    /// Whether the open screen was opened only as the load's worker: the
-    /// `u` prompt's `YouTube` path opens it to describe the pasted URL, and
-    /// a refused answer (a live broadcast) closes it again — a refused load
-    /// opens nothing over the sources screen. Never set by the search
-    /// field's door: that screen was already the user's.
-    youtube_opened_for_load: bool,
     /// The text a describe came from when it came from the search field, kept
     /// so a describe that fails can answer with the search the user meant: an
     /// eleven-character phrase like `dawn-chorus` parses as a video id and is
@@ -1146,7 +1140,6 @@ impl<'lib> App<'lib> {
             position: Position::Files,
             sources: sources::Sources::default(),
             youtube: None,
-            youtube_opened_for_load: false,
             youtube_search_fallback: None,
             youtube_program: None,
             radio_from: View::Library,
@@ -1262,7 +1255,6 @@ impl<'lib> App<'lib> {
             position: Position::Artists,
             sources: sources::Sources::default(),
             youtube: None,
-            youtube_opened_for_load: false,
             youtube_search_fallback: None,
             youtube_program: None,
             radio_from: View::Library,
@@ -4407,7 +4399,7 @@ impl<'lib> App<'lib> {
             }
             youtube::Outcome::Play(found) => Some(self.play_youtube(found)),
             youtube::Outcome::Append(found) => {
-                self.append_youtube(found);
+                self.append_youtube(&found);
                 Some(Action::None)
             }
         }
@@ -4434,8 +4426,7 @@ impl<'lib> App<'lib> {
     /// entry that plays and takes the user to the screen. Refused while a
     /// job is in flight — one at a time — and the running job's line stays
     /// standing. The screen is opened here when there is none: it is the
-    /// worker, and a load that arrives needs it; if the answer is refused
-    /// (a live broadcast), [`Self::youtube_poll`] closes it again.
+    /// worker, and a load that arrives needs it.
     fn start_youtube_describe(&mut self, input: &str, fallback: Option<String>) {
         self.youtube_search_fallback = fallback;
         let started = self
@@ -4452,10 +4443,8 @@ impl<'lib> App<'lib> {
             // and the screen stays usable underneath it.
             self.status =
                 String::from("velo: a job is already running — the YouTube link was not loaded");
-            // No describe is in flight to answer: the screen, if it was
-            // opened as its vehicle, was opened for nothing, and a fallback
-            // with no answer behind it has nothing to answer for.
-            self.youtube_opened_for_load = false;
+            // No describe is in flight to answer, and a fallback with no
+            // answer behind it has nothing to answer for.
             self.youtube_search_fallback = None;
         }
     }
@@ -4471,7 +4460,6 @@ impl<'lib> App<'lib> {
             if self.youtube.is_none() {
                 return; // no tool: the install sentence is standing
             }
-            self.youtube_opened_for_load = true;
         }
         self.start_youtube_describe(typed, None);
     }
@@ -4481,57 +4469,20 @@ impl<'lib> App<'lib> {
     /// its body what the search already said — and the play action goes to
     /// the shell, which starts it the way `enter` on a queue row plays
     /// from that row. Never a second start, never a second entry.
-    fn append_youtube(&mut self, found: Vec<crate::youtube::search::Found>) {
-        // A live broadcast is refused here exactly as it is when chosen: its
-        // stream is HLS, and an entry that cannot open is not a queue entry.
-        let live = found
-            .iter()
-            .find(|found| found.live)
-            .map(|f| f.title.clone());
-        let playable: Vec<_> = found.into_iter().filter(|found| !found.live).collect();
-        let live_refused = live.is_some();
-        if let Some(title) = live {
-            self.status = format!(
-                "velo: {title} is live, and {}",
-                crate::youtube::resolve::LIVE_SENTENCE
-            );
-            if playable.is_empty() {
-                return;
-            }
-        }
-        let count = playable.len();
+    fn append_youtube(&mut self, found: &[crate::youtube::search::Found]) {
+        let count = found.len();
         self.edit_queue(|queue| {
-            queue.extend(playable.iter().map(|found| Entry::Youtube {
+            queue.extend(found.iter().map(|found| Entry::Youtube {
                 path: crate::youtube::pseudo_path(&found.id),
                 title: found.title.clone(),
                 uploader: found.uploader.clone(),
                 duration: found.duration,
             }));
         });
-        self.status = if live_refused {
-            format!(
-                "velo: added {} · skipped 1 live broadcast",
-                plural(count, "result", "results")
-            )
-        } else {
-            format!("velo: added {}", plural(count, "result", "results"))
-        };
+        self.status = format!("velo: added {}", plural(count, "result", "results"));
     }
 
     fn play_youtube(&mut self, found: crate::youtube::search::Found) -> Action {
-        // A live result is known before it is chosen — the search says so —
-        // and is refused here, before anything is queued: its stream is HLS,
-        // and a queue entry would resolve, open, and only then fail. One
-        // sentence, the resolver's own truth, instead of a row that cannot
-        // play.
-        if found.live {
-            self.status = format!(
-                "velo: {} is live, and {}",
-                found.title,
-                crate::youtube::resolve::LIVE_SENTENCE
-            );
-            return Action::None;
-        }
         let path = crate::youtube::pseudo_path(&found.id);
         // The stream will take a moment to resolve (S4, S5): the status
         // names the entry now, before the player has answered, and the
@@ -4596,24 +4547,15 @@ impl<'lib> App<'lib> {
             Some(youtube::Answer::Empty) => {
                 self.status = String::from("no results for that query");
             }
-            // The one video a URL or bare id described (issue #70): a live
-            // answer is refused by name (S3) and opens nothing — a screen
-            // opened only as the load's worker closes again; a video queues
-            // exactly one entry, plays it the way a chosen result plays,
-            // and the user lands on the screen with what is playing
-            // visible.
+            // The one video a URL or bare id described (issue #70): it
+            // queues exactly one entry, plays it the way a chosen result
+            // plays — live broadcasts included (L10: the chain plays them,
+            // no refusal anywhere) — and the user lands on the screen with
+            // what is playing visible.
             Some(youtube::Answer::Described(found)) => {
                 self.youtube_search_fallback = None;
                 if self.status.starts_with(SEARCHING_LINE_PREFIX) {
                     self.status.clear();
-                }
-                let opened_for_load = std::mem::take(&mut self.youtube_opened_for_load);
-                if found.live {
-                    self.play_youtube(found); // the refusal sentence, nothing queued
-                    if opened_for_load {
-                        self.youtube = None;
-                    }
-                    return;
                 }
                 self.view = View::Sources;
                 let action = self.play_youtube(found);

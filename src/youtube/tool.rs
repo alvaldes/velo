@@ -1,11 +1,15 @@
-//! One external process, bounded: the runner every `yt-dlp` call goes through.
+//! One external process — and one chain of two — bounded: the runner every
+//! `yt-dlp` call goes through.
 //!
 //! Nothing else in the tree captures a child's standard output, imposes a
 //! deadline or kills a stuck child — `open_url` is fire-and-forget — so the
 //! rules live here, once, and every one of them is a rule the interface
-//! depends on. `yt-dlp` runs ffmpeg of its own, which is why the kill goes to
-//! the process group: stopping at the parent leaves the grandchild holding the
-//! pipe and the call waiting on it forever.
+//! depends on. The play path runs a **chain**: `yt-dlp` streams the best
+//! audio it can get, and a second child, `ffmpeg`, decodes whatever that is
+//! and writes MP3 to stdout. Both children share one process group — velo
+//! puts `ffmpeg` into `yt-dlp`'s own group — because a kill that stops at
+//! one stage leaves the other holding the pipe and the call waiting on it
+//! forever.
 
 use std::ffi::OsString;
 use std::fmt;
@@ -24,16 +28,20 @@ const POLL: Duration = Duration::from_millis(10);
 /// How long a search may take: ten entries off the search page, no extraction.
 pub const SEARCH: Deadline = Deadline::new(Duration::from_secs(20));
 
-/// How long one play-time resolve may take: a full extraction of one video.
+/// How long one play-time resolve may take: the chain starting and its
+/// pre-buffer filling. A stream's first byte is the fill's first read, so one
+/// bound governs both — the same register of bound the search names, and the
+/// bound a stalled stream misses.
 pub const RESOLVE: Deadline = Deadline::new(Duration::from_secs(30));
 
-/// How long [`spawn`] waits for a child's first byte. A stream's first byte
-/// carries the whole cost of the work before it — extraction, download, the
-/// transcode — the same register of bound [`RESOLVE`] names for one
-/// full extraction. Inside the bound, an exit is the verdict: a tool that
-/// cannot deliver dies with a reason on stderr before its first byte, and
-/// that reason — never a decoder error — is what a failing resolve quotes.
-const STARTUP: Duration = Duration::from_secs(30);
+/// How many bytes are read into memory before the stream is handed to the
+/// decoder: 256 KiB, about sixteen seconds of 128 kbps MP3. The pipe is
+/// filled ahead of playback so that a hiccup in the tool's delivery — a busy
+/// machine, a slow network — does not empty the device's buffer and underrun
+/// (`A buffer underrun or overrun occurred.` was observed without it). It is
+/// a floor, not a measured optimum: enough that a busy machine keeps
+/// playing, and small enough that filling it stays inside [`RESOLVE`].
+pub const PREBUFFER: usize = 256 * 1024;
 
 /// How long a child may take before it is killed with its children.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,6 +82,16 @@ pub enum ToolError {
         /// The first line it wrote — what a user can act on.
         line: String,
     },
+    /// The stream never filled its pre-buffer: no first byte, or fewer than
+    /// the fill, and no end, within [`RESOLVE`]. The honest sentence names
+    /// the stall — it never looks like an empty track.
+    Stalled {
+        /// The program whose bytes were awaited (`ffmpeg` — the chain's
+        /// second stage, whose bytes are what the decoder reads).
+        program: String,
+        /// The bound the fill missed.
+        after: Duration,
+    },
     /// The program could not be run, or became unmanageable once it was.
     Unusable {
         /// The program's file name, for the sentence.
@@ -86,14 +104,28 @@ pub enum ToolError {
 impl fmt::Display for ToolError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NotInstalled(_) => write!(
-                f,
-                "yt-dlp is not installed — install it to play YouTube (brew install yt-dlp, \
-                 or your package manager)"
-            ),
+            Self::NotInstalled(path) => {
+                // The sentence names the tool that is missing: `yt-dlp` when
+                // the downloader is not there, `ffmpeg` when only the
+                // transcoder is — a machine that has one must not be told to
+                // install it again.
+                let name = file_name(path);
+                write!(
+                    f,
+                    "{name} is not installed — install it to play YouTube (brew install {name}, \
+                     or your package manager)"
+                )
+            }
             Self::Deadline { program, after } => write!(
                 f,
                 "{program} did not answer within {}s — the request was cancelled",
+                after.as_secs()
+            ),
+            Self::Stalled { program, after } => write!(
+                f,
+                "{program} did not deliver its first {} KiB within {}s — the stream stalled \
+                 before anything could play",
+                PREBUFFER / 1024,
                 after.as_secs()
             ),
             Self::Failed {
@@ -161,7 +193,7 @@ pub fn run(program: &Path, args: &[OsString], deadline: Deadline) -> Result<Stri
     let stdout = match collect(&out, until) {
         Collected::Bytes(bytes) => bytes,
         Collected::ReadFailed(error) => {
-            end(&mut child);
+            end_all(&mut [&mut child]);
             return Err(ToolError::Unusable {
                 program: name,
                 message: format!("its stdout could not be read: {error}"),
@@ -172,7 +204,7 @@ pub fn run(program: &Path, args: &[OsString], deadline: Deadline) -> Result<Stri
     let stderr = match collect(&err, until) {
         Collected::Bytes(bytes) => bytes,
         Collected::ReadFailed(error) => {
-            end(&mut child);
+            end_all(&mut [&mut child]);
             return Err(ToolError::Unusable {
                 program: name,
                 message: format!("its stderr could not be read: {error}"),
@@ -191,163 +223,274 @@ pub fn run(program: &Path, args: &[OsString], deadline: Deadline) -> Result<Stri
     })
 }
 
-/// Spawns `program` with `args` and hands its standard output over without
-/// waiting for it: the caller reads the stream as it arrives — the shape the
-/// play path needs, where the tool itself delivers the bytes (issue #70,
-/// S4 as revised) and a bounded wait would be a deadline on the music.
-/// Everything [`run`] guarantees still holds: arguments are arguments and
-/// never a shell line, the child never inherits the terminal, and nothing
-/// is left unreaped — [`Running`]'s `Drop` kills the whole process group
-/// and waits, so a playback that is closed or killed never leaves a
-/// downloader running behind it.
+/// Spawns the play path's two-stage chain and hands its stream over without
+/// waiting for it to end: `yt_dlp` streams the best audio it can get, and
+/// `ffmpeg` — whose stdin is the tool's own stdout (`Stdio::from`), so no
+/// pipe of ours sits in the middle and no byte is copied — decodes whatever
+/// that is and writes MP3 to stdout. The caller reads that stream as it
+/// arrives — the shape the play path needs, where the tool itself delivers
+/// the bytes (issue #70, S4 as revised) and a bounded wait would be a
+/// deadline on the music.
 ///
-/// The handover happens the moment the first bytes arrive — never a fixed
-/// wait — and until then the child's exit decides: a stream that never
-/// starts is the tool's own failure, quoted from its stderr, so a failing
-/// resolve says why `yt-dlp` could not answer, never what a decoder made of
-/// an empty pipe. A child that writes nothing within [`STARTUP`] misses the
-/// bound and is killed with its children, [`ToolError::Deadline`].
+/// Both children are put into **one process group**: `yt_dlp` gets a group of
+/// its own and `ffmpeg` joins it, so [`Running`]'s drop — and every deadline
+/// and failure path — kills the pair with one group kill. A grandchild either
+/// leaves behind dies with the group too.
 ///
-/// A child that cannot start is [`ToolError::NotInstalled`]; a spawn failure
-/// is [`ToolError::Unusable`], as in [`run`].
+/// Before the handover, the second stage's stdout is read into memory up to
+/// [`PREBUFFER`] — the pre-buffer that keeps a hiccup from emptying the
+/// device — under `deadline`, the [`RESOLVE`] register: a stream's first byte
+/// is the fill's first read, so until bytes arrive a child's exit is still
+/// the verdict, and the sentence quotes the failing tool's own stderr line
+/// (`yt-dlp` when the downloader failed, `ffmpeg` when only the transcoder
+/// did). A stream shorter than the fill hands over everything it had when it
+/// ends. One that never fills within the bound — stalled, not ended — is
+/// killed with the group and answers [`ToolError::Stalled`], naming the
+/// miss, never looking like an empty track.
+///
+/// A child that cannot start is [`ToolError::NotInstalled`] — the sentence
+/// names whichever tool is missing; a spawn failure is
+/// [`ToolError::Unusable`], as in [`run`].
+///
+/// # Panics
+///
+/// When the downloader's stdout pipe is missing at the second stage's spawn
+/// — a programming error, since [`spawn`] asked for it as a pipe; neither
+/// this nor anything else here can happen through the public surface.
 ///
 /// # Errors
 ///
-/// [`ToolError::NotInstalled`], [`ToolError::Deadline`] (no first byte
-/// within [`STARTUP`]), [`ToolError::Failed`] (an exit before the first
-/// byte), or [`ToolError::Unusable`].
-pub fn spawn(program: &Path, args: &[OsString]) -> Result<Running, ToolError> {
-    let name = file_name(program);
-    let mut command = Command::new(program);
-    command
-        .args(args)
+/// [`ToolError::NotInstalled`], [`ToolError::Stalled`] (the pre-buffer never
+/// filled within `deadline`), [`ToolError::Failed`] (an exit before the
+/// first byte), or [`ToolError::Unusable`].
+pub fn spawn(
+    yt_dlp: &Path,
+    yt_args: &[OsString],
+    ffmpeg: &Path,
+    ffmpeg_args: &[OsString],
+    deadline: Deadline,
+) -> Result<Running, ToolError> {
+    let yt_name = file_name(yt_dlp);
+    let ff_name = file_name(ffmpeg);
+
+    // Stage one: the downloader, in a process group of its own — the group
+    // both stages share, so one kill takes the pair and anything they start.
+    let mut yt_command = Command::new(yt_dlp);
+    yt_command
+        .args(yt_args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    own_group(&mut command);
+    own_group(&mut yt_command);
+    let mut yt = spawn_command(&mut yt_command, yt_dlp)?;
 
-    let mut child = command.spawn().map_err(|error| {
-        if error.kind() == std::io::ErrorKind::NotFound {
-            ToolError::NotInstalled(program.to_path_buf())
-        } else {
-            ToolError::Unusable {
-                program: name.clone(),
-                message: error.to_string(),
-            }
+    // Stage two: the transcoder. Its stdin is the tool's stdout, and it
+    // joins the tool's process group — a grandchild of the tool and the
+    // transcoder are the same kind of leak, and the group is what stops
+    // both.
+    let tool_out = yt
+        .stdout
+        .take()
+        .expect("the tool's stdout was asked for as a pipe");
+    let mut ff_command = Command::new(ffmpeg);
+    ff_command
+        .args(ffmpeg_args)
+        .stdin(Stdio::from(tool_out))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    join_group(&mut ff_command, yt.id());
+    let mut ff = match spawn_command(&mut ff_command, ffmpeg) {
+        Ok(ff) => ff,
+        Err(error) => {
+            end_all(&mut [&mut yt]);
+            return Err(error);
         }
-    })?;
+    };
 
-    // stderr is drained from the start, the way `run` drains it: a chatty
-    // tool must never block on a full pipe, and the drain is what an
-    // immediate failure quotes. stdout is watched by one thread that takes
-    // the first read and hands the pipe straight back — the bytes read
-    // before the handover are none lost, they ride in [`Running`].
-    let err = drain(child.stderr.take());
-    let stdout_pipe = child.stdout.take();
-    let (sender, receiver) = mpsc::channel::<(std::io::Result<Vec<u8>>, Option<ChildStdout>)>();
-    thread::spawn(move || {
-        let Some(mut pipe) = stdout_pipe else {
-            let _ = sender.send((Err(std::io::Error::other("stdout was not piped")), None));
-            return;
-        };
-        let mut first = [0u8; 4096];
-        let read = pipe.read(&mut first).map(|read| first[..read].to_vec());
-        let _ = sender.send((read, Some(pipe))); // the pipe comes back for the caller
-    });
-    let until = Instant::now() + STARTUP;
+    // stderr of both is drained from the start, the way `run` drains it: a
+    // chatty tool must never block on a full pipe, and the drains are what
+    // an immediate failure quotes.
+    let yt_err = drain(yt.stderr.take());
+    let ff_err = drain(ff.stderr.take());
+
+    // One thread reads the transcoder's stdout until the pre-buffer fills or
+    // the stream ends — the first read is the first-byte watch, the rest is
+    // the fill — and hands the pipe straight back. A stream shorter than the
+    // fill hands over everything it had when it ends; the bytes read before
+    // the handover are none lost, they ride in [`Running`].
+    let receiver = fill_watch(ff.stdout.take());
+    let until = Instant::now() + deadline.after();
 
     loop {
         match receiver.try_recv() {
             Ok((Ok(prefix), stdout)) if !prefix.is_empty() => {
                 return Ok(Running {
-                    child,
+                    yt_dlp: yt,
+                    ffmpeg: ff,
                     stdout,
                     prefix,
                 });
             }
             // An empty read — EOF before a byte — and a read error are left
-            // to the exit status and the deadline: the pipe, if it came
-            // back, is dropped here and its verdict is the child's.
+            // to the exit statuses and the deadline: the pipe, if it came
+            // back, is dropped here and its verdict is the children's.
             Ok(_) | Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => {}
         }
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                // The exit and the first read race: give the reader thread
-                // a bounded moment to hand back what it read before the
-                // exit is called the verdict. Then the group kill first —
-                // a grandchild may still hold stderr — and what it said.
-                let handed = receiver.recv_timeout(Duration::from_secs(1));
-                if let Ok((Ok(prefix), stdout)) = handed
-                    && !prefix.is_empty()
-                {
-                    return Ok(Running {
-                        child,
-                        stdout,
-                        prefix,
-                    });
-                }
-                end(&mut child);
-                let stderr = match collect(&err, Instant::now() + Duration::from_secs(1)) {
-                    Collected::Bytes(bytes) => bytes,
-                    // A stderr read failure or a bound that ran out leaves
-                    // nothing to quote: the tool exited without a readable
-                    // word, and `reason` says so.
-                    Collected::ReadFailed(_) | Collected::TimedOut => Vec::new(),
-                };
-                return Err(ToolError::Failed {
-                    program: name,
-                    status: status.code(),
-                    line: reason(&[], &stderr),
-                });
-            }
-            Ok(None) => {}
+        let yt_status = match yt.try_wait() {
+            Ok(status) => status,
             Err(error) => {
-                end(&mut child);
+                end_all(&mut [&mut yt, &mut ff]);
                 return Err(ToolError::Unusable {
-                    program: name,
+                    program: yt_name,
                     message: error.to_string(),
                 });
             }
+        };
+        let ff_status = match ff.try_wait() {
+            Ok(status) => status,
+            Err(error) => {
+                end_all(&mut [&mut yt, &mut ff]);
+                return Err(ToolError::Unusable {
+                    program: ff_name,
+                    message: error.to_string(),
+                });
+            }
+        };
+        if let (Some(yt_status), Some(ff_status)) = (yt_status, ff_status) {
+            // The exits and the fill race: give the reader thread a bounded
+            // moment to hand back what it read before the exits are called
+            // the verdict.
+            if let Ok((Ok(prefix), stdout)) = receiver.recv_timeout(Duration::from_secs(1))
+                && !prefix.is_empty()
+            {
+                return Ok(Running {
+                    yt_dlp: yt,
+                    ffmpeg: ff,
+                    stdout,
+                    prefix,
+                });
+            }
+            return Err(exit_verdict(
+                yt_status, ff_status, &yt_name, &ff_name, &yt_err, &ff_err,
+            ));
         }
         if Instant::now() >= until {
-            end(&mut child);
-            return Err(ToolError::Deadline {
-                program: name,
-                after: STARTUP,
+            end_all(&mut [&mut yt, &mut ff]);
+            return Err(ToolError::Stalled {
+                program: ff_name,
+                after: deadline.after(),
             });
         }
         thread::sleep(POLL);
     }
 }
 
-/// A child whose stream has been handed over: owned, in a process group of
-/// its own, never reading a keystroke meant for the interface. Reading it
-/// serves the bytes the startup watch read first, then the pipe; dropping
-/// it ends the whole group and reaps — exactly what [`end`] does for
-/// [`run`] — so the [`MediaSource`][symphonia::core::io::MediaSource] a
-/// resolve returns is the child's lifetime, and a killed playback takes
-/// the downloader with it.
+/// Spawns the watcher of the transcoder's stdout: one thread reads until the
+/// pre-buffer fills or the stream ends and hands the bytes — and the pipe,
+/// for the caller to keep streaming — back once.
+fn fill_watch(
+    pipe: Option<ChildStdout>,
+) -> Receiver<(std::io::Result<Vec<u8>>, Option<ChildStdout>)> {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let Some(mut pipe) = pipe else {
+            let _ = sender.send((Err(std::io::Error::other("stdout was not piped")), None));
+            return;
+        };
+        let mut fill = Vec::new();
+        let mut chunk = [0u8; 8192];
+        let result = loop {
+            match pipe.read(&mut chunk) {
+                Ok(0) => break Ok(fill), // the stream ended: hand over what it had
+                Ok(read) => {
+                    fill.extend_from_slice(&chunk[..read]);
+                    if fill.len() >= PREBUFFER {
+                        break Ok(fill); // the floor is reached: hand over and stream the rest
+                    }
+                }
+                Err(error) => break Err(error),
+            }
+        };
+        let _ = sender.send((result, Some(pipe))); // the pipe comes back for the caller
+    });
+    receiver
+}
+
+/// Spawns a prepared command, mapping the two spawn failures the runner
+/// reports: a program that is not there, and a program that could not be
+/// started.
+fn spawn_command(command: &mut Command, program: &Path) -> Result<Child, ToolError> {
+    command.spawn().map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            ToolError::NotInstalled(program.to_path_buf())
+        } else {
+            ToolError::Unusable {
+                program: file_name(program),
+                message: error.to_string(),
+            }
+        }
+    })
+}
+
+/// The verdict once both stages have exited and no byte came back: the
+/// failing tool's own stderr line — the downloader's when it failed, the
+/// transcoder's when the downloader did not — is the reason a user can act
+/// on, never what a decoder made of an empty pipe. Two clean exits with no
+/// bytes are a failure all the same: an empty stream is not a track.
+fn exit_verdict(
+    yt_status: ExitStatus,
+    ff_status: ExitStatus,
+    yt_name: &str,
+    ff_name: &str,
+    yt_err: &Receiver<std::io::Result<Vec<u8>>>,
+    ff_err: &Receiver<std::io::Result<Vec<u8>>>,
+) -> ToolError {
+    let (program, status, err) = if !yt_status.success() {
+        (yt_name, yt_status.code(), yt_err)
+    } else if !ff_status.success() {
+        (ff_name, ff_status.code(), ff_err)
+    } else {
+        // Both exits were clean and nothing was delivered: the transcoder's
+        // words are the closest reason there is.
+        (ff_name, None, ff_err)
+    };
+    let stderr = match collect(err, Instant::now() + Duration::from_secs(1)) {
+        Collected::Bytes(bytes) => bytes,
+        // A stderr read failure or a bound that ran out leaves nothing to
+        // quote: the tool exited without a readable word, and `reason` says
+        // so.
+        Collected::ReadFailed(_) | Collected::TimedOut => Vec::new(),
+    };
+    ToolError::Failed {
+        program: program.to_owned(),
+        status,
+        line: reason(&[], &stderr),
+    }
+}
+
+/// A chain whose stream has been handed over: both children owned, both in
+/// one process group, neither reading a keystroke meant for the interface.
+/// Reading it serves the pre-buffer bytes the fill read first, then the
+/// pipe; dropping it kills the whole group and reaps both — exactly what
+/// [`end_all`] does — so the
+/// [`MediaSource`][symphonia::core::io::MediaSource] a resolve returns is
+/// the chain's lifetime, and a killed playback takes the downloader and the
+/// transcoder with it.
 pub struct Running {
-    child: Child,
+    yt_dlp: Child,
+    ffmpeg: Child,
     stdout: Option<ChildStdout>,
     prefix: Vec<u8>,
 }
 
 impl Running {
-    /// The child's standard output, once: the raw pipe, already past the
-    /// bytes the startup watch read.
-    #[must_use]
-    pub fn stdout(&mut self) -> Option<ChildStdout> {
-        self.stdout.take()
-    }
-
-    /// Ends the child now, without waiting for the drop: the whole process
-    /// group is killed and the exit reaped. Idempotent — the drop runs it
-    /// again, where a kill on an already-dead child is an error nobody
-    /// reads — and cheap, so the stream a resolve returns can end the
-    /// downloader the moment its last reader closes.
+    /// Ends the chain now, without waiting for the drop: the process group
+    /// both children share is killed and both exits are reaped. Idempotent —
+    /// the drop runs it again, where a kill on an already-dead child is an
+    /// error nobody reads — and cheap, so the stream a resolve returns can
+    /// end the chain the moment its last reader closes.
     pub fn end(&mut self) {
-        end(&mut self.child);
+        end_all(&mut [&mut self.yt_dlp, &mut self.ffmpeg]);
     }
 }
 
@@ -369,10 +512,11 @@ impl Read for Running {
 
 impl fmt::Debug for Running {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // The pipes and the bytes already read are not printable; the pid is
-        // what a reader of a debug dump can act on.
+        // The pipes and the bytes already read are not printable; the pids
+        // are what a reader of a debug dump can act on.
         f.debug_struct("Running")
-            .field("pid", &self.child.id())
+            .field("yt_dlp_pid", &self.yt_dlp.id())
+            .field("ffmpeg_pid", &self.ffmpeg.id())
             .field("prefix_bytes", &self.prefix.len())
             .finish_non_exhaustive()
     }
@@ -467,7 +611,7 @@ fn wait(child: &mut Child, until: Instant, program: &str) -> Result<Option<ExitS
             Ok(Some(status)) => return Ok(Some(status)),
             Ok(None) => {}
             Err(error) => {
-                end(child);
+                end_all(&mut [child]);
                 return Err(ToolError::Unusable {
                     program: program.to_owned(),
                     message: error.to_string(),
@@ -539,35 +683,40 @@ fn reason(stdout: &[u8], stderr: &[u8]) -> String {
     String::from("it exited without saying why")
 }
 
-/// Kills the child with its children and reaps it, so the deadline is the end
-/// of the call and never a spinner over a process still running.
+/// Kills the children with their children and reaps them, so the deadline is
+/// the end of the call and never a spinner over a process still running.
 fn expired(child: &mut Child, program: String, after: Duration) -> ToolError {
-    end(child);
+    end_all(&mut [child]);
     ToolError::Deadline { program, after }
 }
 
-/// Ends `child` without leaving anything behind: its whole process group is
-/// killed — `yt-dlp` runs ffmpeg, and a kill that stops at the parent leaves the
-/// grandchild — and the exit is waited for, because a zombie is not a
-/// failure outcome.
+/// Ends every child without leaving anything behind: the process group the
+/// first child owns is killed — the chain's two stages share one group, and
+/// a kill that stops at one stage leaves the other holding the pipe — and
+/// every exit is waited for, because a zombie is not a failure outcome.
 #[cfg(unix)]
-fn end(child: &mut Child) {
-    if let Some(group) = i32::try_from(child.id())
-        .ok()
+fn end_all(children: &mut [&mut Child]) {
+    if let Some(group) = children
+        .first()
+        .and_then(|child| i32::try_from(child.id()).ok())
         .and_then(rustix::process::Pid::from_raw)
     {
         let _ = rustix::process::kill_process_group(group, rustix::process::Signal::Kill);
     }
-    let _ = child.kill();
-    let _ = child.wait();
+    for child in children.iter_mut() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
 }
 
-/// Ends `child` without leaving anything behind. Without process groups there
-/// is only the child itself to stop, and it is still reaped.
+/// Ends every child without leaving anything behind. Without process groups
+/// there are only the children themselves to stop, and they are still reaped.
 #[cfg(not(unix))]
-fn end(child: &mut Child) {
-    let _ = child.kill();
-    let _ = child.wait();
+fn end_all(children: &mut [&mut Child]) {
+    for child in children.iter_mut() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
 }
 
 /// Puts `command` in a process group of its own, so the kill above reaches
@@ -583,3 +732,20 @@ fn own_group(command: &mut Command) {
 /// Without process groups there is nothing to put in one.
 #[cfg(not(unix))]
 fn own_group(_command: &mut Command) {}
+
+/// Puts `command` into the group `pgid` owns: the chain's second stage joins
+/// the downloader's process group, so one kill reaches both. A group id that
+/// does not fit an `i32` — no real pid is that large — leaves the child where
+/// it is, and [`end_all`] still reaps it directly.
+#[cfg(unix)]
+fn join_group(command: &mut Command, pgid: u32) {
+    use std::os::unix::process::CommandExt;
+
+    if let Ok(pgid) = i32::try_from(pgid) {
+        command.process_group(pgid);
+    }
+}
+
+/// Without process groups there is no group to join.
+#[cfg(not(unix))]
+fn join_group(_command: &mut Command, _pgid: u32) {}

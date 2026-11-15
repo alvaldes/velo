@@ -438,3 +438,18 @@ container, which is the same shape the radio's ICY path already proves. The
 price is `ffmpeg` for this row, a transcode, and a seek that becomes a fresh
 spawn with `--download-sections` — a later slice. S4 above is rewritten to say
 what is now true.
+
+**L11 — L10's future landed, and not by writing a demuxer.** A live broadcast
+pipes through the tool as raw MPEG-TS, so the refusal was right and the tree
+still has no TS or Matroska demuxer. What changed is who decodes: `yt-dlp -f
+bestaudio -o -` feeds velo's own `ffmpeg -i - -f mp3 -`, both children in one
+process group so the existing group kill takes the pair, and the MP3 velo reads
+is sequential either way. Measured with the real binary: a live broadcast and a
+recorded video both play. The pre-flight extraction went with the refusal
+(nothing needed a live verdict any more), so a play is one `yt-dlp` invocation
+instead of two — which also closes the latency finding the pipe's review left.
+A 256 KiB pre-buffer (about sixteen seconds of 128 kbps) bounds the handover,
+because without one a busy machine starved the device and underran. Still open:
+a seek is a fresh open at zero, which the UI refuses; seeking by respawn with
+`--download-sections` is the next slice, and it needs the offset to reach the
+resolver.

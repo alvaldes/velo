@@ -1,11 +1,12 @@
 //! The `yt-dlp` seam (issue #70, S6): one external process per call, bounded by
 //! a deadline it cannot outlive, off the event loop, and never a hang the
-//! interface waits on — and, beside [`run`], the streaming [`spawn`] the play
-//! path reads through, whose drop ends the child and its children.
+//! interface waits on — and, beside [`run`], the chain [`spawn`] the play
+//! path reads through: `yt-dlp` piped into `ffmpeg`, both children in one
+//! process group, whose drop ends the pair and anything they left behind.
 //!
-//! Every case here runs a fake program written into a scratch directory: no
+//! Every case here runs fake programs written into a scratch directory: no
 //! test in this file reaches the network, and none of them needs `yt-dlp`
-//! installed.
+//! or `ffmpeg` installed.
 
 #![cfg(unix)]
 
@@ -13,7 +14,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use velo::youtube::tool::{Deadline, ToolError, run, spawn};
+use velo::youtube::tool::{Deadline, PREBUFFER, Running, ToolError, run, spawn};
 
 /// This case's scratch directory, recreated empty so a failed earlier run can
 /// never satisfy a later assertion.
@@ -24,11 +25,23 @@ fn scratch(case: &str) -> PathBuf {
     dir
 }
 
-/// A fake program: executable, and small enough to read at the call site.
+/// A fake `yt-dlp`: executable, and small enough to read at the call site.
 fn fake(dir: &Path, body: &str) -> PathBuf {
+    fake_program(dir, "yt-dlp", body)
+}
+
+/// A fake `ffmpeg`: the chain's second stage, written the same way.
+fn fake_ffmpeg(dir: &Path, body: &str) -> PathBuf {
+    fake_program(dir, "ffmpeg", body)
+}
+
+/// A fake program with the given name: executable, and small enough to read
+/// at the call site.
+fn fake_program(dir: &Path, name: &str, body: &str) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
 
-    let path = dir.join("yt-dlp");
+    std::fs::create_dir_all(dir).expect("the case's directory creates");
+    let path = dir.join(name);
     std::fs::write(&path, body).expect("the fake program is written");
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
         .expect("the fake program turns executable");
@@ -207,12 +220,19 @@ fn a_program_that_is_not_there_says_how_to_get_it() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-// ---- the streaming spawn (issue #70, S4 as revised: the tool holds the
-// stream) ----
+// ---- the chain spawn (issue #70, S4 as revised: the tool holds the stream,
+// and ffmpeg decodes whatever it is) ----
 
-/// The first byte of a spawned stream, read with a bound so a program that
+/// The spawn call every chain case makes: both fakes' stdout wired as the
+/// real chain wires them — the downloader's stdout is the transcoder's
+/// stdin, because no pipe of velo's sits in the middle.
+fn spawn_chain(yt: &Path, ff: &Path, deadline: Deadline) -> Result<Running, ToolError> {
+    spawn(yt, &[], ff, &[], deadline)
+}
+
+/// The first byte of a spawned stream, read with a bound so a chain that
 /// never writes fails the test instead of hanging it.
-fn first_byte(running: &mut velo::youtube::tool::Running) -> u8 {
+fn first_byte(running: &mut Running) -> u8 {
     let until = Instant::now() + Duration::from_secs(2);
     let mut byte = [0u8; 1];
     loop {
@@ -227,40 +247,69 @@ fn first_byte(running: &mut velo::youtube::tool::Running) -> u8 {
 }
 
 #[test]
-fn spawn_hands_back_bytes_while_the_child_still_runs() {
+fn spawn_hands_back_bytes_while_the_children_still_run() {
     let dir = scratch("spawn-stream");
-    // Writes one byte, sleeps, writes the rest: the first byte must be
-    // readable before the child has exited — spawn hands the stream over,
-    // it does not wait for it.
-    let program = fake(&dir, "#!/bin/sh\nprintf 'a'\nsleep 2\nprintf 'b'\n");
+    // The downloader writes more than the pre-buffer's floor and then holds
+    // the pipe open — still running when the stream is handed over; the
+    // transcoder passes its stdin through, so the fill completes from the
+    // downloader's bytes alone. spawn hands the stream over, it does not
+    // wait for the children's exit.
+    let yt = fake(&dir, "#!/bin/sh\nhead -c 300000 /dev/zero\nsleep 5\n");
+    let ff = fake_ffmpeg(&dir, "#!/bin/sh\ncat\n");
 
     let started = Instant::now();
-    let mut running = spawn(&program, &[]).expect("the child spawns");
+    let mut running =
+        spawn_chain(&yt, &ff, Deadline::new(Duration::from_secs(5))).expect("the chain spawns");
     let handed_over = started.elapsed();
     let first = first_byte(&mut running);
 
-    assert_eq!(first, b'a');
+    let _ = first;
     assert!(
-        handed_over < Duration::from_secs(1),
-        "spawn handed the stream over in {handed_over:?}, before the child's exit"
+        handed_over < Duration::from_secs(3),
+        "spawn handed the stream over in {handed_over:?}, before the children's exit"
     );
     drop(running);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
-fn a_child_that_dies_at_once_names_its_own_reason() {
-    let dir = scratch("spawn-failed");
-    let program = fake(
-        &dir,
-        "#!/bin/sh\nprintf 'ERROR: ffmpeg not found\\n' >&2\nexit 3\n",
-    );
+fn a_stream_shorter_than_the_fill_hands_over_everything_it_had() {
+    let dir = scratch("spawn-short");
+    let yt = fake(&dir, "#!/bin/sh\nprintf 'whole-stream'\n");
+    let ff = fake_ffmpeg(&dir, "#!/bin/sh\ncat\n");
 
-    match spawn(&program, &[]) {
-        Err(ToolError::Failed { line, status, .. }) => {
-            assert_eq!(status, Some(3));
+    let mut running = spawn_chain(&yt, &ff, Deadline::new(Duration::from_secs(5)))
+        .expect("the chain's stream ends short of the fill, and that is a stream");
+    let mut all = Vec::new();
+    running.read_to_end(&mut all).expect("the stream reads");
+
+    assert_eq!(
+        all,
+        b"whole-stream".to_vec(),
+        "nothing was lost to the fill"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_downloader_that_dies_before_a_byte_names_its_own_reason() {
+    let dir = scratch("spawn-yt-failed");
+    let yt = fake(
+        &dir,
+        "#!/bin/sh\nprintf 'ERROR: [youtube] abc: Video unavailable\\n' >&2\nexit 1\n",
+    );
+    let ff = fake_ffmpeg(&dir, "#!/bin/sh\ncat\n");
+
+    match spawn_chain(&yt, &ff, Deadline::new(Duration::from_secs(5))) {
+        Err(ToolError::Failed {
+            program,
+            line,
+            status,
+        }) => {
+            assert_eq!(program, "yt-dlp", "the failing tool is named");
+            assert_eq!(status, Some(1));
             assert!(
-                line.contains("ffmpeg not found"),
+                line.contains("Video unavailable"),
                 "the tool's own reason is the error, never a decoder error: {line}"
             );
         }
@@ -270,16 +319,46 @@ fn a_child_that_dies_at_once_names_its_own_reason() {
 }
 
 #[test]
-fn a_stream_that_cannot_start_is_not_installed_when_the_program_is_missing() {
+fn a_transcoder_that_dies_before_a_byte_names_its_own_reason() {
+    let dir = scratch("spawn-ff-failed");
+    // The downloader succeeds; the transcoder refuses its stdin — the
+    // sentence is ffmpeg's own, not the downloader's.
+    let yt = fake(&dir, "#!/bin/sh\nprintf 'tool-bytes'\n");
+    let ff = fake_ffmpeg(
+        &dir,
+        "#!/bin/sh\nprintf 'ERROR: ffmpeg broke\\n' >&2\nexit 2\n",
+    );
+
+    match spawn_chain(&yt, &ff, Deadline::new(Duration::from_secs(5))) {
+        Err(ToolError::Failed {
+            program,
+            line,
+            status,
+        }) => {
+            assert_eq!(program, "ffmpeg", "the failing stage is named");
+            assert_eq!(status, Some(2));
+            assert!(
+                line.contains("ffmpeg broke"),
+                "the transcoder's own reason is the error: {line}"
+            );
+        }
+        other => panic!("expected the transcoder's own failure, got {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_chain_that_cannot_start_is_not_installed_when_the_downloader_is_missing() {
     let dir = scratch("spawn-missing");
     let missing = dir.join("yt-dlp");
+    let ff = fake_ffmpeg(&dir, "#!/bin/sh\ncat\n");
 
-    match spawn(&missing, &[]) {
+    match spawn_chain(&missing, &ff, Deadline::new(Duration::from_secs(1))) {
         Err(ref error @ ToolError::NotInstalled(ref path)) => {
             assert_eq!(path, &missing);
             assert!(
-                error.to_string().contains("not installed"),
-                "the sentence says it is missing: {error}"
+                error.to_string().contains("yt-dlp is not installed"),
+                "the sentence says what is missing: {error}"
             );
         }
         other => panic!("expected NotInstalled, got {other:?}"),
@@ -288,35 +367,118 @@ fn a_stream_that_cannot_start_is_not_installed_when_the_program_is_missing() {
 }
 
 #[test]
-fn dropping_the_stream_kills_the_whole_group() {
-    let dir = scratch("spawn-drop");
-    // `yt-dlp` runs ffmpeg like this: the child ignores TERM — only a
-    // SIGKILL ends it — and holds a grandchild beside it, both in the
-    // child's group, both still alive when the stream is handed over.
-    // The first byte hands the stream over; the sleeps keep both processes
-    // alive until the drop ends them.
-    let program = fake(
-        &dir,
-        "#!/bin/sh\ntrap '' TERM\nprintf 'stream'\nd=$(dirname \"$0\")\nprintf '%s' \"$$\" > \"$d/pid\"\nsleep 60 & printf '%s' \"$!\" > \"$d/grand\"\nsleep 60\n",
-    );
+fn a_missing_transcoder_says_how_to_install_ffmpeg_not_the_downloader() {
+    let dir = scratch("spawn-missing-ff");
+    // The machine has the downloader; the sentence must not send it back to
+    // install what it already has.
+    let yt = fake(&dir, "#!/bin/sh\ncat /dev/null\n");
+    let missing = dir.join("ffmpeg");
 
-    let mut running = spawn(&program, &[]).expect("the child spawns");
-    let _stream = running.stdout().expect("stdout is piped");
-    let child_pid: i32 = wait_for_file(&dir.join("pid"))
+    match spawn_chain(&yt, &missing, Deadline::new(Duration::from_secs(1))) {
+        Err(ref error @ ToolError::NotInstalled(ref path)) => {
+            assert_eq!(path, &missing);
+            let sentence = error.to_string();
+            assert!(
+                sentence.contains("ffmpeg is not installed"),
+                "the missing tool is named: {sentence}"
+            );
+            assert!(
+                !sentence.contains("yt-dlp is not installed"),
+                "the tool the machine has is not named as missing: {sentence}"
+            );
+        }
+        other => panic!("expected NotInstalled, got {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_chain_that_stalls_names_the_stall_and_ends_the_children() {
+    let dir = scratch("spawn-stalled");
+    // The downloader holds the pipe open and writes nothing; the transcoder
+    // waits on its stdin. No byte, no end: the fill misses its bound.
+    let yt = fake(
+        &dir,
+        "#!/bin/sh\nprintf '%s' \"$$\" > \"$(dirname \"$0\")/pid\"\nsleep 60\n",
+    );
+    let ff = fake_ffmpeg(&dir, "#!/bin/sh\ncat\n");
+
+    let started = Instant::now();
+    let result = spawn_chain(&yt, &ff, Deadline::new(Duration::from_millis(300)));
+    let elapsed = started.elapsed();
+
+    match &result {
+        Err(error @ ToolError::Stalled { program, .. }) => {
+            assert_eq!(program, "ffmpeg", "the bytes awaited are the transcoder's");
+            assert!(
+                error
+                    .to_string()
+                    .contains("did not deliver its first 256 KiB"),
+                "the miss is named for what it is, never an empty track: {error}"
+            );
+        }
+        other => panic!("expected the stall, got {other:?}"),
+    }
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "the bound took {elapsed:?}"
+    );
+    let pid: i32 = std::fs::read_to_string(dir.join("pid"))
+        .expect("the downloader reports its pid")
         .trim()
         .parse()
-        .expect("the child reports its pid");
+        .expect("the pid is a number");
+    assert!(gone(pid), "the stalled chain was killed (pid {pid})");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn dropping_the_stream_kills_both_children_and_the_grandchild() {
+    let dir = scratch("spawn-drop");
+    // The downloader ignores TERM — only a SIGKILL ends it — holds a
+    // grandchild beside it, and writes more than the pre-buffer's floor so
+    // the stream is handed over while everything still runs. The
+    // transcoder records its own pid and then blocks on the downloader's
+    // open pipe.
+    let yt = fake(
+        &dir,
+        "#!/bin/sh\ntrap '' TERM\nd=$(dirname \"$0\")\nprintf '%s' \"$$\" > \"$d/pid\"\nsh -c 'sleep 60' & printf '%s' \"$!\" > \"$d/grand\"\nhead -c 300000 /dev/zero\nsleep 60\n",
+    );
+    let ff = fake_ffmpeg(
+        &dir,
+        "#!/bin/sh\nprintf '%s' \"$$\" > \"$(dirname \"$0\")/ffpid\"\ncat\n",
+    );
+
+    let running =
+        spawn_chain(&yt, &ff, Deadline::new(Duration::from_secs(5))).expect("the chain spawns");
+    let yt_pid: i32 = wait_for_file(&dir.join("pid"))
+        .trim()
+        .parse()
+        .expect("the downloader reports its pid");
     let grand_pid: i32 = wait_for_file(&dir.join("grand"))
         .trim()
         .parse()
         .expect("the grandchild reports its pid");
+    let ff_pid: i32 = wait_for_file(&dir.join("ffpid"))
+        .trim()
+        .parse()
+        .expect("the transcoder reports its pid");
     assert!(
-        !gone(child_pid) && !gone(grand_pid),
-        "child {child_pid} and grandchild {grand_pid} run while the stream is open"
+        !gone(yt_pid) && !gone(grand_pid) && !gone(ff_pid),
+        "downloader {yt_pid}, grandchild {grand_pid} and transcoder {ff_pid} run while the \
+         stream is open"
     );
 
     drop(running);
-    wait_until_gone(child_pid);
+    wait_until_gone(yt_pid);
     wait_until_gone(grand_pid);
+    wait_until_gone(ff_pid);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The pre-buffer's number is the code's own: the constant the fill reads
+/// up to, so the sentence and the floor never drift apart.
+#[test]
+fn the_prebuffer_floor_is_256_kib() {
+    assert_eq!(PREBUFFER, 256 * 1024);
 }

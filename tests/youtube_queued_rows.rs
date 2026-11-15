@@ -42,8 +42,8 @@ fn scratch(case: &str) -> PathBuf {
     dir
 }
 
-/// The MP3 fixture the fake tool streams: the same shape the real pipe has —
-/// a sequential, decodable MP3 on stdout.
+/// The MP3 fixture the fake chain streams: the same shape the real chain has
+/// — a sequential, decodable MP3 on the transcoder's stdout.
 fn fixture() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -51,34 +51,33 @@ fn fixture() -> PathBuf {
         .join("silence-then-tone.mp3")
 }
 
-/// One extraction as the real tool answers it: a recorded video — its
-/// `formats[]` carries a plain-HTTP audio format, so it is not live.
-const EXTRACTION: &str = r#"{"id":"abc","duration":212.0,"formats":[{"vcodec":"none","acodec":"mp4a.40.2","protocol":"https"}]}"#;
-
-/// A fake `yt-dlp` shaped like the real one: the extraction argument answers
-/// `EXTRACTION`, everything else is the pipe — it streams the fixture and
-/// counts its own runs in a file beside it — so a test can prove the tool
-/// ran, or that it never did.
-fn fake(dir: &Path) -> (PathBuf, PathBuf) {
+/// A fake chain shaped like the real one: the downloader counts its own runs
+/// in a file beside it and streams the fixture; the transcoder passes its
+/// stdin through — the chain itself is exercised, stdin wired to the
+/// downloader's stdout — so a test can prove the tool ran, or that it never
+/// did.
+fn fake(dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
     use std::os::unix::fs::PermissionsExt;
 
-    let program = dir.join("yt-dlp");
+    let yt = dir.join("yt-dlp");
     let runs = dir.join("runs");
-    let answer = format!("'{EXTRACTION}'");
     let body = format!(
-        "#!/bin/sh\ncase \"$*\" in\n  *dump-single-json*)\n    printf '%s' {answer}\n    ;;\n  \
-         *)\n    echo run >> {runs}\n    cat {fixture}\n    ;;\nesac\n",
+        "#!/bin/sh\necho run >> {runs}\ncat {fixture}\n",
         runs = runs.display(),
         fixture = fixture().display(),
     );
-    fs::write(&program, body).expect("the fake program is written");
-    fs::set_permissions(&program, fs::Permissions::from_mode(0o755))
-        .expect("the fake program turns executable");
-    (program, runs)
+    fs::write(&yt, body).expect("the fake downloader is written");
+    fs::set_permissions(&yt, fs::Permissions::from_mode(0o755))
+        .expect("the fake downloader turns executable");
+    let ff = dir.join("ffmpeg");
+    fs::write(&ff, "#!/bin/sh\ncat\n").expect("the fake transcoder is written");
+    fs::set_permissions(&ff, fs::Permissions::from_mode(0o755))
+        .expect("the fake transcoder turns executable");
+    (yt, ff, runs)
 }
 
-/// How many times the fake tool ran: a resolve the play did not need is a
-/// second ask the queue never owes.
+/// How many times the fake downloader ran: a resolve the play did not need
+/// is a second ask the queue never owes.
 fn tool_runs(runs: &Path) -> usize {
     fs::read_to_string(runs).map_or(0, |content| content.lines().count())
 }
@@ -142,10 +141,10 @@ fn reference() -> (velo::audio::TrackSpec, Vec<f32>) {
     (spec, samples)
 }
 
-/// A resolver over the fake tool: the whole streamed seam, with nothing
+/// A resolver over the fake chain: the whole streamed seam, with nothing
 /// reaching the network.
-fn resolver(program: PathBuf) -> Arc<dyn PathResolver> {
-    Arc::new(Resolver::new(program))
+fn resolver(yt_dlp: PathBuf, ffmpeg: PathBuf) -> Arc<dyn PathResolver> {
+    Arc::new(Resolver::new(yt_dlp, ffmpeg))
 }
 
 /// B1: a `youtube://` row that arrived as a `File` entry — the history, a
@@ -155,7 +154,7 @@ fn resolver(program: PathBuf) -> Arc<dyn PathResolver> {
 #[test]
 fn a_youtube_row_that_arrives_as_a_file_entry_plays_the_stream_the_tool_resolves() {
     let dir = scratch("file-entry");
-    let (program, runs) = fake(&dir);
+    let (program, ff, runs) = fake(&dir);
     let (spec, expected_samples) = reference();
     let queue: SharedQueue = Arc::new(std::sync::Mutex::new(vec![Entry::File(pseudo_path("abc"))]));
     let heard: Mutex<Vec<f32>> = Mutex::new(Vec::new());
@@ -167,7 +166,7 @@ fn a_youtube_row_that_arrives_as_a_file_entry_plays_the_stream_the_tool_resolves
         0,
         spec,
         ReplayGainMode::default(),
-        Some(resolver(program)),
+        Some(resolver(program, ff)),
         &AtomicU64::new(0),
         &AtomicBool::new(false),
         &mut |block| heard.lock().expect("the samples").extend_from_slice(block),
@@ -194,7 +193,7 @@ fn a_youtube_row_that_arrives_as_a_file_entry_plays_the_stream_the_tool_resolves
 #[test]
 fn a_result_queued_from_the_screen_still_plays_from_its_own_entry() {
     let dir = scratch("screen-entry");
-    let (program, runs) = fake(&dir);
+    let (program, ff, runs) = fake(&dir);
     let (spec, expected_samples) = reference();
     let queue: SharedQueue = Arc::new(std::sync::Mutex::new(vec![Entry::Youtube {
         path: pseudo_path("abc"),
@@ -211,7 +210,7 @@ fn a_result_queued_from_the_screen_still_plays_from_its_own_entry() {
         0,
         spec,
         ReplayGainMode::default(),
-        Some(resolver(program)),
+        Some(resolver(program, ff)),
         &AtomicU64::new(0),
         &AtomicBool::new(false),
         &mut |block| heard.lock().expect("the samples").extend_from_slice(block),
@@ -234,7 +233,7 @@ fn a_result_queued_from_the_screen_still_plays_from_its_own_entry() {
 #[test]
 fn a_carried_source_plays_without_a_second_resolve() {
     let dir = scratch("carried");
-    let (_program, runs) = fake(&dir);
+    let (_program, _ff, runs) = fake(&dir);
     let (spec, expected_samples) = reference();
     let transport = Arc::new(Serves {
         body: fs::read(fixture()).expect("the fixture reads"),
@@ -290,13 +289,13 @@ fn a_carried_source_plays_without_a_second_resolve() {
 #[test]
 fn a_file_row_that_is_a_youtube_row_opens_its_stream_at_selection_time() {
     let dir = scratch("selection");
-    let (program, runs) = fake(&dir);
+    let (program, ff, runs) = fake(&dir);
     let (spec, _) = reference();
 
     let (opened_spec, preopen, carried) = open_first_entry(
         &Entry::File(pseudo_path("abc")),
         None,
-        Some(&resolver(program)),
+        Some(&resolver(program, ff)),
     )
     .expect("the row opens as its resolved stream");
 
@@ -328,7 +327,7 @@ fn a_file_row_that_is_a_youtube_row_opens_its_stream_at_selection_time() {
 #[test]
 fn a_carried_first_source_opens_nothing_and_resolves_nothing() {
     let dir = scratch("carried-selection");
-    let (_program, runs) = fake(&dir);
+    let (_program, _ff, runs) = fake(&dir);
     let transport = Arc::new(Serves {
         body: fs::read(fixture()).expect("the fixture reads"),
         urls: Mutex::new(Vec::new()),
@@ -344,7 +343,10 @@ fn a_carried_first_source_opens_nothing_and_resolves_nothing() {
     let (_, preopen, carried) = open_first_entry(
         &Entry::File(pseudo_path("abc")),
         Some(Box::new(source)),
-        Some(&resolver(PathBuf::from("/nowhere/yt-dlp"))),
+        Some(&resolver(
+            PathBuf::from("/nowhere/yt-dlp"),
+            PathBuf::from("/nowhere/ffmpeg"),
+        )),
     )
     .expect("the carried source is the track already");
 

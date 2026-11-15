@@ -333,13 +333,12 @@ fn a_failing_search_names_the_tool_s_own_sentence() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A result the search marked live (`live_status: is_live`) is known before
-/// it is chosen: its row wears the `✗` the radio wears for a station velo
-/// cannot play, with no length, and choosing it anyway is refused with one
-/// sentence and queues nothing — while the recorded result beside it still
-/// queues and plays from its own row.
+/// A result the search marked live (`live_status: is_live`) plays (L10):
+/// its row wears the live vocabulary the station rows teach, with no length
+/// — there is none to give — and choosing it queues and plays from its own
+/// row, exactly the way the recorded result beside it does.
 #[test]
-fn a_live_result_is_marked_and_refused_while_a_recorded_one_still_queues() {
+fn a_live_result_plays_from_its_row_with_no_length_and_no_cross() {
     let dir = scratch("live");
     let (mut app, _) = app_on_the_row(
         &dir,
@@ -358,8 +357,12 @@ fn a_live_result_is_marked_and_refused_while_a_recorded_one_still_queues() {
     let screen = screen_of(&app);
     let nightfall = row_line(&screen, "Nightfall");
     assert!(
-        nightfall.contains("✗"),
-        "the live result is marked the way an unplayable station is, got:\n{screen}"
+        nightfall.contains("— live"),
+        "the live result wears the live vocabulary the station rows teach, got:\n{screen}"
+    );
+    assert!(
+        !nightfall.contains("✗"),
+        "a playable row is never marked unplayable, got: {nightfall}"
     );
     assert!(
         !nightfall.contains(':'),
@@ -370,37 +373,30 @@ fn a_live_result_is_marked_and_refused_while_a_recorded_one_still_queues() {
         "the recorded row beside it keeps its length, got:\n{screen}"
     );
 
-    // Choosing the live row anyway: one sentence, no queue entry.
+    // Choosing the live row: it queues and plays from its own row, the way
+    // any result does.
     press(&mut app, KeyCode::Char('j')); // onto Dawn
     press(&mut app, KeyCode::Char('j')); // onto Nightfall
-    press(&mut app, KeyCode::Enter);
-    assert!(
-        app.status().contains("HLS"),
-        "the refusal says what it is and what to do: {}",
-        app.status()
-    );
-    assert_eq!(
-        app.queue().len(),
-        0,
-        "a refused result never joins the queue: {:?}",
-        app.queue()
-    );
-
-    // The recorded result beside it still queues and plays from its row.
-    press(&mut app, KeyCode::Char('k')); // back onto Dawn
     let action = app.on_key(key(KeyCode::Enter));
     match &action {
         Action::PlayQueue { from } => {
-            assert_eq!(*from, 0, "the recorded result plays from its row");
+            assert_eq!(*from, 0, "the live result plays from its row");
         }
-        other => panic!("enter on the recorded result queues it, got {other:?}"),
+        other => panic!("enter on the live result queues it, got {other:?}"),
     }
-    assert_eq!(
-        app.queue().len(),
-        1,
-        "the recorded result queued exactly one entry: {:?}",
-        app.queue()
-    );
+    assert_eq!(app.queue().len(), 1, "one entry: the live result's own");
+    match &app.queue()[0] {
+        Entry::Youtube {
+            title, duration, ..
+        } => {
+            assert_eq!(title, "Nightfall");
+            assert_eq!(
+                duration, &None,
+                "a live entry carries no length, and the no-length rule keeps its seek refused"
+            );
+        }
+        other => panic!("a live result queues as a YouTube entry, got {other:?}"),
+    }
 
     press(&mut app, KeyCode::Esc);
     let _ = std::fs::remove_dir_all(&dir);
@@ -464,7 +460,10 @@ fn a_queued_youtube_entry_resolves_on_the_worker_never_the_event_loop() {
     // there: the resolve cannot succeed, which is what makes both its
     // thread and its failure observable.
     app.set_resolver(Some(std::sync::Arc::new(
-        velo::youtube::resolve::Resolver::new(PathBuf::from("/velo-test/does-not-exist/yt-dlp")),
+        velo::youtube::resolve::Resolver::new(
+            PathBuf::from("/velo-test/does-not-exist/yt-dlp"),
+            PathBuf::from("/velo-test/does-not-exist/ffmpeg"),
+        ),
     )));
     for character in "dawn".chars() {
         press(&mut app, KeyCode::Char(character));
@@ -637,7 +636,10 @@ fn a_youtube_entry_refuses_a_seek_with_one_sentence() {
 fn ctrl_s_on_a_youtube_row_says_what_it_is() {
     let mut app = app(); // no server configured; the resolver is the YouTube side
     app.set_resolver(Some(std::sync::Arc::new(
-        velo::youtube::resolve::Resolver::new(PathBuf::from("/velo-test/does-not-exist/yt-dlp")),
+        velo::youtube::resolve::Resolver::new(
+            PathBuf::from("/velo-test/does-not-exist/yt-dlp"),
+            PathBuf::from("/velo-test/does-not-exist/ffmpeg"),
+        ),
     )));
 
     // Both shapes a YouTube row reaches the interface as: the entry the search
@@ -815,7 +817,10 @@ fn the_url_prompt_loads_a_youtube_url_through_the_screen() {
     // which is what makes the queued entry observable (no audio device
     // opens in a test).
     app.set_resolver(Some(std::sync::Arc::new(
-        velo::youtube::resolve::Resolver::new(PathBuf::from("/velo-test/does-not-exist/yt-dlp")),
+        velo::youtube::resolve::Resolver::new(
+            PathBuf::from("/velo-test/does-not-exist/yt-dlp"),
+            PathBuf::from("/velo-test/does-not-exist/ffmpeg"),
+        ),
     )));
     press(&mut app, KeyCode::Char('u'));
     assert!(app.url_prompt_open());
@@ -893,7 +898,10 @@ fn a_youtube_url_in_the_query_loads_and_a_query_still_searches() {
         &format!("#!/bin/sh\ncat <<'JSON'\n{VIDEO_OBJECT}\nJSON\n"),
     );
     app.set_resolver(Some(std::sync::Arc::new(
-        velo::youtube::resolve::Resolver::new(PathBuf::from("/velo-test/does-not-exist/yt-dlp")),
+        velo::youtube::resolve::Resolver::new(
+            PathBuf::from("/velo-test/does-not-exist/yt-dlp"),
+            PathBuf::from("/velo-test/does-not-exist/ffmpeg"),
+        ),
     )));
     press(&mut app, KeyCode::Enter); // the screen opens
     for character in "youtube.com/watch?v=abc123def45".chars() {
@@ -922,16 +930,22 @@ fn a_youtube_url_in_the_query_loads_and_a_query_still_searches() {
     let _ = program;
 }
 
-/// A live description pasted into the `u` prompt is refused with the
-/// existing live sentence, queues nothing, and opens nothing: the screen it
-/// needed as a worker closes, the user stays where they were.
+/// A live description pasted into the `u` prompt queues and plays (L10):
+/// exactly one entry, no length, the way a recorded load plays — and the
+/// screen it needed as a worker stays, showing what is playing.
 #[test]
-fn a_live_url_in_the_prompt_is_refused_and_queues_nothing() {
+fn a_live_url_in_the_prompt_queues_and_plays() {
     let dir = scratch("url-live");
     let (mut app, program) = app_on_the_row(
         &dir,
         &format!("#!/bin/sh\ncat <<'JSON'\n{LIVE_OBJECT}\nJSON\n"),
     );
+    app.set_resolver(Some(std::sync::Arc::new(
+        velo::youtube::resolve::Resolver::new(
+            PathBuf::from("/velo-test/does-not-exist/yt-dlp"),
+            PathBuf::from("/velo-test/does-not-exist/ffmpeg"),
+        ),
+    )));
     press(&mut app, KeyCode::Char('u'));
     for character in "https://youtu.be/live1234567".chars() {
         press(&mut app, KeyCode::Char(character));
@@ -939,33 +953,45 @@ fn a_live_url_in_the_prompt_is_refused_and_queues_nothing() {
     press(&mut app, KeyCode::Enter);
 
     assert!(
-        until(&mut app, |app| app.status().contains("is live")),
-        "the live sentence stands, got: {}",
+        until(&mut app, |app| !app.queue().is_empty()),
+        "the load queues and plays, got: {}",
         app.status()
     );
     assert_eq!(
-        app.queue(),
-        [] as [Entry; 0],
-        "a refused live queues nothing"
+        app.queue().len(),
+        1,
+        "exactly one entry: the broadcast's own"
     );
-    assert!(
-        !app.youtube_open(),
-        "a refused load opens nothing over the sources"
-    );
+    match &app.queue()[0] {
+        Entry::Youtube {
+            title, duration, ..
+        } => {
+            assert_eq!(title, "Streaming now");
+            assert_eq!(duration, &None, "a live entry carries no length");
+        }
+        other => panic!("a live load queues as a YouTube entry, got {other:?}"),
+    }
+    assert!(app.youtube_open(), "the screen the load needed stays");
 
     let _ = std::fs::remove_dir_all(&dir);
     let _ = program;
 }
 
-/// A live id typed into the query is refused the same way: one sentence,
-/// nothing queued, the screen stays where it was.
+/// A live id typed into the query queues and plays the same way: one entry,
+/// no length, the screen the query lives on stays.
 #[test]
-fn a_live_id_in_the_query_is_refused_and_queues_nothing() {
+fn a_live_id_in_the_query_queues_and_plays() {
     let dir = scratch("query-live");
     let (mut app, program) = app_on_the_row(
         &dir,
         &format!("#!/bin/sh\ncat <<'JSON'\n{LIVE_OBJECT}\nJSON\n"),
     );
+    app.set_resolver(Some(std::sync::Arc::new(
+        velo::youtube::resolve::Resolver::new(
+            PathBuf::from("/velo-test/does-not-exist/yt-dlp"),
+            PathBuf::from("/velo-test/does-not-exist/ffmpeg"),
+        ),
+    )));
     press(&mut app, KeyCode::Enter); // the screen opens
     for character in "youtube.com/watch?v=live1234567".chars() {
         press(&mut app, KeyCode::Char(character));
@@ -973,14 +999,14 @@ fn a_live_id_in_the_query_is_refused_and_queues_nothing() {
     press(&mut app, KeyCode::Enter);
 
     assert!(
-        until(&mut app, |app| app.status().contains("is live")),
-        "the live sentence stands, got: {}",
+        until(&mut app, |app| !app.queue().is_empty()),
+        "the describe queues and plays, got: {}",
         app.status()
     );
     assert_eq!(
-        app.queue(),
-        [] as [Entry; 0],
-        "a refused live queues nothing"
+        app.queue().len(),
+        1,
+        "exactly one entry: the broadcast's own"
     );
     assert!(app.youtube_open(), "the screen the query lives on stays");
 
@@ -1150,7 +1176,7 @@ fn a_query_that_parses_as_an_id_but_is_not_one_falls_back_to_searching() {
 }
 
 /// `a` on a result appends it to the queue without playing it, and `A` appends
-/// the whole answer — the live one refused, the rest in order. Typing still
+/// the whole answer — every result, the live one included (L10). Typing still
 /// types them: `/` brings the keyboard back to the query.
 #[test]
 fn a_appends_a_result_and_upper_a_appends_the_answer() {
@@ -1188,23 +1214,24 @@ fn a_appends_a_result_and_upper_a_appends_the_answer() {
         app.status()
     );
 
-    // `A`: the whole answer, the live one refused in its own sentence.
+    // `A`: the whole answer, the live one included — two more entries on
+    // top of the one `a` appended.
     assert_eq!(app.on_key(KeyCode::Char('A').into()), Action::None);
     assert_eq!(
         app.queue().len(),
-        2,
-        "only the recorded result joins, got: {}",
+        3,
+        "every result joins, got: {}",
         app.status()
     );
     assert_eq!(
         app.status().matches("added").count(),
         1,
-        "the append counted the recorded result: {}",
+        "the append counted both results: {}",
         app.status()
     );
     assert!(
-        app.status().contains("skipped 1 live broadcast"),
-        "the live one is named, not silently dropped: {}",
+        app.status().contains("added 2 results"),
+        "nothing was skipped, live included: {}",
         app.status()
     );
 

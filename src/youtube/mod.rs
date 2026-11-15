@@ -18,8 +18,14 @@ use std::path::{Path, PathBuf};
 use crate::audio::AudioError;
 use crate::audio::output::PathResolver;
 
-/// The program this module spawns.
+/// The program this module spawns: the downloader that starts the chain.
 pub const PROGRAM: &str = "yt-dlp";
+
+/// The transcoder the chain runs beside the downloader: whatever
+/// [`PROGRAM`] streams, `ffmpeg` decodes it and writes MP3 to stdout — the
+/// reason a live broadcast plays (L10) and the tree never needed a Matroska
+/// or MPEG-TS demuxer.
+pub const FFMPEG: &str = "ffmpeg";
 
 /// What a queue entry's identity starts with, beside `subsonic://`.
 pub const SCHEME: &str = "youtube://";
@@ -38,14 +44,35 @@ pub fn detect() -> Option<PathBuf> {
     detect_in(&std::env::var_os("PATH")?)
 }
 
+/// The `ffmpeg` on this machine's `PATH`, if there is one: the chain's second
+/// stage, found the same way [`detect`] finds the downloader — a file scan,
+/// never a spawn. A machine can have the downloader and not the transcoder,
+/// and the missing one is the one the sentence names.
+#[must_use]
+pub fn detect_ffmpeg() -> Option<PathBuf> {
+    detect_ffmpeg_in(&std::env::var_os("PATH")?)
+}
+
 /// The `yt-dlp` on the given `PATH` value, if there is one.
 ///
 /// A file scan, never a spawn: launching velo must not cost a process, and a
 /// machine without the tool must not pay for looking.
 #[must_use]
 pub fn detect_in(paths: &OsStr) -> Option<PathBuf> {
+    on_paths(paths, executable())
+}
+
+/// The `ffmpeg` on the given `PATH` value, if there is one — the same scan,
+/// the same rules, the transcoder's own name.
+#[must_use]
+pub fn detect_ffmpeg_in(paths: &OsStr) -> Option<PathBuf> {
+    on_paths(paths, ffmpeg_executable())
+}
+
+/// The first executable `program` on the given `PATH` value, if there is one.
+fn on_paths(paths: &OsStr, program: &str) -> Option<PathBuf> {
     std::env::split_paths(paths)
-        .map(|directory| directory.join(executable()))
+        .map(|directory| directory.join(program))
         .find(|candidate| is_executable(candidate))
 }
 
@@ -168,10 +195,10 @@ fn broken(text: &str, why: &str) -> AudioError {
     AudioError::Source(format!("{text} is not a YouTube entry: {why}"))
 }
 
-/// The resolver a machine without `yt-dlp` gets (S10): local files pass
-/// through untouched, and a `youtube://` row fails with the sentence that says
-/// how to get the tool — so the config, the queue and the history stay valid
-/// and only `YouTube` is refused.
+/// The resolver a machine without the tools gets (S10): local files pass
+/// through untouched, and a `youtube://` row fails with the sentence that
+/// says how to get whichever one is missing — so the config, the queue and
+/// the history stay valid and only `YouTube` is refused.
 #[derive(Debug)]
 pub struct Unconfigured {
     message: String,
@@ -211,16 +238,28 @@ impl PathResolver for Unconfigured {
     }
 }
 
-/// The tool's file name on this platform.
+/// The downloader's file name on this platform.
 #[cfg(unix)]
 const fn executable() -> &'static str {
     PROGRAM
 }
 
-/// The tool's file name on this platform.
+/// The downloader's file name on this platform.
 #[cfg(not(unix))]
 const fn executable() -> &'static str {
     "yt-dlp.exe"
+}
+
+/// The transcoder's file name on this platform.
+#[cfg(unix)]
+const fn ffmpeg_executable() -> &'static str {
+    FFMPEG
+}
+
+/// The transcoder's file name on this platform.
+#[cfg(not(unix))]
+const fn ffmpeg_executable() -> &'static str {
+    "ffmpeg.exe"
 }
 
 /// Whether `path` is a program this machine would run: a file, and executable.

@@ -26,9 +26,11 @@ pub struct Found {
     /// Length in whole seconds, `None` for a broadcast that never ends.
     pub duration: Option<u64>,
     /// Whether the search says the result is a live broadcast: its line's
-    /// `live_status` is `is_live`. The screen marks the row and the shell
-    /// refuses it before anything is queued, because a live broadcast is HLS
-    /// and velo cannot play HLS — a queue entry would fail at open time.
+    /// `live_status` is `is_live`. The screen marks the row with the live
+    /// vocabulary the station rows teach, and it plays like any other —
+    /// through the chain, which needs no demuxer the tree lacks — with no
+    /// length (`duration` is `None` for it) and, like every `YouTube` row,
+    /// no seek.
     pub live: bool,
 }
 

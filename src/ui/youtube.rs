@@ -29,7 +29,7 @@ use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph};
 use crate::youtube::search::{self, Found};
 use crate::youtube::tool::ToolError;
 
-use super::rowtext::station_label;
+use super::rowtext::live;
 use super::theme::Theme;
 use super::{ListRow, PlayState, RowMark, digits, draw_empty, list_row};
 
@@ -53,9 +53,7 @@ pub enum Outcome {
     Append(Vec<Found>),
     /// `enter` on a result: it is queued as one [`Entry::Youtube`] and
     /// played from its own row, the way `enter` on a queue row plays from
-    /// that row — unless the result is a live broadcast, which is refused
-    /// with a sentence instead of a queue entry that would fail at open
-    /// time. The shell carries both out; the screen holds no queue.
+    /// that row. The shell carries it out; the screen holds no queue.
     Play(Found),
 }
 
@@ -501,10 +499,9 @@ impl Search {
     }
 
     /// The results list: one row per answer, the standing one marked, a
-    /// live broadcast marked the way the radio marks a station velo cannot
-    /// play — the `✗` of [`station_label`], and no length, because the row
-    /// has none to give and would be refused if chosen (`duration` is
-    /// already `None` for it).
+    /// live broadcast wearing the live vocabulary the station rows teach
+    /// (L10) — the row plays, so no `✗` — and no length, because the row
+    /// has none to give (`duration` is already `None` for it).
     fn draw_results(
         &self,
         frame: &mut ratatui::Frame<'_>,
@@ -526,10 +523,10 @@ impl Search {
                     Some((entry, PlayState::Paused)) if entry == path.as_path() => RowMark::Paused,
                     _ => RowMark::None,
                 };
-                // The `✗` and no length are [`draw_results`]'s to explain;
-                // the row itself is every result row's shape.
+                // The live vocabulary and no length are [`draw_results`]'s
+                // to explain; the row itself is every result row's shape.
                 let name = if found.live {
-                    station_label(false, true, &found.title, "")
+                    live(&found.title, false)
                 } else {
                     found.title.clone()
                 };
