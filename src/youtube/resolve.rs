@@ -29,11 +29,15 @@
 //! whether the video was live, and on a demuxer the tree does not have —
 //! the chain needs neither, so the extraction, its live verdict and
 //! `LIVE_SENTENCE` are deleted with it. One `yt-dlp` invocation per play,
-//! and live is not a special case anywhere. What the chain does not buy —
-//! a seek inside the stream — is a later slice: a seek on a non-seekable
-//! source would be a fresh open at zero, a silent restart of the track, so
-//! the interface refuses it; a live entry's `duration` is `None`, so the
-//! existing no-length rule already refuses it with its own sentence.
+//! and live is not a special case anywhere. What the chain buys for a seek
+//! is a fresh chain started at the offset: [`Resolver::open_streaming_at`]
+//! adds `--download-sections` to the downloader's argv and the same open —
+//! the same transcoder, process group, pre-buffer and verdicts — hands the
+//! stream over. The interface's seek reaches it: the rebuild's worker asks
+//! the offset form, the player plays the carried stream as handed over —
+//! its clock at the offset, never a re-seek of the pipe — and a live
+//! entry's `duration` is `None`, so the no-length rule keeps refusing it
+//! with its own sentence.
 //!
 //! The resolve is bounded work on the thread the caller chose (S6): the
 //! chain runs under [`tool::RESOLVE`], and the stream is pre-buffered —
@@ -44,6 +48,7 @@
 use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use symphonia::core::io::MediaSource;
 
@@ -58,8 +63,22 @@ use crate::youtube::{is_pseudo_path, tool, video_id};
 /// line, and `--no-playlist` keeps a watch URL carrying `&list=` from
 /// resolving a whole playlist. No `-x`, no `--audio-format`: post-processing
 /// is the transcoder's work now, and it is what lets a live broadcast play.
+/// The ordinary play's argv, offset zero — [`arguments_at`] with nothing
+/// to add.
 #[must_use]
 pub fn arguments(id: &str) -> Vec<OsString> {
+    arguments_at(id, Duration::ZERO)
+}
+
+/// [`arguments`] from `offset` on (issue #70, S4): the seek's fresh chain.
+/// A zero offset adds nothing at all — the ordinary play's argv stays
+/// byte-identical — and any other one adds `--download-sections
+/// "*<seconds>-"`, whole seconds: the tool streams from that second, and
+/// the chain's MP3 starts there. That is the mechanism, measured: a seek
+/// is not a position inside a body, it is a new invocation.
+#[must_use]
+pub fn arguments_at(id: &str, offset: Duration) -> Vec<OsString> {
+    let seek = offset.as_secs() > 0;
     [
         "--no-playlist",
         "--no-warnings",
@@ -71,6 +90,8 @@ pub fn arguments(id: &str) -> Vec<OsString> {
     ]
     .into_iter()
     .map(OsString::from)
+    .chain(seek.then(|| OsString::from("--download-sections")))
+    .chain(seek.then(|| OsString::from(format!("*{}-", offset.as_secs()))))
     .chain(std::iter::once(OsString::from(format!(
         "https://www.youtube.com/watch?v={id}"
     ))))
@@ -115,6 +136,31 @@ impl Resolver {
     pub fn new(yt_dlp: PathBuf, ffmpeg: PathBuf) -> Self {
         Self { yt_dlp, ffmpeg }
     }
+
+    /// The one open both forms share: the row's id, the chain spawned with
+    /// the downloader's argv for `offset`, and ffmpeg's stdout handed over
+    /// as the source. Everything — the transcoder, the shared process
+    /// group, the pre-buffer, the first-byte verdicts — is this helper's;
+    /// neither [`PathResolver::open_streaming`] nor
+    /// [`PathResolver::open_streaming_at`] re-implements any of it.
+    fn stream(
+        &self,
+        path: &Path,
+        offset: Duration,
+    ) -> Result<Option<Box<dyn MediaSource>>, AudioError> {
+        let Some(id) = video_id(path)? else {
+            return Ok(None);
+        };
+        let child = tool::spawn(
+            &self.yt_dlp,
+            &arguments_at(id, offset),
+            &self.ffmpeg,
+            &ffmpeg_arguments(),
+            tool::RESOLVE,
+        )
+        .map_err(|error| AudioError::Source(error.to_string()))?;
+        Ok(Some(Box::new(PipedSource { child })))
+    }
 }
 
 impl PathResolver for Resolver {
@@ -152,18 +198,25 @@ impl PathResolver for Resolver {
     /// fills within [`tool::RESOLVE`]: each names its reason, and a broken
     /// row is refused before any process runs.
     fn open_streaming(&self, path: &Path) -> Result<Option<Box<dyn MediaSource>>, AudioError> {
-        let Some(id) = video_id(path)? else {
-            return Ok(None);
-        };
-        let child = tool::spawn(
-            &self.yt_dlp,
-            &arguments(id),
-            &self.ffmpeg,
-            &ffmpeg_arguments(),
-            tool::RESOLVE,
-        )
-        .map_err(|error| AudioError::Source(error.to_string()))?;
-        Ok(Some(Box::new(PipedSource { child })))
+        self.stream(path, Duration::ZERO)
+    }
+
+    /// How a `youtube://` row plays from `offset` in: the same chain, spawned
+    /// once more — a seek is a fresh chain started at the offset, never a
+    /// position inside a body (S4). The offset is the downloader's argv's
+    /// business ([`arguments_at`]); the transcoder, the shared process
+    /// group, the pre-buffer and the first-byte verdicts are the one open's
+    /// ([`Resolver::stream`]).
+    ///
+    /// # Errors
+    ///
+    /// The same errors as [`PathResolver::open_streaming`].
+    fn open_streaming_at(
+        &self,
+        path: &Path,
+        offset: Duration,
+    ) -> Result<Option<Box<dyn MediaSource>>, AudioError> {
+        self.stream(path, offset)
     }
 }
 

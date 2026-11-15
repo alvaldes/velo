@@ -3,6 +3,7 @@ use std::io::{IsTerminal, Stdout};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Duration;
 
 use clap::{CommandFactory as _, Parser};
 
@@ -1600,6 +1601,23 @@ impl PathResolver for ComposedResolver {
             .as_ref()
             .map_or_else(|| Ok(None), |resolver| resolver.open_streaming(path))
     }
+
+    fn open_streaming_at(
+        &self,
+        path: &Path,
+        offset: Duration,
+    ) -> Result<Option<Box<dyn MediaSource>>, AudioError> {
+        if velo::youtube::is_pseudo_path(path) {
+            return self.youtube.open_streaming_at(path, offset);
+        }
+        // Everything else is the Subsonic half's — or, with no server
+        // configured, the trait default's: the plain open, the offset
+        // already inside a seekable source's own bytes.
+        self.subsonic.as_ref().map_or_else(
+            || self.open_streaming(path),
+            |resolver| resolver.open_streaming_at(path, offset),
+        )
+    }
 }
 
 /// The two tools the chain needs, found once (issue #70, S1): the downloader
@@ -1641,6 +1659,9 @@ fn composed_resolver(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::sync::Mutex;
+    use std::time::Duration;
 
     use velo::audio::AudioError;
 
@@ -1699,7 +1720,6 @@ mod tests {
 
     /// What the stub's `resolve` answers.
     type Answer = Box<dyn Fn(&Path) -> Result<PathBuf, AudioError> + Send + Sync>;
-
     /// What the stub's two questions answer.
     type Verdict = Box<dyn Fn(&Path) -> bool + Send + Sync>;
 
@@ -1714,6 +1734,101 @@ mod tests {
             cached: Box::new(|path| !velo::subsonic::cache::is_pseudo_path(path)),
             streaming: Box::new(velo::subsonic::cache::is_pseudo_path),
         })
+    }
+
+    /// A stand-in for the `YouTube` half that records the offset every
+    /// `open_streaming_at` ask carried, and answers nothing: the dispatch
+    /// is pinned by what was asked, never by what a device would play.
+    struct YoutubeSide {
+        asks: Arc<Mutex<Vec<u64>>>,
+    }
+
+    impl PathResolver for YoutubeSide {
+        fn resolve(&self, path: &Path) -> Result<PathBuf, AudioError> {
+            Err(AudioError::Source(format!(
+                "never a file: {}",
+                path.display()
+            )))
+        }
+
+        fn open_streaming(&self, _path: &Path) -> Result<Option<Box<dyn MediaSource>>, AudioError> {
+            Ok(None)
+        }
+
+        fn open_streaming_at(
+            &self,
+            _path: &Path,
+            offset: Duration,
+        ) -> Result<Option<Box<dyn MediaSource>>, AudioError> {
+            self.asks
+                .lock()
+                .expect("the asks lock")
+                .push(offset.as_secs());
+            Ok(None)
+        }
+    }
+
+    /// The dispatch is the override's whole job: a `youtube://` row's seek
+    /// asks the `YouTube` half's offset form at the offset asked for, and
+    /// everything else goes to the Subsonic half's — or, with no server
+    /// configured, to the trait default, which is the plain open.
+    #[test]
+    fn a_youtube_rows_seek_asks_the_offset_form_and_everything_else_does_not() {
+        let asks = Arc::new(Mutex::new(Vec::new()));
+        let youtube = Arc::new(YoutubeSide {
+            asks: Arc::clone(&asks),
+        });
+        let composed = ComposedResolver {
+            youtube,
+            subsonic: None,
+        };
+
+        composed
+            .open_streaming_at(Path::new("youtube://abc123"), Duration::from_secs(83))
+            .expect("the ask answers");
+        assert_eq!(
+            *asks.lock().expect("the asks lock"),
+            vec![83],
+            "the youtube row's seek asked the offset form at the offset asked for"
+        );
+
+        composed
+            .open_streaming_at(Path::new("/music/a.flac"), Duration::from_secs(83))
+            .expect("the ask answers");
+        assert_eq!(
+            *asks.lock().expect("the asks lock"),
+            vec![83],
+            "a non-youtube row never reaches the youtube half"
+        );
+    }
+
+    /// A row the Subsonic half owns reaches that half's offset form — its
+    /// own default, the plain open — and never the `YouTube` half's.
+    #[test]
+    fn a_subsonic_row_reaches_the_subsonic_half_not_the_youtube_half() {
+        let asks = Arc::new(Mutex::new(Vec::new()));
+        let youtube = Arc::new(YoutubeSide {
+            asks: Arc::clone(&asks),
+        });
+        let composed = ComposedResolver {
+            youtube,
+            subsonic: Some(subsonic_side()),
+        };
+
+        let asked = composed
+            .open_streaming_at(
+                Path::new("subsonic://home.server/42"),
+                Duration::from_secs(5),
+            )
+            .expect("the ask answers");
+        assert!(
+            asked.is_some(),
+            "the subsonic half's own streaming answer came back"
+        );
+        assert!(
+            asks.lock().expect("the asks lock").is_empty(),
+            "the youtube half was never asked"
+        );
     }
 
     /// S10, the machine without anything: no server configured, no tool

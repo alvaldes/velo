@@ -3068,6 +3068,16 @@ impl<'lib> App<'lib> {
         self.start_track_at(track, Duration::ZERO);
     }
 
+    /// Drives [`Self::start_track_at`] the way a seek does, `offset` into
+    /// the track: no test can hold a `Player` — building one opens an audio
+    /// device — so the seek's rebuild, whose worker hand-off is what a seek
+    /// pins, is reached through this hook; production reaches it through
+    /// `seek_by` and `seek_to`. Hidden from the docs.
+    #[doc(hidden)]
+    pub fn seek_rebuild_for_tests(&mut self, track: usize, offset: Duration) {
+        self.start_track_at(track, offset);
+    }
+
     /// Runs once per turn of the event loop — the same cadence as key
     /// polling — so the producer's announcements surface without a key
     /// press, the cover art follows the track it plays (T8), and the server
@@ -4905,10 +4915,19 @@ impl<'lib> App<'lib> {
         self.status = format!("{FETCHING_LINE_PREFIX}{name}…");
         let seam = self.resolver.clone();
         let queued = path.clone();
+        // The offset the start asked for (issue #70, S4): a seek's rebuild
+        // carries it in `TrackAt`, a fresh start and a skip have none — the
+        // worker asks the resolver's offset form, so the chain a seek spawns
+        // starts at the second asked for, and every other ask is argv for
+        // argv the open it always was.
+        let offset = match &start {
+            PendingStart::TrackAt { offset, .. } => *offset,
+            PendingStart::Stream { .. } => Duration::ZERO,
+        };
         let (send, answer) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let resolved = match seam {
-                Some(seam) => match seam.open_streaming(&queued) {
+                Some(seam) => match seam.open_streaming_at(&queued, offset) {
                     // A ranged server streams (S1): the open source — probe
                     // included — is the decision, carried to the open.
                     Ok(Some(source)) => Ok(Resolved::Streams(source)),
@@ -9553,8 +9572,8 @@ impl<'lib> App<'lib> {
     }
 
     /// Jumps to an absolute position (issue #6), clamped to the end of the
-    /// track, and refused by a live station with the sentence the relative
-    /// seek already says.
+    /// track, and refused by a live station and a live `YouTube` entry with
+    /// the sentences the relative seek already says.
     fn seek_to(&mut self, target: Duration) {
         if self.refuse_live_seek() {
             return;
@@ -9566,22 +9585,19 @@ impl<'lib> App<'lib> {
         self.start_at(duration.map_or(target, |duration| target.min(duration)));
     }
 
-    /// Whether a seek is refused (S3; the pipe route of L9): a station has
-    /// no position to seek within, and a `YouTube` stream — live or finite —
-    /// is the tool's own pipe, not seekable, so a seek would rebuild the
-    /// player at an offset the stream cannot honour: a fresh open at zero,
-    /// a silent restart of the track. Saying so is cheaper than the rebuild;
-    /// one answer, both shapes. Seeking inside the tool's stream is a later
-    /// slice, and the sentence says exactly that.
+    /// Whether a seek is refused (S3): a station has no position to seek
+    /// within, and a `YouTube` entry with no length is a live broadcast —
+    /// it cannot be seeked, and its sentence says so. A finite `YouTube`
+    /// entry seeks like any other track: the seek's rebuild asks the
+    /// resolver's offset form, and the tool's chain starts again at the
+    /// second asked for (issue #70, S4).
     fn refuse_live_seek(&mut self) -> bool {
         if matches!(self.playing_entry(), Some(Entry::Station { .. })) {
             self.note("velo: nothing to seek in a live station");
             return true;
         }
-        if matches!(self.playing_entry(), Some(Entry::Youtube { .. })) {
-            self.note(
-                "velo: a YouTube stream comes from yt-dlp and seeking it lands in a later slice",
-            );
+        if let Some(Entry::Youtube { duration: None, .. }) = self.playing_entry() {
+            self.note("velo: nothing to seek in a live YouTube stream");
             return true;
         }
         false
@@ -9710,8 +9726,10 @@ impl<'lib> App<'lib> {
             .is_some_and(|path| self.is_uncached_remote(path));
         // The same handover answer a fresh start makes (issue #65): a skip
         // onto a station, or onto a track the network still owes, waits the
-        // old stream out; a seek lands on the entry already on disk, so it
-        // keeps the plain rebuild and its few milliseconds of silence.
+        // old stream out; a seek onto a file lands on the entry already on
+        // disk, so it keeps the plain rebuild and its few milliseconds of
+        // silence — and a seek onto a `YouTube` entry owes the chain the
+        // same wait a fresh start does (issue #70).
         let handover = self.handover_wanted(first.as_ref(), waits);
         if !handover && let Some(player) = self.player.take() {
             player.stop();

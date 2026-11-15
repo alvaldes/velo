@@ -15,10 +15,14 @@
 #![cfg(unix)]
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use velo::audio::TrackSource;
-use velo::audio::output::PathResolver;
+use symphonia::core::io::MediaSource;
+use velo::audio::output::{Entry, PathResolver, TrackFailure, drain_headless_with_carried_source};
+use velo::audio::{AudioError, TrackSource, TrackSpec};
+use velo::config::ReplayGainMode;
 use velo::youtube::pseudo_path;
 use velo::youtube::resolve::{self, Resolver};
 
@@ -72,10 +76,167 @@ fn fake_chain(dir: &Path, yt_body: &str, ff_body: &str) -> (PathBuf, PathBuf, Pa
     (yt, ff, pipes)
 }
 
+/// A fake chain whose downloader records its own argv, one argument per
+/// line, beside its run count: the arguments are the assertion, and a seek
+/// is told by its argv before anything else about it can be true.
+fn recording_chain(dir: &Path) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+    let pipes = dir.join("pipes");
+    let argv = dir.join("argv");
+    let yt = fake(
+        dir,
+        "yt-dlp",
+        &format!(
+            "#!/bin/sh\necho run >> {pipes}\n\
+             for a in \"$@\"; do printf '%s\\n' \"$a\" >> {argv}; done\n\
+             cat {{fixture}}\n",
+            pipes = sh_quote(&pipes.display().to_string()),
+            argv = sh_quote(&argv.display().to_string()),
+        )
+        .replace("{fixture}", &sh_quote(&fixture().display().to_string())),
+    );
+    let ff = fake(dir, "ffmpeg", "#!/bin/sh\ncat\n");
+    (yt, ff, pipes, argv)
+}
+
+/// The argv the fake downloader recorded, one argument per line.
+fn recorded_argv(path: &Path) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .expect("the fake downloader recorded its argv")
+        .lines()
+        .map(String::from)
+        .collect()
+}
+
+/// A resolver that implements only what the trait asks of every resolver:
+/// its [`PathResolver::open_streaming_at`] is the trait's default — the
+/// shape every composed resolver without an override runs.
+struct Delegating(Resolver);
+
+impl PathResolver for Delegating {
+    fn resolve(&self, path: &Path) -> Result<PathBuf, AudioError> {
+        self.0.resolve(path)
+    }
+
+    fn open_streaming(&self, path: &Path) -> Result<Option<Box<dyn MediaSource>>, AudioError> {
+        self.0.open_streaming(path)
+    }
+}
+
 /// A shell word, single-quoted: nothing a path or a JSON line carries can
 /// break out of it except a quote itself, and none of these contain one.
 fn sh_quote(word: &str) -> String {
     format!("'{word}'")
+}
+
+/// The seek fixtures' downloader: it honours `--download-sections
+/// "*<sec>-"` the way the real tool is measured to — the stream starts at
+/// that second — and records its argv, so both the ask and its answer are
+/// assertions.
+const SECTION_DOWNLOADER: &str = r#"#!/bin/sh
+sec=0
+prev=
+for a in "$@"; do
+  if [ "$prev" = "--download-sections" ]; then
+    sec=${a#'*'}
+    sec=${sec%-}
+  fi
+  prev=$a
+done
+for a in "$@"; do printf '%s\n' "$a" >> {argv}; done
+if [ "$sec" -gt 0 ]; then
+  tail -c +$((sec * 88200 + 1)) {pcm}
+else
+  cat {pcm}
+fi
+"#;
+
+/// The seek fixtures' transcoder: a WAV header ahead of the body it passes
+/// through, so what the chain delivers decodes at an exact sample rate and
+/// every second names itself.
+const PASSTHROUGH_TRANSCODER: &str = "#!/bin/sh\ncat {header} -\n";
+
+/// Writes `seconds` of 44.1 kHz mono PCM16 where second `k` is one constant
+/// sample value, `(k + 1) * 3000`: what decodes names the second it came
+/// from, so "the stream starts at the offset" is a sample-level fact, never
+/// a wording.
+fn write_pcm(dir: &Path, seconds: u32) -> (PathBuf, Vec<i16>) {
+    let mut bytes = Vec::new();
+    let mut values = Vec::new();
+    for second in 0..seconds {
+        let value = i16::try_from((second + 1) * 3_000).expect("a small constant");
+        for _ in 0..44_100 {
+            bytes.extend_from_slice(&value.to_le_bytes());
+            values.push(value);
+        }
+    }
+    let path = dir.join("whole.pcm");
+    std::fs::write(&path, &bytes).expect("the pcm body is written");
+    (path, values)
+}
+
+/// Writes the 44-byte canonical WAV header for `frames` frames of 44.1 kHz
+/// mono PCM16: what the fake transcoder writes ahead of the body it passes
+/// through, so the chain's stream is a WAV the decoder reads whole.
+fn write_wav_header(dir: &Path, frames: u32) -> PathBuf {
+    let data_len = frames * 2;
+    let mut header = Vec::with_capacity(44);
+    header.extend_from_slice(b"RIFF");
+    header.extend_from_slice(&(36 + data_len).to_le_bytes());
+    header.extend_from_slice(b"WAVE");
+    header.extend_from_slice(b"fmt ");
+    header.extend_from_slice(&16u32.to_le_bytes());
+    header.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    header.extend_from_slice(&1u16.to_le_bytes()); // mono
+    header.extend_from_slice(&44_100u32.to_le_bytes());
+    header.extend_from_slice(&88_200u32.to_le_bytes());
+    header.extend_from_slice(&2u16.to_le_bytes());
+    header.extend_from_slice(&16u16.to_le_bytes());
+    header.extend_from_slice(b"data");
+    header.extend_from_slice(&data_len.to_le_bytes());
+    let path = dir.join("header.wav");
+    std::fs::write(&path, &header).expect("the wav header is written");
+    path
+}
+
+/// The seek fixtures' chain: a downloader that honours the section flag and
+/// records its argv, and a transcoder that fronts the body with a WAV
+/// header. Both programs are fakes; the chain wiring is real.
+fn section_chain(dir: &Path) -> (Resolver, PathBuf, Vec<i16>) {
+    let (pcm, values) = write_pcm(dir, 4);
+    let header = write_wav_header(dir, 2 * 44_100);
+    let argv = dir.join("argv");
+    let yt = fake(
+        dir,
+        "yt-dlp",
+        &SECTION_DOWNLOADER
+            .replace("{pcm}", &sh_quote(&pcm.display().to_string()))
+            .replace("{argv}", &sh_quote(&argv.display().to_string())),
+    );
+    let ff = fake(
+        dir,
+        "ffmpeg",
+        &PASSTHROUGH_TRANSCODER.replace("{header}", &sh_quote(&header.display().to_string())),
+    );
+    (Resolver::new(yt, ff), argv, values)
+}
+
+/// The samples `source` decodes, whole.
+fn decoded(source: Box<dyn MediaSource>) -> Vec<f32> {
+    let mut track = TrackSource::open_remote(source).expect("the chain decodes");
+    let mut samples = Vec::new();
+    while let Some(block) = track.read_block().expect("the chain decodes") {
+        samples.extend_from_slice(&block);
+    }
+    samples
+}
+
+/// The samples the pcm's seconds `from..` decode to: the reference the
+/// offset stream is held to, sample for sample.
+fn from_second(values: &[i16], from: u32) -> Vec<f32> {
+    values[usize::try_from(from).expect("small") * 44_100..]
+        .iter()
+        .map(|value| f32::from(*value) / 32_768.0)
+        .collect()
 }
 
 /// How many times the fake downloader ran: a resolve that spawns a second
@@ -364,6 +525,288 @@ fn a_refusal_never_reads_as_a_file_read() {
         !error.to_string().starts_with("cannot read the file:"),
         "a resolve failure is a refusal, not a file read: {error}"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The seek is a fresh chain started at the offset (S4): its argv carries
+/// `--download-sections` with the whole second asked for, the watch URL
+/// stays the last argument, one invocation spawns, and the chain's stream
+/// decodes.
+#[test]
+fn a_seek_starts_a_fresh_chain_whose_argv_carries_the_offset_and_whose_stream_decodes() {
+    let dir = scratch("seek-chain");
+    let (yt, ff, pipes, argv) = recording_chain(&dir);
+    let resolver = Resolver::new(yt, ff);
+
+    let source = resolver
+        .open_streaming_at(&pseudo_path("abc"), Duration::from_secs(83))
+        .expect("the seek's resolve answers")
+        .expect("a source");
+
+    let downloader_argv = recorded_argv(&argv);
+    let flag = downloader_argv
+        .iter()
+        .position(|argument| argument == "--download-sections")
+        .unwrap_or_else(|| {
+            panic!("the seek's chain asks the tool for the offset: {downloader_argv:?}")
+        });
+    assert_eq!(
+        downloader_argv.get(flag + 1).map(String::as_str),
+        Some("*83-"),
+        "the second asked for, whole seconds"
+    );
+    assert_eq!(
+        downloader_argv.last().map(String::as_str),
+        Some("https://www.youtube.com/watch?v=abc"),
+        "the watch URL stays the last argument"
+    );
+    assert_eq!(pipe_runs(&pipes), 1, "one invocation: the seek's own chain");
+
+    let mut track = TrackSource::open_remote(source).expect("the chain decodes");
+    let mut streamed = Vec::new();
+    while let Some(block) = track.read_block().expect("the chain decodes") {
+        streamed.extend_from_slice(&block);
+    }
+    assert_eq!(
+        streamed,
+        reference(),
+        "the fresh chain's stream decodes — the seek's audio, from the offset on"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Offset zero is the ordinary play, argv for argv: no
+/// `--download-sections` at all, and the recorded argv is the public
+/// [`resolve::arguments`] list byte for byte.
+#[test]
+fn an_offset_of_zero_adds_no_download_sections_at_all() {
+    let dir = scratch("seek-zero-argv");
+    let (yt, ff, _pipes, argv) = recording_chain(&dir);
+    let resolver = Resolver::new(yt, ff);
+
+    resolver
+        .open_streaming(&pseudo_path("abc"))
+        .expect("the ordinary play answers")
+        .expect("a source");
+    let ordinary = recorded_argv(&argv);
+
+    std::fs::remove_file(&argv).expect("the first record is cleared");
+    resolver
+        .open_streaming_at(&pseudo_path("abc"), Duration::ZERO)
+        .expect("the seek form at zero answers")
+        .expect("a source");
+    let zeroed = recorded_argv(&argv);
+
+    assert_eq!(zeroed, ordinary, "offset zero is the ordinary play");
+    assert!(
+        !ordinary
+            .iter()
+            .any(|argument| argument == "--download-sections"),
+        "the ordinary play never carries the flag: {ordinary:?}"
+    );
+    assert_eq!(
+        ordinary,
+        resolve::arguments("abc")
+            .iter()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<String>>(),
+        "the recorded argv is the public arguments list, byte for byte"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The trait's default is what a composed resolver without an override
+/// runs: it ignores the offset and delegates to [`PathResolver::open_streaming`]
+/// — no flag, one chain, the delegate's own stream from its start. The
+/// resolver that honours the offset says so by overriding.
+#[test]
+fn the_default_open_streaming_at_ignores_the_offset_and_delegates() {
+    let dir = scratch("default-open-at");
+    let (yt, ff, pipes, argv) = recording_chain(&dir);
+    let composed = Delegating(Resolver::new(yt, ff));
+
+    let source = composed
+        .open_streaming_at(&pseudo_path("abc"), Duration::from_secs(90))
+        .expect("the default answers")
+        .expect("a source, exactly as open_streaming answers");
+
+    let downloader_argv = recorded_argv(&argv);
+    assert!(
+        !downloader_argv
+            .iter()
+            .any(|argument| argument == "--download-sections"),
+        "the default ignores the offset: no flag, argv as open_streaming's, got {downloader_argv:?}"
+    );
+    assert_eq!(pipe_runs(&pipes), 1, "the delegate ran: the chain spawned");
+
+    let mut track = TrackSource::open_remote(source).expect("the chain decodes");
+    let mut streamed = Vec::new();
+    while let Some(block) = track.read_block().expect("the chain decodes") {
+        streamed.extend_from_slice(&block);
+    }
+    assert_eq!(
+        streamed,
+        reference(),
+        "the delegate's own stream, from its start"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The seek's answer is audio, not wording: the fake downloader honours
+/// the section flag the way the real tool is measured to, so the chain's
+/// stream is the offset's own audio — the second asked for, never the
+/// start — and its argv asked for exactly that second.
+#[test]
+fn a_seeked_chain_hands_the_offset_stream_not_the_start() {
+    let dir = scratch("seek-stream-offset");
+    let (resolver, argv, values) = section_chain(&dir);
+
+    let source = resolver
+        .open_streaming_at(&pseudo_path("abc"), Duration::from_secs(2))
+        .expect("the seek's resolve answers")
+        .expect("a source");
+
+    let downloader_argv = recorded_argv(&argv);
+    assert!(
+        downloader_argv
+            .windows(2)
+            .any(|pair| pair[0] == "--download-sections" && pair[1] == "*2-"),
+        "the chain asked the tool for the second asked for: {downloader_argv:?}"
+    );
+    assert_eq!(
+        decoded(source),
+        from_second(&values, 2),
+        "the chain's stream is the offset's own audio — the second asked for, never the start"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The seek's landing, pinned at the sample level: the rebuild's carried
+/// stream is the offset's own, and the producer plays it as handed over —
+/// no silence (the pipe cannot be re-seeked) and no second zero (reopened
+/// at the start). The argv and the carried source together are what make
+/// "did not restart at zero" an observable fact, not a hope.
+#[test]
+fn a_seek_rebuild_plays_the_carried_offset_stream_without_reseeking_it() {
+    let dir = scratch("seek-rebuild-samples");
+    let (resolver, _argv, values) = section_chain(&dir);
+
+    let source = resolver
+        .open_streaming_at(&pseudo_path("abc"), Duration::from_secs(2))
+        .expect("the seek's resolve answers")
+        .expect("a source");
+
+    // The rebuild at 2 s, the way the interface hands it over: the carried
+    // source, the offset riding with it for the clock.
+    let stop = AtomicBool::new(false);
+    let mut samples = Vec::new();
+    drain_headless_with_carried_source(
+        Arc::new(Mutex::new(vec![Entry::Youtube {
+            path: pseudo_path("abc"),
+            title: String::from("Dawn"),
+            uploader: None,
+            duration: Some(4),
+        }])),
+        0,
+        2 * u64::from(44_100u32),
+        TrackSpec {
+            sample_rate: 44_100,
+            channels: 1,
+        },
+        ReplayGainMode::default(),
+        source,
+        &stop,
+        &mut |block: &[f32]| samples.extend_from_slice(block),
+        &mut |_failure: TrackFailure| {},
+    )
+    .expect("the sequence runs");
+
+    assert_eq!(
+        samples,
+        from_second(&values, 2),
+        "the seek's audio is the offset's own: silence would be the pipe re-seeked, second zero \
+         would be a reopen at the start"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A seek must not leak the chain it replaces: the source being replaced is
+/// dropped, and dropping it kills the group — downloader, transcoder and
+/// anything they started. The stop a seek's rebuild performs is pinned here
+/// as the producer's own turn ending over a chain whose children still run;
+/// the drop itself is pinned by `dropping_the_source_ends_both_children_and
+/// _the_grandchild`.
+#[test]
+fn the_chain_a_seek_replaces_is_gone_when_its_source_is_dropped() {
+    let dir = scratch("seek-replaces-chain");
+    let (pcm, _values) = write_pcm(&dir, 4);
+    let header = write_wav_header(&dir, 4 * 44_100);
+    let yt = fake(
+        &dir,
+        "yt-dlp",
+        &"#!/bin/sh\nd=$(dirname \"$0\")\nprintf '%s' \"$$\" > \"$d/pid\"\n\
+          sh -c 'sleep 60' & printf '%s' \"$!\" > \"$d/grand\"\ncat {pcm}\nsleep 60\n"
+            .replace("{pcm}", &sh_quote(&pcm.display().to_string())),
+    );
+    let ff = fake(
+        &dir,
+        "ffmpeg",
+        &"#!/bin/sh\nprintf '%s' \"$$\" > \"$(dirname \"$0\")/ffpid\"\ncat {header} -\n"
+            .replace("{header}", &sh_quote(&header.display().to_string())),
+    );
+    let resolver = Resolver::new(yt, ff);
+
+    let source = resolver
+        .open_streaming(&pseudo_path("abc"))
+        .expect("the resolve answers")
+        .expect("a source");
+    let yt_pid: i32 = wait_for_file(&dir.join("pid"))
+        .trim()
+        .parse()
+        .expect("the downloader reports its pid");
+    let grand_pid: i32 = wait_for_file(&dir.join("grand"))
+        .trim()
+        .parse()
+        .expect("the grandchild reports its pid");
+    let ff_pid: i32 = wait_for_file(&dir.join("ffpid"))
+        .trim()
+        .parse()
+        .expect("the transcoder reports its pid");
+
+    // The turn ends — a seek's stop is this, at the producer's own level —
+    // and the source it played is dropped with it.
+    let stop = AtomicBool::new(false);
+    let mut samples = Vec::new();
+    drain_headless_with_carried_source(
+        Arc::new(Mutex::new(vec![Entry::Youtube {
+            path: pseudo_path("abc"),
+            title: String::from("Dawn"),
+            uploader: None,
+            duration: Some(4),
+        }])),
+        0,
+        0,
+        TrackSpec {
+            sample_rate: 44_100,
+            channels: 1,
+        },
+        ReplayGainMode::default(),
+        source,
+        &stop,
+        &mut |block: &[f32]| {
+            samples.extend_from_slice(block);
+            if samples.len() >= 44_100 {
+                stop.store(true, Ordering::Relaxed);
+            }
+        },
+        &mut |_failure: TrackFailure| {},
+    )
+    .expect("the sequence runs");
+
+    assert!(!samples.is_empty(), "the stream played before the stop");
+    wait_until_gone(yt_pid);
+    wait_until_gone(grand_pid);
+    wait_until_gone(ff_pid);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

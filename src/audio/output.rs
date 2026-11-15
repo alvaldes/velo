@@ -513,6 +513,28 @@ pub trait PathResolver: Send + Sync {
     fn open_streaming(&self, _path: &Path) -> Result<Option<Box<dyn MediaSource>>, AudioError> {
         Ok(None)
     }
+
+    /// How `path` plays from `offset` into it (issue #70, S4): the same ask
+    /// [`PathResolver::open_streaming`] answers, with the seek's fresh chain
+    /// started at the offset — a seek on the tool's own pipe is a new open
+    /// at the offset, never a position inside a body. An implementation
+    /// whose source can be seeked needs nothing here — the offset is the
+    /// decoder's inside its own bytes — so the default ignores the offset
+    /// and delegates to [`PathResolver::open_streaming`]: the default's
+    /// answer is "opening at an offset is not my job", and an
+    /// implementation that honours the offset says so by overriding this.
+    ///
+    /// # Errors
+    ///
+    /// The same errors as [`PathResolver::open_streaming`].
+    fn open_streaming_at(
+        &self,
+        path: &Path,
+        offset: Duration,
+    ) -> Result<Option<Box<dyn MediaSource>>, AudioError> {
+        let _ = offset;
+        self.open_streaming(path)
+    }
 }
 
 /// One opened live station, as the producer reads it: the same surface a
@@ -907,6 +929,15 @@ impl Player {
         };
         let _ = len;
 
+        // A carried source the opener already positioned — the seek's chain
+        // started at the offset, and the tool's pipe cannot be seeked — must
+        // not be re-seeked by the producer's first turn, so the offset the
+        // producer applies is decided here, from the source's own answer
+        // ([`producer_offset_frames`]), before the source is consumed.
+        let carried_seekable = first_source
+            .as_deref()
+            .is_none_or(symphonia::core::io::MediaSource::is_seekable);
+
         // The first entry is decided here, at selection time, so a bad first
         // entry fails before a device is opened, and the format is known for
         // the device to be built on (T12c). A carried source is the start's
@@ -921,7 +952,10 @@ impl Player {
         // keeps the three seams apart.
         let (track_spec, preopened, preopened_file) =
             open_first_entry(&first, first_source, resolver.as_ref())?;
-        let offset_frames = duration_to_frames(offset, track_spec.sample_rate);
+        let offset_frames = producer_offset_frames(
+            duration_to_frames(offset, track_spec.sample_rate),
+            carried_seekable,
+        );
 
         let requested_bit_perfect = bit_perfect;
         // The notices live from the first open on (issue #44, S3): a device
@@ -2324,6 +2358,20 @@ fn resolve_entry(
     }
 }
 
+/// How much of the rebuild's offset the producer applies itself: all of it
+/// when there is no carried source — a file opens at the offset — or the
+/// carried source can be seeked, the reader positioning it inside its own
+/// bytes; none of it when the carried source cannot be seeked. A source the
+/// opener already positioned (issue #70: the seek's chain starts at the
+/// offset, and the tool's pipe has no position to seek to) is played as it
+/// was handed over — applying the offset again would only mark the stream
+/// finished, a seek that lands in silence. The clock keeps the full offset
+/// either way: it reads the constructor's own, never this.
+#[must_use]
+const fn producer_offset_frames(offset_frames: u64, carried_seekable: bool) -> u64 {
+    if carried_seekable { offset_frames } else { 0 }
+}
+
 /// Opens a `youtube://` entry as a ranged stream through the resolver (issue
 /// #70): the resolve and the probe embed in the ask, so the caller chooses
 /// the thread. A missing resolver is a sentence, never a panic, and a `None`
@@ -3122,6 +3170,77 @@ pub fn drain_headless_with_preopen(
         retry: Retry::NONE,
         preopen: None,
         preopened_file: Some((opened_for, preopened)),
+    };
+    let fetching_cell = AtomicU64::new(0);
+    let mut refuse = |_: TrackSpec| -> Result<TrackSpec, AudioError> {
+        unreachable!("only bit-perfect sequences reopen the stream")
+    };
+    drain(
+        job,
+        expected,
+        &RepeatCell::default(),
+        stop,
+        &fetching_cell,
+        &mut FnSink {
+            block: on_block,
+            failure: on_failure,
+            reopen: &mut refuse,
+            progress: &mut |_: Option<Duration>, _: Option<&str>| {},
+        },
+    )
+}
+
+/// [`drain_headless_with_preopen`] with the carried source still raw (issue
+/// #70): a seek's carried stream is handed over as the
+/// [`MediaSource`][symphonia::core::io::MediaSource] it is, and the
+/// carried-source rule — how much of the rebuild's offset the producer
+/// applies itself — is the production one ([`producer_offset_frames`]), so
+/// a test pins what a player does, never what a wrapper re-derives.
+///
+/// # Errors
+///
+/// The same errors as [`drain_headless`].
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the job, the carried source and the two sinks are the whole
+    contract of the drain; bundling them would only hide what is shared"
+)]
+pub fn drain_headless_with_carried_source(
+    queue: SharedQueue,
+    start_track: usize,
+    offset_frames: u64,
+    expected: TrackSpec,
+    gain_mode: ReplayGainMode,
+    source: Box<dyn MediaSource>,
+    stop: &AtomicBool,
+    on_block: &mut dyn FnMut(&[f32]),
+    on_failure: &mut dyn FnMut(TrackFailure),
+) -> Result<(), AudioError> {
+    let source_seekable = source.is_seekable();
+    let opened = TrackSource::open_remote(source)?;
+    let offset_frames = producer_offset_frames(offset_frames, source_seekable);
+    // The queue entry at `start_track` is the one the source was opened for;
+    // the producer's own match against the entry would drop a mismatch, and
+    // the tests hand the same path back.
+    let opened_for = match queue.lock() {
+        Ok(queue) => queue,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+    .get(start_track)
+    .and_then(Entry::as_path)
+    .map(Path::to_path_buf)
+    .unwrap_or_default();
+    let job = Sequence {
+        queue,
+        start_track,
+        offset_frames,
+        gain_mode,
+        bit_perfect: false,
+        resolver: None,
+        opener: None,
+        retry: Retry::NONE,
+        preopen: None,
+        preopened_file: Some((opened_for, opened)),
     };
     let fetching_cell = AtomicU64::new(0);
     let mut refuse = |_: TrackSpec| -> Result<TrackSpec, AudioError> {

@@ -10,9 +10,12 @@
 #![cfg(unix)]
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use velo::audio::output::Entry;
+use symphonia::core::io::MediaSource;
+use velo::audio::AudioError;
+use velo::audio::output::{Entry, PathResolver};
 use velo::ui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use velo::ui::{Action, App, View};
 
@@ -598,36 +601,173 @@ fn a_playing_youtube_entry_marks_the_youtube_row() {
     );
 }
 
-/// S3's live case and the pipe route's price (L9): any `YouTube` entry —
-/// live or finite — plays the tool's own pipe, which has no position to seek
-/// to, so a seek is refused with one sentence instead of rebuilding the
-/// player at an offset the stream cannot honour: a fresh open at zero would
-/// silently restart the track. The refusal says what is true: the stream
-/// comes from the tool, and seeking it lands in a later slice.
+/// S3's live case (issue #70): a `YouTube` entry with no length is a live
+/// broadcast — it cannot be seeked, its sentence says so, and the refusal
+/// starts no chain. A finite entry is not refused: its seek is the rebuild
+/// that asks the resolver's offset form, pinned below.
 #[test]
-fn a_youtube_entry_refuses_a_seek_with_one_sentence() {
-    for (name, duration) in [("Streaming now", None), ("Dawn", Some(212))] {
-        let mut app = app();
-        app.show_playing_for_tests(
-            Entry::Youtube {
-                path: PathBuf::from("youtube://live1"),
-                title: String::from(name),
-                uploader: Some(String::from("Evening")),
-                duration,
-            },
-            Duration::ZERO,
-            duration.map(Duration::from_secs),
-            None,
-        );
+fn a_live_youtube_entry_refuses_a_seek_and_starts_no_chain() {
+    let mut app = app();
+    let (resolver, offset_ask, plain_ask) = recording_resolver();
+    app.set_resolver(Some(Arc::new(resolver)));
+    app.show_playing_for_tests(
+        Entry::Youtube {
+            path: PathBuf::from("youtube://live1"),
+            title: String::from("Streaming now"),
+            uploader: Some(String::from("Evening")),
+            duration: None,
+        },
+        Duration::ZERO,
+        None,
+        None,
+    );
 
-        press(&mut app, KeyCode::Right);
+    press(&mut app, KeyCode::Right);
 
-        assert_eq!(
-            app.status(),
-            "velo: a YouTube stream comes from yt-dlp and seeking it lands in a later slice",
-            "the refusal says itself, once, whatever length the entry carries"
-        );
+    assert_eq!(
+        app.status(),
+        "velo: nothing to seek in a live YouTube stream",
+        "the live refusal says itself"
+    );
+    assert_eq!(
+        *offset_ask.lock().expect("the ask lock"),
+        None,
+        "the refusal started no chain"
+    );
+    assert!(
+        !*plain_ask.lock().expect("the ask lock"),
+        "the refusal started no chain"
+    );
+}
+
+/// A finite `YouTube` entry is not refused a seek: the refusal's sentence
+/// is the live broadcast's alone. (The fixture holds no player, so the
+/// seek itself goes no further here — the ask is pinned by
+/// `a_seek_asks_the_resolver_at_the_offset_the_seek_aimed_at`.)
+#[test]
+fn a_finite_youtube_entry_is_not_refused_a_seek() {
+    let mut app = app();
+    let (resolver, offset_ask, _plain_ask) = recording_resolver();
+    app.set_resolver(Some(Arc::new(resolver)));
+    app.show_playing_for_tests(
+        Entry::Youtube {
+            path: PathBuf::from("youtube://abc123"),
+            title: String::from("Dawn"),
+            uploader: Some(String::from("Chill Channel")),
+            duration: Some(212),
+        },
+        Duration::ZERO,
+        Some(Duration::from_secs(212)),
+        None,
+    );
+
+    press(&mut app, KeyCode::Right);
+
+    assert!(
+        !app.status().contains("nothing to seek"),
+        "a finite entry's seek is not refused: {}",
+        app.status()
+    );
+    assert_eq!(
+        *offset_ask.lock().expect("the ask lock"),
+        None,
+        "no chain without a player: the fixture holds none"
+    );
+}
+
+/// A resolver that records which form the interface asked — the offset
+/// form or the plain one — and refuses everything: the seek's ask is the
+/// pin, and a refusal keeps the test off a device no test can hold.
+struct Recording {
+    offset_ask: Arc<Mutex<Option<u64>>>,
+    plain_ask: Arc<Mutex<bool>>,
+}
+
+/// A [`Recording`] and the two handles its asks land in.
+type RecordingHandles = (Recording, Arc<Mutex<Option<u64>>>, Arc<Mutex<bool>>);
+
+/// Builds a [`Recording`] resolver with its ask handles.
+fn recording_resolver() -> RecordingHandles {
+    let offset_ask = Arc::new(Mutex::new(None));
+    let plain_ask = Arc::new(Mutex::new(false));
+    (
+        Recording {
+            offset_ask: Arc::clone(&offset_ask),
+            plain_ask: Arc::clone(&plain_ask),
+        },
+        offset_ask,
+        plain_ask,
+    )
+}
+
+impl PathResolver for Recording {
+    fn resolve(&self, path: &Path) -> Result<PathBuf, AudioError> {
+        Err(AudioError::Source(format!(
+            "{} is a YouTube entry — velo plays it as a resolved stream, and it is never a file",
+            path.display()
+        )))
     }
+
+    fn cached(&self, _path: &Path) -> bool {
+        false
+    }
+
+    fn open_streaming(&self, _path: &Path) -> Result<Option<Box<dyn MediaSource>>, AudioError> {
+        *self.plain_ask.lock().expect("the ask lock") = true;
+        Err(AudioError::Source(String::from("the plain form was asked")))
+    }
+
+    fn open_streaming_at(
+        &self,
+        _path: &Path,
+        offset: Duration,
+    ) -> Result<Option<Box<dyn MediaSource>>, AudioError> {
+        *self.offset_ask.lock().expect("the ask lock") = Some(offset.as_secs());
+        Err(AudioError::Source(String::from(
+            "the fake resolver refuses — the ask is the pin",
+        )))
+    }
+}
+
+/// The seek's rebuild hands the offset to the worker, and the worker asks
+/// the resolver's offset form with exactly the second the seek aimed at —
+/// never the plain form, whose stream would restart the track at zero.
+#[test]
+fn a_seek_asks_the_resolver_at_the_offset_the_seek_aimed_at() {
+    let mut app = app();
+    let (resolver, offset_ask, plain_ask) = recording_resolver();
+    app.set_resolver(Some(Arc::new(resolver)));
+    app.show_playing_at_for_tests(
+        vec![Entry::Youtube {
+            path: PathBuf::from("youtube://abc123"),
+            title: String::from("Dawn"),
+            uploader: None,
+            duration: Some(212),
+        }],
+        0,
+        Duration::ZERO,
+        Some(Duration::from_secs(212)),
+        None,
+    );
+
+    app.seek_rebuild_for_tests(0, Duration::from_secs(83));
+
+    assert!(
+        until(&mut app, |app| app
+            .status()
+            .contains("the fake resolver refuses")),
+        "the worker's answer was consumed: {}",
+        app.status()
+    );
+    assert_eq!(
+        *offset_ask.lock().expect("the ask lock"),
+        Some(83),
+        "the seek asked the offset form, at the second asked for"
+    );
+    assert!(
+        !*plain_ask.lock().expect("the ask lock"),
+        "the seek never asked the plain form — that stream would restart at zero"
+    );
 }
 
 /// `ctrl+s` on a `YouTube` row says what the row is — never "already a file on

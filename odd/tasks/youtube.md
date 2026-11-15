@@ -453,3 +453,30 @@ because without one a busy machine starved the device and underran. Still open:
 a seek is a fresh open at zero, which the UI refuses; seeking by respawn with
 `--download-sections` is the next slice, and it needs the offset to reach the
 resolver.
+
+**L12 — the queue rule was widened, and the author felt it before he read it.**
+He loaded a URL with `u` (which queues *and* plays), added more, and found the
+one entry he could not remove. It was not a YouTube bug: the queue refused to
+edit anything at or before the playing entry, a rule from T18b, because the
+producer tracks its turn by index. Now the removal and the player's decremented
+position go out in one critical section under the queue lock and the producer
+drains those records under the same lock, so the track that is playing keeps
+playing and the next one is neither lost nor repeated — pinned by a transport
+test that measured a stale index as a sequence ending one entry early. Moving
+keeps its refusal, made symmetric. The author confirmed it by hand.
+
+**L13 — the seek, and the measurement that made it one flag.** A seek on a
+finite `youtube://` row is a fresh chain: `yt-dlp --download-sections "*<sec>-"`
+starts the download at that second (measured: the same command with and without
+the flag produced different audio, both non-empty), the same transcoder and
+pre-buffer follow, and the old chain dies with the source it played. The offset
+travels as a trait method — `PathResolver::open_streaming_at`, whose default
+ignores it because a seekable source already handles it in the decoder — and
+the composed resolver forwards it for `youtube://` rows only. The rule that
+keeps it honest: a source the opener positioned is never re-seeked, so the
+producer applies the rebuild's offset only when there is no carried source or
+the carried one is seekable; re-seeking the pipe marks it finished, which is
+silence. A live broadcast still refuses, with its own sentence. What is left:
+the pipe is bounded at handover only, so a stream that stalls mid-play has no
+per-read bound; and no test drives a removal below the playing entry under
+repeat-all wrap.

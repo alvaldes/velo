@@ -193,10 +193,12 @@ feature.
   position. The stream is opened by the chain when the track plays and never
   stored, and playing it again asks the tool again.
 - A live broadcast plays the same way: the chain handles whatever the tool
-  streams, so a live result queues and plays with no length — and, like every
-  `YouTube` row, without a seek.
-- A seek is not supported yet: the stream comes from the chain's pipe, and
-  seeking it lands in a later slice.
+  streams, so a live result queues and plays with no length — and a live row
+  has no seek, because there is nothing to seek to.
+- A seek works: velo asks the tool again, starting the chain at the second
+  you asked for, so seeking a `YouTube` row streams from that point. The
+  length the row shows does not change, and the clock continues from where
+  the seek landed.
 - ReplayGain, bit-perfect and the loudness path do not apply to a decoded
   stream; one line on its first play says so rather than pretending.
 - Your queries are never written anywhere. Not to the config, not to the
