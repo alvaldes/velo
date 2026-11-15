@@ -600,6 +600,37 @@ fn k_then_j_moves_a_pending_entry_and_the_selection_moves_with_it() {
     assert_eq!(app.queue_selected(), 2);
 }
 
+/// The widened rule (a played entry is editable): two.flac plays, one.flac
+/// already did, and the removal takes the played one — the status names it,
+/// the queue keeps the rest in order, and the transport test pins what the
+/// producer plays next (`removing_a_played_entry_shifts_the_producer_…`).
+#[test]
+fn x_removes_a_played_entry_and_keeps_the_queue_in_order() {
+    let mut app = app_with_three_tracks();
+    press(&mut app, KeyCode::Char('a')); // one.flac
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Char('a')); // two.flac
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Char('a')); // three.flac
+
+    // two.flac plays: one.flac is history, and the removal must take it.
+    let queue = app.queue().to_vec();
+    app.show_playing_at_for_tests(queue, 1, std::time::Duration::ZERO, None, None);
+
+    press(&mut app, KeyCode::Tab); // into the queue, on one.flac
+    assert_eq!(app.queue_selected(), 0);
+    press(&mut app, KeyCode::Char('x'));
+
+    assert_eq!(app.status(), "velo: removed one.flac");
+    assert_eq!(
+        queue_paths(app.queue()),
+        vec![
+            PathBuf::from("/library/artist/two.flac"),
+            PathBuf::from("/library/artist/three.flac")
+        ]
+    );
+}
+
 /// Issue #17: the playing entry is refused whatever it is — a station that
 /// plays has the same protection a track that plays has always had, and
 /// nothing moves across it. The fixture stands in for the player, as it does

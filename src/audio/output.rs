@@ -316,6 +316,13 @@ pub struct Player {
     /// say `⟳ fetching …` on the status line for as long as the download
     /// runs. The same cell the headless drains take from their caller.
     fetching: Arc<AtomicU64>,
+    /// The queue indexes the interface removed from below the entry playing,
+    /// as they stood at removal time: the producer takes them under the
+    /// queue's own lock at every turn boundary and moves its own index down
+    /// past each one, so a removal below the playing entry shifts the
+    /// producer's position with the queue — the entry that follows the one
+    /// playing is the one that plays next, never a repeat, never a skip.
+    removals: Arc<Mutex<VecDeque<usize>>>,
     /// Which track the producer is on and how many ring samples had been
     /// delivered when it started it, in one record. Publishing these as two
     /// pieces let the UI read an index whose start had not been written yet and
@@ -958,6 +965,11 @@ impl Player {
         // The fetching cell (issue #60): the producer stores the entry it is
         // resolving into, the interface reads it on its tick.
         let fetching = Arc::new(AtomicU64::new(0));
+        // The removals the interface publishes for its queue edits from
+        // below the entry playing: the producer applies them at its turn
+        // boundaries, under the queue's lock, exactly as they were
+        // published.
+        let removals = Arc::new(Mutex::new(VecDeque::new()));
         let progress = Arc::new(Mutex::new(Progress {
             start: 0,
             duration: None,
@@ -1004,6 +1016,7 @@ impl Player {
             let stop = Arc::clone(&stop);
             let current = Arc::clone(&current);
             let fetching = Arc::clone(&fetching);
+            let removals = Arc::clone(&removals);
             let progress = Arc::clone(&progress);
             let failures = Arc::clone(&failures);
             let repeat = Arc::clone(&repeat);
@@ -1035,6 +1048,7 @@ impl Player {
                         repeat: &repeat,
                         mono: &mono,
                         fetching: &fetching,
+                        removals: &removals,
                     };
                     let mut out = StreamOut {
                         device: device_handle,
@@ -1065,6 +1079,7 @@ impl Player {
             delivered,
             current,
             fetching,
+            removals,
             progress,
             failures,
             start_offset_samples: usize::try_from(clock_offset_samples).unwrap_or(usize::MAX),
@@ -1257,6 +1272,23 @@ impl Player {
         usize::try_from(index)
             .ok()
             .and_then(|index| index.checked_sub(1))
+    }
+
+    /// Shifts the player's own position one entry down for a queue entry the
+    /// interface removed before the one playing: the same track keeps
+    /// sounding, the row that marks it stays on it, and the producer — which
+    /// takes its turns under the queue's own lock — plays the entry that
+    /// followed it. The interface calls this in the same critical section as
+    /// the edit itself, never after the queue was published, so the queue
+    /// and the position cannot drift.
+    pub fn shift_for_removal(&self, removed: usize) {
+        if removed < self.current.load(Ordering::Acquire) {
+            self.current.fetch_sub(1, Ordering::AcqRel);
+            match self.removals.lock() {
+                Ok(mut removals) => removals.push_back(removed),
+                Err(poisoned) => poisoned.into_inner().push_back(removed),
+            }
+        }
     }
 
     /// Silences the device without stopping the stream.
@@ -1679,6 +1711,11 @@ struct Shared<'a> {
     /// interface reads it on its tick, the way it reads the volume and the
     /// mono cell; the audio callback never touches it.
     fetching: &'a AtomicU64,
+    /// The queue indexes the interface removed from below the entry playing,
+    /// drained at every turn boundary under the queue's lock — the lock the
+    /// interface publishes a removal and its shift under, so the pair this
+    /// sequence reads can never disagree.
+    removals: &'a Mutex<VecDeque<usize>>,
 }
 
 /// Fills the stream from the file system: the producer's device-side sink.
@@ -1950,13 +1987,65 @@ impl SequenceSink for FnSink<'_> {
     }
 }
 
-/// Copies one queue entry out with the queue's length, so the lock is held
-/// only for the copy.
-fn queued_entry(queue: &Mutex<Vec<Entry>>, index: usize) -> (Option<Entry>, usize) {
-    let read = |queue: &Vec<Entry>| (queue.get(index).cloned(), queue.len());
+/// One turn's queue entry, taken with the queue's length and the removals
+/// the interface published, in one lock: an edit that removed an entry
+/// below the one playing travels with its shift, so the index this turn
+/// reads and the queue it reads into can never disagree. Each recorded
+/// removal moves the turn's index down past the entry that left — only
+/// past it: an index below the removed entry names the same entry it named
+/// before, which is what a repeat-all wrap can make of this index while
+/// the entry playing stands above it.
+fn turn_entry(
+    queue: &Mutex<Vec<Entry>>,
+    turn: &mut usize,
+    removals: &Mutex<VecDeque<usize>>,
+) -> (Option<Entry>, usize) {
+    let read = |queue: &Vec<Entry>, turn: &mut usize| {
+        match removals.lock() {
+            Ok(mut recorded) => apply_removals(&mut recorded, turn),
+            Err(poisoned) => apply_removals(&mut poisoned.into_inner(), turn),
+        }
+        (queue.get(*turn).cloned(), queue.len())
+    };
     match queue.lock() {
-        Ok(queue) => read(&queue),
-        Err(poisoned) => read(&poisoned.into_inner()),
+        Ok(queue) => read(&queue, turn),
+        Err(poisoned) => read(&poisoned.into_inner(), turn),
+    }
+}
+
+/// The queue's length, with the turn's index settled against the removals
+/// the interface published, in one lock — before the next turn's index is
+/// decided from it: a stale index against a shrunk queue would end the
+/// sequence one entry early instead of playing the entry that followed the
+/// one playing.
+fn settled_len(
+    queue: &Mutex<Vec<Entry>>,
+    turn: &mut usize,
+    removals: &Mutex<VecDeque<usize>>,
+) -> usize {
+    let read = |queue: &Vec<Entry>, turn: &mut usize| {
+        match removals.lock() {
+            Ok(mut recorded) => apply_removals(&mut recorded, turn),
+            Err(poisoned) => apply_removals(&mut poisoned.into_inner(), turn),
+        }
+        queue.len()
+    };
+    match queue.lock() {
+        Ok(queue) => read(&queue, turn),
+        Err(poisoned) => read(&poisoned.into_inner(), turn),
+    }
+}
+
+/// Moves the turn's index down past each recorded removal that stood below
+/// it, and only past those: an index below the removed entry names the
+/// same entry it named before. Each record is consumed once, so the two
+/// call sites — the turn's entry and the turn's end — never apply one
+/// removal twice.
+fn apply_removals(recorded: &mut VecDeque<usize>, turn: &mut usize) {
+    for removed in recorded.drain(..) {
+        if *turn > removed {
+            *turn -= 1;
+        }
     }
 }
 
@@ -2020,8 +2109,12 @@ fn run_sequence(
         // One entry per turn, under the lock, because the queue is shared: what
         // the interface appended, removed or moved while this runs is what
         // plays next. Past the end is how a sequence finishes; the queue can
-        // also shrink.
-        let (Some(entry), _) = queued_entry(&queue, turn.index) else {
+        // also shrink. The turn's index is taken with the removals the
+        // interface published for its edits under the same lock: an entry
+        // taken out below the one playing moves this index down with the
+        // queue, so the entry that follows the one playing is the one that
+        // plays next.
+        let (Some(entry), _) = turn_entry(&queue, &mut turn.index, shared.removals) else {
             return Ok(());
         };
         // The entry is decided when the producer reaches it (T12c), by what
@@ -2164,8 +2257,10 @@ fn run_sequence(
         sink.after_turn();
 
         // The length now, not when the track began: an entry appended while
-        // it played is what comes next (T18).
-        let len = queued_entry(&queue, turn.index).1;
+        // it played is what comes next (T18). The turn's index settles
+        // against the removals first, under the same lock, so the next
+        // turn's index is decided from the queue as it stands.
+        let len = settled_len(&queue, &mut turn.index, shared.removals);
         let mut repeat = shared.repeat.get();
         match outcome {
             Turn::Stopped => return Ok(()),
@@ -3155,6 +3250,63 @@ pub fn drain_headless_repeating(
     )
 }
 
+/// [`drain_headless_repeating`] with the interface's removal channel in the
+/// caller's hands (the queue-edit tests): `removals` holds the queue indexes
+/// an edit took out from below the entry playing, applied at the turn
+/// boundaries exactly as the producer thread applies them. The caller
+/// removes the entries from the shared queue itself, the way the
+/// interface's edit does.
+///
+/// # Errors
+///
+/// The same errors as [`drain_headless`].
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the job, the mode and the two sinks are the whole contract of\n    the drain; bundling them would only hide what is shared"
+)]
+pub fn drain_headless_with_removals(
+    queue: SharedQueue,
+    start_track: usize,
+    offset_frames: u64,
+    expected: TrackSpec,
+    repeat: &RepeatCell,
+    removals: &Mutex<VecDeque<usize>>,
+    stop: &AtomicBool,
+    on_block: &mut dyn FnMut(&[f32]),
+    on_failure: &mut dyn FnMut(TrackFailure),
+) -> Result<(), AudioError> {
+    let job = Sequence {
+        queue,
+        start_track,
+        offset_frames,
+        gain_mode: ReplayGainMode::default(),
+        bit_perfect: false,
+        resolver: None,
+        opener: None,
+        retry: Retry::NONE,
+        preopen: None,
+        preopened_file: None,
+    };
+    let fetching_cell = AtomicU64::new(0);
+    let mut refuse = |_: TrackSpec| -> Result<TrackSpec, AudioError> {
+        unreachable!("only bit-perfect sequences reopen the stream")
+    };
+    drain_with_removals(
+        job,
+        expected,
+        repeat,
+        removals,
+        stop,
+        &fetching_cell,
+        &mut FnSink {
+            block: on_block,
+            failure: on_failure,
+            reopen: &mut refuse,
+            progress: &mut |_: Option<Duration>, _: Option<&str>| {},
+        },
+    )
+}
+
 /// [`drain_headless_with_gain`] under bit-perfect playback (T17): the stream
 /// follows each track's own sample rate instead of converting it, and the
 /// gain is skipped whatever `gain_mode` says — so the drained samples must be
@@ -3226,6 +3378,24 @@ fn drain(
     fetching: &AtomicU64,
     sink: &mut dyn SequenceSink,
 ) -> Result<(), AudioError> {
+    let removals = Mutex::new(VecDeque::new());
+    drain_with_removals(job, expected, repeat, &removals, stop, fetching, sink)
+}
+
+/// [`drain`] with the interface's removal channel in the caller's hands: the
+/// indexes a queue edit took out from below the entry playing, applied at
+/// the turn boundaries exactly as the producer thread applies them. The
+/// caller removes the entries from the shared queue itself, the way the
+/// interface's edit does.
+fn drain_with_removals(
+    job: Sequence,
+    expected: TrackSpec,
+    repeat: &RepeatCell,
+    removals: &Mutex<VecDeque<usize>>,
+    stop: &AtomicBool,
+    fetching: &AtomicU64,
+    sink: &mut dyn SequenceSink,
+) -> Result<(), AudioError> {
     let delivered = AtomicUsize::new(0);
     let current = AtomicUsize::new(job.start_track);
     let mono = MonoCell::default();
@@ -3243,6 +3413,7 @@ fn drain(
         repeat,
         mono: &mono,
         fetching,
+        removals,
     };
     run_sequence(job, expected, &shared, sink)
 }
@@ -3268,6 +3439,7 @@ fn drain_with_mono(
         first: true,
         title: None,
     });
+    let removals = Mutex::new(VecDeque::new());
     let shared = Shared {
         stop,
         delivered: &delivered,
@@ -3276,6 +3448,7 @@ fn drain_with_mono(
         repeat,
         mono,
         fetching,
+        removals: &removals,
     };
     run_sequence(job, expected, &shared, sink)
 }

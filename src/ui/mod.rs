@@ -209,6 +209,12 @@ struct TransportFixture {
     /// The queue index the transport is fetching, stored the way the real
     /// player's cell answers it (issue #60): `None` is no fetch going on.
     fetching: Option<usize>,
+    /// The queue index the transport stands on: the fact a playing player's
+    /// own cell answers, held the same way for the queue-edit tests' hook
+    /// ([`App::show_playing_at_for_tests`]), where the entry that plays is
+    /// not the queue's head. Zero where [`App::show_playing_for_tests`]
+    /// built the fixture, whose queue's head is the entry.
+    index: usize,
 }
 
 /// What a finished fetch starts, exactly as the request named it — kept,
@@ -2987,6 +2993,34 @@ impl<'lib> App<'lib> {
             duration,
             title,
             fetching: None,
+            index: 0,
+        });
+    }
+
+    /// Stands in for a playing player standing at `index` of `queue` (the
+    /// queue-edit tests' hook): the queue stands as given, entry `index` is
+    /// the one that plays, and the position, total and title are held
+    /// exactly as [`Self::show_playing_for_tests`] holds them. No test can
+    /// build a player — building one opens an audio device. Production
+    /// never calls this, which is why it is hidden from the docs.
+    #[doc(hidden)]
+    pub fn show_playing_at_for_tests(
+        &mut self,
+        queue: Vec<Entry>,
+        index: usize,
+        position: Duration,
+        duration: Option<Duration>,
+        title: Option<String>,
+    ) {
+        self.queue = queue;
+        self.playing = Some(Playback::Queue);
+        self.state = PlayState::Playing;
+        self.transport_fixture = Some(TransportFixture {
+            position,
+            duration,
+            title,
+            fetching: None,
+            index,
         });
     }
 
@@ -7522,14 +7556,14 @@ impl<'lib> App<'lib> {
     /// the player stands on (T6c). Nothing plays while the state is stopped,
     /// and in production the running state and the player stand and fall
     /// together — the fixture path (no player, state running) exists only
-    /// under [`App::show_playing_for_tests`], where the queue's head is the
-    /// entry.
+    /// under [`App::show_playing_for_tests`] and
+    /// [`App::show_playing_at_for_tests`], where the fixture's own index
+    /// names the entry.
     fn playing_entry(&self) -> Option<&Entry> {
         if self.state == PlayState::Stopped {
             return None;
         }
-        let index = self.player.as_ref().map_or(0, Player::current_index);
-        self.queue.get(index)
+        self.queue.get(self.playing_queue_index()?)
     }
 
     /// The queue entry the transport stands on, whether or not it still
@@ -8621,36 +8655,84 @@ impl<'lib> App<'lib> {
 
     /// The queue index that is playing, when anything is: the player counts
     /// from the list it was given, which is this queue. Production sets
-    /// `playing` and the player together; the tests' fixture (no player) reads
-    /// the queue's head, the same entry [`Self::playing_entry`] names.
+    /// `playing` and the player together; the tests' fixture (no player)
+    /// holds the index the way the player's own cell does, and a removal
+    /// below it shifts it the same way (`publish_queue`), so the entry that
+    /// plays stays the entry that plays there too.
     fn playing_queue_index(&self) -> Option<usize> {
         self.playing.as_ref()?;
-        Some(self.player.as_ref().map_or(0, Player::current_index))
+        Some(match self.transport_fixture.as_ref() {
+            Some(fixture) => fixture.index,
+            None => self.player.as_ref().map_or(0, Player::current_index),
+        })
     }
 
     /// Applies an edit to the queue and to the handle the player reads, in that
     /// order and in one place: two call sites that had to agree would drift.
     fn edit_queue(&mut self, edit: impl FnOnce(&mut Vec<Entry>)) {
+        self.publish_queue(edit, None);
+    }
+
+    /// The removal's own edit: the entry leaves the queue and — when it
+    /// stood before the entry playing — the player's own position shifts one
+    /// entry down under the same lock the edited queue is published under:
+    /// the same track keeps sounding, and the producer, which takes its
+    /// turns under the same lock, plays the entry that followed it. Never
+    /// after the queue was already published, never in a second place that
+    /// could drift.
+    fn remove_queue_entry(&mut self, index: usize) {
+        let below_playing = self
+            .playing_queue_index()
+            .is_some_and(|playing| index < playing);
+        self.publish_queue(
+            |queue| {
+                queue.remove(index);
+            },
+            below_playing.then_some(index),
+        );
+    }
+
+    /// The publication every queue edit travels through: the interface's own
+    /// list first, then the handle the producer reads, under its lock — and,
+    /// for a removal that took an entry out below the entry playing, the
+    /// position shift with it, in the same critical section. The fixture
+    /// under test holds the playing index the way the player's cell does and
+    /// shifts it the same way, so the entry that plays stays the entry that
+    /// plays there too.
+    fn publish_queue(&mut self, edit: impl FnOnce(&mut Vec<Entry>), removal: Option<usize>) {
         edit(&mut self.queue);
         if let Some(shared) = &self.shared {
-            match shared.lock() {
-                Ok(mut queue) => queue.clone_from(&self.queue),
-                Err(poisoned) => poisoned.into_inner().clone_from(&self.queue),
+            let mut queue = match shared.lock() {
+                Ok(queue) => queue,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            queue.clone_from(&self.queue);
+            if let (Some(removed), Some(player)) = (removal, &self.player) {
+                player.shift_for_removal(removed);
             }
+        }
+        if let Some(removed) = removal
+            && self.player.is_none()
+            && let Some(fixture) = self.transport_fixture.as_mut()
+            && removed < fixture.index
+        {
+            fixture.index -= 1;
         }
     }
 
-    /// The queue index an edit may touch, or why it may not. Only entries after
-    /// the one playing are editable: that keeps the producer's index valid
-    /// without renumbering, and the entries before it are history anyway.
+    /// The queue index an edit may touch, or why it may not.
     fn editable_queue_index(&self, index: usize) -> Result<usize, String> {
         Self::editable_queue_index_among(self.queue.len(), self.playing_queue_index(), index)
     }
 
-    /// The edit rule on its own terms, so the playing-entry refusals are
+    /// The edit rule on its own terms, so the playing-entry refusal is
     /// testable without opening a sound device: given a queue of `len`
-    /// entries with entry `playing` being played, `index` may be edited only
-    /// when it is neither the playing entry nor anything before it.
+    /// entries with entry `playing` being played, `index` may be edited
+    /// unless it is the playing entry itself. An entry before it already
+    /// played — history, not protection: removing one shifts the player's
+    /// own position with the queue, which is the shift
+    /// [`Self::remove_queue_entry`] publishes under the same lock as the
+    /// edit.
     fn editable_queue_index_among(
         len: usize,
         playing: Option<usize>,
@@ -8659,13 +8741,10 @@ impl<'lib> App<'lib> {
         if index >= len {
             return Err("velo: nothing selected in the queue".to_owned());
         }
-        match playing {
-            Some(playing) if index == playing => {
-                Err("velo: cannot remove the track that is playing".to_owned())
-            }
-            Some(playing) if index < playing => Err("velo: that track already played".to_owned()),
-            _ => Ok(index),
+        if playing.is_some_and(|playing| index == playing) {
+            return Err("velo: cannot remove the track that is playing".to_owned());
         }
+        Ok(index)
     }
 
     fn remove_from_queue(&mut self) {
@@ -8674,9 +8753,7 @@ impl<'lib> App<'lib> {
             return;
         };
         let name = self.queue[index].label().into_owned();
-        self.edit_queue(|queue| {
-            queue.remove(index);
-        });
+        self.remove_queue_entry(index);
         self.queue_selected = self.queue_selected.min(self.queue.len().saturating_sub(1));
         self.status = format!("velo: removed {name}");
     }
@@ -8698,7 +8775,10 @@ impl<'lib> App<'lib> {
 
     /// The move rule on its own terms: the index `J`/`K` may move entry
     /// `index` to, or `None` when the move is refused — landing outside the
-    /// queue, or on, or across, the entry that is playing.
+    /// queue, or on, or across, the entry that is playing, from either side:
+    /// a played entry may move among the played ones, where the playing
+    /// entry's index never changes, but a move across it would renumber the
+    /// producer's position, which a removal shifts and a move does not.
     fn queue_move_target(
         len: usize,
         playing: Option<usize>,
@@ -8707,7 +8787,9 @@ impl<'lib> App<'lib> {
     ) -> Option<usize> {
         let target = i64::try_from(index).ok()?.checked_add(delta)?;
         let target = usize::try_from(target).ok()?;
-        let reachable = target < len && playing.is_none_or(|playing| target > playing);
+        let reachable = target < len
+            && playing
+                .is_none_or(|playing| (index < playing) == (target < playing) && target != playing);
         reachable.then_some(target)
     }
 
@@ -11643,15 +11725,11 @@ mod tests {
     }
 
     #[test]
-    fn an_edit_refuses_every_entry_before_the_playing_one() {
-        assert_eq!(
-            App::editable_queue_index_among(3, Some(2), 0),
-            Err("velo: that track already played".to_owned())
-        );
-        assert_eq!(
-            App::editable_queue_index_among(3, Some(2), 1),
-            Err("velo: that track already played".to_owned())
-        );
+    fn an_edit_allows_every_entry_before_the_playing_one() {
+        // A played entry is history, not protection: removing one shifts the
+        // player's own position with the queue, so it edits like the rest.
+        assert_eq!(App::editable_queue_index_among(3, Some(2), 0), Ok(0));
+        assert_eq!(App::editable_queue_index_among(3, Some(2), 1), Ok(1));
     }
 
     #[test]
@@ -11680,6 +11758,16 @@ mod tests {
         assert_eq!(App::queue_move_target(3, None, 2, -1), Some(1));
         assert_eq!(App::queue_move_target(3, None, 0, -1), None);
         assert_eq!(App::queue_move_target(3, None, 2, 1), None);
+    }
+
+    #[test]
+    fn a_move_keeps_a_played_entry_among_the_played_ones() {
+        // Playing entry 2: the played entries may move among themselves —
+        // the playing entry's index never changes — and never across it.
+        assert_eq!(App::queue_move_target(3, Some(2), 0, 1), Some(1));
+        assert_eq!(App::queue_move_target(3, Some(2), 1, -1), Some(0));
+        assert_eq!(App::queue_move_target(3, Some(2), 0, 2), None);
+        assert_eq!(App::queue_move_target(3, Some(2), 1, 2), None);
     }
 
     // ---- the station's own `next` (issue #17) --------------------------------

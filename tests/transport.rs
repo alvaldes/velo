@@ -4,11 +4,13 @@
 //! target are pure, and a seek is observed through [`velo::audio::TrackSource`]
 //! the same way the producer thread reads a track.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use velo::audio::output::{Entry, TrackFailure, drain_headless};
+use velo::audio::output::{Entry, SharedQueue, TrackFailure, drain_headless};
 use velo::audio::{GainRamp, TrackSource, TrackSpec, seek_target};
 
 /// Writes a minimal PCM16 WAV file so the tests need no external tooling.
@@ -574,7 +576,9 @@ fn previous_restarts_a_track_already_under_way_and_otherwise_goes_back() {
 
 // ---- repeat (S8) -------------------------------------------------------------
 
-use velo::audio::output::{Repeat, RepeatCell, drain_headless_repeating, next_track};
+use velo::audio::output::{
+    Repeat, RepeatCell, drain_headless_repeating, drain_headless_with_removals, next_track,
+};
 
 #[test]
 fn the_next_track_follows_the_repeat_mode() {
@@ -643,6 +647,70 @@ fn drain_until(
     )
     .expect("the sequence runs");
     (samples, failures)
+}
+
+/// Removing a played entry shifts the producer's own position with the
+/// queue: the track that plays keeps playing and the entry that followed it
+/// is the one that plays next — never a lost entry, never a repeat. The
+/// queue here is `[played, playing, next]`, started at the middle track,
+/// and the removal lands while that track is being produced, the way an
+/// `x` on the queue view lands while it sounds.
+#[test]
+fn removing_a_played_entry_shifts_the_producer_onto_the_entry_that_followed() {
+    let spec = TrackSpec {
+        sample_rate: 44_100,
+        channels: 2,
+    };
+    let played = scratch_path("shift-played");
+    let playing = scratch_path("shift-playing");
+    let next = scratch_path("shift-next");
+    write_indexed_wav(&played, 500, spec); // 1_000 samples
+    write_indexed_wav(&playing, 700, spec); // 1_400 samples
+    write_indexed_wav(&next, 900, spec); // 1_800 samples
+
+    let queue: SharedQueue = Arc::new(Mutex::new(
+        vec![played, playing, next]
+            .into_iter()
+            .map(Entry::from)
+            .collect(),
+    ));
+    let removals = Mutex::new(VecDeque::new());
+    let stop = AtomicBool::new(false);
+    let mut samples: Vec<f32> = Vec::new();
+    let mut failures: Vec<TrackFailure> = Vec::new();
+    let mut removed = false;
+    drain_headless_with_removals(
+        Arc::clone(&queue),
+        1, // the middle track plays; the first one already did
+        0,
+        spec,
+        &RepeatCell::new(Repeat::Off),
+        &removals,
+        &stop,
+        &mut |block: &[f32]| {
+            samples.extend_from_slice(block);
+            if !removed {
+                removed = true;
+                queue.lock().expect("the queue locks").remove(0);
+                removals.lock().expect("the removals lock").push_back(0);
+            }
+        },
+        &mut |failure: TrackFailure| failures.push(failure),
+    )
+    .expect("the sequence runs");
+
+    let _ = std::fs::remove_file(scratch_path("shift-played"));
+    let _ = std::fs::remove_file(scratch_path("shift-playing"));
+    let _ = std::fs::remove_file(scratch_path("shift-next"));
+
+    assert!(failures.is_empty(), "{failures:?}");
+    // The middle track's own 1_400 samples, then the third track's 1_800:
+    // a lost next entry drains 1_400, a repeated playing entry 4_600.
+    assert_eq!(
+        samples.len(),
+        1_400 + 1_800,
+        "the track that plays keeps playing and the entry that followed it plays next"
+    );
 }
 
 #[test]

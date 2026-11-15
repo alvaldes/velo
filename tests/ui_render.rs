@@ -929,6 +929,43 @@ fn the_queue_view_draws_the_queued_file_names_and_empty_state() {
     );
 }
 
+/// The widened rule, observed on the queue itself: removing a played entry
+/// leaves the row that plays marked — the same track keeps its `▶`, now at
+/// the queue's head, the way the player's own position shifts with the
+/// removal.
+#[test]
+fn removing_a_played_entry_leaves_the_playing_row_on_the_same_track() {
+    let mut app = App::new(tracks(&["one.flac", "two.flac", "three.flac"]));
+    press(&mut app, KeyCode::Char('a')); // one.flac
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Char('a')); // two.flac
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Char('a')); // three.flac
+
+    // two.flac plays; one.flac already did.
+    let queue = app.queue().to_vec();
+    app.show_playing_at_for_tests(queue, 1, std::time::Duration::ZERO, None, None);
+
+    press(&mut app, KeyCode::Tab); // into the queue, on one.flac
+    press(&mut app, KeyCode::Char('x')); // the played entry leaves
+
+    let screen = screen_at(&app, 90, 12);
+    let playing_row = screen
+        .lines()
+        .find(|line| line.contains("two.flac") && line.contains("1. "))
+        .expect("the queue still shows the entry that plays");
+    assert!(
+        playing_row.contains('▶'),
+        "the entry that plays keeps its marker at the queue's head, got: {playing_row:?}"
+    );
+    assert!(
+        !screen
+            .lines()
+            .any(|line| line.contains("1. ") && line.contains("one.flac")),
+        "the played entry is gone from the queue, got:\n{screen}"
+    );
+}
+
 // ---- a station row reads as live (issue #17) -------------------------------
 
 /// A station queued among the tracks keeps its row and reads as live: the
