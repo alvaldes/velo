@@ -105,9 +105,11 @@ pub fn pseudo_path(id: &str) -> PathBuf {
 /// `&list=` and `&t=` among them), `https://youtu.be/<id>`,
 /// `https://www.youtube.com/shorts/<id>`, `/embed/<id>`, `/live/<id>`,
 /// `youtube://<id>` (the app's own identity, pasted back), a scheme-less
-/// `youtube.com/…` paste, and a bare eleven-character video id. Anything
-/// else — a search phrase, another site, a playlist link, an id of another
-/// length — is `None`.
+/// `youtube.com/…` paste, and a bare eleven-character video id. The scheme
+/// and the host fold case — `HTTPS://` and `YouTube.com` are what a person
+/// pastes — while the path and the id stay case-sensitive, because an id
+/// is. Anything else — a search phrase, another site, a playlist link, an
+/// id of another length — is `None`.
 #[must_use]
 pub fn input_video_id(text: &str) -> Option<String> {
     let text = text.trim();
@@ -119,15 +121,23 @@ pub fn input_video_id(text: &str) -> Option<String> {
         return Some(String::from(text));
     }
     // A pasted URL: scheme (optional — a search-field paste drops it),
-    // host, path segments, query.
+    // host, path segments, query. Scheme and host fold case (R3-003):
+    // `HTTPS://youtu.be/…` and `YouTube.com/watch?v=…` are what a person
+    // pastes, and a URL is not matched against what a browser would
+    // lowercase for them. The path and the id do not fold: an id is.
     let rest = match text.split_once("://") {
-        Some(("https" | "http", rest)) => rest,
+        Some((scheme, rest))
+            if scheme.eq_ignore_ascii_case("https") || scheme.eq_ignore_ascii_case("http") =>
+        {
+            rest
+        }
         Some(_) => return None,
         None => text,
     };
     let (authority, tail) = rest.split_once('/')?;
     let (path, query) = tail.split_once('?').unwrap_or((tail, ""));
-    let host = authority.strip_prefix("www.").unwrap_or(authority);
+    let host = authority.to_ascii_lowercase();
+    let host = host.strip_prefix("www.").unwrap_or(&host);
     let mut segments = path.split('/');
     let id = match (host, segments.next(), segments.next()) {
         ("youtu.be", Some(id), None) => id,

@@ -93,6 +93,16 @@ impl Pending {
             Self::Describe { input, .. } => input,
         }
     }
+
+    /// The sentence a worker that died before answering is given (R3-001):
+    /// one per job, naming the job the user asked for — a describe never
+    /// says "the search", because the user never started one.
+    fn lost_sentence(&self) -> String {
+        match self {
+            Self::Search { .. } => String::from("the search stopped without an answer"),
+            Self::Describe { .. } => String::from("the video lookup stopped without an answer"),
+        }
+    }
 }
 
 /// The screen's own state: the query being typed, the cursor — the query row
@@ -227,6 +237,7 @@ impl Search {
         }
 
         let pending = self.pending.take()?;
+        let lost = pending.lost_sentence();
         let polled = match pending {
             Pending::Search { query, answer } => match answer.try_recv() {
                 Ok(answer) => Polled::Search(answer),
@@ -247,9 +258,7 @@ impl Search {
         };
         match polled {
             Polled::StillRunning => None,
-            Polled::Lost => Some(Answer::Failed(String::from(
-                "the search stopped without an answer",
-            ))),
+            Polled::Lost => Some(Answer::Failed(lost)),
             Polled::Search(Err(error)) | Polled::Describe(Err(error)) => {
                 Some(Answer::Failed(error.to_string()))
             }
@@ -534,4 +543,51 @@ fn clock(secs: Option<u64>) -> String {
         return String::new();
     };
     format!("{}:{:02}", secs / 60, secs % 60)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A worker that died before answering names its own job: a describe
+    /// never says "the search", because the user never started one (R3-001).
+    /// The lost worker itself is forced here through the channel the worker
+    /// holds, the way it reaches `poll` when the thread dies before its
+    /// send.
+    #[test]
+    fn a_lost_describe_names_the_describe_not_the_search() {
+        let mut screen = Search::new(PathBuf::from("/nowhere/yt-dlp"));
+        let (sender, receiver) = mpsc::channel();
+        drop(sender); // the worker died before it answered
+        screen.pending = Some(Pending::Describe {
+            input: String::from("https://youtu.be/abc123def45"),
+            answer: receiver,
+        });
+
+        assert_eq!(
+            screen.poll(),
+            Some(Answer::Failed(String::from(
+                "the video lookup stopped without an answer"
+            )))
+        );
+    }
+
+    /// A lost search keeps its own sentence: one per job.
+    #[test]
+    fn a_lost_search_still_names_the_search() {
+        let mut screen = Search::new(PathBuf::from("/nowhere/yt-dlp"));
+        let (sender, receiver) = mpsc::channel();
+        drop(sender);
+        screen.pending = Some(Pending::Search {
+            query: String::from("dawn"),
+            answer: receiver,
+        });
+
+        assert_eq!(
+            screen.poll(),
+            Some(Answer::Failed(String::from(
+                "the search stopped without an answer"
+            )))
+        );
+    }
 }

@@ -989,6 +989,69 @@ fn a_live_id_in_the_query_is_refused_and_queues_nothing() {
     let _ = program;
 }
 
+/// A paste that arrives while a job is already running is refused, and the
+/// refusal is said: the prompt closed, the status names why the paste was
+/// not loaded — never the searching line standing in its place — and the
+/// screen stays usable, the running search's answer still landing on it.
+#[test]
+fn a_paste_refused_while_a_job_is_running_says_so_and_the_screen_stays_usable() {
+    let dir = scratch("busy");
+    // The search answer takes its time, so a job is in flight when the
+    // paste arrives.
+    let body = format!("#!/bin/sh\nsleep 2\ncat <<'JSON'\n{SEARCH_ANSWER}\nJSON\n");
+    let (mut app, program) = app_on_the_row(&dir, &body);
+    press(&mut app, KeyCode::Enter); // the screen opens
+    for character in "dawn".chars() {
+        press(&mut app, KeyCode::Char(character));
+    }
+    press(&mut app, KeyCode::Enter); // the search starts: browsing
+    assert_eq!(app.status(), "⟳ searching dawn…", "the job is in flight");
+
+    // The `u` prompt: paste a YouTube URL while the search runs.
+    press(&mut app, KeyCode::Char('u'));
+    assert!(
+        app.url_prompt_open(),
+        "`u` opens the prompt while a job runs"
+    );
+    for character in "https://youtu.be/abc123def45".chars() {
+        press(&mut app, KeyCode::Char(character));
+    }
+    press(&mut app, KeyCode::Enter);
+
+    assert!(!app.url_prompt_open(), "the prompt closed on submit");
+    assert_eq!(
+        app.status(),
+        "velo: a job is already running — the YouTube link was not loaded",
+        "the refusal is said, not swallowed by the searching line: {}",
+        app.status()
+    );
+
+    // The screen stays usable: the running search still answers, nothing
+    // was queued, and the refusal stands beside it — never replaced by the
+    // searching line mid-flight.
+    assert!(
+        until(&mut app, |app| screen_of(app).contains("Dawn")),
+        "the running search still answers, got:\n{}",
+        screen_of(&app)
+    );
+    assert!(app.youtube_open(), "the screen stays open and usable");
+    assert_eq!(
+        app.queue(),
+        [] as [Entry; 0],
+        "the refused paste queued nothing"
+    );
+    assert_eq!(
+        app.status(),
+        "velo: a job is already running — the YouTube link was not loaded",
+        "the refusal still stands once the answer landed, got: {}",
+        app.status()
+    );
+
+    press(&mut app, KeyCode::Esc);
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = program;
+}
+
 // ---- what is playing is visible ---------------------------------------------
 
 /// The screen names what is playing when the playing entry is a `YouTube`

@@ -50,13 +50,11 @@ fn fixture() -> PathBuf {
 }
 
 /// One extraction as the real tool answers it: a recorded video — its
-/// `formats[]` carries a plain-HTTP audio format, so it is not live.
-const EXTRACTION: &str = r#"{"id":"abc","duration":212.0,"formats":[{"vcodec":"none","acodec":"mp4a.40.2","protocol":"https"}]}"#;
+/// `live_status` says so, whatever its `formats[]` look like.
+const EXTRACTION: &str = r#"{"id":"abc","duration":212.0,"live_status":"not_live"}"#;
 
-/// One extraction as a live broadcast answers it: only manifests, no
-/// plain-HTTP audio anywhere.
-const LIVE_EXTRACTION: &str =
-    r#"{"id":"abc","formats":[{"vcodec":"none","acodec":"mp4a.40.2","protocol":"m3u8_native"}]}"#;
+/// One extraction as a live broadcast answers it: `live_status` is `is_live`.
+const LIVE_EXTRACTION: &str = r#"{"id":"abc","live_status":"is_live"}"#;
 
 /// A fake tool shaped like the real one: the extraction argument answers
 /// `answer`, everything else is the pipe — it counts its own runs in a file
@@ -319,6 +317,46 @@ fn a_live_answer_is_refused_by_name_before_any_pipe_is_spawned() {
         "the refusal happens before any pipe is spawned"
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A recorded video is never called live, whatever its `formats[]` look
+/// like: the extraction's only verdict is `live_status`, so a recorded
+/// video whose formats the pipe cannot use fails with the pipe's own
+/// reason — never with a sentence about a broadcast the video is not.
+#[test]
+fn a_recorded_video_is_never_called_live_whatever_its_formats_look_like() {
+    for status in ["not_live", "was_live"] {
+        let dir = scratch(&format!("recorded-{status}"));
+        let extraction = format!(
+            r#"{{"id":"abc","duration":212.0,"live_status":"{status}","formats":[{{"vcodec":"none","acodec":"mp4a.40.2","protocol":"m3u8_native"}}]}}"#
+        );
+        let (program, pipes) = fake_tool(
+            &dir,
+            &extraction,
+            "printf 'ERROR: [youtube] abc: requested format not available\\n' >&2\nexit 1",
+        );
+        let resolver = Resolver::new(program);
+
+        let error = resolver
+            .open_streaming(&pseudo_path("abc"))
+            .err()
+            .expect("nothing to play");
+
+        assert!(
+            !error.to_string().contains("live") && !error.to_string().contains("HLS"),
+            "a recorded video (`live_status: {status}`) is never called live: {error}"
+        );
+        assert!(
+            error.to_string().contains("requested format not available"),
+            "the pipe's own reason is the failure: {error}"
+        );
+        assert_eq!(
+            pipe_runs(&pipes),
+            1,
+            "the recorded verdict let the pipe run"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[test]

@@ -161,6 +161,12 @@ fn a_pasted_youtube_thing_names_its_video_id() {
         ("dQw4w9WgXcQ", "dQw4w9WgXcQ"),
         ("youtube.com/watch?v=dQw4w9WgXcQ", "dQw4w9WgXcQ"),
         ("  https://youtu.be/dQw4w9WgXcQ  ", "dQw4w9WgXcQ"),
+        // Scheme and host fold case — what a person actually pastes —
+        // while the path and the id stay case-sensitive (an id is).
+        ("HTTPS://youtu.be/dQw4w9WgXcQ", "dQw4w9WgXcQ"),
+        ("Http://youtu.be/dQw4w9WgXcQ", "dQw4w9WgXcQ"),
+        ("YouTube.com/watch?v=dQw4w9WgXcQ", "dQw4w9WgXcQ"),
+        ("WWW.YouTube.com/shorts/dQw4w9WgXcQ", "dQw4w9WgXcQ"),
     ] {
         assert_eq!(input_video_id(text).as_deref(), Some(id), "{text}");
     }
@@ -179,6 +185,10 @@ fn anything_else_is_not_a_video_id() {
         "https://youtu.be/",
         "a search phrase",
         "",
+        // The path stays case-sensitive: an id is, and so is the route to it.
+        "youtube.com/WATCH?v=dQw4w9WgXcQ",
+        // Another scheme is not folded into the two that are accepted.
+        "FTP://youtu.be/dQw4w9WgXcQ",
     ] {
         assert_eq!(input_video_id(text), None, "{text}");
     }

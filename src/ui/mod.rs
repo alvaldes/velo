@@ -4441,6 +4441,13 @@ impl<'lib> App<'lib> {
         if started {
             self.status = format!("{SEARCHING_LINE_PREFIX}{input}…");
         } else {
+            // The refusal is said, not swallowed (R3-002): a paste the `u`
+            // prompt accepted and then dropped on a running job must not
+            // look like it was loaded — the running job's line would
+            // otherwise stand as if nothing had been asked. One sentence,
+            // and the screen stays usable underneath it.
+            self.status =
+                String::from("velo: a job is already running — the YouTube link was not loaded");
             // No describe is in flight to answer: the screen, if it was
             // opened as its vehicle, was opened for nothing, and a fallback
             // with no answer behind it has nothing to answer for.
@@ -4515,7 +4522,13 @@ impl<'lib> App<'lib> {
         let answer = screen.poll();
         if let Some(query) = searching {
             let line = format!("{SEARCHING_LINE_PREFIX}{query}…");
-            if self.status != line {
+            // The running job's line stands only while it owns the status
+            // line (R3-002): a sentence another writer said — a refused
+            // second ask, most — is not the searching machinery's to
+            // replace, and would be un-said every tick if it were.
+            if (self.status.is_empty() || self.status.starts_with(SEARCHING_LINE_PREFIX))
+                && self.status != line
+            {
                 self.status = line;
             }
         }

@@ -25,6 +25,18 @@
 //! for a stream that never starts by [`tool::spawn`]'s first-byte bound. Both
 //! are off
 //! the event loop, never a hang.
+//!
+//! Why the extraction is still here at all, when the pipe answers everything
+//! else: one question, `live_status`, and nothing else. It is asked once,
+//! before the pipe, so a live broadcast is refused by name before any
+//! downloader runs — and the *only* thing it decides (R4): `live_status` is
+//! the tool's own word for whether the video is live right now, so a
+//! recorded video is never called live, whatever its `formats[]` look like;
+//! a recorded video the pipe cannot deliver fails with the pipe's own
+//! reason, which names the format that could not be used. Reading anything
+//! more out of the extraction would re-decide what the pipe already decides,
+//! and the one past reading — a format scan for "playable" — was exactly
+//! how a recorded video got called a live broadcast.
 
 use std::ffi::OsString;
 use std::io::Read;
@@ -37,8 +49,8 @@ use crate::audio::output::PathResolver;
 use crate::youtube::{is_pseudo_path, tool, video_id};
 
 /// The truth about a live broadcast, said by both refusals — the resolver's
-/// (the answer carries no playable format) and the screen's (a live row
-/// chosen anyway). `yt-dlp` answers a live broadcast's streams as HLS
+/// (the extraction's `live_status` says `is_live`) and the screen's (a live
+/// row chosen anyway). `yt-dlp` answers a live broadcast's streams as HLS
 /// manifests, and velo has no HLS demuxer: the honest sentence names what it
 /// is and what to do, never the symptom of a failed open.
 pub const LIVE_SENTENCE: &str =
@@ -70,10 +82,11 @@ pub fn arguments(id: &str) -> Vec<OsString> {
 }
 
 /// The arguments of the extraction that refuses a live broadcast by name
-/// (S3): the full answer, read for one thing only — whether any of its
-/// `formats[]` is playable at all. No URL is taken from it and no format is
-/// selected in it: the stream comes from the pipe ([`arguments`]), not from
-/// this answer.
+/// (S3): the full answer, read for one thing only — its `live_status`, the
+/// tool's own word for whether the video is live right now (R4). No URL is
+/// taken from it, no format is selected in it, and nothing else about it
+/// decides anything: the stream comes from the pipe ([`arguments`]), not
+/// from this answer.
 #[must_use]
 pub fn extraction_arguments(id: &str) -> Vec<OsString> {
     pipe(
@@ -143,9 +156,9 @@ impl PathResolver for Resolver {
     /// # Errors
     ///
     /// When the row is broken (no usable id), the extraction fails, the
-    /// answer is a live broadcast, or the pipe never starts within
-    /// [`tool::STARTUP`]: each names its reason, and a broken row is refused
-    /// before any process runs.
+    /// answer's `live_status` says the video is live, or the pipe never
+    /// starts within [`tool::STARTUP`]: each names its reason, and a broken
+    /// row is refused before any process runs.
     fn open_streaming(&self, path: &Path) -> Result<Option<Box<dyn MediaSource>>, AudioError> {
         let Some(id) = video_id(path)? else {
             return Ok(None);
@@ -203,40 +216,24 @@ impl Drop for PipedSource {
     }
 }
 
-/// The members velo reads out of one extraction. Everything else the object
-/// carries — descriptions, thumbnails, URLs — is ignored: no URL is taken
-/// from the answer any more (L9), the stream comes from the pipe.
+/// The one member the extraction is read for: the tool's own word for
+/// whether the video is live right now. Everything else the object carries —
+/// descriptions, thumbnails, `formats[]`, URLs — is ignored: no URL is taken
+/// from the answer and no format is judged in it (L9, R4), the stream comes
+/// from the pipe and the pipe's own failures speak for it.
 #[derive(miniserde::Deserialize)]
 struct Extraction {
-    formats: Option<Vec<Format>>,
-}
-
-/// One entry of the answer's `formats[]`, read for the live verdict alone.
-#[derive(miniserde::Deserialize)]
-struct Format {
-    vcodec: Option<String>,
-    acodec: Option<String>,
-    protocol: Option<String>,
-}
-
-/// Whether one format is audio-only and plain HTTP — the two things a
-/// recorded video offers and a live broadcast does not. Audio-only:
-/// `vcodec` absent, `null` or `"none"`, and `acodec` present and not
-/// `"none"`. Plain HTTP: `protocol` absent or `http`/`https` — anything
-/// else (`m3u8`, `m3u8_native`, `dash`, …) is a manifest or a segmented
-/// stream this tree cannot demux. What codec the audio is in no longer
-/// decides anything: the pipe transcodes to MP3, which this tree decodes.
-fn playable(format: &Format) -> bool {
-    let audio_only = matches!(format.vcodec.as_deref(), None | Some("none"))
-        && !matches!(format.acodec.as_deref(), None | Some("none"));
-    let plain_http = matches!(format.protocol.as_deref(), None | Some("http" | "https"));
-    audio_only && plain_http
+    live_status: Option<String>,
 }
 
 /// The extraction that refuses a live broadcast by name, before any pipe is
-/// spawned (S3): the sentence is reviewed and stays, and the verdict reads
-/// the answer's own formats — a live broadcast offers only manifests, and a
-/// recorded video offers a plain-HTTP audio format beside them.
+/// spawned (S3): the sentence is reviewed and stays, and the verdict is the
+/// answer's own `live_status` — the one thing the extraction decides (R4).
+/// `is_live` is the only value that means live now: `not_live`, `was_live`
+/// (a finished broadcast, downloadable like any recording) and
+/// `is_upcoming` name a recorded or scheduled video, and a recorded video
+/// the pipe cannot use fails with the pipe's own reason, never with a
+/// sentence about a broadcast it is not.
 ///
 /// # Errors
 ///
@@ -256,8 +253,8 @@ fn refuse_live(program: &Path, id: &str) -> Result<(), AudioError> {
             "yt-dlp answered something velo could not read as one extraction".to_owned(),
         )
     })?;
-    if extraction.formats.unwrap_or_default().iter().any(playable) {
-        return Ok(());
+    if extraction.live_status.as_deref() == Some("is_live") {
+        return Err(AudioError::Source(LIVE_SENTENCE.to_owned()));
     }
-    Err(AudioError::Source(LIVE_SENTENCE.to_owned()))
+    Ok(())
 }

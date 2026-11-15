@@ -158,11 +158,27 @@ pub fn run(program: &Path, args: &[OsString], deadline: Deadline) -> Result<Stri
 
     // The status and both pipes share one budget: a grandchild that keeps
     // stdout open is a call that missed its deadline, not a call that waits.
-    let Ok(Some(stdout)) = collect(&out, until) else {
-        return Err(expired(&mut child, name, deadline.after()));
+    let stdout = match collect(&out, until) {
+        Collected::Bytes(bytes) => bytes,
+        Collected::ReadFailed(error) => {
+            end(&mut child);
+            return Err(ToolError::Unusable {
+                program: name,
+                message: format!("its stdout could not be read: {error}"),
+            });
+        }
+        Collected::TimedOut => return Err(expired(&mut child, name, deadline.after())),
     };
-    let Ok(Some(stderr)) = collect(&err, until) else {
-        return Err(expired(&mut child, name, deadline.after()));
+    let stderr = match collect(&err, until) {
+        Collected::Bytes(bytes) => bytes,
+        Collected::ReadFailed(error) => {
+            end(&mut child);
+            return Err(ToolError::Unusable {
+                program: name,
+                message: format!("its stderr could not be read: {error}"),
+            });
+        }
+        Collected::TimedOut => return Err(expired(&mut child, name, deadline.after())),
     };
 
     if status.success() {
@@ -272,8 +288,11 @@ pub fn spawn(program: &Path, args: &[OsString]) -> Result<Running, ToolError> {
                 }
                 end(&mut child);
                 let stderr = match collect(&err, Instant::now() + Duration::from_secs(1)) {
-                    Ok(Some(bytes)) => bytes,
-                    Ok(None) | Err(()) => Vec::new(),
+                    Collected::Bytes(bytes) => bytes,
+                    // A stderr read failure or a bound that ran out leaves
+                    // nothing to quote: the tool exited without a readable
+                    // word, and `reason` says so.
+                    Collected::ReadFailed(_) | Collected::TimedOut => Vec::new(),
                 };
                 return Err(ToolError::Failed {
                     program: name,
@@ -359,6 +378,50 @@ impl fmt::Debug for Running {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A pipe whose read fails mid-way is a failure naming the IO error —
+    /// never an empty answer a caller would read as "the tool said nothing"
+    /// (R4-3). A real child's pipe read is forced here through the channel
+    /// `drain` hands back, because no child script can make `read_to_end`
+    /// fail on demand.
+    #[test]
+    fn a_read_error_is_a_failure_naming_the_io_error() {
+        let (sender, receiver) = mpsc::channel::<std::io::Result<Vec<u8>>>();
+        sender
+            .send(Err(std::io::Error::other("the pipe burst")))
+            .expect("the reader answers");
+
+        match collect(&receiver, Instant::now() + Duration::from_secs(1)) {
+            Collected::ReadFailed(message) => {
+                assert!(
+                    message.contains("the pipe burst"),
+                    "the IO error is named: {message}"
+                );
+            }
+            other => panic!("expected a read failure, got {other:?}"),
+        }
+    }
+
+    /// A pipe that closes with no bytes at all stays an empty success — the
+    /// closed pipe is not a failure, and the caller keeps its behaviour for
+    /// it (R4-3).
+    #[test]
+    fn a_closed_pipe_with_no_bytes_is_an_empty_success() {
+        let (sender, receiver) = mpsc::channel::<std::io::Result<Vec<u8>>>();
+        sender.send(Ok(Vec::new())).expect("the reader answers");
+
+        match collect(&receiver, Instant::now() + Duration::from_secs(1)) {
+            Collected::Bytes(bytes) => {
+                assert!(bytes.is_empty(), "no bytes came back: {bytes:?}");
+            }
+            other => panic!("expected an empty answer, got {other:?}"),
+        }
+    }
+}
+
 impl Drop for Running {
     fn drop(&mut self) {
         self.end();
@@ -398,8 +461,10 @@ fn wait(child: &mut Child, until: Instant, program: &str) -> Result<Option<ExitS
 }
 
 /// Reads one pipe to its end on its own thread and hands the bytes back when it
-/// closes. A pipe that closes without a byte — or fails mid-read — is `Ok(None)`:
-/// the process's own exit status already carries the verdict.
+/// closes. A pipe that closes without a byte hands back an empty `Vec` — no
+/// bytes is an answer, and the exit status says whether it is one. A read that
+/// fails mid-way hands back the error itself: truncated output is never an
+/// answer a caller can mistake for what the tool said (R4-3).
 fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> Receiver<std::io::Result<Vec<u8>>> {
     let (sender, receiver) = mpsc::channel();
     if let Some(mut pipe) = pipe {
@@ -412,16 +477,23 @@ fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> Receiver<std::io::Result<
     receiver
 }
 
-/// The bytes one pipe delivered, or `Ok(None)` when it delivered none within
-/// `until`, or `Err(())` when it kept the call waiting past it.
-type Collected = Result<Option<Vec<u8>>, ()>;
+/// What one pipe's wait ended as: the bytes it delivered — possibly none, a
+/// pipe that closed empty is an empty answer, not a failure — why the read
+/// itself failed, naming the IO error, or that the bound ran out first.
+#[derive(Debug)]
+enum Collected {
+    Bytes(Vec<u8>),
+    ReadFailed(String),
+    TimedOut,
+}
 
 fn collect(pipe: &Receiver<std::io::Result<Vec<u8>>>, until: Instant) -> Collected {
     let left = until.saturating_duration_since(Instant::now());
     match pipe.recv_timeout(left) {
-        Ok(Ok(bytes)) => Ok(Some(bytes)),
-        Ok(Err(_)) | Err(RecvTimeoutError::Disconnected) => Ok(None),
-        Err(RecvTimeoutError::Timeout) => Err(()),
+        Ok(Ok(bytes)) => Collected::Bytes(bytes),
+        Ok(Err(error)) => Collected::ReadFailed(error.to_string()),
+        Err(RecvTimeoutError::Disconnected) => Collected::Bytes(Vec::new()),
+        Err(RecvTimeoutError::Timeout) => Collected::TimedOut,
     }
 }
 
