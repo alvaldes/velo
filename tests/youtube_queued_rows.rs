@@ -1,13 +1,15 @@
 //! A `youtube://` row that reaches the queue as a `File` entry — from the
 //! history, a favourite, a playlist, or `velo --play youtube://<id>` — plays
 //! exactly the way its own [`Entry::Youtube`] kind does: the path asks the
-//! streaming question first, one bounded resolve, the ranged stream the tool
-//! answered, and the carried source of a start's worker is never resolved a
-//! second time (issue #70, S4).
+//! streaming question first, one bounded resolve, and the tool's own pipe as
+//! the stream — while the carried source of a start's worker is never
+//! resolved a second time (issue #70, S4 as revised by L9).
 //!
-//! Every case here runs a fake program written into a scratch directory and
-//! a transport that serves slices of one canned body: no test reaches the
-//! network, and none needs `yt-dlp` installed.
+//! Every case here runs a fake program written into a scratch directory; the
+//! streamed cases stream a real fixture through the pipe, and the
+//! carried-source control serves its body through a transport the same way
+//! `tests/remote_stream.rs`'s fixture does. No test reaches the network, and
+//! none needs `yt-dlp` installed.
 
 #![cfg(unix)]
 
@@ -27,7 +29,8 @@ use velo::subsonic::Error;
 use velo::youtube::pseudo_path;
 use velo::youtube::resolve::Resolver;
 
-/// The URL the fake tool answers; the transport serves it.
+/// The URL the carried-source control's transport serves; nothing in the
+/// streamed route carries a URL any more.
 const STREAM_URL: &str = "https://stream.example/audio.m4a";
 
 /// This case's scratch directory, recreated empty so a failed earlier run can
@@ -39,22 +42,36 @@ fn scratch(case: &str) -> PathBuf {
     dir
 }
 
-/// A fake `yt-dlp` that answers one full extraction whose chosen `formats`
-/// entry carries `url`, and counts its own runs in a file beside it — so a
-/// test can prove the tool ran, or that it never did.
-fn fake(dir: &Path, url: &str) -> (PathBuf, PathBuf) {
+/// The MP3 fixture the fake tool streams: the same shape the real pipe has —
+/// a sequential, decodable MP3 on stdout.
+fn fixture() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("silence-then-tone.mp3")
+}
+
+/// One extraction as the real tool answers it: a recorded video — its
+/// `formats[]` carries a plain-HTTP audio format, so it is not live.
+const EXTRACTION: &str = r#"{"id":"abc","duration":212.0,"formats":[{"vcodec":"none","acodec":"mp4a.40.2","protocol":"https"}]}"#;
+
+/// A fake `yt-dlp` shaped like the real one: the extraction argument answers
+/// `EXTRACTION`, everything else is the pipe — it streams the fixture and
+/// counts its own runs in a file beside it — so a test can prove the tool
+/// ran, or that it never did.
+fn fake(dir: &Path) -> (PathBuf, PathBuf) {
     use std::os::unix::fs::PermissionsExt;
 
     let program = dir.join("yt-dlp");
     let runs = dir.join("runs");
-    fs::write(
-        &program,
-        format!(
-            "#!/bin/sh\necho run >> {}\ncat <<'JSON'\n{{\"id\":\"abc\",\"formats\":[{{\"ext\":\"m4a\",\"vcodec\":\"none\",\"acodec\":\"mp4a.40.2\",\"protocol\":\"https\",\"url\":\"{url}\"}}]}}\nJSON\n",
-            runs.display()
-        ),
-    )
-    .expect("the fake program is written");
+    let answer = format!("'{EXTRACTION}'");
+    let body = format!(
+        "#!/bin/sh\ncase \"$*\" in\n  *dump-single-json*)\n    printf '%s' {answer}\n    ;;\n  \
+         *)\n    echo run >> {runs}\n    cat {fixture}\n    ;;\nesac\n",
+        runs = runs.display(),
+        fixture = fixture().display(),
+    );
+    fs::write(&program, body).expect("the fake program is written");
     fs::set_permissions(&program, fs::Permissions::from_mode(0o755))
         .expect("the fake program turns executable");
     (program, runs)
@@ -67,8 +84,8 @@ fn tool_runs(runs: &Path) -> usize {
 }
 
 /// A transport that records every URL it was asked about and serves slices of
-/// one canned body, the way `tests/remote_stream.rs`'s fixture does — never
-/// a network.
+/// one canned body — the carried-source control only, the way
+/// `tests/remote_stream.rs`'s fixture does — never a network.
 struct Serves {
     body: Vec<u8>,
     urls: Mutex<Vec<String>>,
@@ -98,28 +115,21 @@ impl Serves {
     }
 }
 
-/// The WAV fixture's path, for the bodies the audio path decodes.
-fn wav_fixture() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("fixtures")
-        .join("mono-tone.wav")
-}
-
-/// The spec and the samples a local open of the WAV's own bytes answers — the
-/// reference the streamed turn is held to.
+/// The MP3 fixture's samples decoded as a local file — the reference the
+/// streamed pipe is held to.
 ///
 /// Each call writes its own directory, numbered: the tests run in parallel, so
 /// a shared name here is one test wiping another's reference file while it is
 /// being read.
-fn reference(wav: &[u8]) -> (velo::audio::TrackSpec, Vec<f32>) {
+fn reference() -> (velo::audio::TrackSpec, Vec<f32>) {
     static CALLS: AtomicUsize = AtomicUsize::new(0);
     let dir = scratch(&format!(
         "reference-{}",
         CALLS.fetch_add(1, Ordering::Relaxed)
     ));
-    let path = dir.join("reference.wav");
-    fs::write(&path, wav).expect("the reference writes");
+    let path = dir.join("reference.mp3");
+    let bytes = fs::read(fixture()).expect("the fixture reads");
+    fs::write(&path, bytes).expect("the reference writes");
 
     let mut source = TrackSource::open(&path).expect("the reference opens");
     let spec = source.spec();
@@ -132,28 +142,21 @@ fn reference(wav: &[u8]) -> (velo::audio::TrackSpec, Vec<f32>) {
     (spec, samples)
 }
 
-/// A resolver over the fake tool and the canned transport: the whole seam,
-/// with nothing reaching the network.
-fn resolver(program: PathBuf, transport: &Arc<Serves>) -> Arc<dyn PathResolver> {
-    Arc::new(
-        Resolver::new(program).with_transport(Arc::clone(transport) as Arc<dyn RangeTransport>),
-    )
+/// A resolver over the fake tool: the whole streamed seam, with nothing
+/// reaching the network.
+fn resolver(program: PathBuf) -> Arc<dyn PathResolver> {
+    Arc::new(Resolver::new(program))
 }
 
 /// B1: a `youtube://` row that arrived as a `File` entry — the history, a
 /// favourite, a playlist, `--play` — is never a file: the producer asks the
-/// streaming question first and the track plays from the resolved ranged
-/// stream, instead of being skipped with `cannot read the file`.
+/// streaming question first and the track plays from the tool's own pipe,
+/// instead of being skipped with `cannot read the file`.
 #[test]
 fn a_youtube_row_that_arrives_as_a_file_entry_plays_the_stream_the_tool_resolves() {
     let dir = scratch("file-entry");
-    let (program, runs) = fake(&dir, STREAM_URL);
-    let wav = fs::read(wav_fixture()).expect("the fixture reads");
-    let (spec, expected_samples) = reference(&wav);
-    let transport = Arc::new(Serves {
-        body: wav,
-        urls: Mutex::new(Vec::new()),
-    });
+    let (program, runs) = fake(&dir);
+    let (spec, expected_samples) = reference();
     let queue: SharedQueue = Arc::new(std::sync::Mutex::new(vec![Entry::File(pseudo_path("abc"))]));
     let heard: Mutex<Vec<f32>> = Mutex::new(Vec::new());
     let failures: Mutex<Vec<TrackFailure>> = Mutex::new(Vec::new());
@@ -164,7 +167,7 @@ fn a_youtube_row_that_arrives_as_a_file_entry_plays_the_stream_the_tool_resolves
         0,
         spec,
         ReplayGainMode::default(),
-        Some(resolver(program, &transport)),
+        Some(resolver(program)),
         &AtomicU64::new(0),
         &AtomicBool::new(false),
         &mut |block| heard.lock().expect("the samples").extend_from_slice(block),
@@ -180,12 +183,7 @@ fn a_youtube_row_that_arrives_as_a_file_entry_plays_the_stream_the_tool_resolves
     assert_eq!(
         *heard.lock().expect("the samples"),
         expected_samples,
-        "the resolved stream decodes to exactly the local file's samples"
-    );
-    assert_eq!(
-        transport.asked(),
-        vec![STREAM_URL.to_owned()],
-        "the resolved URL is what the stream was opened from"
+        "the tool's pipe decodes to exactly the fixture's own samples"
     );
     assert_eq!(tool_runs(&runs), 1, "exactly one resolve, the play's own");
 }
@@ -196,13 +194,8 @@ fn a_youtube_row_that_arrives_as_a_file_entry_plays_the_stream_the_tool_resolves
 #[test]
 fn a_result_queued_from_the_screen_still_plays_from_its_own_entry() {
     let dir = scratch("screen-entry");
-    let (program, runs) = fake(&dir, STREAM_URL);
-    let wav = fs::read(wav_fixture()).expect("the fixture reads");
-    let (spec, expected_samples) = reference(&wav);
-    let transport = Arc::new(Serves {
-        body: wav,
-        urls: Mutex::new(Vec::new()),
-    });
+    let (program, runs) = fake(&dir);
+    let (spec, expected_samples) = reference();
     let queue: SharedQueue = Arc::new(std::sync::Mutex::new(vec![Entry::Youtube {
         path: pseudo_path("abc"),
         title: String::from("Dawn"),
@@ -218,7 +211,7 @@ fn a_result_queued_from_the_screen_still_plays_from_its_own_entry() {
         0,
         spec,
         ReplayGainMode::default(),
-        Some(resolver(program, &transport)),
+        Some(resolver(program)),
         &AtomicU64::new(0),
         &AtomicBool::new(false),
         &mut |block| heard.lock().expect("the samples").extend_from_slice(block),
@@ -232,7 +225,6 @@ fn a_result_queued_from_the_screen_still_plays_from_its_own_entry() {
         failures.lock().expect("the failures")
     );
     assert_eq!(*heard.lock().expect("the samples"), expected_samples);
-    assert_eq!(transport.asked(), vec![STREAM_URL.to_owned()]);
     assert_eq!(tool_runs(&runs), 1, "exactly one resolve, the play's own");
 }
 
@@ -242,11 +234,10 @@ fn a_result_queued_from_the_screen_still_plays_from_its_own_entry() {
 #[test]
 fn a_carried_source_plays_without_a_second_resolve() {
     let dir = scratch("carried");
-    let (_program, runs) = fake(&dir, STREAM_URL);
-    let wav = fs::read(wav_fixture()).expect("the fixture reads");
-    let (spec, expected_samples) = reference(&wav);
+    let (_program, runs) = fake(&dir);
+    let (spec, expected_samples) = reference();
     let transport = Arc::new(Serves {
-        body: wav,
+        body: fs::read(fixture()).expect("the fixture reads"),
         urls: Mutex::new(Vec::new()),
     });
     let RemoteOpen::Streams(source) =
@@ -292,25 +283,20 @@ fn a_carried_source_plays_without_a_second_resolve() {
 
 /// B1, at the seam every start shares: a `youtube://` row that arrived as a
 /// `File` entry — what `velo --play youtube://<id>` queues, and what the
-/// history, a favourite and a playlist rebuild — opens its resolved ranged
-/// stream at selection time, the way its own entry kind does, and the source
-/// is carried to the first turn. `PathResolver::resolve`'s refusal for a
+/// history, a favourite and a playlist rebuild — opens the tool's own stream
+/// at selection time, the way its own entry kind does, and the source is
+/// carried to the first turn. `PathResolver::resolve`'s refusal for a
 /// `youtube://` row is never reached.
 #[test]
 fn a_file_row_that_is_a_youtube_row_opens_its_stream_at_selection_time() {
     let dir = scratch("selection");
-    let (program, runs) = fake(&dir, STREAM_URL);
-    let wav = fs::read(wav_fixture()).expect("the fixture reads");
-    let (spec, _) = reference(&wav);
-    let transport = Arc::new(Serves {
-        body: wav,
-        urls: Mutex::new(Vec::new()),
-    });
+    let (program, runs) = fake(&dir);
+    let (spec, _) = reference();
 
     let (opened_spec, preopen, carried) = open_first_entry(
         &Entry::File(pseudo_path("abc")),
         None,
-        Some(&resolver(program, &transport)),
+        Some(&resolver(program)),
     )
     .expect("the row opens as its resolved stream");
 
@@ -330,11 +316,6 @@ fn a_file_row_that_is_a_youtube_row_opens_its_stream_at_selection_time() {
         "the carried source is keyed by the path the producer matches against"
     );
     assert_eq!(
-        transport.asked(),
-        vec![STREAM_URL.to_owned()],
-        "the resolved URL is what was opened, never a file read"
-    );
-    assert_eq!(
         tool_runs(&runs),
         1,
         "exactly one resolve, the selection's own"
@@ -347,10 +328,9 @@ fn a_file_row_that_is_a_youtube_row_opens_its_stream_at_selection_time() {
 #[test]
 fn a_carried_first_source_opens_nothing_and_resolves_nothing() {
     let dir = scratch("carried-selection");
-    let (_program, runs) = fake(&dir, STREAM_URL);
-    let wav = fs::read(wav_fixture()).expect("the fixture reads");
+    let (_program, runs) = fake(&dir);
     let transport = Arc::new(Serves {
-        body: wav,
+        body: fs::read(fixture()).expect("the fixture reads"),
         urls: Mutex::new(Vec::new()),
     });
     let RemoteOpen::Streams(source) =
@@ -364,7 +344,7 @@ fn a_carried_first_source_opens_nothing_and_resolves_nothing() {
     let (_, preopen, carried) = open_first_entry(
         &Entry::File(pseudo_path("abc")),
         Some(Box::new(source)),
-        Some(&resolver(PathBuf::from("/nowhere/yt-dlp"), &transport)),
+        Some(&resolver(PathBuf::from("/nowhere/yt-dlp"))),
     )
     .expect("the carried source is the track already");
 

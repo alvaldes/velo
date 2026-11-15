@@ -33,8 +33,9 @@ Site, with a player you can press play on: <https://alvaldes.github.io/velo/>
   directory, [cliamp](https://radio.cliamp.stream) channels, and any stream URL.
 - **Subsonic servers** (early access) — Navidrome, Airsonic, Gonic: synced
   into the same index, played through a local cache, scrobbled.
-- **YouTube** — search and play through `yt-dlp`, resolved when the track
-  plays so the queue, the seek and the history work as they do for a file.
+- **YouTube** — search and play through `yt-dlp`; the tool delivers the
+  stream itself when the track plays, so the queue and the history work as
+  they do for a file. A seek is not supported yet.
 - **ReplayGain** — applied at playback with clipping protection, and an
   EBU R128 scanner that writes the tags.
 - **Bit-perfect mode**, mono, output device selection and OS media keys
@@ -174,23 +175,25 @@ a folder you name.
 The `YouTube` row searches and plays, through [`yt-dlp`](https://github.com/yt-dlp/yt-dlp).
 Type a query, `enter`, then `enter` on a result; `esc` goes back.
 
-velo never talks to YouTube itself: it spawns `yt-dlp`, reads its answer, and
-opens the audio stream that answer names. So the tool has to be on your `PATH`:
+velo never talks to YouTube itself: it spawns `yt-dlp`, and the tool delivers
+the stream — it extracts the audio, transcodes it to MP3, and writes it to
+stdout, where velo plays it as it arrives. That work needs `ffmpeg` beside the
+tool, because it is `yt-dlp` that muxes the stream; install both:
 
 ```sh
-brew install yt-dlp     # or your package manager
+brew install yt-dlp ffmpeg     # or your package manager
 ```
 
-Without it the row still opens its own sentence and nothing else changes: velo
-is the same player, and removing the tool or never using the row removes the
-feature. `ffmpeg` joins it only for the formats that need muxing, and the tool
-says so when it does.
+Without them the row still opens its own sentence and nothing else changes: velo
+is the same player, and removing the tools or never using the row removes the
+feature.
 
-- A result is a finite track: a title, a channel as the artist, a length, a
-  position and a seek. The stream URL is extracted when the track plays and
-  never stored, because it expires.
-- A broadcast with no end plays without a seek instead of showing an invented
-  length.
+- A result is a finite track: a title, a channel as the artist, a length and a
+  position. The stream is opened by the tool when the track plays and never
+  stored, and playing it again asks the tool again.
+- A seek is not supported yet: the stream comes from the tool's pipe, and
+  seeking it lands in a later slice. A broadcast with no end plays the same
+  way, without a seek and without an invented length.
 - ReplayGain, bit-perfect and the loudness path do not apply to a decoded
   stream; one line on its first play says so rather than pretending.
 - Your queries are never written anywhere. Not to the config, not to the
@@ -297,9 +300,9 @@ not what you want, do not use the row; nothing else depends on it.
 - For cover art, a terminal that speaks the kitty, sixel or iTerm2 protocol
   and a window of at least 100×28. The cover is the picture embedded in the
   track, else a `cover`, `folder` or `front` `.jpg`/`.png` in its folder.
-- Optional, for the `YouTube` row: `yt-dlp` on your `PATH`, plus `ffmpeg` for
-  the formats that need muxing. velo starts, plays and behaves identically
-  without them; the row is the only thing that needs them.
+- Optional, for the `YouTube` row: `yt-dlp` on your `PATH`, with `ffmpeg`
+  beside it — the tool muxes the stream through it. velo starts, plays and
+  behaves identically without them; the row is the only thing that needs them.
 
 ## Exit codes
 

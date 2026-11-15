@@ -30,10 +30,13 @@ a `Station`: it has a duration and it seeks. A result with no duration (a live
 broadcast) keeps playing with its seek disabled and says so, instead of
 inventing a length.
 
-**S4 — re-resolved when it plays, not when it was queued.**
+**S4 — opened when it plays, not when it was queued.** *(revised: see L9)*
 "A queued item has to be re-resolved when it plays, not when it was queued."
-The extracted stream URL expires; the queue holds the video's identity, and the
-URL is fetched at the moment playback reaches the entry, every time.
+The queue holds the video's identity; the stream is opened at the moment
+playback reaches the entry, every time, and **the tool holds the stream rather
+than handing velo a URL** — measured, the only format whose URL velo may fetch
+is the one it cannot decode (L9). A seek is therefore a fresh open, not a
+position inside a body.
 
 **S5 — progress and failure that name the reason.**
 "Progress reporting that is honest: "resolving…" while `yt-dlp` works, a
@@ -412,3 +415,18 @@ seeking, still fails when every attempt draws badly), or let the tool deliver
 the bytes itself (`-o -` on stdout), which is reliable but makes a seek a fresh
 spawn with `--download-sections` and retires the "resolved URL with a lifetime"
 premise of S4.
+
+**L9 — the architecture changed, because the measurement did.** Five
+consecutive extractions of one video gave the same answer every time: the only
+audio format whose URL answers a ranged GET is 139, which is HE-AAC and which
+symphonia refuses with "aac too complex"; 140 (AAC-LC, the one that decodes),
+251 (opus) and the rest answer `403` to a bare GET **and** to a GET carrying the
+`http_headers` the extraction declares. So the refusal is not a coin flip and no
+amount of re-extraction fixes it — my earlier "2 of 6 usable" reading was a bad
+sample and is retracted here. What does work, first try, is letting the tool
+fetch: `yt-dlp -x --audio-format mp3 -o - <url>` streams a decodable,
+sequential MP3 to stdout. MP3 on purpose: symphonia decodes it without seeking a
+container, which is the same shape the radio's ICY path already proves. The
+price is `ffmpeg` for this row, a transcode, and a seek that becomes a fresh
+spawn with `--download-sections` — a later slice. S4 above is rewritten to say
+what is now true.

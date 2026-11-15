@@ -1,56 +1,23 @@
-//! The `yt-dlp` seam (issue #70, S6): one external process per call, bounded by
-//! a deadline it cannot outlive, off the event loop, and never a hang the
-//! interface waits on.
+//! The `youtube://` resolve (issue #70, S4 as revised by L9): the stream is
+//! the tool's own pipe — `yt-dlp -x --audio-format mp3 -o -` — opened when
+//! the entry plays, never a URL this tree fetches. The URL route this file
+//! once pinned is deleted with the code it tested: measured over five
+//! consecutive extractions, every decodable format answers `403` to a ranged
+//! GET, so no transport test can survive and none should.
 //!
-//! Every case here runs a fake program written into a scratch directory: no
-//! test in this file reaches the network, and none of them needs `yt-dlp`
-//! installed.
+//! Every case here runs a fake program written into a scratch directory and
+//! streams a real fixture: no test in this file reaches the network, and
+//! none of them needs `yt-dlp` installed.
 
 #![cfg(unix)]
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
+use velo::audio::TrackSource;
 use velo::audio::output::PathResolver;
-use velo::audio::remote::{RangeAnswer, RangeTransport};
-use velo::subsonic::Error;
 use velo::youtube::pseudo_path;
 use velo::youtube::resolve::{self, LIVE_SENTENCE, Resolver};
-
-/// One extraction as `yt-dlp --dump-single-json` writes it: one object, a
-/// `formats[]` with the members velo reads and a few it must ignore.
-fn extraction(formats: &str) -> String {
-    format!(r#"{{"id":"abc","title":"T","duration":212.0,"formats":[{formats}]}}"#)
-}
-
-/// One `formats[]` entry.
-fn format(ext: &str, protocol: &str, abr: &str, url: &str) -> String {
-    // The codec follows the container, as the tool's own answer does: an `m4a`
-    // carries AAC, a `webm` carries opus. A fixture that claimed AAC-LC inside
-    // a webm would let the picker pass a stream nothing here can decode.
-    let acodec = match ext {
-        "m4a" => "mp4a.40.2",
-        "mp3" => "mp3",
-        _ => "opus",
-    };
-    format!(
-        r#"{{"format_id":"x","ext":"{ext}","vcodec":"none","acodec":"{acodec}","protocol":"{protocol}","abr":{abr},"url":"{url}","http_headers":{{"User-Agent":"x"}}}}"#
-    )
-}
-
-/// One format with its codec named: `YouTube` serves AAC-LC and HE-AAC both as
-/// `m4a`, and lists the HE-AAC one first.
-fn coded(ext: &str, acodec: &str, abr: &str, url: &str) -> String {
-    format!(
-        r#"{{"format_id":"x","ext":"{ext}","vcodec":"none","acodec":"{acodec}","protocol":"https","abr":{abr},"url":"{url}"}}"#
-    )
-}
-
-/// A fake program whose answer is `stdout`'s text, read through a heredoc so
-/// no shell quoting touches the JSON.
-fn fake_answer(dir: &Path, answer: &str) -> PathBuf {
-    fake(dir, &format!("#!/bin/sh\ncat <<'JSON'\n{answer}\nJSON\n"))
-}
 
 /// This case's scratch directory, recreated empty so a failed earlier run can
 /// never satisfy a later assertion.
@@ -65,6 +32,7 @@ fn scratch(case: &str) -> PathBuf {
 fn fake(dir: &Path, body: &str) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
 
+    std::fs::create_dir_all(dir).expect("the case's directory creates");
     let path = dir.join("yt-dlp");
     std::fs::write(&path, body).expect("the fake program is written");
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
@@ -72,24 +40,96 @@ fn fake(dir: &Path, body: &str) -> PathBuf {
     path
 }
 
-/// A transport that records every URL it was asked about and serves one small
-/// ranged body, the way `tests/remote_stream.rs`'s fixture does — never a
-/// network.
-struct Seen {
-    urls: Mutex<Vec<String>>,
+/// The MP3 fixture the fake tool streams: the same shape the real pipe has —
+/// a sequential, decodable MP3 on stdout.
+fn fixture() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("silence-then-tone.mp3")
 }
 
-impl RangeTransport for Seen {
-    fn range(&self, url: &str, _from: u64, _to: Option<u64>) -> Result<RangeAnswer, Error> {
-        self.urls
-            .lock()
-            .expect("the record unlocks")
-            .push(url.to_owned());
-        Ok(RangeAnswer::Partial {
-            bytes: vec![0x00, 0x01, 0x02],
-            total: 3,
-        })
+/// One extraction as the real tool answers it: a recorded video — its
+/// `formats[]` carries a plain-HTTP audio format, so it is not live.
+const EXTRACTION: &str = r#"{"id":"abc","duration":212.0,"formats":[{"vcodec":"none","acodec":"mp4a.40.2","protocol":"https"}]}"#;
+
+/// One extraction as a live broadcast answers it: only manifests, no
+/// plain-HTTP audio anywhere.
+const LIVE_EXTRACTION: &str =
+    r#"{"id":"abc","formats":[{"vcodec":"none","acodec":"mp4a.40.2","protocol":"m3u8_native"}]}"#;
+
+/// A fake tool shaped like the real one: the extraction argument answers
+/// `answer`, everything else is the pipe — it counts its own runs in a file
+/// beside it and then runs `pipe_body`, so a test can prove the pipe was (or
+/// was never) spawned.
+fn fake_tool(dir: &Path, answer: &str, pipe_body: &str) -> (PathBuf, PathBuf) {
+    let pipes = dir.join("pipes");
+    let body = format!(
+        "#!/bin/sh\ncase \"$*\" in\n  *dump-single-json*)\n    printf '%s' {answer}\n    ;;\n  \
+         *)\n    echo run >> {pipes}\n{pipe_body}\n    ;;\nesac\n",
+        answer = sh_quote(answer),
+        pipes = sh_quote(&pipes.display().to_string()),
+    )
+    .replace("{fixture}", &sh_quote(&fixture().display().to_string()));
+    let program = fake(dir, &body);
+    (program, pipes)
+}
+
+/// A shell word, single-quoted: nothing a path or a JSON line carries can
+/// break out of it except a quote itself, and none of these contain one.
+fn sh_quote(word: &str) -> String {
+    format!("'{word}'")
+}
+
+/// How many times the fake pipe ran: a resolve that spawns a second pipe is
+/// an ask the play never owed.
+fn pipe_runs(pipes: &Path) -> usize {
+    std::fs::read_to_string(pipes).map_or(0, |content| content.lines().count())
+}
+
+/// Whether `pid` is gone: a kill that finds nothing answers `ESRCH`.
+fn gone(pid: i32) -> bool {
+    let Some(pid) = rustix::process::Pid::from_raw(pid) else {
+        return true;
+    };
+    rustix::process::kill_process(pid, rustix::process::Signal::Kill).is_err()
+}
+
+/// Waits for the fake program to write a small file, bounded.
+fn wait_for_file(path: &Path) -> String {
+    let until = Instant::now() + Duration::from_secs(2);
+    loop {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            return content;
+        }
+        assert!(
+            Instant::now() < until,
+            "the file never appeared: {}",
+            path.display()
+        );
+        std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+/// Waits until `gone` holds for `pid`, bounded: a kill is not instantaneous,
+/// and the assertion is about the end state, not about scheduling.
+fn wait_until_gone(pid: i32) {
+    let until = Instant::now() + Duration::from_secs(2);
+    while !gone(pid) {
+        assert!(Instant::now() < until, "pid {pid} never died");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// The samples the fixture decodes as a local file — the reference the
+/// streamed pipe is held to.
+fn reference() -> Vec<f32> {
+    let mut source = TrackSource::open(&fixture()).expect("the fixture opens as a file");
+    let mut samples = Vec::new();
+    while let Some(block) = source.read_block().expect("the reference decodes") {
+        samples.extend_from_slice(&block);
+    }
+    samples
 }
 
 #[test]
@@ -100,7 +140,7 @@ fn a_youtube_row_is_never_cached_and_never_a_file() {
 
     assert!(
         !resolver.cached(&row),
-        "a resolved URL expires: never reachable"
+        "a resolved stream never waits on a cache: never reachable"
     );
     assert!(resolver.cached(&file), "a local file is already reachable");
     assert_eq!(
@@ -115,8 +155,43 @@ fn a_youtube_row_is_never_cached_and_never_a_file() {
 }
 
 #[test]
-fn the_resolve_asks_for_the_full_extraction_in_a_format_the_decoder_can_read() {
+fn the_pipe_asks_for_the_stream_the_tool_delivers_itself() {
     let args: Vec<String> = resolve::arguments("abc")
+        .into_iter()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect();
+
+    assert_eq!(
+        args.last().map(String::as_str),
+        Some("https://www.youtube.com/watch?v=abc"),
+        "the watch URL is the last argument, after the -- that ends the options"
+    );
+    assert!(args.contains(&"--no-playlist".to_owned()), "one video only");
+    assert!(
+        args.contains(&"-x".to_owned())
+            && args.contains(&"--audio-format".to_owned())
+            && args.contains(&"mp3".to_owned()),
+        "the tool extracts and transcodes to mp3: the one route that works"
+    );
+    assert!(
+        args.contains(&"-o".to_owned()) && args.contains(&"-".to_owned()),
+        "the stream goes to stdout, where velo reads it"
+    );
+    assert!(
+        !args.iter().any(|argument| argument.contains("get-url")),
+        "the URL route is gone: no retry of a 403 fixes it"
+    );
+    assert!(
+        !args
+            .iter()
+            .any(|argument| argument.contains("dump-single-json")),
+        "the pipe is one call, and it answers bytes, not JSON"
+    );
+}
+
+#[test]
+fn the_extraction_that_refuses_a_live_takes_no_url_and_selects_no_format() {
+    let args: Vec<String> = resolve::extraction_arguments("abc")
         .into_iter()
         .map(|argument| argument.to_string_lossy().into_owned())
         .collect();
@@ -129,127 +204,119 @@ fn the_resolve_asks_for_the_full_extraction_in_a_format_the_decoder_can_read() {
     assert!(args.contains(&"--no-playlist".to_owned()), "one video only");
     assert!(
         args.contains(&"--dump-single-json".to_owned()),
-        "the full extraction, not the bare `--get-url` URL"
+        "the full extraction, for the live verdict alone"
     );
     assert!(
-        !args.contains(&"--get-url".to_owned()),
-        "the bare URL route is gone: a plain ranged GET answers it 403"
-    );
-    let format_at = args
-        .iter()
-        .position(|argument| argument == "--format")
-        .expect("a format selector")
-        + 1;
-    assert_eq!(
-        args[format_at], "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio",
-        "m4a first — the decoder has no Matroska demuxer"
+        !args.contains(&"--format".to_owned()) && !args.contains(&"-x".to_owned()),
+        "no URL is taken and no format is selected: the stream comes from the pipe"
     );
 }
 
 #[test]
-fn a_recorded_answer_resolves_to_the_m4a_url_never_the_manifest() {
-    let dir = scratch("three-formats");
-    let answer = extraction(
-        &[
-            format(
-                "m4a",
-                "m3u8_native",
-                "null",
-                "https://manifest.example/audio.m4a",
-            ),
-            format("m4a", "https", "128", "https://media.example/audio.m4a"),
-            format("mp3", "https", "96", "https://media.example/audio.mp3"),
-        ]
-        .join(", "),
-    );
-    let program = fake_answer(&dir, &answer);
-    let seen = Arc::new(Seen {
-        urls: Mutex::new(Vec::new()),
-    });
-    let resolver =
-        Resolver::new(program).with_transport(Arc::clone(&seen) as Arc<dyn RangeTransport>);
+fn an_open_streaming_decodes_the_fixture_through_the_pipe_and_is_not_seekable() {
+    let dir = scratch("pipe-decodes");
+    let (program, pipes) = fake_tool(&dir, EXTRACTION, "cat {fixture}");
+    let resolver = Resolver::new(program);
 
     let source = resolver
         .open_streaming(&pseudo_path("abc"))
         .expect("the resolve answers")
-        .expect("a ranged source");
+        .expect("a source");
+    assert!(!source.is_seekable(), "a pipe has no position to seek to");
+    assert_eq!(source.byte_len(), None, "a pipe has no end to know");
+
+    let mut track = TrackSource::open_remote(source).expect("the pipe decodes");
+    let mut streamed = Vec::new();
+    while let Some(block) = track.read_block().expect("the pipe decodes") {
+        streamed.extend_from_slice(&block);
+    }
 
     assert_eq!(
-        seen.urls.lock().expect("the record unlocks").as_slice(),
-        ["https://media.example/audio.m4a"],
-        "the plain-HTTP m4a is what the transport was asked for, never the manifest"
+        streamed,
+        reference(),
+        "the tool's pipe decodes to exactly the fixture's own samples — the decoder takes a \
+         non-seekable source"
     );
-    drop(source);
+    assert_eq!(pipe_runs(&pipes), 1, "exactly one pipe, the resolve's own");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
-fn without_an_m4a_the_mp3_plays_and_without_either_the_highest_abr_does() {
-    let dir = scratch("preference");
-    let answer = extraction(
-        &[
-            format("webm", "https", "50", "https://media.example/low.webm"),
-            format("mp3", "https", "96", "https://media.example/audio.mp3"),
-            format("webm", "https", "160", "https://media.example/high.webm"),
-        ]
-        .join(", "),
+fn dropping_the_source_ends_the_child() {
+    let dir = scratch("drop-ends-child");
+    let (program, _pipes) = fake_tool(
+        &dir,
+        EXTRACTION,
+        "printf 'stream'\nd=\"$(dirname \"$0\")\"\nprintf '%s' \"$$\" > \"$d/pid\"\nsleep 60",
     );
-    let program = fake_answer(&dir, &answer);
-    let seen = Arc::new(Seen {
-        urls: Mutex::new(Vec::new()),
-    });
-    let resolver =
-        Resolver::new(program).with_transport(Arc::clone(&seen) as Arc<dyn RangeTransport>);
+    let resolver = Resolver::new(program);
 
     let source = resolver
         .open_streaming(&pseudo_path("abc"))
         .expect("the resolve answers")
-        .expect("a ranged source");
+        .expect("a source");
+    let pid: i32 = wait_for_file(&dir.join("pid"))
+        .trim()
+        .parse()
+        .expect("the pipe reports its pid");
+    assert!(!gone(pid), "the child runs while the source is open");
 
-    assert_eq!(
-        seen.urls.lock().expect("the record unlocks").as_slice(),
-        ["https://media.example/audio.mp3"],
-        "the mp3 outranks the webm formats even at a higher abr"
-    );
     drop(source);
+    wait_until_gone(pid);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
-fn an_answer_with_only_manifests_is_refused_before_any_transport_ask() {
-    let dir = scratch("manifests-only");
-    let answer = extraction(
-        &[
-            format(
-                "m4a",
-                "m3u8_native",
-                "128",
-                "https://manifest.example/one.m3u8",
-            ),
-            format("webm", "m3u8", "96", "https://manifest.example/two.m3u8"),
-        ]
-        .join(", "),
+fn a_pipe_that_dies_at_once_answers_the_tool_s_own_sentence_not_a_decode_error() {
+    let dir = scratch("pipe-fails");
+    let (program, pipes) = fake_tool(
+        &dir,
+        EXTRACTION,
+        "printf 'ERROR: [youtube] abc: Video unavailable\\n' >&2\nexit 1",
     );
-    let program = fake_answer(&dir, &answer);
-    let seen = Arc::new(Seen {
-        urls: Mutex::new(Vec::new()),
-    });
-    let resolver =
-        Resolver::new(program).with_transport(Arc::clone(&seen) as Arc<dyn RangeTransport>);
+    let resolver = Resolver::new(program);
 
     let error = resolver
         .open_streaming(&pseudo_path("abc"))
         .err()
-        .expect("nothing playable");
+        .expect("nothing to play");
+
+    assert!(
+        error.to_string().contains("yt-dlp could not answer"),
+        "the tool's own sentence, in the register of every failure: {error}"
+    );
+    assert!(
+        error.to_string().contains("Video unavailable"),
+        "the reason a user can act on survives the wrapper: {error}"
+    );
+    assert!(
+        !error.to_string().contains("could not read"),
+        "a stream that never starts is never a decoder error: {error}"
+    );
+    assert_eq!(pipe_runs(&pipes), 1, "the pipe is what failed");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_live_answer_is_refused_by_name_before_any_pipe_is_spawned() {
+    let dir = scratch("live-refused");
+    let (program, pipes) = fake_tool(&dir, LIVE_EXTRACTION, "cat {fixture}");
+    let resolver = Resolver::new(program);
+
+    let error = resolver
+        .open_streaming(&pseudo_path("abc"))
+        .err()
+        .expect("a live broadcast is refused");
 
     assert_eq!(
         error.to_string(),
         LIVE_SENTENCE,
         "the refusal says what it is, in its own words: {error}"
     );
-    assert!(
-        seen.urls.lock().expect("the record unlocks").is_empty(),
-        "the refusal happens before any HTTP request: the transport saw nothing"
+    assert_eq!(
+        pipe_runs(&pipes),
+        0,
+        "the refusal happens before any pipe is spawned"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -257,28 +324,25 @@ fn an_answer_with_only_manifests_is_refused_before_any_transport_ask() {
 #[test]
 fn a_refusal_never_reads_as_a_file_read() {
     let dir = scratch("refusal-wording");
-    let answer = extraction(&format(
-        "m4a",
-        "m3u8_native",
-        "128",
-        "https://manifest.example/a.m3u8",
-    ));
     let cases = [
         // The live/manifest refusal...
-        fake_answer(&dir, &answer),
+        (
+            "live",
+            format!(
+                "#!/bin/sh\ncase \"$*\" in\n  *dump-single-json*)\n    printf '%s' {answer}\n    \
+                 ;;\n  *) cat /dev/null ;;\nesac\n",
+                answer = sh_quote(LIVE_EXTRACTION),
+            ),
+        ),
         // ...and the tool's own failure: both must not wear the prefix.
-        fake(
-            &dir,
-            "#!/bin/sh\nprintf 'ERROR: Video unavailable\n' >&2\nexit 1\n",
+        (
+            "failed",
+            "#!/bin/sh\nprintf 'ERROR: Video unavailable\\n' >&2\nexit 1\n".to_owned(),
         ),
     ];
-    for program in &cases {
-        let seen = Arc::new(Seen {
-            urls: Mutex::new(Vec::new()),
-        });
-        let resolver = Resolver::new(program.clone())
-            .with_transport(Arc::clone(&seen) as Arc<dyn RangeTransport>);
-        let error = resolver
+    for (case, body) in &cases {
+        let program = fake(&dir.join(case), body);
+        let error = Resolver::new(program)
             .open_streaming(&pseudo_path("abc"))
             .err()
             .expect("nothing to play");
@@ -287,67 +351,6 @@ fn a_refusal_never_reads_as_a_file_read() {
             "a resolve failure is a refusal, not a file read: {error}"
         );
     }
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn the_stream_is_opened_with_the_url_the_extraction_carries() {
-    let dir = scratch("resolve");
-    let program = fake_answer(
-        &dir,
-        &extraction(&format(
-            "m4a",
-            "https",
-            "128",
-            "https://media.example/audio.m4a",
-        )),
-    );
-    let seen = Arc::new(Seen {
-        urls: Mutex::new(Vec::new()),
-    });
-    let resolver =
-        Resolver::new(program).with_transport(Arc::clone(&seen) as Arc<dyn RangeTransport>);
-
-    let source = resolver
-        .open_streaming(&pseudo_path("abc"))
-        .expect("the resolve answers")
-        .expect("a ranged source");
-
-    assert_eq!(
-        seen.urls.lock().expect("the record unlocks").as_slice(),
-        ["https://media.example/audio.m4a"],
-        "the tool's line is what the transport was asked for"
-    );
-    drop(source);
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn a_failing_resolve_answers_the_tools_own_reason() {
-    let dir = scratch("resolve-fail");
-    let program = fake(
-        &dir,
-        "#!/bin/sh\nprintf 'ERROR: Video unavailable\\n' >&2\nexit 1\n",
-    );
-    let seen = Arc::new(Seen {
-        urls: Mutex::new(Vec::new()),
-    });
-    let resolver =
-        Resolver::new(program).with_transport(Arc::clone(&seen) as Arc<dyn RangeTransport>);
-
-    let error = resolver
-        .open_streaming(&pseudo_path("abc"))
-        .err()
-        .expect("nothing to play");
-
-    assert!(
-        error.to_string().contains("Video unavailable"),
-        "the reason a user can act on survives the wrapper: {error}"
-    );
-    assert!(
-        seen.urls.lock().expect("the record unlocks").is_empty(),
-        "a failed resolve never reaches the transport"
-    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -366,85 +369,4 @@ fn a_row_that_says_youtube_and_carries_no_id_is_refused_before_any_process() {
         error.to_string().contains("is not a YouTube entry"),
         "the broken-row sentence, never NotInstalled: {error}"
     );
-}
-
-#[test]
-fn he_aac_listed_first_never_wins_over_the_aac_lc_that_actually_decodes() {
-    // Measured against the real tool: `YouTube` lists itag 139 (HE-AAC,
-    // `mp4a.40.5`, ~48 kbps) before itag 140 (AAC-LC, `mp4a.40.2`, ~129 kbps),
-    // both as `m4a`. symphonia reads the second and refuses the first at decode
-    // time ("aac too complex"), so picking by container alone plays nothing.
-    let dir = scratch("he-aac-first");
-    let answer = extraction(
-        &[
-            coded(
-                "m4a",
-                "mp4a.40.5",
-                "48.783",
-                "https://media.example/he-aac.m4a",
-            ),
-            coded(
-                "m4a",
-                "mp4a.40.2",
-                "129.472",
-                "https://media.example/aac-lc.m4a",
-            ),
-        ]
-        .join(", "),
-    );
-    let program = fake_answer(&dir, &answer);
-    let seen = Arc::new(Seen {
-        urls: Mutex::new(Vec::new()),
-    });
-    let resolver =
-        Resolver::new(program).with_transport(Arc::clone(&seen) as Arc<dyn RangeTransport>);
-
-    let source = resolver
-        .open_streaming(&pseudo_path("abc"))
-        .expect("the resolve answers")
-        .expect("a ranged source");
-
-    assert_eq!(
-        seen.urls.lock().expect("the record unlocks").as_slice(),
-        ["https://media.example/aac-lc.m4a"],
-        "the profile that decodes wins, whatever order the tool listed them in"
-    );
-    drop(source);
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn an_answer_with_only_undecodable_audio_says_so_and_is_not_called_live() {
-    let dir = scratch("undecodable");
-    let answer = extraction(
-        &[
-            coded("m4a", "mp4a.40.5", "48", "https://media.example/he-aac.m4a"),
-            coded("webm", "opus", "160", "https://media.example/audio.webm"),
-        ]
-        .join(", "),
-    );
-    let program = fake_answer(&dir, &answer);
-    let seen = Arc::new(Seen {
-        urls: Mutex::new(Vec::new()),
-    });
-    let resolver =
-        Resolver::new(program).with_transport(Arc::clone(&seen) as Arc<dyn RangeTransport>);
-
-    let Err(error) = resolver.open_streaming(&pseudo_path("abc")) else {
-        panic!("nothing here decodes");
-    };
-
-    assert_eq!(
-        error.to_string(),
-        velo::youtube::resolve::UNDECODABLE_SENTENCE
-    );
-    assert!(
-        !error.to_string().contains("live"),
-        "a recorded video is not called live: {error}"
-    );
-    assert!(
-        seen.urls.lock().expect("the record unlocks").is_empty(),
-        "nothing is asked of the network when nothing can be decoded"
-    );
-    let _ = std::fs::remove_dir_all(&dir);
 }

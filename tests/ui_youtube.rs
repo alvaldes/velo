@@ -599,58 +599,36 @@ fn a_playing_youtube_entry_marks_the_youtube_row() {
     );
 }
 
-/// S3's live case for a result with no length (issue #70): it plays and shows
-/// elapsed time only, and a seek is refused with one sentence — the
-/// vocabulary the station rows taught — instead of rebuilding the player and
-/// re-resolving at an offset the stream cannot honour.
+/// S3's live case and the pipe route's price (L9): any `YouTube` entry —
+/// live or finite — plays the tool's own pipe, which has no position to seek
+/// to, so a seek is refused with one sentence instead of rebuilding the
+/// player at an offset the stream cannot honour: a fresh open at zero would
+/// silently restart the track. The refusal says what is true: the stream
+/// comes from the tool, and seeking it lands in a later slice.
 #[test]
-fn a_result_with_no_length_refuses_a_seek_with_one_sentence() {
-    let mut app = app();
-    app.show_playing_for_tests(
-        Entry::Youtube {
-            path: PathBuf::from("youtube://live1"),
-            title: String::from("Streaming now"),
-            uploader: Some(String::from("Evening")),
-            duration: None,
-        },
-        Duration::ZERO,
-        None,
-        None,
-    );
+fn a_youtube_entry_refuses_a_seek_with_one_sentence() {
+    for (name, duration) in [("Streaming now", None), ("Dawn", Some(212))] {
+        let mut app = app();
+        app.show_playing_for_tests(
+            Entry::Youtube {
+                path: PathBuf::from("youtube://live1"),
+                title: String::from(name),
+                uploader: Some(String::from("Evening")),
+                duration,
+            },
+            Duration::ZERO,
+            duration.map(Duration::from_secs),
+            None,
+        );
 
-    press(&mut app, KeyCode::Right);
+        press(&mut app, KeyCode::Right);
 
-    assert_eq!(
-        app.status(),
-        "velo: nothing to seek in a live YouTube stream",
-        "the refusal says itself, once, in the station's own register"
-    );
-}
-
-/// A result with a length still seeks: the refusal belongs to the broadcast
-/// alone, never to the finite result beside it.
-#[test]
-fn a_result_with_a_length_still_seeks() {
-    let mut app = app();
-    app.show_playing_for_tests(
-        Entry::Youtube {
-            path: PathBuf::from("youtube://abc123"),
-            title: String::from("Dawn"),
-            uploader: Some(String::from("Chill Channel")),
-            duration: Some(212),
-        },
-        Duration::ZERO,
-        Some(Duration::from_secs(212)),
-        None,
-    );
-
-    press(&mut app, KeyCode::Right);
-
-    assert!(
-        !app.status().contains("nothing to seek"),
-        "a finite result is seekable: got {}",
-        app.status()
-    );
+        assert_eq!(
+            app.status(),
+            "velo: a YouTube stream comes from yt-dlp and seeking it lands in a later slice",
+            "the refusal says itself, once, whatever length the entry carries"
+        );
+    }
 }
 
 /// `ctrl+s` on a `YouTube` row says what the row is — never "already a file on

@@ -9339,21 +9339,22 @@ impl<'lib> App<'lib> {
         self.start_at(duration.map_or(target, |duration| target.min(duration)));
     }
 
-    /// Whether a live stream refused the seek (S3): a station has no position
-    /// to seek within, and a `YouTube` result with no length is the same case —
-    /// it plays and shows elapsed time only, and a seek would rebuild the
-    /// player at an offset the stream was never ranged for. Saying so is
-    /// cheaper than the rebuild; one answer, both gears.
+    /// Whether a seek is refused (S3; the pipe route of L9): a station has
+    /// no position to seek within, and a `YouTube` stream — live or finite —
+    /// is the tool's own pipe, not seekable, so a seek would rebuild the
+    /// player at an offset the stream cannot honour: a fresh open at zero,
+    /// a silent restart of the track. Saying so is cheaper than the rebuild;
+    /// one answer, both shapes. Seeking inside the tool's stream is a later
+    /// slice, and the sentence says exactly that.
     fn refuse_live_seek(&mut self) -> bool {
         if matches!(self.playing_entry(), Some(Entry::Station { .. })) {
             self.note("velo: nothing to seek in a live station");
             return true;
         }
-        if matches!(
-            self.playing_entry(),
-            Some(Entry::Youtube { duration: None, .. })
-        ) {
-            self.note("velo: nothing to seek in a live YouTube stream");
+        if matches!(self.playing_entry(), Some(Entry::Youtube { .. })) {
+            self.note(
+                "velo: a YouTube stream comes from yt-dlp and seeking it lands in a later slice",
+            );
             return true;
         }
         false

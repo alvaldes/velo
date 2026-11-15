@@ -11,7 +11,7 @@ use std::ffi::OsString;
 use std::fmt;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -26,6 +26,14 @@ pub const SEARCH: Deadline = Deadline::new(Duration::from_secs(20));
 
 /// How long one play-time resolve may take: a full extraction of one video.
 pub const RESOLVE: Deadline = Deadline::new(Duration::from_secs(30));
+
+/// How long [`spawn`] waits for a child's first byte. A stream's first byte
+/// carries the whole cost of the work before it — extraction, download, the
+/// transcode — the same register of bound [`RESOLVE`] names for one
+/// full extraction. Inside the bound, an exit is the verdict: a tool that
+/// cannot deliver dies with a reason on stderr before its first byte, and
+/// that reason — never a decoder error — is what a failing resolve quotes.
+const STARTUP: Duration = Duration::from_secs(30);
 
 /// How long a child may take before it is killed with its children.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -165,6 +173,196 @@ pub fn run(program: &Path, args: &[OsString], deadline: Deadline) -> Result<Stri
         status: status.code(),
         line: reason(&stdout, &stderr),
     })
+}
+
+/// Spawns `program` with `args` and hands its standard output over without
+/// waiting for it: the caller reads the stream as it arrives — the shape the
+/// play path needs, where the tool itself delivers the bytes (issue #70,
+/// S4 as revised) and a bounded wait would be a deadline on the music.
+/// Everything [`run`] guarantees still holds: arguments are arguments and
+/// never a shell line, the child never inherits the terminal, and nothing
+/// is left unreaped — [`Running`]'s `Drop` kills the whole process group
+/// and waits, so a playback that is closed or killed never leaves a
+/// downloader running behind it.
+///
+/// The handover happens the moment the first bytes arrive — never a fixed
+/// wait — and until then the child's exit decides: a stream that never
+/// starts is the tool's own failure, quoted from its stderr, so a failing
+/// resolve says why `yt-dlp` could not answer, never what a decoder made of
+/// an empty pipe. A child that writes nothing within [`STARTUP`] misses the
+/// bound and is killed with its children, [`ToolError::Deadline`].
+///
+/// A child that cannot start is [`ToolError::NotInstalled`]; a spawn failure
+/// is [`ToolError::Unusable`], as in [`run`].
+///
+/// # Errors
+///
+/// [`ToolError::NotInstalled`], [`ToolError::Deadline`] (no first byte
+/// within [`STARTUP`]), [`ToolError::Failed`] (an exit before the first
+/// byte), or [`ToolError::Unusable`].
+pub fn spawn(program: &Path, args: &[OsString]) -> Result<Running, ToolError> {
+    let name = file_name(program);
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    own_group(&mut command);
+
+    let mut child = command.spawn().map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            ToolError::NotInstalled(program.to_path_buf())
+        } else {
+            ToolError::Unusable {
+                program: name.clone(),
+                message: error.to_string(),
+            }
+        }
+    })?;
+
+    // stderr is drained from the start, the way `run` drains it: a chatty
+    // tool must never block on a full pipe, and the drain is what an
+    // immediate failure quotes. stdout is watched by one thread that takes
+    // the first read and hands the pipe straight back — the bytes read
+    // before the handover are none lost, they ride in [`Running`].
+    let err = drain(child.stderr.take());
+    let stdout_pipe = child.stdout.take();
+    let (sender, receiver) = mpsc::channel::<(std::io::Result<Vec<u8>>, Option<ChildStdout>)>();
+    thread::spawn(move || {
+        let Some(mut pipe) = stdout_pipe else {
+            let _ = sender.send((Err(std::io::Error::other("stdout was not piped")), None));
+            return;
+        };
+        let mut first = [0u8; 4096];
+        let read = pipe.read(&mut first).map(|read| first[..read].to_vec());
+        let _ = sender.send((read, Some(pipe))); // the pipe comes back for the caller
+    });
+    let until = Instant::now() + STARTUP;
+
+    loop {
+        match receiver.try_recv() {
+            Ok((Ok(prefix), stdout)) if !prefix.is_empty() => {
+                return Ok(Running {
+                    child,
+                    stdout,
+                    prefix,
+                });
+            }
+            // An empty read — EOF before a byte — and a read error are left
+            // to the exit status and the deadline: the pipe, if it came
+            // back, is dropped here and its verdict is the child's.
+            Ok(_) | Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => {}
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                // The exit and the first read race: give the reader thread
+                // a bounded moment to hand back what it read before the
+                // exit is called the verdict. Then the group kill first —
+                // a grandchild may still hold stderr — and what it said.
+                let handed = receiver.recv_timeout(Duration::from_secs(1));
+                if let Ok((Ok(prefix), stdout)) = handed
+                    && !prefix.is_empty()
+                {
+                    return Ok(Running {
+                        child,
+                        stdout,
+                        prefix,
+                    });
+                }
+                end(&mut child);
+                let stderr = match collect(&err, Instant::now() + Duration::from_secs(1)) {
+                    Ok(Some(bytes)) => bytes,
+                    Ok(None) | Err(()) => Vec::new(),
+                };
+                return Err(ToolError::Failed {
+                    program: name,
+                    status: status.code(),
+                    line: reason(&[], &stderr),
+                });
+            }
+            Ok(None) => {}
+            Err(error) => {
+                end(&mut child);
+                return Err(ToolError::Unusable {
+                    program: name,
+                    message: error.to_string(),
+                });
+            }
+        }
+        if Instant::now() >= until {
+            end(&mut child);
+            return Err(ToolError::Deadline {
+                program: name,
+                after: STARTUP,
+            });
+        }
+        thread::sleep(POLL);
+    }
+}
+
+/// A child whose stream has been handed over: owned, in a process group of
+/// its own, never reading a keystroke meant for the interface. Reading it
+/// serves the bytes the startup watch read first, then the pipe; dropping
+/// it ends the whole group and reaps — exactly what [`end`] does for
+/// [`run`] — so the [`MediaSource`][symphonia::core::io::MediaSource] a
+/// resolve returns is the child's lifetime, and a killed playback takes
+/// the downloader with it.
+pub struct Running {
+    child: Child,
+    stdout: Option<ChildStdout>,
+    prefix: Vec<u8>,
+}
+
+impl Running {
+    /// The child's standard output, once: the raw pipe, already past the
+    /// bytes the startup watch read.
+    #[must_use]
+    pub fn stdout(&mut self) -> Option<ChildStdout> {
+        self.stdout.take()
+    }
+
+    /// Ends the child now, without waiting for the drop: the whole process
+    /// group is killed and the exit reaped. Idempotent — the drop runs it
+    /// again, where a kill on an already-dead child is an error nobody
+    /// reads — and cheap, so the stream a resolve returns can end the
+    /// downloader the moment its last reader closes.
+    pub fn end(&mut self) {
+        end(&mut self.child);
+    }
+}
+
+impl Read for Running {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.prefix.is_empty() {
+            match self.stdout.as_mut() {
+                Some(pipe) => pipe.read(buf),
+                None => Ok(0),
+            }
+        } else {
+            let read = self.prefix.len().min(buf.len());
+            buf[..read].copy_from_slice(&self.prefix[..read]);
+            self.prefix.drain(..read);
+            Ok(read)
+        }
+    }
+}
+
+impl fmt::Debug for Running {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The pipes and the bytes already read are not printable; the pid is
+        // what a reader of a debug dump can act on.
+        f.debug_struct("Running")
+            .field("pid", &self.child.id())
+            .field("prefix_bytes", &self.prefix.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.end();
+    }
 }
 
 /// The program's own file name: what a sentence names instead of a path.
