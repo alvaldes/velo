@@ -372,3 +372,19 @@ producer's file arm, with the carried source still skipping a second resolve
 seek instead of re-resolving at an offset) and two smaller ones — `ctrl+s` on
 such a row, and `next` under a station skipping a queued YouTube entry — came
 with it.
+
+**L7 — the native review, slice by slice, and the first one approved.** The
+branch was re-partitioned into twelve commits of 23–649 authored lines each
+(`d723900` … `0ef3846`), because the whole branch (4097 lines) was refused as a
+candidate with `lens_context_budget_exceeded`. The first slice reviewed on its
+own — the bounded child runner, `ad9cc0b`, over `d723900` — came back
+**approved** (`review-88bbde3d97ac33ad`, lenses risk and resilience, three
+advisory findings, none blocking): (R4-1) on the deadline path after the child
+has already exited, the group kill targets a pid that may have been recycled,
+an unrealistically narrow window; (R4-2) off unix, `end()` kills only the direct
+child, so a grandchild holding the pipe leaves a drain thread blocked — unix is
+correct and no unix target is affected; (R4-3) a mid-read pipe error is treated
+as an empty successful read, so a caller could see success with truncated
+output. All three are follow-ups for a later commit, not corrections to this
+one. The remaining eleven commits each need the same per-slice review before
+delivery; delivery itself — push, PR, merge, release — stays the author's.
