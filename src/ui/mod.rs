@@ -4394,6 +4394,19 @@ impl<'lib> App<'lib> {
     /// the shell, which starts it the way `enter` on a queue row plays
     /// from that row. Never a second start, never a second entry.
     fn play_youtube(&mut self, found: crate::youtube::search::Found) -> Action {
+        // A live result is known before it is chosen — the search says so —
+        // and is refused here, before anything is queued: its stream is HLS,
+        // and a queue entry would resolve, open, and only then fail. One
+        // sentence, the resolver's own truth, instead of a row that cannot
+        // play.
+        if found.live {
+            self.status = format!(
+                "velo: {} is live, and {}",
+                found.title,
+                crate::youtube::resolve::LIVE_SENTENCE
+            );
+            return Action::None;
+        }
         let path = crate::youtube::pseudo_path(&found.id);
         // The stream will take a moment to resolve (S4, S5): the status
         // names the entry now, before the player has answered, and the

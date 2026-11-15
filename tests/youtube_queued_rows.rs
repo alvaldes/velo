@@ -39,8 +39,9 @@ fn scratch(case: &str) -> PathBuf {
     dir
 }
 
-/// A fake `yt-dlp` that answers one URL, and counts its own runs in a file
-/// beside it — so a test can prove the tool ran, or that it never did.
+/// A fake `yt-dlp` that answers one full extraction whose chosen `formats`
+/// entry carries `url`, and counts its own runs in a file beside it — so a
+/// test can prove the tool ran, or that it never did.
 fn fake(dir: &Path, url: &str) -> (PathBuf, PathBuf) {
     use std::os::unix::fs::PermissionsExt;
 
@@ -49,7 +50,7 @@ fn fake(dir: &Path, url: &str) -> (PathBuf, PathBuf) {
     fs::write(
         &program,
         format!(
-            "#!/bin/sh\necho run >> {}\nprintf '{url}\\n'\n",
+            "#!/bin/sh\necho run >> {}\ncat <<'JSON'\n{{\"id\":\"abc\",\"formats\":[{{\"ext\":\"m4a\",\"vcodec\":\"none\",\"acodec\":\"mp4a.40.2\",\"protocol\":\"https\",\"url\":\"{url}\"}}]}}\nJSON\n",
             runs.display()
         ),
     )

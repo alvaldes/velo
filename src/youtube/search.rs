@@ -25,6 +25,11 @@ pub struct Found {
     pub uploader: Option<String>,
     /// Length in whole seconds, `None` for a broadcast that never ends.
     pub duration: Option<u64>,
+    /// Whether the search says the result is a live broadcast: its line's
+    /// `live_status` is `is_live`. The screen marks the row and the shell
+    /// refuses it before anything is queued, because a live broadcast is HLS
+    /// and velo cannot play HLS — a queue entry would fail at open time.
+    pub live: bool,
 }
 
 /// Asks the tool for [`RESULTS`] answers to `query`, and reads them.
@@ -79,6 +84,7 @@ struct Line {
     uploader: Option<String>,
     channel: Option<String>,
     duration: Option<f64>,
+    live_status: Option<String>,
 }
 
 impl Line {
@@ -91,16 +97,25 @@ impl Line {
             .title
             .filter(|title| !title.is_empty())
             .unwrap_or_else(|| id.clone());
+        // `is_live` is the only value of `live_status` that means live now;
+        // `is_upcoming` or `was_live` names a recorded or scheduled video and
+        // is not refused.
+        let live = self.live_status.as_deref() == Some("is_live");
         Some(Found {
             id,
             title,
             uploader: self.uploader.or(self.channel),
             // A length the tool states as a float, and a live broadcast's
-            // `null`: the id is a length only when it is one.
-            duration: self
-                .duration
-                .and_then(|secs| std::time::Duration::try_from_secs_f64(secs).ok())
-                .map(|length| length.as_secs()),
+            // `null`: the id is a length only when it is one, and a row marked
+            // live never invents one even if the line carried a number.
+            duration: if live {
+                None
+            } else {
+                self.duration
+                    .and_then(|secs| std::time::Duration::try_from_secs_f64(secs).ok())
+                    .map(|length| length.as_secs())
+            },
+            live,
         })
     }
 }

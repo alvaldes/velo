@@ -106,13 +106,14 @@ fn row_line(screen: &str, name: &str) -> String {
 }
 
 /// One search answer: two results, one of them named through `channel`
-/// instead of `uploader`, one of them a broadcast with no duration, and one
-/// line of garbage between them the parser is expected to skip.
+/// instead of `uploader`, one of them a live broadcast (marked so by its
+/// `live_status`) with no duration, and one line of garbage between them the
+/// parser is expected to skip.
 const SEARCH_ANSWER: &str = concat!(
     r#"{"id": "abc123", "title": "Dawn", "uploader": "Chill Channel", "duration": 212.0}"#,
     "\n",
     "```this line is garbage nobody reads```\n",
-    r#"{"id": "def456", "title": "Nightfall", "channel": "Evening", "duration": null}"#,
+    r#"{"id": "def456", "title": "Nightfall", "channel": "Evening", "duration": null, "live_status": "is_live"}"#,
     "\n"
 );
 
@@ -329,6 +330,79 @@ fn a_failing_search_names_the_tool_s_own_sentence() {
     press(&mut app, KeyCode::Esc);
     assert!(!app.youtube_open());
 
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A result the search marked live (`live_status: is_live`) is known before
+/// it is chosen: its row wears the `✗` the radio wears for a station velo
+/// cannot play, with no length, and choosing it anyway is refused with one
+/// sentence and queues nothing — while the recorded result beside it still
+/// queues and plays from its own row.
+#[test]
+fn a_live_result_is_marked_and_refused_while_a_recorded_one_still_queues() {
+    let dir = scratch("live");
+    let (mut app, _) = app_on_the_row(
+        &dir,
+        &format!("#!/bin/sh\ncat <<'JSON'\n{SEARCH_ANSWER}\nJSON\n"),
+    );
+    press(&mut app, KeyCode::Enter); // the screen opens
+    for character in "dawn".chars() {
+        press(&mut app, KeyCode::Char(character));
+    }
+    press(&mut app, KeyCode::Enter);
+    assert!(
+        until(&mut app, |app| screen_of(app).contains("Dawn")),
+        "the search answered"
+    );
+
+    let screen = screen_of(&app);
+    let nightfall = row_line(&screen, "Nightfall");
+    assert!(
+        nightfall.contains("✗"),
+        "the live result is marked the way an unplayable station is, got:\n{screen}"
+    );
+    assert!(
+        !nightfall.contains(':'),
+        "a live row shows no length, got: {nightfall}"
+    );
+    assert!(
+        row_line(&screen, "Dawn").contains("3:32"),
+        "the recorded row beside it keeps its length, got:\n{screen}"
+    );
+
+    // Choosing the live row anyway: one sentence, no queue entry.
+    press(&mut app, KeyCode::Char('j')); // onto Dawn
+    press(&mut app, KeyCode::Char('j')); // onto Nightfall
+    press(&mut app, KeyCode::Enter);
+    assert!(
+        app.status().contains("HLS"),
+        "the refusal says what it is and what to do: {}",
+        app.status()
+    );
+    assert_eq!(
+        app.queue().len(),
+        0,
+        "a refused result never joins the queue: {:?}",
+        app.queue()
+    );
+
+    // The recorded result beside it still queues and plays from its row.
+    press(&mut app, KeyCode::Char('k')); // back onto Dawn
+    let action = app.on_key(key(KeyCode::Enter));
+    match &action {
+        Action::PlayQueue { from } => {
+            assert_eq!(*from, 0, "the recorded result plays from its row");
+        }
+        other => panic!("enter on the recorded result queues it, got {other:?}"),
+    }
+    assert_eq!(
+        app.queue().len(),
+        1,
+        "the recorded result queued exactly one entry: {:?}",
+        app.queue()
+    );
+
+    press(&mut app, KeyCode::Esc);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

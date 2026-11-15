@@ -74,6 +74,39 @@ fn a_broadcast_without_a_length_still_comes_back() {
 }
 
 #[test]
+fn a_broadcast_marked_live_comes_back_live_and_a_recorded_one_does_not() {
+    let out = format!(
+        "{}\n{}\n{}\n",
+        line(
+            "live1",
+            "Streaming now",
+            r#","duration":null,"live_status":"is_live","uploader":"Them""#
+        ),
+        line(
+            "rec1",
+            "Recorded",
+            r#","duration":42,"live_status":"not_live""#
+        ),
+        line("rec2", "No such field", ""),
+    );
+
+    let found = search::parse(&out);
+
+    assert_eq!(found.len(), 3);
+    assert!(
+        found[0].live,
+        "`is_live` in the line's live_status means live"
+    );
+    assert_eq!(found[0].duration, None, "a live row never carries a length");
+    assert!(
+        !found[1].live,
+        "`not_live` names a recorded video, and it keeps its length"
+    );
+    assert_eq!(found[1].duration, Some(42));
+    assert!(!found[2].live, "a line without live_status is not live");
+}
+
+#[test]
 fn a_line_nobody_can_use_is_skipped_and_the_rest_survive() {
     let out = format!(
         "{}\nnot json at all\n{}\n{}\n",

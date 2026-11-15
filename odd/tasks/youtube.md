@@ -388,3 +388,27 @@ as an empty successful read, so a caller could see success with truncated
 output. All three are follow-ups for a later commit, not corrections to this
 one. The remaining eleven commits each need the same per-slice review before
 delivery; delivery itself — push, PR, merge, release — stays the author's.
+
+**L8 — the first run against real `YouTube`, and what it cost.** Manual testing
+against `yt-dlp 2026.10.26` found four things no fake binary could: (1) the
+`--get-url` route printed a media URL that answered `403`, while the full
+extraction (`--dump-single-json`) answers with URLs a plain ranged GET can use —
+so the resolve now reads the extraction, not the URL print; (2) `YouTube` serves
+AAC-LC (`mp4a.40.2`) and HE-AAC (`mp4a.40.5`) both as `m4a` and lists the
+HE-AAC one first, and symphonia refuses HE-AAC at decode time ("aac too
+complex"), so the picker chooses by codec, not container, and the test fixture
+that had claimed AAC-LC inside a `webm` was corrected; (3) a live broadcast is an
+HLS manifest, which this tree cannot demux — refused by name before any request,
+and marked `✗` in the results; (4) the shared HTTP transport followed no
+redirects, so a `302` to the host that serves the bytes read as a refusal.
+
+**Still open, and it is a decision, not a bug: the extracted URL is a coin
+flip.** Measured over six fresh extractions of one video, two produced a URL
+that answered `206` and four a URL that refused every attempt (`403`); retrying
+the same URL never helped, a new extraction sometimes did. So playback today
+succeeds on roughly a third of attempts. Two ways out, and the cost is
+different: ask the tool again on a refusal, up to a few attempts (keeps ranged
+seeking, still fails when every attempt draws badly), or let the tool deliver
+the bytes itself (`-o -` on stdout), which is reliable but makes a seek a fresh
+spawn with `--download-sections` and retires the "resolved URL with a lifetime"
+premise of S4.

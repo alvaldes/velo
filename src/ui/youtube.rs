@@ -29,6 +29,7 @@ use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph};
 use crate::youtube::search::{self, Found};
 use crate::youtube::tool::ToolError;
 
+use super::rowtext::station_label;
 use super::theme::Theme;
 use super::{ListRow, PlayState, RowMark, digits, draw_empty, list_row};
 
@@ -47,7 +48,9 @@ pub enum Outcome {
     Search(String),
     /// `enter` on a result: it is queued as one [`Entry::Youtube`] and
     /// played from its own row, the way `enter` on a queue row plays from
-    /// that row.
+    /// that row — unless the result is a live broadcast, which is refused
+    /// with a sentence instead of a queue entry that would fail at open
+    /// time. The shell carries both out; the screen holds no queue.
     Play(Found),
 }
 
@@ -314,12 +317,21 @@ impl Search {
                     Some((entry, PlayState::Paused)) if entry == path.as_path() => RowMark::Paused,
                     _ => RowMark::None,
                 };
+                // A live broadcast is marked the way the radio marks a station
+                // velo cannot play — the `✗` of [`station_label`], and no
+                // length, because the row has none to give and would be
+                // refused if chosen (`duration` is already `None` for it).
+                let name = if found.live {
+                    station_label(false, true, &found.title, "")
+                } else {
+                    found.title.clone()
+                };
                 ListItem::new(list_row(
                     ListRow {
                         mark,
                         number: Some(index + 1),
                         digits,
-                        name: found.title.clone(),
+                        name,
                         note: found.uploader.clone().unwrap_or_default(),
                         fact: clock(found.duration),
                     },

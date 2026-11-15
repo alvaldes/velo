@@ -51,6 +51,11 @@ impl TrackSpec {
 pub enum AudioError {
     /// The file could not be read.
     Io(std::io::Error),
+    /// A source refused before it could be opened, in the words of the
+    /// refusal — a resolver that will not resolve. Unlike [`AudioError::Io`]
+    /// this is never a file read, so the message is printed as it is, with
+    /// no "cannot read the file" in front of it.
+    Source(String),
     /// The container or codec was recognised but decoding failed.
     Decode(String),
     /// The file should have been decodable but its format is not supported.
@@ -65,6 +70,7 @@ impl fmt::Display for AudioError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io(error) => write!(f, "cannot read the file: {error}"),
+            Self::Source(message) => write!(f, "{message}"),
             Self::Decode(message) => write!(f, "cannot decode the file: {message}"),
             Self::Unsupported(message) => write!(f, "unsupported format: {message}"),
             Self::Device(message) => write!(f, "audio device: {message}"),

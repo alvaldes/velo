@@ -32,17 +32,34 @@ use crate::youtube::{is_pseudo_path, tool, video_id};
 /// read.
 const FORMAT: &str = "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio";
 
+/// The truth about a live broadcast, said by both refusals — the resolver's
+/// (the answer carries no playable format) and the screen's (a live row
+/// chosen anyway). `yt-dlp` answers a live broadcast's streams as HLS
+/// manifests, and velo has no HLS demuxer: the honest sentence names what it
+/// is and what to do, never the symptom of a failed open.
+pub const LIVE_SENTENCE: &str =
+    "a live broadcast is HLS and velo cannot play HLS — pick a recorded video";
+
+/// Said when the answer carries only audio this build cannot decode: `YouTube`
+/// serves HE-AAC and opus as often as AAC-LC, and neither plays here.
+pub const UNDECODABLE_SENTENCE: &str = "YouTube offered only audio velo cannot decode — HE-AAC \
+     or opus, and this build reads AAC-LC and mp3 — try another result";
+
 /// The arguments of one resolve: the options first, `--` to end them, and
 /// the watch URL last — the id is one argument, never a shell line, and
 /// `--no-playlist` keeps a watch URL carrying `&list=` from resolving a
-/// whole playlist.
+/// whole playlist. The full extraction (`--dump-single-json`), not
+/// `--get-url`: the bare URL `--get-url` prints is often a signed googlevideo
+/// address a plain ranged GET answers 403, while the `url` of the matching
+/// `formats[]` entry from the full answer answers 206 — measured on
+/// `yt-dlp` 2026.10.26.
 #[must_use]
 pub fn arguments(id: &str) -> Vec<OsString> {
     [
         "--no-playlist",
         "--no-warnings",
         "--no-progress",
-        "--get-url",
+        "--dump-single-json",
         "--format",
         FORMAT,
         "--",
@@ -93,10 +110,10 @@ impl PathResolver for Resolver {
         if !is_pseudo_path(path) {
             return Ok(path.to_path_buf());
         }
-        Err(AudioError::Io(std::io::Error::other(format!(
+        Err(AudioError::Source(format!(
             "{} is a YouTube entry — velo plays it as a resolved stream, and it is never a file",
             path.to_string_lossy()
-        ))))
+        )))
     }
 
     /// A `YouTube` row is never already reachable: the URL a resolve extracts
@@ -130,34 +147,130 @@ impl PathResolver for Resolver {
         };
         match remote::open(transport, &url) {
             Ok(RemoteOpen::Streams(source)) => Ok(Some(Box::new(source))),
-            Ok(RemoteOpen::NoRanges) => Err(AudioError::Io(std::io::Error::other(
+            // Defensive: the selection only hands over plain-HTTP URLs, and
+            // those answer ranged GETs — but a server that lies about it is
+            // a refusal, never a fallback question (the entry has no file to
+            // fall back to).
+            Ok(RemoteOpen::NoRanges) => Err(AudioError::Source(
                 "yt-dlp returned a stream that cannot be ranged — a stream that cannot be ranged \
-                 cannot be seeked, and a YouTube entry has no file to fall back to",
-            ))),
-            Err(error) => Err(AudioError::Io(std::io::Error::other(error.to_string()))),
+                 cannot be seeked, and a YouTube entry has no file to fall back to"
+                    .to_owned(),
+            )),
+            Err(error) => Err(AudioError::Source(error.to_string())),
         }
     }
 }
 
-/// One resolve call: the tool runs bounded by [`tool::RESOLVE`], and its
-/// first non-empty stdout line is the media URL.
+/// The members velo reads out of one extraction. Everything else the object
+/// carries — descriptions, thumbnails, the video-level url — is ignored.
+#[derive(miniserde::Deserialize)]
+struct Extraction {
+    formats: Option<Vec<Format>>,
+}
+
+/// One entry of the answer's `formats[]`.
+///
+/// `http_headers` exists on this object — the headers a client is meant to
+/// send with the URL. It is not carried yet on purpose: a bare ranged GET of
+/// the chosen URLs was measured answering 206, so nothing needs it today.
+/// If a format starts refusing bare requests, the headers are the next thing
+/// to carry — not a retry, not a guess.
+#[derive(miniserde::Deserialize)]
+struct Format {
+    url: Option<String>,
+    vcodec: Option<String>,
+    acodec: Option<String>,
+    protocol: Option<String>,
+    abr: Option<f64>,
+}
+
+/// Whether one format is audio-only and plain HTTP — the two things the
+/// streaming path can actually play. Audio-only: `vcodec` absent, `null` or
+/// `"none"`, and `acodec` present and not `"none"`. Plain HTTP: `protocol`
+/// absent or `http`/`https` — anything else (`m3u8`, `m3u8_native`, `dash`,
+/// …) is a manifest or a segmented stream this tree cannot demux.
+fn playable(format: &Format) -> bool {
+    let audio_only = matches!(format.vcodec.as_deref(), None | Some("none"))
+        && !matches!(format.acodec.as_deref(), None | Some("none"));
+    let plain_http = matches!(format.protocol.as_deref(), None | Some("http" | "https"));
+    audio_only && plain_http
+}
+
+/// What an answer's `formats[]` allowed.
+enum Pick {
+    /// One plain-HTTP, audio-only URL the decoder can read.
+    Url(String),
+    /// Nothing but manifests — the live case.
+    ManifestOnly,
+    /// Plain-HTTP audio the decoder cannot read at all.
+    Undecodable,
+}
+
+/// Picks one playable format's URL by what this tree can **decode**, not by
+/// what container it is in.
+///
+/// The distinction is not academic: `YouTube` serves AAC-LC (`mp4a.40.2`) and
+/// HE-AAC (`mp4a.40.5`, SBR) both as `m4a`, and it lists the HE-AAC one first.
+/// symphonia has `isomp4`/`aac`/`mp3` and no Matroska demuxer, so it reads the
+/// first and refuses the second at decode time with "aac too complex" — a
+/// codec's name for a profile it does not implement. So the codec decides, and
+/// among the streams that decode, the loudest wins.
+fn pick(formats: &[Format]) -> Pick {
+    let candidates: Vec<&Format> = formats.iter().filter(|format| playable(format)).collect();
+    if candidates.is_empty() {
+        return Pick::ManifestOnly;
+    }
+    let best = candidates
+        .iter()
+        .copied()
+        .filter(|format| decodes(format))
+        .max_by(|a, b| {
+            a.abr
+                .partial_cmp(&b.abr)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .and_then(|format| format.url.clone().filter(|url| !url.is_empty()));
+    best.map_or(Pick::Undecodable, Pick::Url)
+}
+
+/// Whether this tree's decoder reads `format`'s codec: AAC-LC and mp3, and
+/// nothing else. HE-AAC is SBR — a profile symphonia does not implement — and
+/// opus arrives in webm, whose demuxer this tree does not have.
+fn decodes(format: &Format) -> bool {
+    match format.acodec.as_deref() {
+        Some(codec) => codec == "mp4a.40.2" || codec.starts_with("mp3"),
+        None => false,
+    }
+}
+
+/// One resolve call: the tool runs bounded by [`tool::RESOLVE`], its answer
+/// is one extraction, and the chosen format's URL is the media URL.
 ///
 /// # Errors
 ///
 /// The tool's own failure — not installed, deadline, refused — as the audio
-/// path carries it, or an empty answer where a URL should be.
+/// path carries it, an answer that reads as no extraction, or an answer with
+/// no playable format: the live case, refused by its name before any HTTP
+/// request is made.
 fn resolved_url(program: &Path, id: &str) -> Result<String, AudioError> {
     let out = tool::run(program, &arguments(id), tool::RESOLVE)
-        .map_err(|error| AudioError::Io(std::io::Error::other(error.to_string())))?;
-    out.lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(str::to_owned)
-        .ok_or_else(|| {
-            AudioError::Io(std::io::Error::other(
-                "yt-dlp answered nothing — there is no URL to play",
-            ))
-        })
+        .map_err(|error| AudioError::Source(error.to_string()))?;
+    if out.trim().is_empty() {
+        return Err(AudioError::Source(
+            "yt-dlp answered nothing — there is no URL to play".to_owned(),
+        ));
+    }
+    let extraction: Extraction = miniserde::json::from_str(out.trim()).map_err(|_| {
+        AudioError::Source(
+            "yt-dlp answered something velo could not read as one extraction".to_owned(),
+        )
+    })?;
+    let formats = extraction.formats.unwrap_or_default();
+    match pick(&formats) {
+        Pick::Url(url) => Ok(url),
+        Pick::ManifestOnly => Err(AudioError::Source(LIVE_SENTENCE.to_owned())),
+        Pick::Undecodable => Err(AudioError::Source(UNDECODABLE_SENTENCE.to_owned())),
+    }
 }
 
 /// The production range transport (remote-streaming T1): the Subsonic
@@ -170,5 +283,5 @@ fn resolved_url(program: &Path, id: &str) -> Result<String, AudioError> {
 fn production_transport() -> Result<Arc<dyn RangeTransport>, AudioError> {
     crate::subsonic::client::HttpTransport::new(false)
         .map(|transport| Arc::new(transport) as Arc<dyn RangeTransport>)
-        .map_err(|error| AudioError::Io(std::io::Error::other(error.to_string())))
+        .map_err(|error| AudioError::Source(error.to_string()))
 }

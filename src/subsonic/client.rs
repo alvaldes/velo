@@ -196,6 +196,12 @@ impl HttpTransport {
             .tls_config(tls.build())
             .timeout_connect(Some(std::time::Duration::from_secs(15)))
             .timeout_per_read(Some(std::time::Duration::from_secs(30)))
+            // Redirects are followed, bounded: a media URL commonly answers
+            // `302` to the host that will actually serve the bytes (a
+            // `YouTube` stream does exactly that), and a client that stops at
+            // the first hop reports the redirect as a refusal. Five is what a
+            // CDN chain takes; the bound keeps a loop from becoming a hang.
+            .max_redirects(5)
             .build()
             .new_agent();
         Ok(Self { agent })

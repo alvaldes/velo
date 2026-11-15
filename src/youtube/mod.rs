@@ -94,9 +94,7 @@ pub fn pseudo_path(id: &str) -> PathBuf {
 }
 
 fn broken(text: &str, why: &str) -> AudioError {
-    AudioError::Io(std::io::Error::other(format!(
-        "{text} is not a YouTube entry: {why}"
-    )))
+    AudioError::Source(format!("{text} is not a YouTube entry: {why}"))
 }
 
 /// The resolver a machine without `yt-dlp` gets (S10): local files pass
@@ -127,7 +125,9 @@ impl Unconfigured {
 impl PathResolver for Unconfigured {
     fn resolve(&self, path: &Path) -> Result<PathBuf, AudioError> {
         if is_pseudo_path(path) {
-            return Err(AudioError::Io(std::io::Error::other(self.message.clone())));
+            // Source, not Io: the sentence is a refusal, not a file read —
+            // "cannot read the file" would name something that never happened.
+            return Err(AudioError::Source(self.message.clone()));
         }
         Ok(path.to_path_buf())
     }
