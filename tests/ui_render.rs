@@ -1004,7 +1004,7 @@ fn the_sources_screen_marks_the_row_what_plays_came_from() {
     );
     let library = screen
         .lines()
-        .find(|line| line.contains("2. Local library"))
+        .find(|line| line.contains("3. Local library"))
         .unwrap_or_else(|| panic!("the library row is on the first screen:\n{screen}"));
     assert!(
         !library.contains('▶'),

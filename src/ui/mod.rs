@@ -25,6 +25,7 @@ pub mod shuffle;
 pub mod sources;
 pub mod theme;
 pub mod visualizer;
+pub mod youtube;
 
 pub use ratatui;
 pub use ratatui::crossterm;
@@ -84,6 +85,12 @@ pub const MONO_WITH_BIT_PERFECT_REFUSED: &str = "velo: --mono cannot be combined
 /// The fetching line's own words (issue #60): what one starts with, so only
 /// a line this machinery wrote is its to clear.
 const FETCHING_LINE_PREFIX: &str = "⟳ fetching ";
+
+/// The searching line's own words (issue #70, T5): what a running `YouTube`
+/// search starts with, the fetching line's sibling — the one line the search
+/// machinery writes while the tool works, and the one line it is alone
+/// entitled to clear.
+const SEARCHING_LINE_PREFIX: &str = "⟳ searching ";
 
 /// The streaming line's own words (remote-streaming T2, S1): the way the
 /// track plays — its bytes arriving as they are read, nothing being fetched
@@ -890,6 +897,18 @@ pub struct App<'lib> {
     /// `Sources` when it was chosen there, the library or the queue when `R`
     /// opened it over them.
     radio_from: View,
+    /// The `YouTube` search screen (issue #70, T5), while it is open over
+    /// the sources screen: the query, the cursor, the answers, and the one
+    /// search in flight whose answer the tick polls. Closing the screen
+    /// drops all of it (S7): nothing about a search outlives the screen.
+    youtube: Option<youtube::Search>,
+    /// The `yt-dlp` the launch found on `PATH`, or `None` when there is
+    /// none. The sources row's fact and the screen's very existence read
+    /// it; no process is ever spawned to learn it — the scan ran once at
+    /// launch and was handed over ([`Self::set_youtube_program`]), the way
+    /// the resolver and the covers are. `None` is also every test's
+    /// default: no test reaches this machine's real `PATH`.
+    youtube_program: Option<PathBuf>,
     /// The refusal note the status line last showed for the radio's cursor
     /// (S1, issue #19): `None` when the cursor is not on a rejected station
     /// or the note is not on the line. The note is only rewritten when this
@@ -1115,6 +1134,8 @@ impl<'lib> App<'lib> {
         App {
             position: Position::Files,
             sources: sources::Sources::default(),
+            youtube: None,
+            youtube_program: None,
             radio_from: View::Library,
             url_opener: open_url,
             tab_origin: View::Sources,
@@ -1227,6 +1248,8 @@ impl<'lib> App<'lib> {
         let mut app = Self {
             position: Position::Artists,
             sources: sources::Sources::default(),
+            youtube: None,
+            youtube_program: None,
             radio_from: View::Library,
             url_opener: open_url,
             tab_origin: View::Sources,
@@ -1844,6 +1867,7 @@ impl<'lib> App<'lib> {
                 Action::None
             }
             sources::Source::Radio => self.open_radio(),
+            sources::Source::Youtube => self.open_youtube(),
             sources::Source::RecentlyPlayed => {
                 self.open_recent();
                 Action::None
@@ -3029,6 +3053,10 @@ impl<'lib> App<'lib> {
         // directory request lands without a key press, and an in-flight
         // one says `⟳ loading…` on the status line.
         self.radio_poll();
+        // The search screen's turn (issue #70): a finished `yt-dlp` search
+        // lands without a key press, the way a finished directory request
+        // does.
+        self.youtube_poll();
         // The fetching fact (issue #60): a remote entry the queue is
         // downloading says so on the status line until it sounds. The start's
         // own worker is polled first, so a finished fetch begins its stream
@@ -3668,6 +3696,12 @@ impl<'lib> App<'lib> {
         {
             return action;
         }
+        // The `YouTube` search screen (issue #70, T5) sits over the sources
+        // screen and owns its keys while it is up, the way the radio view
+        // does; the keys it does not claim reach the keymap underneath.
+        if let Some(action) = self.youtube_key(event) {
+            return action;
+        }
         // The sources screen (issue #3) owns its list keys while it is up;
         // the keys it does not claim keep reaching the transport and the
         // global commands.
@@ -4272,6 +4306,145 @@ impl<'lib> App<'lib> {
         self.edit_queue(|queue| queue.push(Entry::Station { url, name }));
         let from = self.queue.len() - 1;
         Action::PlayQueue { from }
+    }
+
+    /// Opens the `YouTube` search screen (issue #70, T5), one level above
+    /// the sources screen the way the radio is — or, with no tool on the
+    /// machine, says exactly that and stays where it is (S1, S10): the row
+    /// opens no broken screen, one sentence says how to install what it
+    /// needs, and the sources screen stays under the cursor.
+    fn open_youtube(&mut self) -> Action {
+        let Some(program) = self.youtube_program.clone() else {
+            self.status =
+                crate::youtube::Unconfigured::new(std::path::Path::new(crate::youtube::PROGRAM))
+                    .message()
+                    .into();
+            return Action::None;
+        };
+        self.youtube = Some(youtube::Search::new(program));
+        Action::None
+    }
+
+    /// Whether the `YouTube` search screen is what the keys act on: it is
+    /// open, and the sources screen it sits over is the screen. The queue
+    /// keeps it asleep the way the radio is kept: `tab` away and its keys
+    /// sleep; `tab` back and they wake.
+    fn youtube_on_screen(&self) -> bool {
+        self.youtube.is_some() && self.view == View::Sources
+    }
+
+    /// Whether the `YouTube` search screen is open (T5).
+    #[must_use]
+    pub const fn youtube_open(&self) -> bool {
+        self.youtube.is_some()
+    }
+
+    /// Installs the launch-time detection's answer (the shells' hook): the
+    /// program path the `PATH` scan found, or `None` for a machine without
+    /// the tool. Production calls this once, at launch, before any frame is
+    /// drawn; the row's fact never spawns a process to learn it (S1).
+    pub fn set_youtube_program(&mut self, program: Option<PathBuf>) {
+        self.youtube_program = program;
+    }
+
+    /// The keys the open `YouTube` search screen owns (T5); `None` lets the
+    /// key fall through to the rest of the keymap, so the transport, `q`,
+    /// `?` and the seek keys stay global, the way the sources screen's are.
+    fn youtube_key(&mut self, event: ratatui::crossterm::event::KeyEvent) -> Option<Action> {
+        if !self.youtube_on_screen() {
+            return None;
+        }
+        let outcome = self.youtube.as_mut()?.key(event);
+        match outcome {
+            youtube::Outcome::Handled => Some(Action::None),
+            youtube::Outcome::Unhandled => None,
+            youtube::Outcome::Close => {
+                // The way out is the way in: `esc` lands back on the
+                // sources screen, which never moved. The query and the
+                // answers die here (S7).
+                self.youtube = None;
+                Some(Action::None)
+            }
+            youtube::Outcome::Search(query) => {
+                self.start_youtube_search(&query);
+                Some(Action::None)
+            }
+            youtube::Outcome::Play(found) => Some(self.play_youtube(found)),
+        }
+    }
+
+    /// Starts one search on its worker (S6): the tool runs bounded by its
+    /// own search deadline, off the event loop, and the status line names
+    /// what is being looked for until the answer or the failure replaces
+    /// it. A search refused — one already in flight — left the running
+    /// one's line standing, which is the honest line.
+    fn start_youtube_search(&mut self, query: &str) {
+        let started = self
+            .youtube
+            .as_mut()
+            .is_some_and(|screen| screen.search(query.to_owned()));
+        if started {
+            self.status = format!("{SEARCHING_LINE_PREFIX}{query}…");
+        }
+    }
+
+    /// Queues one search result and plays it (S3): exactly one
+    /// [`Entry::Youtube`] joins the queue — its identity the pseudo path,
+    /// its body what the search already said — and the play action goes to
+    /// the shell, which starts it the way `enter` on a queue row plays
+    /// from that row. Never a second start, never a second entry.
+    fn play_youtube(&mut self, found: crate::youtube::search::Found) -> Action {
+        let path = crate::youtube::pseudo_path(&found.id);
+        // The stream will take a moment to resolve (S4, S5): the status
+        // names the entry now, before the player has answered, and the
+        // fetching or streaming line it hands over replaces it.
+        self.status = format!("velo: opening {}…", found.title);
+        self.edit_queue(|queue| {
+            queue.push(Entry::Youtube {
+                path,
+                title: found.title,
+                uploader: found.uploader,
+                duration: found.duration,
+            });
+        });
+        let from = self.queue.len() - 1;
+        Action::PlayQueue { from }
+    }
+
+    /// The search screen's turn of the tick (T6b's shape, issue #70): a
+    /// running search keeps its line — the query on screen, never a stale
+    /// one — and a finished answer lands without a key press. A failure
+    /// names the tool's own reason, one line, never a hang; a query with no
+    /// results says so; and only the searching line is the searching
+    /// machinery's to clear.
+    fn youtube_poll(&mut self) {
+        let Some(screen) = self.youtube.as_mut() else {
+            return;
+        };
+        let searching = screen.searching_query().map(str::to_owned);
+        let answer = screen.poll();
+        if let Some(query) = searching {
+            let line = format!("{SEARCHING_LINE_PREFIX}{query}…");
+            if self.status != line {
+                self.status = line;
+            }
+        }
+        match answer {
+            // A filled answer's list is on screen; the searching line, if it
+            // is still standing, said its piece. Every other writer's
+            // message is left alone, and a tick with no answer changes
+            // nothing.
+            Some(youtube::Answer::Filled) => {
+                if self.status.starts_with(SEARCHING_LINE_PREFIX) {
+                    self.status.clear();
+                }
+            }
+            None => {}
+            Some(youtube::Answer::Failed(message)) => self.status = message,
+            Some(youtube::Answer::Empty) => {
+                self.status = String::from("no results for that query");
+            }
+        }
     }
 
     /// Appends a station to the queue without starting anything (T6c, issue
@@ -6036,6 +6209,10 @@ impl<'lib> App<'lib> {
             {
                 view.render(frame, union(header, body), &self.theme);
             }
+            // The `YouTube` search screen (issue #70) replaces the list the
+            // same way, over the sources screen it was opened from: header,
+            // query and results, all in one screen the row lent it.
+            self.draw_youtube_screen(frame, header, body);
         }
         self.draw_footer(frame, footer);
         self.draw_artwork(frame, pane);
@@ -6077,6 +6254,27 @@ impl<'lib> App<'lib> {
         }
     }
 
+    /// The `YouTube` search screen over the sources screen it was opened
+    /// from (issue #70, T5): header, query and results in one screen. The
+    /// row the standing entry plays is the one marked, the way every list
+    /// marks it (issue #53).
+    fn draw_youtube_screen(&self, frame: &mut Frame, header: Rect, body: Rect) {
+        // The queue never paints over the screen (issue #23's rule): when
+        // the round trip put the queue on screen, the queue is what the
+        // body draws, and the search screen sleeps under it.
+        if !self.youtube_on_screen() {
+            return;
+        }
+        let Some(screen) = &self.youtube else {
+            return;
+        };
+        let playing = self.standing_entry().and_then(|entry| match entry {
+            Entry::Youtube { path, .. } => Some((path.as_path(), self.state)),
+            _ => None,
+        });
+        screen.render(frame, union(header, body), &self.theme, playing);
+    }
+
     /// Renders the cover at the left of the now-playing block, fitting the source image into the
     /// pane. The protocol re-encodes only when its area changes, so a redraw
     /// costs it nothing.
@@ -6109,7 +6307,8 @@ impl<'lib> App<'lib> {
         // under the radio view, which is drawn over both — and the queue is
         // lit only when it is the screen.
         let inside_sources = matches!(self.view, View::Sources | View::Library)
-            || (self.radio.is_some() && self.view != View::Queue);
+            || (self.radio.is_some() && self.view != View::Queue)
+            || self.youtube.is_some();
         let tab = |label: &'static str, lit: bool| {
             if lit {
                 Span::styled(label, Style::new().fg(self.theme.accent).bold())
@@ -6477,6 +6676,11 @@ impl<'lib> App<'lib> {
         if self.radio_on_screen() {
             return;
         }
+        // The search screen draws its own header line over this one (issue
+        // #70), the way the radio view does.
+        if self.youtube_on_screen() {
+            return;
+        }
         if self.search.is_none() && self.view == View::Library && self.in_library() {
             frame.render_widget(Paragraph::new(self.views_header(area.width)), area);
             return;
@@ -6589,6 +6793,12 @@ impl<'lib> App<'lib> {
         if self.radio_on_screen() {
             return;
         }
+        // The search screen owns the body the same way (issue #70): its
+        // list of results renders over this exact area, and it sleeps under
+        // the queue the round trip put on screen (issue #23's rule).
+        if self.youtube_on_screen() {
+            return;
+        }
         let width = area.width;
         let (rows, selected) = if self.search.is_some() {
             if self.search_results.is_empty() {
@@ -6637,9 +6847,8 @@ impl<'lib> App<'lib> {
     fn playing_source(&self) -> Option<sources::Source> {
         match self.playing_entry()? {
             Entry::Station { .. } => Some(sources::Source::Radio),
-            // The row that names this source lands with the screen (T5);
-            // until then a YouTube entry marks no row.
-            Entry::Youtube { .. } => None,
+            // The screen that queued it names it (issue #70, T5).
+            Entry::Youtube { .. } => Some(sources::Source::Youtube),
             Entry::File(path) => {
                 let path = path.to_string_lossy();
                 // A remote file plays through the radio's side (the
@@ -6681,13 +6890,33 @@ impl<'lib> App<'lib> {
                         digits,
                         name: source.label().to_owned(),
                         note: String::new(),
-                        fact: String::new(),
+                        // The fact the row shows without a single process
+                        // spawned to learn it (issue #70, S1): whether the
+                        // launch's `PATH` scan found the tool. Every other
+                        // row needs nothing outside the machine.
+                        fact: if source == sources::Source::Youtube {
+                            self.youtube_fact()
+                        } else {
+                            String::new()
+                        },
                     },
                     width,
                     &self.theme,
                 ))
             })
             .collect()
+    }
+
+    /// The fact the `YouTube` row carries (issue #70, S1): `yt-dlp` when
+    /// the launch found it, `yt-dlp missing` when it did not. The launch's
+    /// own detection is the whole story — no scan at draw time, no version
+    /// probe, no process.
+    fn youtube_fact(&self) -> String {
+        if self.youtube_program.is_some() {
+            String::from(crate::youtube::PROGRAM)
+        } else {
+            String::from("yt-dlp missing")
+        }
     }
 
     /// The rows of the current level, as they are on screen.
@@ -6975,6 +7204,19 @@ impl<'lib> App<'lib> {
                 ("/", "search"),
                 ("f", "fav"),
                 ("tab", "queue"),
+                ("?", "help"),
+                ("q", "quit"),
+            ];
+        }
+        // The search screen replaces the body wherever it was opened over
+        // (issue #70), so its keys are the footer's on the sources screen
+        // it sits over.
+        if self.youtube_on_screen() {
+            return &[
+                ("type", "query"),
+                ("enter", "search / play"),
+                ("j/k", "move"),
+                ("esc", "back"),
                 ("?", "help"),
                 ("q", "quit"),
             ];
@@ -8901,7 +9143,11 @@ impl<'lib> App<'lib> {
             shuffle::shuffle_after(&mut paths, 1, shuffle::seed());
         }
         let first = paths.first().cloned();
-        if waits && let Some(Entry::File(path)) = first {
+        // A YouTube entry behaves like the remote file it is (issue #70):
+        // its identity is a pseudo path, its resolve is the tool's own
+        // bounded call, and it waits on the same worker a `subsonic://` row
+        // waits on — never on the event loop (S6).
+        if waits && let Some(Entry::File(path) | Entry::Youtube { path, .. }) = first {
             self.start_as_pending(
                 path,
                 PendingStart::Stream {
@@ -9207,7 +9453,9 @@ impl<'lib> App<'lib> {
         if !handover && let Some(player) = self.player.take() {
             player.stop();
         }
-        if waits && let Some(Entry::File(path)) = first {
+        // The same rule a fresh start keeps (issue #70): a `youtube://`
+        // entry waits on the resolve worker too, never on the event loop.
+        if waits && let Some(Entry::File(path) | Entry::Youtube { path, .. }) = first {
             self.start_as_pending(
                 path,
                 PendingStart::TrackAt {

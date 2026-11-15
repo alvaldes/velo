@@ -11,6 +11,10 @@ pub enum Source {
     Library,
     /// Live radio: the directory, the country, the user's own stations.
     Radio,
+    /// `YouTube`, played through `yt-dlp` (issue #70): a row honest about
+    /// the tool it needs — its fact says whether the launch found one, and
+    /// the screen behind it searches, queues and plays.
+    Youtube,
     /// The history's entries (issue #5), newest first.
     RecentlyPlayed,
     /// The saved store's favourites (issue #7): the tracks the user marked.
@@ -24,9 +28,11 @@ impl Source {
     /// Every source, in the order the first screen shows them (S2, revised by
     /// the author: Radio leads, because a fresh install reaches for a station
     /// before it has a folder to index, and the local library is the second
-    /// row rather than the first).
-    pub const ALL: [Self; 5] = [
+    /// row rather than the first). `YouTube` (issue #70) sits directly beside
+    /// Radio: the two sources that go looking outside the machine.
+    pub const ALL: [Self; 6] = [
         Self::Radio,
+        Self::Youtube,
         Self::Library,
         Self::RecentlyPlayed,
         Self::Favourites,
@@ -39,6 +45,7 @@ impl Source {
         match self {
             Self::Library => "Local library",
             Self::Radio => "Radio",
+            Self::Youtube => "YouTube",
             Self::RecentlyPlayed => "Recently played",
             Self::Favourites => "Favourites",
             Self::Playlists => "Playlists",

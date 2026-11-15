@@ -2361,7 +2361,8 @@ fn a_recorded_view_still_parses_and_the_launch_lands_on_sources_then_the_library
     // The shell's launch path: `Sources` first, the library behind `enter`.
     app.open_sources();
     assert_eq!(app.view(), View::Sources);
-    press(&mut app, KeyCode::Char('j')); // onto Local library, the second row
+    press(&mut app, KeyCode::Char('j')); // past Radio, onto YouTube
+    press(&mut app, KeyCode::Char('j')); // onto Local library, the third row
     press(&mut app, KeyCode::Enter);
     assert_eq!(app.view(), View::Library);
     assert_eq!(app.level(), Some(Level::AllAlbums));
@@ -2396,7 +2397,8 @@ fn a_file_without_the_view_key_still_parses_and_restores_the_rest() {
     );
 
     app.open_sources();
-    press(&mut app, KeyCode::Char('j')); // onto Local library, the second row
+    press(&mut app, KeyCode::Char('j')); // past Radio, onto YouTube
+    press(&mut app, KeyCode::Char('j')); // onto Local library, the third row
     press(&mut app, KeyCode::Enter);
     assert_eq!(app.view(), View::Library);
     assert_eq!(

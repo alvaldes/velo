@@ -175,6 +175,7 @@ fn playlists_is_the_last_source_after_favourites() {
         app.sources_labels(),
         [
             "Radio",
+            "YouTube",
             "Local library",
             "Recently played",
             "Favourites",
@@ -183,7 +184,7 @@ fn playlists_is_the_last_source_after_favourites() {
         "Playlists is last"
     );
     press(&mut app, KeyCode::Char('G'));
-    assert_eq!(app.sources_selected(), 4, "G lands on Playlists");
+    assert_eq!(app.sources_selected(), 5, "G lands on Playlists");
 
     let _ = fs::remove_dir_all(&temp.root);
 }

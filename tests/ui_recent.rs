@@ -54,6 +54,7 @@ fn open_recently_played(app: &mut App<'static>) {
     app.open_sources();
     press(app, KeyCode::Char('j'));
     press(app, KeyCode::Char('j'));
+    press(app, KeyCode::Char('j')); // the walk Radio → YouTube → Local library → Recently played
     assert_eq!(press(app, KeyCode::Enter), Action::None);
 }
 

@@ -354,8 +354,9 @@ fn an_unmarked_track_shows_no_star() {
 // ---- S4: the list ------------------------------------------------------------
 
 /// `Sources` gains `Favourites` after `Recently played`, and `Playlists`
-/// (issue #4) is the row after it. Radio leads the list and Local library is
-/// the second row (the author's order).
+/// (issue #4) is the row after it. Radio leads the list, `YouTube`
+/// (issue #70) is the row directly beside it, and Local library is the next
+/// one (the author's order).
 #[test]
 fn favourites_sits_before_playlists_and_radio_leads_the_list() {
     let temp = TempLibrary::new("sources");
@@ -366,6 +367,7 @@ fn favourites_sits_before_playlists_and_radio_leads_the_list() {
         app.sources_labels(),
         [
             "Radio",
+            "YouTube",
             "Local library",
             "Recently played",
             "Favourites",
@@ -377,7 +379,7 @@ fn favourites_sits_before_playlists_and_radio_leads_the_list() {
     assert_eq!(
         app.sources_selected(),
         1,
-        "the first j still lands on Radio"
+        "the first j lands on YouTube, directly after Radio"
     );
 
     let _ = fs::remove_dir_all(&temp.root);
@@ -532,7 +534,8 @@ fn the_list_reads_the_store_anew_every_time_it_opens() {
     // Walk back out, unmark one, and open the list again.
     press(&mut app, KeyCode::Esc);
     press(&mut app, KeyCode::Char('g')); // the top of Sources: Radio
-    press(&mut app, KeyCode::Char('j')); // onto Local library
+    press(&mut app, KeyCode::Char('j')); // onto YouTube
+    press(&mut app, KeyCode::Char('j')); // down to Local library
     press(&mut app, KeyCode::Enter); // into the library
     assert_eq!(app.level(), Some(Level::AllTracks));
     // The selection is already on the first row: opening a source resets it.

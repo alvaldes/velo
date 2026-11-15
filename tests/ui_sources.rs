@@ -49,10 +49,10 @@ fn press(app: &mut App<'_>, code: KeyCode) -> Action {
 }
 
 /// Issue #35's control: with the radio closed, the sources screen renders
-/// its own header and all five rows — the fix that lets the radio own the
+/// its own header and all six rows — the fix that lets the radio own the
 /// body must not take the screen away from the sources themselves.
 #[test]
-fn the_sources_screen_renders_its_header_and_all_five_rows() {
+fn the_sources_screen_renders_its_header_and_all_six_rows() {
     let mut app = app();
     app.open_sources();
 
@@ -63,6 +63,7 @@ fn the_sources_screen_renders_its_header_and_all_five_rows() {
     );
     for row in [
         "Radio",
+        "YouTube",
         "Local library",
         "Recently played",
         "Favourites",
@@ -73,8 +74,9 @@ fn the_sources_screen_renders_its_header_and_all_five_rows() {
 }
 
 /// S1, S2: the first screen lists what velo can play, with the cursor
-/// already on the first row, `Radio`. `Favourites` (issue #7) and
-/// `Playlists` (issue #4) are last; `Local library` is one `j` from the top.
+/// already on the first row, `Radio`. `YouTube` (issue #70) is the second
+/// row, directly beside Radio; `Favourites` (issue #7) and `Playlists`
+/// (issue #4) are last; `Local library` is one `j` from the top.
 #[test]
 fn the_sources_screen_names_the_sources_with_the_cursor_on_the_first() {
     let mut app = app();
@@ -85,6 +87,7 @@ fn the_sources_screen_names_the_sources_with_the_cursor_on_the_first() {
         app.sources_labels(),
         [
             "Radio",
+            "YouTube",
             "Local library",
             "Recently played",
             "Favourites",
@@ -109,14 +112,16 @@ fn the_source_cursor_moves_and_wraps_at_both_ends() {
     assert_eq!(
         app.sources_selected(),
         1,
-        "the first j still lands on Local library"
+        "the first j still lands on YouTube"
     );
     press(&mut app, KeyCode::Char('j'));
     assert_eq!(app.sources_selected(), 2);
     press(&mut app, KeyCode::Char('j'));
     assert_eq!(app.sources_selected(), 3);
     press(&mut app, KeyCode::Char('j'));
-    assert_eq!(app.sources_selected(), 4, "Playlists is the last source");
+    assert_eq!(app.sources_selected(), 4);
+    press(&mut app, KeyCode::Char('j'));
+    assert_eq!(app.sources_selected(), 5, "Playlists is the last source");
     press(&mut app, KeyCode::Char('j'));
     assert_eq!(
         app.sources_selected(),
@@ -126,13 +131,13 @@ fn the_source_cursor_moves_and_wraps_at_both_ends() {
     press(&mut app, KeyCode::Char('k'));
     assert_eq!(
         app.sources_selected(),
-        4,
+        5,
         "k wraps from the first source to the last"
     );
     press(&mut app, KeyCode::Char('k'));
-    assert_eq!(app.sources_selected(), 3);
-    press(&mut app, KeyCode::Char('G'));
     assert_eq!(app.sources_selected(), 4);
+    press(&mut app, KeyCode::Char('G'));
+    assert_eq!(app.sources_selected(), 5);
     press(&mut app, KeyCode::Char('g'));
     assert_eq!(app.sources_selected(), 0);
 }
@@ -144,6 +149,7 @@ fn entering_the_local_library_lands_on_the_library_and_its_keys_still_work() {
     let mut app = app_with_a_library();
     app.open_sources();
 
+    press(&mut app, KeyCode::Char('j')); // past Radio, onto YouTube
     press(&mut app, KeyCode::Char('j')); // down to Local library
     press(&mut app, KeyCode::Enter);
     assert_eq!(app.view(), View::Library);
@@ -183,6 +189,7 @@ fn entering_the_local_library_lands_on_the_library_even_when_the_saved_tab_was_t
     app.open_sources();
     assert_eq!(app.view(), View::Sources);
 
+    press(&mut app, KeyCode::Char('j')); // past Radio, onto YouTube
     press(&mut app, KeyCode::Char('j')); // down to Local library
     press(&mut app, KeyCode::Enter);
     assert_eq!(app.view(), View::Library);
@@ -196,6 +203,7 @@ fn entering_the_local_library_lands_on_the_library_even_when_the_saved_tab_was_t
 fn entering_the_local_library_without_one_configured_asks_for_its_path() {
     let mut app = app(); // no open index, no configured root
     app.open_sources();
+    press(&mut app, KeyCode::Char('j')); // past Radio, onto YouTube
     press(&mut app, KeyCode::Char('j')); // down to Local library
     press(&mut app, KeyCode::Enter);
 
@@ -246,6 +254,7 @@ fn esc_closing_the_radio_lands_on_sources() {
 fn r_still_opens_the_radio_from_inside_the_library() {
     let mut app = app_with_a_library();
     app.open_sources();
+    press(&mut app, KeyCode::Char('j')); // past Radio, onto YouTube
     press(&mut app, KeyCode::Char('j')); // down to Local library
     press(&mut app, KeyCode::Enter);
 
@@ -282,7 +291,7 @@ fn the_flat_files_list_never_shows_a_sources_screen() {
 fn tab_from_the_sources_screen_reaches_the_queue_and_returns_to_it() {
     let mut app = app();
     app.open_sources();
-    press(&mut app, KeyCode::Char('j')); // onto Local library
+    press(&mut app, KeyCode::Char('j')); // onto YouTube
     assert_eq!(app.sources_selected(), 1);
 
     press(&mut app, KeyCode::Tab);
@@ -304,7 +313,7 @@ fn the_page_keys_reach_the_sources_ends_and_no_further() {
     assert_eq!(app.sources_selected(), 1);
 
     press(&mut app, KeyCode::PageDown);
-    assert_eq!(app.sources_selected(), 4, "pgdn reaches the last source");
+    assert_eq!(app.sources_selected(), 5, "pgdn reaches the last source");
     press(&mut app, KeyCode::PageUp);
     assert_eq!(
         app.sources_selected(),
@@ -318,7 +327,7 @@ fn the_page_keys_reach_the_sources_ends_and_no_further() {
     );
     let action = app.on_key(ctrl_d);
     app.apply(action);
-    assert_eq!(app.sources_selected(), 4, "ctrl+d is pgdn here");
+    assert_eq!(app.sources_selected(), 5, "ctrl+d is pgdn here");
 
     let ctrl_u = KeyEvent::new(
         KeyCode::Char('u'),
