@@ -151,8 +151,11 @@ Rules it must satisfy:
    play-time resolve 30 s (one full extraction). Both are named constants beside
    the radio's `connect`/`response`/`read` bounds, with the same kind of comment.
 7. **Deterministic exit mapping.** Non-zero status → its first stderr line;
-   deadline → `ToolError::Deadline`; no output → `ToolError::Empty`; the
-   program not found at `spawn` → `ToolError::NotInstalled`.
+   deadline → `ToolError::Deadline`; the program not found at `spawn` →
+   `ToolError::NotInstalled`. A success with no bytes is `Ok("")`, not an
+   error: an empty search answer is "no results" and an empty resolve is
+   "the tool answered nothing", which are the callers' sentences to say —
+   the runner does not invent a failure the tool did not report.
 
 The runner is injectable, mirroring `set_url_opener` (`tests/ui_radio.rs:1878`):
 the resolver holds a program path, so a test constructs it with a fake binary
@@ -248,12 +251,17 @@ station rows already taught (`live_row`, `src/ui/mod.rs:6822`).
 | --- | --- |
 | no tool | `yt-dlp is not installed — install it to play YouTube (brew install yt-dlp, or your package manager)` |
 | deadline | `yt-dlp did not answer within 20s — the request was cancelled` |
-| tool failed | `yt-dlp could not resolve this video: <its first stderr line>` |
-| unparsable | `yt-dlp answered something velo does not understand: <first line>` |
-| not decodable | `yt-dlp returned a <ext> stream velo cannot decode — no m4a or mp3 was offered` |
+| tool failed | `yt-dlp could not answer: <its first stderr line> (exit N)` |
+| broken row | `<path> is not a YouTube entry: <why>` |
+| asked for a file | `<path> is a YouTube entry — velo plays it as a resolved stream, and it is never a file` |
+| cannot be seeked | `this YouTube entry cannot be played as a ranged stream — there is no file to fall back to` |
 | no results | `no results for that query` |
+| a live result, `seek` | `velo: nothing to seek in a live YouTube stream` |
 
-Each names the reason and the next step; none of them is a spinner.
+Each names the reason and the next step; none of them is a spinner. A line
+nobody can use is skipped and an unusable ones-and-zeros answer is "no
+results", so the runner needs no sentence for either: the caller already has
+one.
 
 ### Tests, with no network anywhere
 
@@ -349,3 +357,18 @@ without any test noticing. The pinning test
 caught it. The lesson for a next source that owns a pseudo-path: the wait
 question is a separate seam from the resolve one, and adding a scheme without
 teaching it is a silent S6 regression.
+
+**L6 — the verification found the seam's blind spot, and it was a blocker.** An
+independent read of slices A–D found that `Entry::Youtube` plays and a
+`youtube://` row rebuilt from a stored path does not: the history, a favourite,
+a playlist and `velo --play youtube://<id>` all produce `Entry::File`, whose
+arms asked `resolve` and got the resolver's honest refusal — a skipped track,
+and no process ever spawned. B1 in the verification, and exactly the risk that
+made this task's verification independent. Fixed at the seam rather than per
+constructor: `open_first_entry` is the one place a start opens its first entry,
+and a youtube pseudo-path asks the streaming question there and in the
+producer's file arm, with the carried source still skipping a second resolve
+(`tests/youtube_queued_rows.rs` pins both). F2 (a lengthless result refuses a
+seek instead of re-resolving at an offset) and two smaller ones — `ctrl+s` on
+such a row, and `next` under a station skipping a queued YouTube entry — came
+with it.

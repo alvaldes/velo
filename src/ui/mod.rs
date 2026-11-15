@@ -5229,7 +5229,19 @@ impl<'lib> App<'lib> {
                 );
                 return;
             }
-            Entry::File(path) if !is_pseudo_path(path) && !is_remote_url(path) => {
+            Entry::File(path) if crate::youtube::is_pseudo_path(path) => {
+                self.status = format!(
+                    "velo: {} is a resolved YouTube stream — velo saves what it can copy \
+                     to a file, and a resolved stream is not one",
+                    entry.label()
+                );
+                return;
+            }
+            Entry::File(path)
+                if !is_pseudo_path(path)
+                    && !crate::youtube::is_pseudo_path(path)
+                    && !is_remote_url(path) =>
+            {
                 self.status = format!(
                     "velo: {} is already a file on disk — copying it is cp",
                     entry.label()
@@ -9314,12 +9326,21 @@ impl<'lib> App<'lib> {
         self.start_at(duration.map_or(target, |duration| target.min(duration)));
     }
 
-    /// Whether a live station refused the seek (S3): it has no position to seek
-    /// within, and saying so is cheaper than rebuilding the player — which
-    /// would refetch the stream. One answer, both gears.
+    /// Whether a live stream refused the seek (S3): a station has no position
+    /// to seek within, and a `YouTube` result with no length is the same case —
+    /// it plays and shows elapsed time only, and a seek would rebuild the
+    /// player at an offset the stream was never ranged for. Saying so is
+    /// cheaper than the rebuild; one answer, both gears.
     fn refuse_live_seek(&mut self) -> bool {
         if matches!(self.playing_entry(), Some(Entry::Station { .. })) {
             self.note("velo: nothing to seek in a live station");
+            return true;
+        }
+        if matches!(
+            self.playing_entry(),
+            Some(Entry::Youtube { duration: None, .. })
+        ) {
+            self.note("velo: nothing to seek in a live YouTube stream");
             return true;
         }
         false
@@ -9370,14 +9391,15 @@ impl<'lib> App<'lib> {
     /// The queue index `next` goes to while a station plays (issue #17): the
     /// FIRST track of the queue — the human's rule, "ir a la primera pista de
     /// la cola" — not the entry after the station, so an evening of stations
-    /// lined up behind it is left whole. `Err` is the one status line the
-    /// refusal says; the station keeps playing. Only consulted when the entry
-    /// that plays is a station; a queue of tracks alone answers from
-    /// [`skip_target`] as it always has.
+    /// lined up behind it is left whole. A queued `YouTube` entry is a playable
+    /// next target like a file (issue #70): `next` lands on it the same way.
+    /// `Err` is the one status line the refusal says; the station keeps
+    /// playing. Only consulted when the entry that plays is a station; a
+    /// queue of tracks alone answers from [`skip_target`] as it always has.
     fn station_next_target(queue: &[Entry]) -> Result<usize, &'static str> {
         queue
             .iter()
-            .position(|entry| matches!(entry, Entry::File(_)))
+            .position(|entry| matches!(entry, Entry::File(_) | Entry::Youtube { .. }))
             .ok_or("velo: no track in the queue — the station keeps playing")
     }
 
@@ -11561,6 +11583,29 @@ mod tests {
         assert_eq!(
             App::station_next_target(&[Entry::from(PathBuf::from("/music/one.flac"))]),
             Ok(0)
+        );
+    }
+
+    /// A queued `YouTube` entry is a playable next target like a file (issue
+    /// #70): with a station playing, `next` lands on it instead of skipping
+    /// past it.
+    #[test]
+    fn next_while_a_station_plays_lands_on_a_queued_youtube_entry() {
+        use std::path::PathBuf;
+
+        let queue = vec![
+            station("nova"),
+            Entry::Youtube {
+                path: PathBuf::from("youtube://abc123"),
+                title: String::from("Dawn"),
+                uploader: Some(String::from("Chill Channel")),
+                duration: Some(212),
+            },
+        ];
+        assert_eq!(
+            App::station_next_target(&queue),
+            Ok(1),
+            "a queued result is a track `next` may land on, like a file"
         );
     }
 }

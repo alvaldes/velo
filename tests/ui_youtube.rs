@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use velo::audio::output::Entry;
-use velo::ui::crossterm::event::{KeyCode, KeyEvent};
+use velo::ui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use velo::ui::{Action, App, View};
 
 /// How long a test waits for the worker's answer before it calls the answer
@@ -47,6 +47,11 @@ fn app() -> App<'static> {
 
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::from(code)
+}
+
+/// A `ctrl`-modified press, the way a terminal reports it.
+fn ctrl(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::CONTROL)
 }
 
 /// One key press, its action applied.
@@ -518,4 +523,100 @@ fn a_playing_youtube_entry_marks_the_youtube_row() {
         !row_line(&screen, "Radio").contains("▶"),
         "no other row wears the mark, got:\n{screen}"
     );
+}
+
+/// S3's live case for a result with no length (issue #70): it plays and shows
+/// elapsed time only, and a seek is refused with one sentence — the
+/// vocabulary the station rows taught — instead of rebuilding the player and
+/// re-resolving at an offset the stream cannot honour.
+#[test]
+fn a_result_with_no_length_refuses_a_seek_with_one_sentence() {
+    let mut app = app();
+    app.show_playing_for_tests(
+        Entry::Youtube {
+            path: PathBuf::from("youtube://live1"),
+            title: String::from("Streaming now"),
+            uploader: Some(String::from("Evening")),
+            duration: None,
+        },
+        Duration::ZERO,
+        None,
+        None,
+    );
+
+    press(&mut app, KeyCode::Right);
+
+    assert_eq!(
+        app.status(),
+        "velo: nothing to seek in a live YouTube stream",
+        "the refusal says itself, once, in the station's own register"
+    );
+}
+
+/// A result with a length still seeks: the refusal belongs to the broadcast
+/// alone, never to the finite result beside it.
+#[test]
+fn a_result_with_a_length_still_seeks() {
+    let mut app = app();
+    app.show_playing_for_tests(
+        Entry::Youtube {
+            path: PathBuf::from("youtube://abc123"),
+            title: String::from("Dawn"),
+            uploader: Some(String::from("Chill Channel")),
+            duration: Some(212),
+        },
+        Duration::ZERO,
+        Some(Duration::from_secs(212)),
+        None,
+    );
+
+    press(&mut app, KeyCode::Right);
+
+    assert!(
+        !app.status().contains("nothing to seek"),
+        "a finite result is seekable: got {}",
+        app.status()
+    );
+}
+
+/// `ctrl+s` on a `YouTube` row says what the row is — never "already a file on
+/// disk", and never a save prompt for something that cannot be copied.
+#[test]
+fn ctrl_s_on_a_youtube_row_says_what_it_is() {
+    let mut app = app(); // no server configured; the resolver is the YouTube side
+    app.set_resolver(Some(std::sync::Arc::new(
+        velo::youtube::resolve::Resolver::new(PathBuf::from("/velo-test/does-not-exist/yt-dlp")),
+    )));
+
+    // Both shapes a YouTube row reaches the interface as: the entry the search
+    // queued, and the one a stored path rebuilds.
+    for row in [
+        Entry::Youtube {
+            path: PathBuf::from("youtube://abc123"),
+            title: String::from("A video"),
+            uploader: None,
+            duration: Some(9),
+        },
+        Entry::File(PathBuf::from("youtube://abc123")),
+    ] {
+        app.show_playing_for_tests(row, Duration::ZERO, None, None);
+        let action = app.on_key(ctrl(KeyCode::Char('s')));
+        app.apply(action);
+
+        assert!(
+            !app.save_prompt_open(),
+            "a resolved stream is not offered a save prompt: {}",
+            app.status()
+        );
+        assert!(
+            app.status().contains("resolved YouTube stream"),
+            "the row is named for what it is: got {}",
+            app.status()
+        );
+        assert!(
+            !app.status().contains("already a file on disk"),
+            "the file sentence never appears: {}",
+            app.status()
+        );
+    }
 }
