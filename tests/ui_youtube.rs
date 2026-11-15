@@ -1,0 +1,521 @@
+//! The `YouTube` search screen (issue #70, T5), tested without a terminal
+//! and without a network: the row and its fact, the tool-less refusal, the
+//! search and its answers through the worker, the queueing and the playing,
+//! and that nothing about a search is stored.
+//!
+//! Every case here runs a fake program written into a scratch directory: no
+//! test in this file reaches the network, and none of them needs `yt-dlp`
+//! installed.
+
+#![cfg(unix)]
+
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use velo::audio::output::Entry;
+use velo::ui::crossterm::event::{KeyCode, KeyEvent};
+use velo::ui::{Action, App, View};
+
+/// How long a test waits for the worker's answer before it calls the answer
+/// not arrived: the fake program finishes in milliseconds, so this is
+/// generous and never the tool's own deadline.
+const ARRIVAL_BOUND: Duration = Duration::from_secs(5);
+
+/// This case's scratch directory, recreated empty so a failed earlier run
+/// can never satisfy a later assertion.
+fn scratch(case: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("velo-ui-youtube-{case}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("the scratch directory creates");
+    dir
+}
+
+/// A fake program: executable, and small enough to read at the call site.
+fn fake(dir: &Path, body: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = dir.join("yt-dlp");
+    std::fs::write(&path, body).expect("the fake program is written");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+        .expect("the fake program turns executable");
+    path
+}
+
+fn app() -> App<'static> {
+    App::browse(None)
+}
+
+fn key(code: KeyCode) -> KeyEvent {
+    KeyEvent::from(code)
+}
+
+/// One key press, its action applied.
+fn press(app: &mut App<'_>, code: KeyCode) -> Action {
+    let action = app.on_key(key(code));
+    app.apply(action);
+    action
+}
+
+/// Ticks until the predicate holds or the wait runs out. The wait is a
+/// wall-clock bound, generous against a worker thread's own scheduling: a
+/// fake program answers in milliseconds.
+fn until(app: &mut App<'_>, satisfies: impl Fn(&App<'_>) -> bool) -> bool {
+    let started = std::time::Instant::now();
+    while started.elapsed() < ARRIVAL_BOUND {
+        app.tick();
+        if satisfies(app) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    false
+}
+
+/// The whole interface as one screen, the way the user sees it.
+fn screen_of(app: &App) -> String {
+    use velo::ui::ratatui::Terminal;
+    use velo::ui::ratatui::backend::TestBackend;
+    use velo::ui::ratatui::buffer::{Buffer, Cell};
+
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("a test terminal");
+    terminal
+        .draw(|frame| app.draw(frame))
+        .expect("the frame draws");
+    let buffer: &Buffer = terminal.backend().buffer();
+    let screen: String = buffer.content().iter().map(Cell::symbol).collect();
+    let characters: Vec<char> = screen.chars().collect();
+    characters
+        .chunks(80)
+        .map(|line| line.iter().collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The line of the sources screen a row lives on.
+fn row_line(screen: &str, name: &str) -> String {
+    screen
+        .lines()
+        .find(|line| line.contains(name))
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// One search answer: two results, one of them named through `channel`
+/// instead of `uploader`, one of them a broadcast with no duration, and one
+/// line of garbage between them the parser is expected to skip.
+const SEARCH_ANSWER: &str = concat!(
+    r#"{"id": "abc123", "title": "Dawn", "uploader": "Chill Channel", "duration": 212.0}"#,
+    "\n",
+    "```this line is garbage nobody reads```\n",
+    r#"{"id": "def456", "title": "Nightfall", "channel": "Evening", "duration": null}"#,
+    "\n"
+);
+
+/// An app standing on the `YouTube` row with the tool found.
+fn app_on_the_row(dir: &Path, body: &str) -> (App<'static>, PathBuf) {
+    let program = fake(dir, body);
+    let mut app = app();
+    app.set_youtube_program(Some(program.clone()));
+    app.open_sources();
+    press(&mut app, KeyCode::Char('j')); // onto YouTube
+    (app, program)
+}
+
+/// S1: the row exists, sits directly after `Radio`, and its fact says
+/// whether the launch found the tool — `yt-dlp` or `yt-dlp missing` — from
+/// the injected capability alone. No process is spawned to draw the screen.
+#[test]
+fn the_row_sits_after_radio_and_its_fact_says_whether_the_tool_was_found() {
+    let mut app = app();
+    app.open_sources();
+    let screen = screen_of(&app);
+
+    assert!(
+        screen.contains("YouTube"),
+        "the row is on screen, got:\n{screen}"
+    );
+    assert!(
+        screen.contains("yt-dlp missing"),
+        "without the tool the fact says so, got:\n{screen}"
+    );
+    let (radio, youtube) = (
+        screen.find("Radio").expect("the Radio row is on screen"),
+        screen
+            .find("YouTube")
+            .expect("the YouTube row is on screen"),
+    );
+    assert!(
+        radio < youtube,
+        "YouTube sits directly after Radio, got:\n{screen}"
+    );
+
+    let dir = scratch("fact-found");
+    let program = fake(&dir, "#!/bin/sh\ntrue\n");
+    app.set_youtube_program(Some(program));
+    let screen = screen_of(&app);
+    let line = row_line(&screen, "YouTube");
+    assert!(
+        line.contains("yt-dlp") && !line.contains("missing"),
+        "with the tool the fact names it, got:\n{screen}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// S1, S10: opening the row without the tool opens no screen — one
+/// sentence says how to install it and the cursor stays where it was.
+#[test]
+fn opening_the_row_without_the_tool_says_how_to_install_it_and_stays() {
+    let mut app = app(); // no tool injected
+    app.open_sources();
+    press(&mut app, KeyCode::Char('j')); // onto YouTube
+
+    press(&mut app, KeyCode::Enter);
+
+    assert!(
+        !app.youtube_open(),
+        "no tool, no screen: the row opens nothing broken"
+    );
+    assert_eq!(
+        app.status(),
+        "yt-dlp is not installed — install it to play YouTube \
+         (brew install yt-dlp, or your package manager)",
+        "the install sentence is the status line, got: {}",
+        app.status()
+    );
+    assert_eq!(app.view(), View::Sources, "the cursor stays where it was");
+    let screen = screen_of(&app);
+    for row in [
+        "Radio",
+        "YouTube",
+        "Local library",
+        "Recently played",
+        "Favourites",
+        "Playlists",
+    ] {
+        assert!(
+            screen.contains(row),
+            "the sources screen stands with its rows, got:\n{screen}"
+        );
+    }
+    assert!(
+        !screen.contains("YouTube search"),
+        "no search screen opened, got:\n{screen}"
+    );
+}
+
+/// T5: the query line takes what is typed, `enter` searches off the event
+/// loop, the worker's answer arrives on a tick and lists itself, `enter` on
+/// a result queues exactly one `Entry::Youtube` with the pseudo path and
+/// plays it from its own row, and `esc` goes back to the sources.
+#[test]
+fn the_screen_searches_queues_and_plays_a_result() {
+    let dir = scratch("screen");
+    let (mut app, program) = app_on_the_row(
+        &dir,
+        &format!("#!/bin/sh\ncat <<'JSON'\n{SEARCH_ANSWER}\nJSON\n"),
+    );
+    press(&mut app, KeyCode::Enter); // YouTube: the screen opens
+
+    assert!(app.youtube_open(), "the tool is there: the screen opens");
+
+    // Typing goes to the query, and `enter` searches.
+    for character in "dawn".chars() {
+        press(&mut app, KeyCode::Char(character));
+    }
+    press(&mut app, KeyCode::Enter);
+
+    assert_eq!(
+        app.status(),
+        "⟳ searching dawn…",
+        "the search says what it is looking for"
+    );
+
+    // The worker's answer arrives on a tick, without a key press.
+    assert!(
+        until(&mut app, |app| screen_of(app).contains("Dawn")),
+        "the results land on the list: got:\n{}",
+        screen_of(&app)
+    );
+    let screen = screen_of(&app);
+    assert!(
+        screen.contains("Nightfall"),
+        "both parsed results are listed, got:\n{screen}"
+    );
+    assert!(
+        !screen.contains("garbage"),
+        "a line nobody can use is nobody's row, got:\n{screen}"
+    );
+
+    // The cursor moves off the query row onto the first result, and
+    // `enter` queues exactly one entry and plays it from there.
+    press(&mut app, KeyCode::Char('j'));
+    let action = app.on_key(key(KeyCode::Enter));
+    // The play action is the same one a queue row answers today; applying
+    // it would open an audio device, which no test can, so it is asserted
+    // and left for the shell.
+    match &action {
+        Action::PlayQueue { from } => {
+            assert_eq!(*from, 0, "the entry just queued is the one that plays");
+        }
+        other => panic!("enter on a result plays from it, got {other:?}"),
+    }
+    assert_eq!(
+        app.queue().len(),
+        1,
+        "one result, one entry: got {:?}",
+        app.queue()
+    );
+    assert_eq!(
+        app.queue()[0],
+        Entry::Youtube {
+            path: PathBuf::from("youtube://abc123"),
+            title: String::from("Dawn"),
+            uploader: Some(String::from("Chill Channel")),
+            duration: Some(212),
+        },
+        "the entry carries the identity and the body the search said"
+    );
+
+    // `esc` goes back the way you came in, to the sources screen.
+    press(&mut app, KeyCode::Esc);
+    assert!(!app.youtube_open(), "esc closes the screen");
+    assert_eq!(app.view(), View::Sources);
+    assert!(
+        !screen_of(&app).contains("YouTube search"),
+        "the sources screen is back, got:\n{}",
+        screen_of(&app)
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = program;
+}
+
+/// S5: a search whose tool fails names the tool's own reason, one line —
+/// never a blank screen, never a hang.
+#[test]
+fn a_failing_search_names_the_tool_s_own_sentence() {
+    let dir = scratch("failed");
+    let body = "#!/bin/sh\ncat >/dev/null\nprintf 'ERROR: [youtube] no network'\nexit 1\n";
+    let (mut app, _) = app_on_the_row(&dir, body);
+    press(&mut app, KeyCode::Enter); // YouTube: the screen opens
+
+    for character in "anything".chars() {
+        press(&mut app, KeyCode::Char(character));
+    }
+    press(&mut app, KeyCode::Enter);
+
+    assert_eq!(app.status(), "⟳ searching anything…");
+
+    assert!(
+        until(&mut app, |app| app.status().contains("no network")),
+        "the tool's own sentence is the failure line, got: {}",
+        app.status()
+    );
+    assert!(
+        !app.status().contains("the search stopped"),
+        "a tool failure is not a lost worker, got: {}",
+        app.status()
+    );
+    // And the interface still answers: the screen did not hang.
+    assert!(
+        screen_of(&app).contains("type a query"),
+        "the screen stands"
+    );
+    press(&mut app, KeyCode::Esc);
+    assert!(!app.youtube_open());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The queue keeps the screen asleep (issue #23's rule): `tab` away and the
+/// queue is what the body draws; `tab` back and the screen is exactly where
+/// it was left.
+#[test]
+fn tab_away_puts_the_queue_over_the_screen_and_tab_back_wakes_it() {
+    let dir = scratch("tab");
+    let (mut app, _) = app_on_the_row(
+        &dir,
+        &format!("#!/bin/sh\ncat <<'JSON'\n{SEARCH_ANSWER}\nJSON\n"),
+    );
+    press(&mut app, KeyCode::Enter); // the screen opens
+    for character in "dawn".chars() {
+        press(&mut app, KeyCode::Char(character));
+    }
+    press(&mut app, KeyCode::Enter);
+    assert!(
+        until(&mut app, |app| screen_of(app).contains("Dawn")),
+        "the search answered"
+    );
+
+    press(&mut app, KeyCode::Tab);
+    assert_eq!(app.view(), View::Queue);
+    let screen = screen_of(&app);
+    assert!(
+        !screen.contains("YouTube search") && !screen.contains("Dawn"),
+        "the screen sleeps under the queue, got:\n{screen}"
+    );
+
+    press(&mut app, KeyCode::Tab);
+    assert_eq!(app.view(), View::Sources);
+    assert!(
+        screen_of(&app).contains("Dawn"),
+        "the screen wakes where it was left, got:\n{}",
+        screen_of(&app)
+    );
+
+    press(&mut app, KeyCode::Esc);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// S6's pin: a queued `youtube://` first entry goes to the start's resolve
+/// worker, never on the event loop. The gate is [`App::is_uncached_remote`]
+/// answering for a `youtube://` row and the fresh-start gate handing the
+/// entry to `start_as_pending`; the observable shape is the fetching line
+/// naming the entry by the body the search said, the queue standing while
+/// the resolve runs, and the tool's own sentence arriving from the worker.
+#[test]
+fn a_queued_youtube_entry_resolves_on_the_worker_never_the_event_loop() {
+    let dir = scratch("worker");
+    let (mut app, _) = app_on_the_row(
+        &dir,
+        &format!("#!/bin/sh\ncat <<'JSON'\n{SEARCH_ANSWER}\nJSON\n"),
+    );
+    press(&mut app, KeyCode::Enter); // the screen opens
+    // The session's resolver is the YouTube side over a program that is not
+    // there: the resolve cannot succeed, which is what makes both its
+    // thread and its failure observable.
+    app.set_resolver(Some(std::sync::Arc::new(
+        velo::youtube::resolve::Resolver::new(PathBuf::from("/velo-test/does-not-exist/yt-dlp")),
+    )));
+    for character in "dawn".chars() {
+        press(&mut app, KeyCode::Char(character));
+    }
+    press(&mut app, KeyCode::Enter);
+    assert!(
+        until(&mut app, |app| screen_of(app).contains("Dawn")),
+        "the search answered"
+    );
+
+    // `enter` on the result queues exactly one entry and starts it the way
+    // a queue row starts; the start is applied here, the way the shell
+    // applies it.
+    press(&mut app, KeyCode::Char('j'));
+    let action = app.on_key(key(KeyCode::Enter));
+    app.apply(action);
+
+    // The pending path took over: the fetching line names the entry by its
+    // title — never the bare id — and the queue stands where the user put
+    // it. A synchronous open on this thread would have built a player (or
+    // failed one) here and cleared the queue on failure.
+    assert_eq!(
+        app.status(),
+        "⟳ fetching Dawn…",
+        "the resolve waits on the worker, and the line names the entry"
+    );
+    assert_eq!(
+        app.queue().len(),
+        1,
+        "the queue is untouched while the resolve runs: {:?}",
+        app.queue()
+    );
+
+    // The worker's failure lands on the tick as the tool's own sentence,
+    // one line, and the queue was never advanced behind the user's back.
+    assert!(
+        until(&mut app, |app| app
+            .status()
+            .contains("yt-dlp is not installed")),
+        "the worker's answer names the reason, got: {}",
+        app.status()
+    );
+    assert_eq!(
+        app.queue().len(),
+        1,
+        "a failed fetch does not clear the queue"
+    );
+
+    press(&mut app, KeyCode::Esc);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// S7: nothing about the query is stored — no config write, no history
+/// write, nothing on disk that carries what was typed.
+#[test]
+fn the_query_never_reaches_the_config_file_or_the_history_file() {
+    let dir = scratch("privacy");
+    let config = dir.join("config.toml");
+    std::fs::write(&config, "volume = 40\n").expect("the config file is written");
+    let program = fake(
+        &dir,
+        &format!("#!/bin/sh\ncat <<'JSON'\n{SEARCH_ANSWER}\nJSON\n"),
+    );
+    let mut app = app();
+    app.set_youtube_program(Some(program));
+    app.set_config_file(Some(config.clone()));
+    app.open_sources();
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Enter); // the screen opens
+
+    for character in "my secret query".chars() {
+        press(&mut app, KeyCode::Char(character));
+    }
+    press(&mut app, KeyCode::Enter);
+    assert!(
+        until(&mut app, |app| screen_of(app).contains("Dawn")),
+        "the search answered"
+    );
+    app.tick();
+    app.tick();
+
+    assert_eq!(
+        std::fs::read_to_string(&config).expect("the config file is read"),
+        "volume = 40\n",
+        "the config file is untouched by the search"
+    );
+    assert!(
+        !velo::history::path_beside(&config).exists(),
+        "the history file never appears"
+    );
+    assert_eq!(
+        dir.read_dir().expect("the folder is read").count(),
+        2,
+        "the only files in the folder are the two the test wrote: {:?}",
+        dir.read_dir()
+            .expect("the folder is read")
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>()
+    );
+
+    press(&mut app, KeyCode::Esc);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The playing entry marks its source (T5): `playing_source` answers
+/// `Source::Youtube` while one plays, so the row carries the playing mark.
+#[test]
+fn a_playing_youtube_entry_marks_the_youtube_row() {
+    let mut app = app();
+    app.show_playing_for_tests(
+        Entry::Youtube {
+            path: PathBuf::from("youtube://abc123"),
+            title: String::from("Dawn"),
+            uploader: Some(String::from("Chill Channel")),
+            duration: Some(212),
+        },
+        Duration::ZERO,
+        Some(Duration::from_secs(212)),
+        None,
+    );
+    app.open_sources();
+
+    let screen = screen_of(&app);
+    let line = row_line(&screen, "YouTube");
+    assert!(
+        line.contains("▶"),
+        "the playing entry marks the YouTube row, got:\n{screen}"
+    );
+    assert!(
+        !row_line(&screen, "Radio").contains("▶"),
+        "no other row wears the mark, got:\n{screen}"
+    );
+}
