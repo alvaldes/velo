@@ -9,7 +9,7 @@ use clap::{CommandFactory as _, Parser};
 use velo::audio::loudness;
 use velo::audio::output::{Entry, PathResolver};
 use velo::audio::replay_gain::{GainTags, format_gain_db, format_peak, write_tags};
-use velo::audio::{Player, TrackSource};
+use velo::audio::{AudioError, Player, TrackSource};
 use velo::config::{self, Cli, Command, Config, HistoryAction, PlaylistAction, Settings};
 use velo::library::Library;
 use velo::subsonic;
@@ -26,6 +26,7 @@ use crossterm::{execute, terminal};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use rustix::process::{Signal, getpid, kill_process};
+use symphonia::core::io::MediaSource;
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -114,11 +115,18 @@ fn main() -> ExitCode {
             std::env::var_os("XDG_CACHE_HOME").as_deref(),
             home.as_deref(),
         );
+        // The tool is looked for once, here (issue #70, S1): the scan is a
+        // file read and never a spawn, and its answer feeds the sources row
+        // and the resolver the session plays through.
+        let youtube_program = velo::youtube::detect();
         return browse_interface(
             library.as_deref(),
             config_file,
             &settings,
-            seams.resolver,
+            SessionResolver {
+                resolver: Some(composed_resolver(seams.resolver, youtube_program.clone())),
+                youtube_program,
+            },
             seams.covers,
             seams.scrobbler,
             &seams.warnings,
@@ -136,7 +144,11 @@ fn main() -> ExitCode {
             std::env::var_os("XDG_CACHE_HOME").as_deref(),
             home.as_deref(),
         );
-        return play(&cli.files, &settings, seams.resolver);
+        // A `youtube://` argument resolves through the tool the same way the
+        // interface would (issue #70): with the tool it plays, without it it
+        // fails with the install sentence.
+        let resolver = Some(composed_resolver(seams.resolver, velo::youtube::detect()));
+        return play(&cli.files, &settings, resolver);
     }
     run_interface(cli.files, &settings, config_file)
 }
@@ -1211,11 +1223,20 @@ fn run_interface(
 /// Subsonic server's synced index is the library, and with neither a library
 /// nor a server the interface says what to configure in one sentence. `L`
 /// still opens the folder prompt at any time.
+/// One session's play-through seam (issue #70): the composed resolver —
+/// the Subsonic seams' under `YouTube`'s — and the program the launch's
+/// `PATH` scan found, which the sources row's fact reads. Both come from
+/// one detection and one composition, decided where the other seams are.
+struct SessionResolver {
+    resolver: Option<Arc<dyn PathResolver>>,
+    youtube_program: Option<PathBuf>,
+}
+
 fn browse_interface(
     root: Option<&Path>,
     config_file: Option<PathBuf>,
     settings: &Settings,
-    resolver: Option<Arc<dyn PathResolver>>,
+    session: SessionResolver,
     covers: Option<Arc<dyn CoverArt>>,
     scrobbler: Option<Arc<dyn Scrobbles>>,
     warnings: &[String],
@@ -1269,7 +1290,11 @@ fn browse_interface(
         app.open_sources();
         // Remote rows play through the cache (T12c); without a server this
         // stays `None` and every entry already is a file.
-        app.set_resolver(resolver);
+        app.set_resolver(session.resolver);
+        // The tool the launch's `PATH` scan found (issue #70): the sources
+        // row's fact reads it, and no process is spawned to learn what it
+        // already says. With none, the row's `enter` says how to install.
+        app.set_youtube_program(session.youtube_program);
         // Remote covers and scrobbles ride the same server (T12d); without
         // one, covers simply never arrive and nothing is ever sent.
         app.set_covers(covers);
@@ -1533,4 +1558,255 @@ fn play(
         eprintln!("velo: played with {underruns} underruns");
     }
     ExitCode::SUCCESS
+}
+
+/// The resolver the session plays through (issue #70): one dispatch over the
+/// two kinds of pseudo-path the queue can carry. A `youtube://` row goes to
+/// the `YouTube` half, which is always installed — with the tool the entry
+/// is resolved when it plays, without it it fails with the install sentence
+/// and is never opened as a file — and everything else goes to the Subsonic
+/// seams' resolver, or, with no server configured, to the pass-through
+/// answers no resolver at all gave. Every answer that is not a
+/// `youtube://` row's is exactly what the session heard before it.
+struct ComposedResolver {
+    youtube: Arc<dyn PathResolver>,
+    subsonic: Option<Arc<dyn PathResolver>>,
+}
+
+impl PathResolver for ComposedResolver {
+    fn resolve(&self, path: &Path) -> Result<PathBuf, AudioError> {
+        if velo::youtube::is_pseudo_path(path) {
+            return self.youtube.resolve(path);
+        }
+        self.subsonic
+            .as_ref()
+            .map_or_else(|| Ok(path.to_path_buf()), |resolver| resolver.resolve(path))
+    }
+
+    fn cached(&self, path: &Path) -> bool {
+        if velo::youtube::is_pseudo_path(path) {
+            return self.youtube.cached(path);
+        }
+        self.subsonic
+            .as_ref()
+            .is_none_or(|resolver| resolver.cached(path))
+    }
+
+    fn open_streaming(&self, path: &Path) -> Result<Option<Box<dyn MediaSource>>, AudioError> {
+        if velo::youtube::is_pseudo_path(path) {
+            return self.youtube.open_streaming(path);
+        }
+        self.subsonic
+            .as_ref()
+            .map_or_else(|| Ok(None), |resolver| resolver.open_streaming(path))
+    }
+}
+
+/// Composes one session's resolver (issue #70): the Subsonic seams' resolver
+/// under it, the `YouTube` half over everything the tool owns. That half is
+/// the detected program in a `resolve::Resolver`, or the degraded one
+/// ([`velo::youtube::Unconfigured`]) on a machine without the tool — the
+/// shape that keeps S10 true, since the config and the queue survive and
+/// only `YouTube` is refused.
+fn composed_resolver(
+    subsonic: Option<Arc<dyn PathResolver>>,
+    youtube_program: Option<PathBuf>,
+) -> Arc<dyn PathResolver> {
+    let youtube: Arc<dyn PathResolver> = match youtube_program {
+        Some(program) => Arc::new(velo::youtube::resolve::Resolver::new(program)),
+        None => Arc::new(velo::youtube::Unconfigured::new(Path::new(
+            velo::youtube::PROGRAM,
+        ))),
+    };
+    Arc::new(ComposedResolver { youtube, subsonic })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use velo::audio::AudioError;
+
+    /// A stand-in for the Subsonic side that records what it was asked and
+    /// answers the way a real configured server's resolver behaves: files
+    /// and remote rows it answers out of its own rules, and here that
+    /// behavior is whatever the closure says.
+    struct Side {
+        resolve: Answer,
+        cached: Verdict,
+        streaming: Verdict,
+    }
+
+    impl PathResolver for Side {
+        fn resolve(&self, path: &Path) -> Result<PathBuf, AudioError> {
+            (self.resolve)(path)
+        }
+
+        fn cached(&self, path: &Path) -> bool {
+            (self.cached)(path)
+        }
+
+        fn open_streaming(&self, path: &Path) -> Result<Option<Box<dyn MediaSource>>, AudioError> {
+            if (self.streaming)(path) {
+                return Ok(Some(Box::new(EmptySource)));
+            }
+            Ok(None)
+        }
+    }
+
+    /// The smallest `MediaSource` there is: zero-length, and read from
+    /// never. Only its type identity matters here.
+    struct EmptySource;
+
+    impl std::io::Read for EmptySource {
+        fn read(&mut self, _buffer: &mut [u8]) -> Result<usize, std::io::Error> {
+            Ok(0)
+        }
+    }
+
+    impl std::io::Seek for EmptySource {
+        fn seek(&mut self, _: std::io::SeekFrom) -> Result<u64, std::io::Error> {
+            Ok(0)
+        }
+    }
+
+    impl symphonia::core::io::MediaSource for EmptySource {
+        fn byte_len(&self) -> Option<u64> {
+            Some(0)
+        }
+
+        fn is_seekable(&self) -> bool {
+            true
+        }
+    }
+
+    /// What the stub's `resolve` answers.
+    type Answer = Box<dyn Fn(&Path) -> Result<PathBuf, AudioError> + Send + Sync>;
+
+    /// What the stub's two questions answer.
+    type Verdict = Box<dyn Fn(&Path) -> bool + Send + Sync>;
+
+    fn subsonic_side() -> Arc<dyn PathResolver> {
+        Arc::new(Side {
+            resolve: Box::new(|path| {
+                Ok(PathBuf::from(format!(
+                    "the cache file of {}",
+                    path.display()
+                )))
+            }),
+            cached: Box::new(|path| !velo::subsonic::cache::is_pseudo_path(path)),
+            streaming: Box::new(velo::subsonic::cache::is_pseudo_path),
+        })
+    }
+
+    /// S10, the machine without anything: no server configured, no tool
+    /// installed. Local files and remote `http(s)://` answers keep exactly
+    /// the pass-through answers they had before a resolver existed, and a
+    /// `youtube://` row fails with the install sentence instead of being
+    /// opened as a file.
+    #[test]
+    fn with_no_server_and_no_tool_everything_but_youtube_is_untouched() {
+        let resolver = composed_resolver(None, None);
+
+        let local = Path::new("/music/one.flac");
+        assert_eq!(
+            resolver
+                .resolve(local)
+                .expect("a local file passes through"),
+            local,
+            "a local file is its own file, as no resolver always left it"
+        );
+        assert!(
+            resolver.cached(local),
+            "a local file is already on disk, as no resolver always said"
+        );
+        assert!(
+            resolver
+                .open_streaming(local)
+                .expect("nothing to stream")
+                .is_none(),
+            "a local file streams nothing, as no resolver always answered"
+        );
+
+        let remote = Path::new("https://radio.example/stream");
+        assert_eq!(
+            resolver
+                .resolve(remote)
+                .expect("a remote row passes through"),
+            remote,
+            "a remote URL is its own file, as no resolver always left it"
+        );
+        assert!(
+            resolver
+                .open_streaming(remote)
+                .expect("nothing to stream")
+                .is_none()
+        );
+
+        let youtube = Path::new("youtube://abc123xyz_-_-_-_-_");
+        let error = resolver
+            .resolve(youtube)
+            .expect_err("a youtube row has no file to open");
+        assert!(
+            error.to_string().contains("yt-dlp is not installed"),
+            "the install sentence is what a youtube row fails with: {error}"
+        );
+        assert!(
+            !resolver.cached(youtube),
+            "a youtube row is never already reachable"
+        );
+    }
+
+    /// S10, a machine with a server and the tool: every answer that is not
+    /// a `youtube://` row's is the Subsonic side's own, and a `youtube://`
+    /// row is the `YouTube` side's — resolved when it plays (its `cached`
+    /// says no, so the start's worker takes it), and never a file.
+    #[test]
+    fn with_both_sides_every_answer_goes_to_the_side_that_owns_the_row() {
+        let resolver = composed_resolver(
+            Some(subsonic_side()),
+            Some(PathBuf::from("/velo-test/does-not-exist/yt-dlp")),
+        );
+
+        let local = Path::new("/music/one.flac");
+        assert_eq!(
+            resolver.resolve(local).expect("the file is the side's own"),
+            PathBuf::from("the cache file of /music/one.flac"),
+        );
+        let subsonic_row = Path::new("subsonic://server.example/id");
+        assert_eq!(
+            resolver
+                .resolve(subsonic_row)
+                .expect("the row is the server's own"),
+            PathBuf::from("the cache file of subsonic://server.example/id"),
+        );
+        assert!(!resolver.cached(subsonic_row), "the server says so");
+        assert!(
+            resolver
+                .open_streaming(subsonic_row)
+                .expect("the ask is the server's own")
+                .is_some(),
+            "the server streams its own rows"
+        );
+        assert!(
+            resolver
+                .open_streaming(local)
+                .expect("the ask passes through")
+                .is_none(),
+        );
+
+        let youtube = Path::new("youtube://abc123xyz");
+        assert!(!resolver.cached(youtube), "the youtube side says so");
+        // A program that is not there: the entry's resolve fails with the
+        // tool's own sentence, which is the point of the always-installed
+        // half — never a file open in disguise.
+        let error = resolver
+            .open_streaming(Path::new("youtube://abc123xyz"))
+            .err()
+            .expect("a stream that cannot be launched says so");
+        assert!(
+            error.to_string().contains("yt-dlp is not installed"),
+            "the tool's own sentence is what the resolve fails with: {error}"
+        );
+    }
 }
