@@ -147,13 +147,12 @@ impl GainRamp {
 }
 
 /// The offset a seek lands on: `position` moved by `delta_secs`, clamped into
-/// `0..=duration`, **whole seconds**: the seek's chain starts at
-/// `--download-sections "*<sec>-"` (issue #70), which takes integer seconds,
-/// so a fraction cannot be honoured — it is dropped here, where the offset
-/// is taken, and the clock carries the same number the chain was asked for,
-/// never a second the audio does not play. A `None` duration only clamps the
-/// lower end; the player clamps an offset past the end of the track when it
-/// opens it.
+/// `0..=duration`, the fraction kept — a seekable source starts exactly where
+/// the seek aimed. A `None` duration only clamps the lower end; the player
+/// clamps an offset past the end of the track when it opens it. The one
+/// source that cannot honour a fraction truncates where its own kind is
+/// known, in the interface's rebuild — never here, where a pipe cannot be
+/// told from a file.
 #[must_use]
 pub fn seek_target(position: Duration, delta_secs: i64, duration: Option<Duration>) -> Duration {
     let moved = if delta_secs >= 0 {
@@ -161,8 +160,7 @@ pub fn seek_target(position: Duration, delta_secs: i64, duration: Option<Duratio
     } else {
         position.saturating_sub(Duration::from_secs(delta_secs.unsigned_abs()))
     };
-    let landed = duration.map_or(moved, |duration| moved.min(duration));
-    Duration::from_secs(landed.as_secs())
+    duration.map_or(moved, |duration| moved.min(duration))
 }
 
 /// What follows the end of a track.

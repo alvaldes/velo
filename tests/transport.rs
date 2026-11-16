@@ -240,32 +240,33 @@ fn the_seek_target_clamps_at_both_ends() {
     );
 }
 
-/// The offset a seek lands on is whole seconds (issue #70, R3-001): the
-/// seek's chain starts at `--download-sections "*<sec>-"`, which takes
-/// integer seconds, so the fraction is dropped once — here, where the offset
-/// is taken — and the clock carries the same number the chain was asked for,
-/// never a second the audio does not play.
+/// The offset a seek lands on keeps its fraction: a seekable source — a
+/// local file, a Subsonic row — starts exactly where the seek aimed, so
+/// [`seek_target`] rounds for no one. The one source that cannot honour a
+/// fraction is the `YouTube` chain, and it truncates where its own kind is
+/// known — the interface's rebuild — never here, where a pipe cannot be
+/// told from a file.
 #[test]
-fn the_seek_target_is_whole_seconds_the_fraction_is_dropped_where_it_is_taken() {
-    // A position carrying a fraction moves by whole seconds to a whole
-    // second: 10.4 s + 5 lands at 15 s, the second the chain can start at.
+fn the_seek_target_keeps_the_fraction_the_source_can_honour() {
+    // A position carrying a fraction moves by the delta and keeps it:
+    // 10.4 s + 5 lands at 15.4 s.
     assert_eq!(
         seek_target(Duration::from_millis(10_400), 5, None),
-        Duration::from_secs(15)
+        Duration::from_millis(15_400)
     );
-    // Backwards the same: 10.4 s − 5 lands at 5 s.
+    // Backwards the same: 10.4 s − 5 lands at 5.4 s.
     assert_eq!(
         seek_target(Duration::from_millis(10_400), -5, None),
-        Duration::from_secs(5)
+        Duration::from_millis(5_400)
     );
-    // Clamping to a duration with a fraction still lands on a whole second.
+    // Clamping to a duration keeps its fraction too: the end is the end.
     assert_eq!(
         seek_target(
             Duration::from_secs(25),
             60,
             Some(Duration::from_millis(30_500))
         ),
-        Duration::from_secs(30)
+        Duration::from_millis(30_500)
     );
 }
 

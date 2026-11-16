@@ -679,12 +679,12 @@ fn a_finite_youtube_entry_is_not_refused_a_seek() {
 /// form or the plain one — and refuses everything: the seek's ask is the
 /// pin, and a refusal keeps the test off a device no test can hold.
 struct Recording {
-    offset_ask: Arc<Mutex<Option<u64>>>,
+    offset_ask: Arc<Mutex<Option<Duration>>>,
     plain_ask: Arc<Mutex<bool>>,
 }
 
 /// A [`Recording`] and the two handles its asks land in.
-type RecordingHandles = (Recording, Arc<Mutex<Option<u64>>>, Arc<Mutex<bool>>);
+type RecordingHandles = (Recording, Arc<Mutex<Option<Duration>>>, Arc<Mutex<bool>>);
 
 /// Builds a [`Recording`] resolver with its ask handles.
 fn recording_resolver() -> RecordingHandles {
@@ -722,7 +722,7 @@ impl PathResolver for Recording {
         _path: &Path,
         offset: Duration,
     ) -> Result<Option<Box<dyn MediaSource>>, AudioError> {
-        *self.offset_ask.lock().expect("the ask lock") = Some(offset.as_secs());
+        *self.offset_ask.lock().expect("the ask lock") = Some(offset);
         Err(AudioError::Source(String::from(
             "the fake resolver refuses — the ask is the pin",
         )))
@@ -731,7 +731,12 @@ impl PathResolver for Recording {
 
 /// The seek's rebuild hands the offset to the worker, and the worker asks
 /// the resolver's offset form with exactly the second the seek aimed at —
-/// never the plain form, whose stream would restart the track at zero.
+/// never the plain form, whose stream would restart the track at zero. A
+/// chain can only start on a whole second, so a `YouTube` seek's target is a
+/// whole second everywhere it is read: a fractional ask in, the chain is
+/// asked at the whole second, and the clock the user sees — the offset the
+/// rebuild carries into the start, which the player's position begins at —
+/// stands at that same whole second.
 #[test]
 fn a_seek_asks_the_resolver_at_the_offset_the_seek_aimed_at() {
     let mut app = app();
@@ -750,8 +755,17 @@ fn a_seek_asks_the_resolver_at_the_offset_the_seek_aimed_at() {
         None,
     );
 
-    app.seek_rebuild_for_tests(0, Duration::from_secs(83));
+    // A fraction enters: the transport's position carries one, and a seek
+    // from it aims between two seconds.
+    app.seek_rebuild_for_tests(0, Duration::from_millis(83_500));
 
+    // The clock the user sees starts at the whole second the rebuild
+    // carries: read before the first tick, while the start is still pending.
+    assert_eq!(
+        app.pending_start_offset_for_tests(),
+        Some(Duration::from_secs(83)),
+        "the rebuild carries the whole second, never the fraction"
+    );
     assert!(
         until(&mut app, |app| app
             .status()
@@ -761,8 +775,8 @@ fn a_seek_asks_the_resolver_at_the_offset_the_seek_aimed_at() {
     );
     assert_eq!(
         *offset_ask.lock().expect("the ask lock"),
-        Some(83),
-        "the seek asked the offset form, at the second asked for"
+        Some(Duration::from_secs(83)),
+        "the chain was asked at the whole second, never the fraction"
     );
     assert!(
         !*plain_ask.lock().expect("the ask lock"),

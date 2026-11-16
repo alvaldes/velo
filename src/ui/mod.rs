@@ -9289,6 +9289,22 @@ impl<'lib> App<'lib> {
             })
     }
 
+    /// Reads the offset a pending rebuild carries, for the seek tests: it
+    /// is the second the chain will be asked at and the clock the user
+    /// sees starts at — the player's position begins where the rebuild
+    /// aims. `None` when no fetch is pending or the start is not a
+    /// track-at rebuild. Hidden from the docs.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn pending_start_offset_for_tests(&self) -> Option<Duration> {
+        self.pending_resolve
+            .as_ref()
+            .and_then(|pending| match &pending.start {
+                PendingStart::TrackAt { offset, .. } => Some(*offset),
+                PendingStart::Stream { .. } => None,
+            })
+    }
+
     /// Ends a handover in flight: the previous stream — already falling or
     /// fallen — is stopped outright, because a new start replaces it. Stopping
     /// a stream whose fade had not begun is the accepted cost of starting
@@ -9720,6 +9736,23 @@ impl<'lib> App<'lib> {
         // The queue stands where it was; the rebuild neither advances nor
         // clears it.
         let first = self.queue.get(track).cloned();
+        // A chain can only start on a whole second, so a YouTube seek's
+        // target is a whole second everywhere it is read: the offset is
+        // truncated here, where the entry's kind is known — the point that
+        // decides which path a seek takes — and the resolver's argv
+        // (`youtube::resolve::arguments_at`) consumes the same whole second
+        // the clock starts at. Every other source — a file, a Subsonic row —
+        // is seekable to the fraction and keeps it.
+        let rides_the_chain = match first.as_ref() {
+            Some(Entry::Youtube { .. }) => true,
+            Some(Entry::File(path)) => crate::youtube::is_pseudo_path(path),
+            _ => false,
+        };
+        let offset = if rides_the_chain {
+            Duration::from_secs(offset.as_secs())
+        } else {
+            offset
+        };
         let waits = first
             .as_ref()
             .and_then(Entry::as_path)
