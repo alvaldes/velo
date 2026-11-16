@@ -1,6 +1,39 @@
 # Changelog
 
 Every release of velo, newest first, generated from its Conventional Commits.
+## [1.2.0] - 2026-11-16
+
+### Features
+- **youtube:** A bounded child runner
+- **youtube:** The tool on the PATH, and a search that asks for JSON
+- **youtube:** A result is a queue entry that resolves when it plays
+- **youtube:** The resolver, and the row that plays it
+- **youtube:** A row that searches, plays and waits
+- **youtube:** The session resolver is composed, the YouTube half over the subsonic seams
+- **youtube:** The tool holds the stream, and velo plays its pipe
+- **youtube:** Two keyboard modes, and a URL or an id loads its video
+- **youtube:** A and A add results to the queue without playing them
+- **youtube:** The tool streams, velo transcodes — live broadcasts play
+- **queue:** A played entry can be removed, and the producer follows
+- **youtube:** A seek restarts the chain at the second asked for
+
+### Fixes
+- **youtube:** A stored YouTube row plays, and a live result refuses a seek
+- **youtube:** Resolve the full extraction, refuse live, follow redirects
+- **youtube:** The five findings the reviews left, closed
+- **youtube:** A lost reader is a failure, not an empty answer
+- **youtube:** A slow start that flows plays instead of stalling
+- **youtube:** The seek's offset agrees with the clock, and a stream that cannot honour it says so
+- **seek:** A file keeps its fraction, a chain keeps its whole second
+
+### Documentation
+- **readme:** What the YouTube row sends, and what it does not
+
+### Tests
+- **youtube:** The queued rows a stored path rebuilds play the resolved stream
+- **youtube:** The row and the screen, through the interface
+- **youtube:** The runner bounds leave room for a loaded machine
+- **queue, youtube:** The shift test is not racy, and the bounds stay tight
 ## [1.1.0] - 2026-11-14
 
 ### Features
